@@ -247,6 +247,141 @@ fn control_headless_launch_delivers_once_and_exits_with_a_future_timer() {
     restarted_requests_keep_prefix(false, true);
 }
 
+#[test]
+fn bound_idle_parent_consumes_review_in_existing_cli_process() {
+    use mush_ai::types::*;
+    use mush_session::inbox::{Binding, Event, Inbox, TerminalReason};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "auto_compact = false\n[api_keys]\nfixture = 'fixture-key'\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let model = Model::builder()
+        .id("gpt-parent-fixture".into())
+        .name("fixture".into())
+        .provider(Provider::Custom("fixture".into()))
+        .api(Api::OpenaiResponses)
+        .base_url(format!("http://{}", listener.local_addr().unwrap()).into())
+        .context_window(TokenCount::new(1_000_000))
+        .max_output_tokens(TokenCount::new(64))
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
+    let mut session =
+        mush_session::Session::new("gpt-parent-fixture", &dir.path().display().to_string());
+    session.system_prompt = Some("synthetic parent, no external effects".into());
+    session.push_message(Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text("original parent task".into()))
+            .timestamp_ms(Timestamp::zero())
+            .build(),
+    ));
+    store.save(&session).unwrap();
+    let inbox_path = dir.path().join("inbox");
+    let inbox = Inbox::register(
+        &inbox_path,
+        Binding {
+            session_id: session.meta.id.to_string(),
+            cwd: dir.path().into(),
+            workers: vec![dir.path().into()],
+        },
+    )
+    .unwrap();
+    let event = Event {
+        event_id: "review.worker.1".into(), run_id: "review".into(), worker_id: "worker".into(), assignment_id: 1, round: 1,
+        session_id: Some("review-session".into()), reason: TerminalReason::Completed, report_path: dir.path().join("verdict.json"),
+        review: Some(serde_json::from_value(serde_json::json!({
+            "verdict": {"version":1,"task":"parent-task","assignment":"parent-review","generation":1,"candidate":"1".repeat(40),
+                "reviewer":{"run_id":"review","worker":"worker","assignment":1,"round":1,"session":"review-session"},
+                "result":"blocked","complete":false,"checks":[],"findings":[],"blockers":["synthetic parent decision"],"evidence":[],"regression_commit":null},
+            "capture_sha256":"a".repeat(64),"producer_action":"not_rejected","evidence_directory":dir.path().join("capture")
+        })).unwrap()),
+    };
+    let mut child = Command::new("script").env_clear().envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
+        .env("HOME", dir.path()).env("MUSH_DATA_DIR", dir.path().join("data")).env("MUSH_CONFIG_DIR", &config)
+        .env("XDG_CONFIG_HOME", dir.path().join("config")).env("XDG_RUNTIME_DIR", dir.path())
+        .env("MUSH_ORCHESTRATOR_INBOX", &inbox_path).env("TERM", "xterm-256color")
+        .env("MUSH_FIXTURE_BINARY", env!("CARGO_BIN_EXE_mush")).env("MUSH_FIXTURE_SESSION", session.meta.id.as_str())
+        .current_dir(dir.path()).args(["-q", "-e"]).arg(dir.path().join("terminal.log"))
+        .args(["-c", "stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --continue \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while inbox.consumer(session.meta.id.as_str(), dir.path()).is_ok() {
+        if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "parent did not attach: {}",
+                std::fs::read_to_string(dir.path().join("terminal.log")).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    inbox.enqueue(event.clone(), dir.path()).unwrap();
+    let connection = loop {
+        if let Ok((socket, _)) = listener.accept() {
+            break Some(socket);
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let received = connection.map(|mut socket| {
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut bytes = Vec::new();
+        let start = loop {
+            if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") { break index + 4; }
+            let mut buffer = [0; 8192]; let n = socket.read(&mut buffer).unwrap();
+            assert!(n > 0 && bytes.len() < 1024 * 1024); bytes.extend_from_slice(&buffer[..n]);
+        };
+        let headers = String::from_utf8_lossy(&bytes[..start]).to_ascii_lowercase();
+        let length: usize = headers.lines().find_map(|s| s.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+        assert!(length < 1024 * 1024);
+        while bytes.len() < start + length { let mut buffer = [0;8192]; let n = socket.read(&mut buffer).unwrap(); assert!(n > 0); bytes.extend_from_slice(&buffer[..n]); }
+        let body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n";
+        write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        String::from_utf8(bytes[start..start+length].to_vec()).unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !inbox.acknowledged(&event.event_id).unwrap() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = std::fs::read_to_string(dir.path().join("parent-pid")).unwrap();
+    let status = Command::new("kill")
+        .args(["-KILL", pid.trim()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    child.stdin.take();
+    let _ = child.wait();
+    assert!(
+        received
+            .as_ref()
+            .is_some_and(|s| s.contains("synthetic parent decision")),
+        "parent did not consume event"
+    );
+    assert!(inbox.acknowledged(&event.event_id).unwrap());
+    let saved = store.load(&session.meta.id).unwrap();
+    assert!(mush_session::inbox::contains(
+        &saved.conversation,
+        &event.event_id
+    ));
+    assert_eq!(saved.meta.id, session.meta.id);
+}
+
 #[expect(clippy::unwrap_used)]
 fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
     use mush_ai::types::*;

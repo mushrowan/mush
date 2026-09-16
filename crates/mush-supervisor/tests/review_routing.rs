@@ -320,10 +320,11 @@ fn parent_unavailable_reconnect_and_changed_verdict() {
     write(&source, &journal);
     fixture.route();
     let inbox = Inbox::open(&fixture.inbox).unwrap();
-    assert_eq!(inbox.pending().unwrap().len(), 1);
-    let event = inbox.pending().unwrap().remove(0);
-    assert!(event.review.is_some());
-    inbox.acknowledge(&event.event_id).unwrap();
+    assert_eq!(inbox.pending().unwrap().len(), 2);
+    for event in inbox.pending().unwrap() {
+        assert!(event.review.is_some());
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
     fixture.route();
     assert!(inbox.pending().unwrap().is_empty());
     assert_eq!(
@@ -769,7 +770,7 @@ fn schema_examples_are_executable() {
         ),
         ("authority", fixture.root.path().join("authority.json")),
         ("verdict", fixture.route.join("capture/verdict.json")),
-        ("parent_event", fixture.route.join("parent-3.json")),
+        ("parent_event", fixture.route.join("parent-events.json")),
         ("state", fixture.route.join("state.json")),
     ] {
         let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
@@ -1591,4 +1592,399 @@ fn reviewer_launch_crash_keeps_original_session_and_never_replays() {
             .status
             .success()
     );
+}
+
+#[test]
+fn changed_producer_run_identity_cannot_resume_bound_session() {
+    let fixture = Fixture::new(true, true, "rejected");
+    write(
+        &fixture.run.join("event-run.json"),
+        &json!({"run_id":"replacement-run"}),
+    );
+    fixture.route();
+    assert!(
+        !fixture.root.path().join("calls").exists(),
+        "{}",
+        fixture.state()
+    );
+}
+
+#[test]
+fn partial_capture_cannot_deliver_an_unbound_verdict() {
+    let fixture = Fixture::new(false, true, "rejected");
+    let source = fixture
+        .root
+        .path()
+        .join("review/reviewer/event-reports/assignment-0001.json");
+    let journal: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+    let bytes: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
+    let mut verdict: Value = serde_json::from_slice(&bytes).unwrap();
+    verdict["generation"] = json!(2);
+    verdict["candidate"] = json!("2".repeat(40));
+    directory(&fixture.route.join("capture"));
+    write(&fixture.route.join("capture/verdict.json"), &verdict);
+    fs::remove_file(source).unwrap();
+    fixture.route();
+    let pending = Inbox::open(&fixture.inbox).unwrap().pending().unwrap();
+    assert!(pending.is_empty(), "{pending:?}");
+}
+
+#[test]
+fn surviving_correction_retains_workspace_lock_after_router_crash() {
+    let fixture = Fixture::new_worker(
+        true,
+        false,
+        "rejected",
+        "printf '%s' \"$$\" >../spawned\nsleep 30",
+    );
+    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
+        .env("HOME", fixture.root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let marker = fixture.root.path().join("spawned");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() {
+        if std::time::Instant::now() >= deadline {
+            router.kill().unwrap();
+            router.wait().unwrap();
+            panic!("correction did not start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let pid: i32 = fs::read_to_string(marker).unwrap().parse().unwrap();
+    assert!(pid > 1);
+    router.kill().unwrap();
+    router.wait().unwrap();
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let lock_held =
+        mush_supervisor::admission::execution_lock(&fixture.root.path().join("pool"), &fixture.cwd)
+            .is_err();
+    let run_lock = fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.run.join("supervisor.lock"))
+        .unwrap();
+    let run_held = run_lock.try_lock().is_err();
+    let session_held = mush_supervisor::admission::session_lock(
+        &fixture.run.join("producer/mush-data/sessions"),
+        "original",
+        None,
+    )
+    .is_err();
+    fixture.route();
+    let state = fixture.state();
+    let ledger_path = fixture.root.path().join("pool/claims.json");
+    let mut ledger: Value = serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
+    let claim = ledger["claims"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    ledger["claims"][&claim]["processes"] = json!({});
+    ledger["claims"][&claim]["state"] = json!("reserved");
+    write(&ledger_path, &ledger);
+    let release = fixture.command(&[
+        "admission-release",
+        fixture.root.path().join("pool").to_str().unwrap(),
+        &claim,
+        "--confirm-processes-exited",
+    ]);
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    assert!(alive);
+    assert!(
+        run_held && session_held,
+        "surviving correction lost run or session ownership"
+    );
+    assert_eq!(state["producer"], "needs_input_launch_unknown");
+    assert!(
+        lock_held && !release.status.success(),
+        "live correction: workspace lock held={lock_held}, admission release={}",
+        release.status
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let release = fixture.command(&[
+            "admission-release",
+            fixture.root.path().join("pool").to_str().unwrap(),
+            &claim,
+            "--confirm-processes-exited",
+        ]);
+        if release.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cleanup did not become verifiable: {}",
+            String::from_utf8_lossy(&release.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        mush_supervisor::admission::execution_lock(&fixture.root.path().join("pool"), &fixture.cwd)
+            .is_ok()
+    );
+    let released: Value = serde_json::from_slice(&fs::read(ledger_path).unwrap()).unwrap();
+    assert_eq!(released["claims"][&claim]["state"], "released");
+}
+
+#[test]
+fn prepared_real_jj_workspace_resumes_without_revision_mutation() {
+    let mut fixture = Fixture::new(true, false, "rejected");
+    fs::remove_file(fixture.root.path().join("bin/jj")).unwrap();
+    let output = Command::new("jj")
+        .args(["git", "init", "--no-colocate"])
+        .arg(&fixture.cwd)
+        .env("HOME", fixture.root.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let revision = || {
+        let output = Command::new("jj")
+            .current_dir(&fixture.cwd)
+            .args([
+                "--ignore-working-copy",
+                "--color=never",
+                "--no-pager",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id",
+            ])
+            .env("HOME", fixture.root.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let head = revision();
+    assert_eq!(head.len(), 40);
+    let mut config: Value = serde_json::from_slice(&fs::read(&fixture.config).unwrap()).unwrap();
+    fixture.route = fixture.root.path().join("real-route");
+    config["directory"] = json!(fixture.route);
+    config["candidate"] = json!(head);
+    config["producer"]["head"] = json!(head);
+    config["task"] = json!("real-jj-task");
+    config["authority_file"] = json!(fixture.root.path().join("real-authority.json"));
+    write(
+        &fixture.root.path().join("real-authority.json"),
+        &json!({"assignment":"task-review","generation":1,"enabled":true}),
+    );
+    write(&fixture.config, &config);
+    let source = fixture
+        .root
+        .path()
+        .join("review/reviewer/event-reports/assignment-0001.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+    let raw: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
+    let mut verdict: Value = serde_json::from_slice(&raw).unwrap();
+    verdict["candidate"] = json!(head);
+    verdict["task"] = json!("real-jj-task");
+    let raw = serde_json::to_vec(&verdict).unwrap();
+    journal["review"] = json!({"sha256":digest(&raw),"bytes":raw});
+    write(&source, &journal);
+    fixture.ok(&["register-review", fixture.config.to_str().unwrap()]);
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(revision(), head);
+}
+
+#[test]
+fn parent_receives_updated_pending_action_status() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let policy = fixture.root.path().join("pool/policy.json");
+    let mut full: Value = serde_json::from_slice(&fs::read(&policy).unwrap()).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "queued_capacity");
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    let events = inbox.pending().unwrap();
+    assert!(
+        events.iter().any(|event| event
+            .review
+            .as_ref()
+            .is_some_and(|notice| notice.producer_action == "queued_capacity")),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn disable_is_durable_while_launch_transaction_is_owned() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(fixture.route.join("transaction.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    fixture.ok(&["review-disable", fixture.route.to_str().unwrap()]);
+    assert!(fixture.route.join("DISABLED").exists());
+    drop(lock);
+    fixture.route();
+    assert!(!fixture.root.path().join("calls").exists());
+}
+
+#[test]
+fn late_run_identity_drift_is_rejected_at_final_launch() {
+    let fixture = Fixture::new(true, false, "rejected");
+    fs::write(fixture.root.path().join("bin/jj"),format!("#!/bin/sh\nset -eu\ncase \"$*\" in *'conflicts() & @'*) exit 0;; esac\nprintf '%s' '{{\"run_id\":\"replacement-run\"}}' >'{}'\nprintf '%s' '{}'\n",fixture.run.join("event-run.json").display(),"1".repeat(40))).unwrap();
+    fixture.route();
+    assert!(!fixture.root.path().join("calls").exists());
+    assert_eq!(fixture.state()["launch_claimed"], true);
+    assert!(
+        fixture.state()["detail"]
+            .as_str()
+            .unwrap()
+            .contains("run identity changed")
+    );
+}
+
+#[test]
+fn parent_status_transitions_are_bounded_durable_and_ack_independent() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    fixture.route();
+    fixture.route();
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    let events = inbox.pending().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events
+            .last()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action,
+        "queued_capacity"
+    );
+    for event in events {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    fs::write(&policy, original).unwrap();
+    fixture.route();
+    fixture.route();
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(
+        pending[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn unreceipted_or_truncated_capture_never_delivers_parent_details() {
+    for scenario in [
+        "no_receipt",
+        "missing_terminal",
+        "truncated_terminal",
+        "stale_candidate",
+    ] {
+        let fixture = Fixture::new(false, true, "rejected");
+        let source = fixture
+            .root
+            .path()
+            .join("review/reviewer/event-reports/assignment-0001.json");
+        let journal: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+        let bytes: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
+        directory(&fixture.route.join("capture"));
+        fs::write(fixture.route.join("capture/verdict.json"), &bytes).unwrap();
+        write(&fixture.route.join("capture/terminal.json"), &journal);
+        if scenario != "no_receipt" {
+            let mut state = fixture.state();
+            state["capture"] = json!(digest(&bytes));
+            write(&fixture.route.join("state.json"), &state);
+            write(&fixture.route.join("history/0001.json"), &state);
+        }
+        match scenario {
+            "no_receipt" => fs::write(&source, "malformed").unwrap(),
+            "missing_terminal" => {
+                fs::remove_file(fixture.route.join("capture/terminal.json")).unwrap();
+                fs::remove_file(&source).unwrap();
+            }
+            "truncated_terminal" => {
+                fs::write(fixture.route.join("capture/terminal.json"), "{").unwrap()
+            }
+            "stale_candidate" => {
+                let mut wrong = journal;
+                let mut verdict: Value = serde_json::from_slice(&bytes).unwrap();
+                verdict["candidate"] = json!("4".repeat(40));
+                let raw = serde_json::to_vec(&verdict).unwrap();
+                wrong["review"] = json!({"bytes":raw,"sha256":digest(&raw)});
+                write(&fixture.route.join("capture/terminal.json"), &wrong);
+            }
+            _ => unreachable!(),
+        }
+        fixture.route();
+        assert!(
+            Inbox::open(&fixture.inbox)
+                .unwrap()
+                .pending()
+                .unwrap()
+                .is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
+fn disable_during_final_validation_prevents_spawn() {
+    let fixture = Fixture::new(true, false, "rejected");
+    let marker = fixture.root.path().join("validating");
+    fs::write(fixture.root.path().join("bin/jj"),format!("#!/bin/sh\nset -eu\ncase \"$*\" in *'conflicts() & @'*) exit 0;; esac\nif test -f '{}'; then : >'{}'; sleep 1; fi\nprintf '%s' '{}'\n",fixture.run.join("review-reservation.json").display(),marker.display(),"1".repeat(40))).unwrap();
+    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
+        .env("HOME", fixture.root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    fixture.ok(&["review-disable", fixture.route.to_str().unwrap()]);
+    assert!(router.wait().unwrap().success());
+    assert!(fixture.route.join("DISABLED").exists());
+    assert!(!fixture.root.path().join("calls").exists());
 }

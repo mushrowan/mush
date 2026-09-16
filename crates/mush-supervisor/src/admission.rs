@@ -66,6 +66,28 @@ pub fn execution_lock(directory: &Path, workspace: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+pub fn claim_lock(directory: &Path, id: &str) -> io::Result<File> {
+    if !identifier(id) {
+        return Err(io::Error::other("invalid admission claim"));
+    }
+    private_directory(directory)?;
+    let path = directory.join(format!("claim-{id}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    read_private(&path, 0)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "claim still owns an execution")
+        }
+        std::fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
 pub fn session_lock(directory: &Path, session: &str, inherited: Option<i32>) -> io::Result<File> {
     if !identifier(session) {
         return Err(io::Error::other("invalid session identity"));

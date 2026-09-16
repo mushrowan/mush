@@ -107,6 +107,8 @@ struct State {
     config_sha256: String,
     sequence: u32,
     producer: String,
+    #[serde(default)]
+    producer_result: Option<String>,
     parent: String,
     detail: String,
     capture: Option<String>,
@@ -342,6 +344,7 @@ fn register_config(config: Config) -> Result<()> {
         config_sha256: digest(&read(&config.directory.join("config.json"), 256 * 1024)?),
         sequence: 0,
         producer: "waiting_review".into(),
+        producer_result: None,
         parent: "pending".into(),
         detail: String::new(),
         capture: None,
@@ -385,6 +388,10 @@ fn producer_manifest(config: &Config) -> Result<Manifest> {
     if digest(&read(&manifest.executable, 512 * 1024 * 1024)?) != config.producer.executable_sha256
     {
         return Err("producer executable changed".into());
+    }
+    let run: Value = decode(&read(&manifest.directory.join("event-run.json"), 4096)?)?;
+    if run["run_id"] != config.producer.identity.run_id {
+        return Err("producer run identity changed".into());
     }
     Ok(manifest)
 }
@@ -622,7 +629,42 @@ fn capture(config: &Config) -> Result<(Verdict, String)> {
     } else {
         read(&source, 3 * 1024 * 1024)?
     };
-    let journal: Value = decode(&bytes)?;
+    let (journal, verdict, raw, sha) = validate_capture(config, &bytes)?;
+    if destination.exists() {
+        return committed_capture(config, Some(&sha));
+    }
+    let pending = config.directory.join("capture-pending");
+    fs::DirBuilder::new().mode(0o700).create(&pending)?;
+    replace(&pending.join("verdict.json"), &raw)?;
+    atomic(&pending.join("terminal.json"), &journal)?;
+    let mut total = 0;
+    for evidence in &verdict.evidence {
+        let binding = config
+            .artifacts
+            .iter()
+            .find(|a| a.id == evidence.id)
+            .ok_or("unbound review artifact")?;
+        let bytes = read(&binding.path, 1024 * 1024)?;
+        total += bytes.len();
+        if total > 8 * 1024 * 1024
+            || digest(&bytes) != evidence.sha256
+            || binding
+                .sha256
+                .as_ref()
+                .is_some_and(|s| s != &evidence.sha256)
+        {
+            return Err("review artifact changed or exceeds limit".into());
+        }
+        replace(&pending.join(format!("{}.evidence", evidence.id)), &bytes)?;
+    }
+    File::open(&pending)?.sync_all()?;
+    fs::rename(pending, &destination)?;
+    File::open(&config.directory)?.sync_all()?;
+    Ok((verdict, sha))
+}
+
+fn validate_capture(config: &Config, bytes: &[u8]) -> Result<(Value, Verdict, Vec<u8>, String)> {
+    let journal: Value = decode(bytes)?;
     let event: Event = serde_json::from_value(journal["state"]["terminal_event"].clone())?;
     event.validate()?;
     let id = &config.reviewer;
@@ -669,74 +711,83 @@ fn capture(config: &Config) -> Result<(Verdict, String)> {
     if verdict.result == VerdictResult::Rejected && event.reason != TerminalReason::Completed {
         return Err("review did not complete".into());
     }
-    if destination.exists() {
-        if read(&destination.join("verdict.json"), 256 * 1024)? != raw {
-            return Err("review bytes changed after capture".into());
-        }
-        for evidence in &verdict.evidence {
-            if digest(&read(
-                &destination.join(format!("{}.evidence", evidence.id)),
-                1024 * 1024,
-            )?) != evidence.sha256
-            {
-                return Err("captured artifact changed".into());
-            }
-        }
-        return Ok((verdict, sha));
+    Ok((journal, verdict, raw, sha))
+}
+
+fn committed_capture(config: &Config, expected: Option<&str>) -> Result<(Verdict, String)> {
+    let destination = config.directory.join("capture");
+    let (_, verdict, raw, sha) = validate_capture(
+        config,
+        &read(&destination.join("terminal.json"), 3 * 1024 * 1024)?,
+    )?;
+    if expected != Some(sha.as_str()) {
+        return Err("review capture receipt missing or changed".into());
     }
-    let pending = config.directory.join("capture-pending");
-    fs::DirBuilder::new().mode(0o700).create(&pending)?;
-    replace(&pending.join("verdict.json"), &raw)?;
-    atomic(&pending.join("terminal.json"), &journal)?;
-    let mut total = 0;
+    if read(&destination.join("verdict.json"), 256 * 1024)? != raw {
+        return Err("review bytes changed after capture".into());
+    }
     for evidence in &verdict.evidence {
         let binding = config
             .artifacts
             .iter()
             .find(|a| a.id == evidence.id)
-            .ok_or("unbound review artifact")?;
-        let bytes = read(&binding.path, 1024 * 1024)?;
-        total += bytes.len();
-        if total > 8 * 1024 * 1024
-            || digest(&bytes) != evidence.sha256
-            || binding
-                .sha256
-                .as_ref()
-                .is_some_and(|s| s != &evidence.sha256)
+            .ok_or("unbound captured artifact")?;
+        if binding
+            .sha256
+            .as_ref()
+            .is_some_and(|s| s != &evidence.sha256)
         {
-            return Err("review artifact changed or exceeds limit".into());
+            return Err("captured artifact binding changed".into());
         }
-        replace(&pending.join(format!("{}.evidence", evidence.id)), &bytes)?;
+        if digest(&read(
+            &destination.join(format!("{}.evidence", evidence.id)),
+            1024 * 1024,
+        )?) != evidence.sha256
+        {
+            return Err("captured artifact changed".into());
+        }
     }
-    File::open(&pending)?.sync_all()?;
-    fs::rename(pending, &destination)?;
-    File::open(&config.directory)?.sync_all()?;
     Ok((verdict, sha))
 }
 
-fn notify(
-    config: &Config,
-    state: &mut State,
-    verdict: &Verdict,
-    sha: &str,
-    number: u32,
-) -> Result<()> {
+fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> Result<()> {
     if !config.actions.return_to_parent {
         return Ok(());
     }
-    let parent = config.parent.as_ref().ok_or("parent binding missing")?;
-    let inbox = Inbox::open(&parent.inbox)?;
-    if inbox.binding()? != parent.binding {
-        return Err("parent binding changed".into());
+    let (captured, digest) = committed_capture(config, state.capture.as_deref())?;
+    if captured != *verdict || digest != sha {
+        return Err("parent payload does not match committed capture".into());
     }
-    let run_id = format!("review-{}-{}", config.task, config.generation);
-    let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
-    let stored = config.directory.join(format!("parent-{number}.json"));
-    let event = if stored.exists() {
-        serde_json::from_slice(&read(&stored, 512 * 1024)?)?
+    let parent = config.parent.as_ref().ok_or("parent binding missing")?;
+    let stored = config.directory.join("parent-events.json");
+    let mut events: Vec<Event> = if stored.exists() {
+        decode(&read(&stored, 16 * 1024 * 1024)?)?
     } else {
+        Vec::new()
+    };
+    let action = if state.producer == "attempt_finished" {
+        format!(
+            "{}: {}",
+            state.producer,
+            state.producer_result.as_deref().unwrap_or("unknown")
+        )
+    } else {
+        state.producer.clone()
+    };
+    if events.last().is_none_or(|event| {
+        event
+            .review
+            .as_ref()
+            .is_none_or(|review| review.producer_action != action)
+    }) {
+        if events.len() >= 64 {
+            return Err("parent action history is full, inspect review status".into());
+        }
+        let number = u32::try_from(events.len())? + 1;
+        let run_id = format!("review-{}-{}", config.task, config.generation);
+        let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
         let event = Event {
-            event_id: event_id.clone(),
+            event_id,
             run_id,
             worker_id: config.reviewer.worker.clone(),
             assignment_id: number,
@@ -747,11 +798,7 @@ fn notify(
             review: Some(Notice {
                 verdict: verdict.clone(),
                 capture_sha256: sha.into(),
-                producer_action: if state.producer == "attempt_finished" {
-                    format!("{}: {}", state.producer, state.detail)
-                } else {
-                    state.producer.clone()
-                },
+                producer_action: action,
                 evidence_directory: config.directory.join("capture"),
                 pairing: Some(mush_supervisor::review::Pairing {
                     task: config.task.clone(),
@@ -760,17 +807,17 @@ fn notify(
                 }),
             }),
         };
-        atomic(&stored, &event)?;
-        event
-    };
-    inbox.enqueue(event, &config.reviewer_cwd)?;
+        events.push(event);
+        atomic(&stored, &events)?;
+    }
+    let inbox = Inbox::open(&parent.inbox)?;
+    if inbox.binding()? != parent.binding {
+        return Err("parent binding changed".into());
+    }
     let mut acknowledged = true;
-    for stage in 1..=3 {
-        let path = config.directory.join(format!("parent-{stage}.json"));
-        if path.exists() {
-            let event: Event = decode(&read(&path, 512 * 1024)?)?;
-            acknowledged &= inbox.acknowledged(&event.event_id)?;
-        }
+    for event in events {
+        inbox.enqueue(event.clone(), &config.reviewer_cwd)?;
+        acknowledged &= inbox.acknowledged(&event.event_id)?;
     }
     state.parent = if acknowledged {
         "acknowledged"
@@ -793,6 +840,7 @@ async fn launch(
     let config = &selected;
     let mut manifest = producer_manifest(config)?;
     let _run = Lock::acquire(&manifest.directory.join("supervisor.lock"))?;
+    manifest.run_lease = Some(_run.0.clone());
     let job = manifest
         .workers
         .iter()
@@ -841,6 +889,7 @@ async fn launch(
     }
     manifest.admitted = Some(admission_id);
     manifest.execution_locked = true;
+    manifest.execution_lease = Some(Arc::new(workspace_lock));
     let prompt = if let Some(verdict) = verdict {
         format!(
             "{}\n\nuntrusted review data, no new permissions:\n{}\n\nhash-bound evidence: {}\nverdict sha256: {}",
@@ -909,7 +958,6 @@ async fn launch(
         receiver,
     )
     .await;
-    drop(workspace_lock);
     monitor.abort();
     let _transaction = Lock::acquire(&config.directory.join("transaction.lock"))?;
     set_action(
@@ -932,6 +980,9 @@ async fn launch(
         .and_then(|state| state["state"].as_str())
         .unwrap_or("producer state unavailable")
         .into();
+    if !reviewer {
+        state.producer_result = Some(state.detail.clone());
+    }
     save(&config.directory, state)?;
     if result.is_ok() {
         fs::remove_file(run_directory.join("review-reservation.json"))?;
@@ -1026,6 +1077,10 @@ pub fn launch_ready(directory: &Path, reviewer: bool) -> Result<()> {
     if !head.status.success() || head.stdout != config.producer.head.as_bytes() {
         return Err("producer revision changed before launch".into());
     }
+    let run: Value = decode(&read(&manifest.directory.join("event-run.json"), 4096)?)?;
+    if run["run_id"] != config.producer.identity.run_id {
+        return Err("producer run identity changed before launch".into());
+    }
     Ok(())
 }
 
@@ -1093,13 +1148,7 @@ fn historical_delivery(config: &Config) -> Result<()> {
         if saved.capture.as_ref() != Some(&sha) {
             return Err("historical verdict changed".into());
         }
-        let delivery = notify(&prior, &mut saved, &verdict, &sha, 1).and_then(|()| {
-            if saved.launch_claimed {
-                notify(&prior, &mut saved, &verdict, &sha, 3)
-            } else {
-                Ok(())
-            }
-        });
+        let delivery = notify(&prior, &mut saved, &verdict, &sha);
         if let Err(error) = delivery {
             saved.parent = "pending".into();
             saved.detail = error.to_string();
@@ -1172,7 +1221,11 @@ async fn run_generation(directory: &Path, once: bool) -> Result<Option<PathBuf>>
                     if !current.launch_claimed && !current.review_launch_claimed {
                         current.detail.clear();
                     }
-                    current.capture = Some(sha.clone());
+                    if current.capture.as_ref() != Some(&sha) {
+                        current.capture = Some(sha.clone());
+                        let _transaction = Lock::acquire(&directory.join("transaction.lock"))?;
+                        save(directory, &mut current)?;
+                    }
                     if !current.launch_claimed {
                         current.producer = if !config.actions.resume_rejected {
                             "manual"
@@ -1183,7 +1236,9 @@ async fn run_generation(directory: &Path, once: bool) -> Result<Option<PathBuf>>
                         }
                         .into();
                     }
-                    if let Err(e) = notify(&config, &mut current, &verdict, &sha, 1) {
+                    if !directory.join("parent-events.json").exists()
+                        && let Err(e) = notify(&config, &mut current, &verdict, &sha)
+                    {
                         current.parent = "pending".into();
                         current.detail = e.to_string();
                     }
@@ -1201,15 +1256,9 @@ async fn run_generation(directory: &Path, once: bool) -> Result<Option<PathBuf>>
                             current.detail = e.to_string();
                         }
                     }
-                    if current.launch_claimed
-                        || current.producer == "exhausted"
-                        || current.producer == "needs_input"
-                    {
-                        let number = if current.launch_claimed { 3 } else { 2 };
-                        if let Err(e) = notify(&config, &mut current, &verdict, &sha, number) {
-                            current.parent = "pending".into();
-                            current.detail = e.to_string();
-                        }
+                    if let Err(e) = notify(&config, &mut current, &verdict, &sha) {
+                        current.parent = "pending".into();
+                        current.detail = e.to_string();
                     }
                 }
                 Err(e) => {
@@ -1221,15 +1270,12 @@ async fn run_generation(directory: &Path, once: bool) -> Result<Option<PathBuf>>
                     if !current.launch_claimed {
                         current.producer = "needs_input_review".into();
                     }
-                    if let Ok(bytes) = read(&directory.join("capture/verdict.json"), 256 * 1024)
-                        && let Ok(verdict) = serde_json::from_slice::<Verdict>(&bytes)
+                    if let Ok((verdict, sha)) =
+                        committed_capture(&config, current.capture.as_deref())
+                        && let Err(error) = notify(&config, &mut current, &verdict, &sha)
                     {
-                        let sha = digest(&bytes);
-                        let number = if current.launch_claimed { 3 } else { 2 };
-                        if let Err(error) = notify(&config, &mut current, &verdict, &sha, number) {
-                            current.parent = "pending".into();
-                            current.detail.push_str(&format!("; parent: {error}"));
-                        }
+                        current.parent = "pending".into();
+                        current.detail.push_str(&format!("; parent: {error}"));
                     }
                 }
             }
@@ -1262,8 +1308,21 @@ pub fn status(directory: &Path) -> Result<()> {
 
 pub fn disable(directory: &Path) -> Result<()> {
     load(directory)?;
-    let _transaction = Lock::acquire(&directory.join("transaction.lock"))?;
-    replace(&directory.join("DISABLED"), b"disabled")?;
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join("DISABLED"))
+    {
+        Ok(file) => file.sync_all()?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            mush_supervisor::inbox::read_private(&directory.join("DISABLED"), 64)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    File::open(directory)?.sync_all()?;
     replace(
         &directory.join(format!("disabled-{}.json", Utc::now().timestamp_micros())),
         &serde_json::to_vec(&json!({"at":Utc::now(),"action":"disable"}))?,

@@ -159,6 +159,10 @@ struct Manifest {
     #[serde(skip)]
     execution_locked: bool,
     #[serde(skip)]
+    execution_lease: Option<Arc<File>>,
+    #[serde(skip)]
+    run_lease: Option<Arc<File>>,
+    #[serde(skip)]
     session_lease: Option<Arc<File>>,
     workers: Vec<Worker>,
 }
@@ -270,7 +274,7 @@ fn validate(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-struct Lock(File);
+struct Lock(Arc<File>);
 
 impl Lock {
     fn acquire(path: &Path) -> Result<Self> {
@@ -282,13 +286,7 @@ impl Lock {
             ),
             std::fs::TryLockError::Error(error) => error,
         })?;
-        Ok(Self(file))
-    }
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
+        Ok(Self(Arc::new(file)))
     }
 }
 
@@ -604,14 +602,20 @@ async fn worker(
             format!("{}:{}:{round}", manifest.directory.display(), job.name).as_bytes(),
         );
         let _execution = if manifest.execution_locked {
-            None
+            manifest.execution_lease.clone()
         } else {
             manifest
                 .admission
                 .as_ref()
                 .map(|pool| mush_supervisor::admission::execution_lock(pool, &job.cwd))
                 .transpose()?
+                .map(Arc::new)
         };
+        let claim_guard = manifest
+            .admission
+            .as_ref()
+            .map(|pool| mush_supervisor::admission::claim_lock(pool, &admission_id))
+            .transpose()?;
         if let Some(pool) = &manifest.admission
             && manifest.admitted.as_ref() != Some(&admission_id)
         {
@@ -697,6 +701,26 @@ async fn worker(
             None
         };
         use std::os::fd::AsRawFd;
+        let mut execution_fds = Vec::new();
+        if let Some(file) = &_execution {
+            execution_fds.push(file.as_raw_fd());
+        }
+        if let Some(file) = &manifest.run_lease {
+            execution_fds.push(file.as_raw_fd());
+        }
+        if let Some(file) = &claim_guard {
+            execution_fds.push(file.as_raw_fd());
+        }
+        unsafe {
+            cmd.pre_exec(move || {
+                for fd in &execution_fds {
+                    if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
         if let Some(lease) = &session_lease {
             let fd = lease.as_raw_fd();
             cmd.env("MUSH_SESSION_LEASE_FD", fd.to_string());
@@ -752,6 +776,12 @@ async fn worker(
         }
         if let Some(directory) = &manifest.routing_guard {
             routing::launch_ready(directory, manifest.routing_review)?;
+            if !routing::enabled(directory)
+                || manifest.directory.join("STOP").exists()
+                || Utc::now() >= manifest.until
+            {
+                return Err("launch was revoked during final validation".into());
+            }
         }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -826,11 +856,13 @@ async fn worker(
         signal_tree(&tracked, "-TERM").await;
         signal_tree(&tracked, "-KILL").await;
         let remaining = processes();
+        drop(claim_guard);
         if let Some(pool) = &manifest.admission
             && !tracked.is_empty()
             && !tracked
                 .iter()
                 .any(|(pid, start)| remaining.get(pid).is_some_and(|p| p.start == *start))
+            && let Ok(_exited) = mush_supervisor::admission::claim_lock(pool, &admission_id)
         {
             mush_supervisor::admission::Pool::open(pool)?.release(&admission_id)?;
         }
@@ -1004,7 +1036,10 @@ async fn run(path: &Path) -> Result<()> {
     supervise(manifest, lock, false).await
 }
 
-async fn supervise(manifest: Manifest, _lock: Lock, pending_only: bool) -> Result<()> {
+async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Result<()> {
+    if manifest.admission.is_some() {
+        manifest.run_lease = Some(lock.0.clone());
+    }
     if manifest.directory.join("review-reservation.json").exists() {
         return Err("run has a review reservation".into());
     }
@@ -1209,6 +1244,7 @@ async fn main() -> Result<()> {
                 .cloned()
                 .ok_or("unknown admission claim")?;
             let _run = Lock::acquire(&saved.run.join("supervisor.lock"))?;
+            let _execution = mush_supervisor::admission::claim_lock(&directory, &claim)?;
             let mut pool = mush_supervisor::admission::Pool::open(&directory)?;
             let saved = pool.claims().get(&claim).ok_or("unknown admission claim")?;
             let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;

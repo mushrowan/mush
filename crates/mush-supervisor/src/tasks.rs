@@ -153,6 +153,8 @@ pub async fn prepare(args: Prepare) -> Result<()> {
         routing_review: false,
         admitted: None,
         execution_locked: false,
+        execution_lease: None,
+        run_lease: None,
         session_lease: None,
         workers: Vec::new(),
     };
