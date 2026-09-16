@@ -11,6 +11,7 @@ mush-ai.workspace = true
 mush-agent.workspace = true
 mush-session.workspace = true
 tokio.workspace = true
+futures.workspace = true
 
 [lints]
 workspace = true

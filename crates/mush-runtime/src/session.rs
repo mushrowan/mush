@@ -1,9 +1,93 @@
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mush_ai::types::{ImageMimeType, Message};
+use futures::StreamExt;
+use mush_agent::AgentEvent;
+use mush_ai::registry::ApiRegistry;
+use mush_ai::types::{ImageMimeType, Message, PaneId};
 use mush_session::ConversationState;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, watch};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamGeneration(pub u64);
+
+pub type TurnEvent = (PaneId, StreamGeneration, AgentEvent);
+
+pub type TurnStream<'a> = Pin<Box<dyn futures::Stream<Item = TurnEvent> + Send + 'a>>;
+
+const TURN_EVENT_BUFFER: usize = 1024;
+
+pub struct TurnEvents {
+    tx: mpsc::Sender<TurnEvent>,
+    rx: mpsc::Receiver<TurnEvent>,
+    active: Arc<AtomicUsize>,
+    active_tx: watch::Sender<usize>,
+    active_rx: watch::Receiver<usize>,
+}
+
+impl Default for TurnEvents {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel(TURN_EVENT_BUFFER);
+        let (active_tx, active_rx) = watch::channel(0);
+        Self {
+            tx,
+            rx,
+            active: Arc::new(AtomicUsize::new(0)),
+            active_tx,
+            active_rx,
+        }
+    }
+}
+
+impl TurnEvents {
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst) > 0 || !self.rx.is_empty()
+    }
+
+    #[must_use]
+    pub fn active_turns(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+
+    pub fn try_next(&mut self) -> Option<TurnEvent> {
+        self.rx.try_recv().ok()
+    }
+
+    pub async fn next(&mut self) -> Option<TurnEvent> {
+        if !self.is_active() {
+            return None;
+        }
+        let mut idle = self.active_rx.clone();
+        tokio::select! {
+            event = self.rx.recv() => event,
+            _ = idle.wait_for(|active| *active == 0) => self.rx.try_recv().ok(),
+        }
+    }
+
+    pub fn spawn<B>(&self, registry: ApiRegistry, build: B)
+    where
+        B: for<'r> FnOnce(&'r ApiRegistry) -> TurnStream<'r> + Send + 'static,
+    {
+        let tx = self.tx.clone();
+        let active = self.active.clone();
+        let active_tx = self.active_tx.clone();
+        let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = active_tx.send(count);
+        tokio::spawn(async move {
+            let mut stream = build(&registry);
+            while let Some(event) = stream.next().await {
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            let count = active.fetch_sub(1, Ordering::SeqCst) - 1;
+            let _ = active_tx.send(count);
+        });
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PendingImage {
@@ -53,6 +137,7 @@ pub struct SessionRuntime {
     pub title_generated: bool,
     pub control: Option<mush_agent::ipc::control::Control>,
     pub control_socket: Option<PathBuf>,
+    pub turns: TurnEvents,
 }
 
 impl SessionRuntime {
@@ -66,7 +151,13 @@ impl SessionRuntime {
             title_generated: false,
             control: None,
             control_socket: None,
+            turns: TurnEvents::default(),
         }
+    }
+
+    #[must_use]
+    pub fn turn_active(&self) -> bool {
+        self.turns.is_active()
     }
 
     #[must_use]
@@ -85,5 +176,55 @@ impl SessionRuntime {
 impl Default for SessionRuntime {
     fn default() -> Self {
         Self::new(ConversationState::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(n: usize) -> TurnStream<'static> {
+        Box::pin(futures::stream::iter((0..n).map(|_| {
+            (PaneId::new(1), StreamGeneration(0), AgentEvent::AgentStart)
+        })))
+    }
+
+    #[tokio::test]
+    async fn events_flow_through_and_the_turn_settles() {
+        let mut turns = TurnEvents::default();
+        assert!(!turns.is_active());
+        assert!(turns.next().await.is_none());
+
+        turns.spawn(ApiRegistry::new(), |_| events(3));
+
+        let mut seen = 0;
+        while let Some(_event) = turns.next().await {
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+        assert!(!turns.is_active());
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_is_still_running_counts_as_active() {
+        let mut turns = TurnEvents::default();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+        turns.spawn(ApiRegistry::new(), move |_| {
+            Box::pin(futures::stream::once(async move {
+                let _ = release_rx.await;
+                (PaneId::new(1), StreamGeneration(0), AgentEvent::AgentEnd)
+            }))
+        });
+        tokio::task::yield_now().await;
+
+        assert!(turns.is_active());
+        assert!(turns.try_next().is_none());
+        let _ = release_tx.send(());
+        assert!(matches!(
+            turns.next().await,
+            Some((_, _, AgentEvent::AgentEnd))
+        ));
+        assert!(turns.next().await.is_none());
     }
 }

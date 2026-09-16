@@ -1,13 +1,8 @@
 use mush_agent::ipc::control::{Control, Outcome};
 
-use super::{
-    TuiConfig,
-    runtime::RunnerRuntime,
-    streams::{AgentStreams, StreamState},
-};
+use super::{TuiConfig, runtime::RunnerRuntime, streams::StreamState};
 
 pub(super) async fn poll(
-    streams: &AgentStreams<'_>,
     state: &StreamState,
     runtime: &mut RunnerRuntime,
     config: &TuiConfig,
@@ -18,7 +13,7 @@ pub(super) async fn poll(
     if control.target().session != config.session_id.as_str() {
         control.activate(config.session_id.to_string());
     }
-    if !super::inbox::safe_to_consume(streams, state, runtime).await {
+    if !super::inbox::safe_to_consume(state, runtime).await {
         return Ok(());
     }
     control.finish(Outcome::Failed);

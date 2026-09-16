@@ -37,9 +37,7 @@ use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
 use self::size_cached_backend::{SizeCachedBackend, spawn_sigwinch_listener};
-use self::streams::{
-    AgentStreams, StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
-};
+use self::streams::{StreamConfig, StreamDeps, StreamState, start_pending_streams};
 use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
@@ -129,7 +127,6 @@ pub async fn run_tui(
     ));
     diag::write_startup_diagnostics(startup_phases, Vec::new());
 
-    let mut agent_streams = new_agent_streams();
     let mut stream_state = StreamState::new();
     let mut orchestrator_inbox = inbox::attach(
         inbox::OrchestratorInbox::from_env(&tui_config),
@@ -153,7 +150,6 @@ pub async fn run_tui(
         report_loop_progress(
             &stall_watchdog,
             &runtime,
-            &agent_streams,
             loop_iteration,
             draw_count,
             "start_pending_streams",
@@ -162,7 +158,6 @@ pub async fn run_tui(
         let inbox_connected = orchestrator_inbox.is_some();
         let inbox_ready = inbox::poll(
             &mut orchestrator_inbox,
-            &agent_streams,
             &stream_state,
             &mut runtime,
             &tui_config,
@@ -176,10 +171,9 @@ pub async fn run_tui(
         )
         .await;
         if inbox_ready {
-            control::poll(&agent_streams, &stream_state, &mut runtime, &tui_config).await?;
+            control::poll(&stream_state, &mut runtime, &tui_config).await?;
             let control_endpoint = runtime.session.control_endpoint();
             start_pending_streams(
-                &mut agent_streams,
                 &mut stream_state,
                 &mut runtime.session,
                 &mut runtime.pending_prompt,
@@ -214,14 +208,12 @@ pub async fn run_tui(
         report_loop_progress(
             &stall_watchdog,
             &runtime,
-            &agent_streams,
             loop_iteration,
             draw_count,
             "waiting_for_event",
             "parked before select/input handling",
         );
         let action = run_loop_iteration(
-            &mut agent_streams,
             &mut stream_state,
             &mut runtime,
             &mut tui_config,
@@ -234,7 +226,6 @@ pub async fn run_tui(
         report_loop_progress(
             &stall_watchdog,
             &runtime,
-            &agent_streams,
             loop_iteration,
             draw_count,
             "post_loop_iteration",
@@ -282,7 +273,6 @@ pub async fn run_tui(
             report_loop_progress(
                 &stall_watchdog,
                 &runtime,
-                &agent_streams,
                 loop_iteration,
                 draw_count,
                 "draw",
@@ -300,7 +290,6 @@ pub async fn run_tui(
     }
 
     stream_state.abort(mush_ai::types::PaneId::new(1));
-    drop(agent_streams);
     tui_config
         .snapshot_kernel_state(&tui_config.session_id.clone())
         .await;
@@ -317,7 +306,6 @@ pub async fn run_tui(
 fn report_loop_progress(
     watchdog: &diag::StallWatchdog,
     runtime: &RunnerRuntime,
-    agent_streams: &AgentStreams<'_>,
     loop_iteration: u64,
     draw_count: u64,
     phase: &'static str,
@@ -329,7 +317,7 @@ fn report_loop_progress(
         diag::LoopSnapshot {
             loop_iteration,
             draw_count,
-            active_streams: agent_streams.len(),
+            active_streams: runtime.session.runtime.turns.active_turns(),
             active_tools: runtime.active_tool_labels(),
         },
     );

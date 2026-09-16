@@ -70,7 +70,8 @@ pub(super) async fn handle_slash_action(
     );
     if changes_conversation
         && session.runtime.control.is_some()
-        && (session.app.stream.active
+        && (session.runtime.turn_active()
+            || session.app.stream.active
             || !session.app.active_tools.is_empty()
             || session.runtime.pending_prompt.is_some()
             || pending_prompt.is_some()

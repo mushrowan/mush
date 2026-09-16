@@ -1,6 +1,5 @@
 use std::io;
 
-use futures::StreamExt;
 use mush_agent::AgentEvent;
 use mush_ai::registry::ApiRegistry;
 
@@ -12,7 +11,7 @@ use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
 use super::runtime::RunnerRuntime;
-use super::streams::{AgentStreams, StreamState, poll_confirmation_prompt, poll_live_tool_output};
+use super::streams::{StreamState, poll_confirmation_prompt, poll_live_tool_output};
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     crate::app::ANIMATION_FRAME_INTERVAL;
@@ -21,7 +20,6 @@ const MAX_AGENT_EVENT_DRAIN: std::time::Duration = std::time::Duration::from_mil
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_iteration(
-    agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
     tui_config: &mut TuiConfig,
@@ -30,7 +28,7 @@ pub(super) async fn run_loop_iteration(
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    let action = if agent_streams.is_empty() {
+    let action = if !runtime.session.runtime.turn_active() {
         handle_idle_iteration(
             stream_state,
             runtime,
@@ -42,7 +40,6 @@ pub(super) async fn run_loop_iteration(
         .await
     } else {
         handle_streaming_iteration(
-            agent_streams,
             stream_state,
             runtime,
             tui_config,
@@ -103,7 +100,6 @@ fn input_parts<'a>(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_streaming_iteration(
-    agent_streams: &mut AgentStreams<'_>,
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
     tui_config: &mut TuiConfig,
@@ -120,7 +116,7 @@ async fn handle_streaming_iteration(
     let mut tick_changed = false;
 
     tokio::select! {
-        result = agent_streams.next() => {
+        result = runtime.session.runtime.turns.next() => {
             let drain_started = std::time::Instant::now();
             if let Some((pane_id, stream_gen, event)) = result {
                 saw_agent_event = true;
@@ -139,9 +135,8 @@ async fn handle_streaming_iteration(
                 ) {
                     break;
                 }
-                use futures::FutureExt;
-                match agent_streams.next().now_or_never() {
-                    Some(Some((pane_id, stream_gen, event))) => {
+                match runtime.session.runtime.turns.try_next() {
+                    Some((pane_id, stream_gen, event)) => {
                         saw_agent_event = true;
                         saw_settling_agent_event |= is_settling_agent_event(&event);
                         drained_events += 1;

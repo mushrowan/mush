@@ -1,9 +1,6 @@
 use super::control::*;
-use super::streams::{
-    StreamConfig, StreamDeps, StreamState, new_agent_streams, start_pending_streams,
-};
+use super::streams::{StreamConfig, StreamDeps, StreamState, start_pending_streams};
 use super::{TuiConfig, runtime::RunnerRuntime};
-use futures::StreamExt;
 use mush_agent::AgentEvent;
 use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
 use mush_agent::tool::{AgentTool, ToolRegistry, ToolResult};
@@ -65,31 +62,29 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
         fail: false,
     }));
     let tools = ToolRegistry::new();
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     for (index, id) in ["first", "second"].into_iter().enumerate() {
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         assert_eq!(outcome(&control, id), Outcome::Running);
         let stream_deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
-            &mut streams,
             &mut state,
             &mut runtime.session,
             &mut runtime.pending_prompt,
             stream_deps,
         )
         .await;
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         if index == 0 {
             assert_eq!(outcome(&control, "second"), Outcome::Queued);
         }
-        while let Some((pane, _, event)) = streams.next().await {
+        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
         assert_eq!(outcome(&control, id), Outcome::Completed);
         assert_eq!(requests.lock().unwrap().len(), index + 1);
     }
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert!(runtime.session.runtime.pending_prompt.is_none());
     assert_eq!(control.target(), target);
     let result = tokio::process::Command::new(&binary)
@@ -118,17 +113,16 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
     assert!(result.status.success());
     assert_eq!(outcome(&control, "wake"), Outcome::Scheduled);
     tokio::time::sleep(std::time::Duration::from_millis(110)).await;
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
         stream_deps,
     )
     .await;
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert_eq!(outcome(&control, "wake"), Outcome::Completed);
@@ -169,13 +163,11 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
         endpoint: endpoint.clone(),
     }));
     enqueue(&control, "confirm");
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let mut stream_deps = deps(&config, &runtime, &tools, &registry);
     stream_deps.config.confirm_tools = true;
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
@@ -193,7 +185,7 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
                 break request;
             }
             tokio::select! {
-                event = streams.next() => {
+                event = runtime.session.runtime.turns.next() => {
                     let (pane, _, event) = event.unwrap();
                     dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
                 }
@@ -205,10 +197,10 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     .unwrap();
     assert!(endpoint.lock().unwrap().is_none());
     enqueue(&control, "during-confirm");
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "during-confirm"), Outcome::Queued);
     confirmation.reply.send(false).unwrap();
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert!(endpoint.lock().unwrap().is_none());
@@ -240,12 +232,10 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
         fail: false,
     }));
     enqueue(&control, "previous-session");
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
@@ -255,7 +245,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = streams.next() => {
+            event = runtime.session.runtime.turns.next() => {
                 let (pane, _, event) = event.unwrap();
                 dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
             }
@@ -279,7 +269,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     assert_eq!(control.target().session, old_session);
     assert_eq!(outcome(&control, "previous-session"), Outcome::Running);
     release.notify_one();
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert_eq!(outcome(&control, "previous-session"), Outcome::Completed);
@@ -778,7 +768,6 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
             fail,
         }));
         let tools = ToolRegistry::new();
-        let mut streams = new_agent_streams();
         let mut state = StreamState::new();
         let response = mush_agent::ipc::listener::exchange(
             listener.path(),
@@ -804,20 +793,19 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
                 ..
             })
         ));
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         let deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
-            &mut streams,
             &mut state,
             &mut runtime.session,
             &mut runtime.pending_prompt,
             deps,
         )
         .await;
-        while let Some((pane, _, event)) = streams.next().await {
+        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(
             outcome(&control, "idle"),
@@ -868,13 +856,11 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         release: release.clone(),
         endpoint: endpoint.clone(),
     }));
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     runtime.session.runtime.pending_prompt =
         Some(crate::session::PendingPrompt::text("ordinary user"));
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
@@ -882,7 +868,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     )
     .await;
     loop {
-        let (pane, _, event) = streams.next().await.unwrap();
+        let (pane, _, event) = runtime.session.runtime.turns.next().await.unwrap();
         let tool = matches!(event, AgentEvent::ToolExecStart { .. });
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         if tool {
@@ -891,7 +877,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     }
     tokio::select! {
         _ = entered.notified() => {},
-        _ = streams.next() => panic!("tool returned before release"),
+        _ = runtime.session.runtime.turns.next() => panic!("tool returned before release"),
     }
     enqueue(&control, "during-tool");
     super::streams::submit_streaming_input(
@@ -901,7 +887,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         vec![],
     )
     .await;
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "during-tool"), Outcome::Queued);
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert_eq!(
@@ -909,21 +895,20 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         control.target()
     );
     release.notify_one();
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert_eq!(outcome(&control, "during-tool"), Outcome::Queued);
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
         stream_deps,
     )
     .await;
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert_eq!(outcome(&control, "during-tool"), Outcome::Completed);
@@ -951,13 +936,11 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
         release: Arc::new(tokio::sync::Notify::new()),
         endpoint: Default::default(),
     }));
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     enqueue(&control, "active");
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
@@ -965,36 +948,35 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     )
     .await;
     loop {
-        let (pane, _, event) = streams.next().await.unwrap();
+        let (pane, _, event) = runtime.session.runtime.turns.next().await.unwrap();
         let tool = matches!(event, AgentEvent::ToolExecStart { .. });
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         if tool {
             break;
         }
     }
-    tokio::select! { _ = entered.notified() => {}, _ = streams.next() => panic!() }
+    tokio::select! { _ = entered.notified() => {}, _ = runtime.session.runtime.turns.next() => panic!() }
     enqueue(&control, "after-cancel");
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Queued);
-    while let Some((pane, generation, event)) = streams.next().await {
+    while let Some((pane, generation, event)) = runtime.session.runtime.turns.next().await {
         if state.is_current(pane, generation) {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
     }
     entered.notified().await;
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
         stream_deps,
     )
     .await;
-    while let Some((pane, _, event)) = streams.next().await {
+    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
         dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
     }
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Completed);
@@ -1050,13 +1032,11 @@ async fn cancellation_drops_pending_provider_connection() {
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(PendingProvider(entered.clone())));
     let tools = ToolRegistry::new();
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     enqueue(&control, "active");
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
-        &mut streams,
         &mut state,
         &mut runtime.session,
         &mut runtime.pending_prompt,
@@ -1066,7 +1046,7 @@ async fn cancellation_drops_pending_provider_connection() {
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = streams.next() => {
+            event = runtime.session.runtime.turns.next() => {
                 let (pane, _, event) = event.unwrap();
                 dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
             }
@@ -1074,7 +1054,7 @@ async fn cancellation_drops_pending_provider_connection() {
     }
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while streams.next().await.is_some() {}
+        while runtime.session.runtime.turns.next().await.is_some() {}
         entered.notified().await;
     })
     .await
@@ -1093,7 +1073,6 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
         fail: false,
     }));
     let tools = ToolRegistry::new();
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     for id in ["wake", "rearmed"] {
         request(
@@ -1105,20 +1084,19 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
                 ttl_ms: 100,
             },
         );
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         assert!(runtime.session.runtime.pending_prompt.is_none());
         tokio::time::advance(std::time::Duration::from_millis(100)).await;
-        poll(&streams, &state, &mut runtime, &config).await.unwrap();
+        poll(&state, &mut runtime, &config).await.unwrap();
         let stream_deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
-            &mut streams,
             &mut state,
             &mut runtime.session,
             &mut runtime.pending_prompt,
             stream_deps,
         )
         .await;
-        while let Some((pane, _, event)) = streams.next().await {
+        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
         assert_eq!(outcome(&control, id), Outcome::Completed);
@@ -1129,18 +1107,17 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
 #[tokio::test]
 async fn pending_user_inputs_and_session_switch_block_old_events() {
     let (mut runtime, mut config, control) = fixture();
-    let streams = new_agent_streams();
     let mut state = StreamState::new();
     enqueue(&control, "old");
     runtime.pending_prompt = Some("ordinary".into());
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Queued);
     runtime.pending_prompt = None;
     config.session_id = SessionId::new();
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Unavailable);
     enqueue(&control, "cancel");
-    poll(&streams, &state, &mut runtime, &config).await.unwrap();
+    poll(&state, &mut runtime, &config).await.unwrap();
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
     assert_eq!(outcome(&control, "cancel"), Outcome::Cancelled);
 }
@@ -1172,7 +1149,6 @@ async fn pending_prompts_start_one_agent_at_a_time() {
         fail: false,
     }));
     let tools = ToolRegistry::new();
-    let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     for expected in 1..=2 {
         runtime.session.runtime.pending_prompt = Some(crate::session::PendingPrompt::text(
@@ -1180,7 +1156,6 @@ async fn pending_prompts_start_one_agent_at_a_time() {
         ));
         let stream_deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
-            &mut streams,
             &mut state,
             &mut runtime.session,
             &mut runtime.pending_prompt,
@@ -1189,14 +1164,13 @@ async fn pending_prompts_start_one_agent_at_a_time() {
         .await;
         let stream_deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
-            &mut streams,
             &mut state,
             &mut runtime.session,
             &mut runtime.pending_prompt,
             stream_deps,
         )
         .await;
-        while let Some((pane, _, event)) = streams.next().await {
+        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
         assert_eq!(requests.lock().unwrap().len(), expected);

@@ -4,7 +4,10 @@ use mush_agent::AgentEvent;
 use mush_ai::types::{Message, Timestamp, ToolResultMessage};
 use mush_session::ConversationState;
 
-pub use session::{PendingImage, PendingPrompt, SessionRuntime};
+pub use session::{
+    PendingImage, PendingPrompt, SessionRuntime, StreamGeneration, TurnEvent, TurnEvents,
+    TurnStream,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {

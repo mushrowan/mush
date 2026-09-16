@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::stream::SelectAll;
 use mush_agent::tool::{SharedTool, ToolRegistry};
 use mush_agent::{AgentConfig, AgentEvent, agent_loop};
 use mush_ai::registry::ApiRegistry;
@@ -22,12 +20,8 @@ const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct StreamGeneration(u64);
+pub(super) use mush_runtime::StreamGeneration;
 
-pub(super) type TaggedStream<'a> =
-    Pin<Box<dyn futures::Stream<Item = (PaneId, StreamGeneration, AgentEvent)> + Send + 'a>>;
-pub(super) type AgentStreams<'a> = SelectAll<TaggedStream<'a>>;
 pub(super) type ConfirmReply = tokio::sync::oneshot::Sender<bool>;
 
 pub(super) struct ConfirmRequest {
@@ -39,10 +33,6 @@ pub(super) struct ConfirmRequest {
 pub(super) struct PendingConfirmation {
     pub tool_call_id: ToolCallId,
     pub reply: ConfirmReply,
-}
-
-pub(super) fn new_agent_streams<'a>() -> AgentStreams<'a> {
-    SelectAll::new()
 }
 
 pub(super) struct StreamMeta {
@@ -711,22 +701,20 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
 }
 
 pub(super) async fn start_pending_streams<'a>(
-    agent_streams: &mut AgentStreams<'a>,
     stream_state: &mut StreamState,
     session: &mut Session,
     pending_prompt: &mut Option<String>,
     deps: StreamDeps<'a>,
 ) {
-    if !agent_streams.is_empty() {
+    if session.runtime.turn_active() {
         return;
     }
     for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
-        start_stream_for_prompt(agent_streams, stream_state, session, pane_id, prompt, &deps).await;
+        start_stream_for_prompt(stream_state, session, pane_id, prompt, &deps).await;
     }
 }
 
 async fn start_stream_for_prompt<'a>(
-    agent_streams: &mut AgentStreams<'a>,
     stream_state: &mut StreamState,
     session: &mut Session,
     pane_id: PaneId,
@@ -823,28 +811,33 @@ async fn start_stream_for_prompt<'a>(
         },
     );
 
-    let config = AgentConfig {
-        model,
-        system_prompt,
-        tools: tool_registry,
-        registry,
-        options: call_options,
-        max_turns: deps.config.max_turns,
-        hooks: Box::new(mush_agent::ClosureHooks {
-            steering,
-            follow_up,
-            transform,
-            confirm,
-        }),
-        injections: deps.injections.clone(),
-        cancel: Some(cancel),
-    };
-
-    let stream = agent_loop(config, conversation_snapshot);
-    let tagged: TaggedStream<'a> = Box::pin(futures::StreamExt::map(stream, move |event| {
-        (pane_id, stream_gen, event)
-    }));
-    agent_streams.push(tagged);
+    let max_turns = deps.config.max_turns;
+    let injections = deps.injections.clone();
+    session
+        .runtime
+        .turns
+        .spawn(registry.clone(), move |registry| {
+            let config = AgentConfig {
+                model,
+                system_prompt,
+                tools: tool_registry,
+                registry,
+                options: call_options,
+                max_turns,
+                hooks: Box::new(mush_agent::ClosureHooks {
+                    steering,
+                    follow_up,
+                    transform,
+                    confirm,
+                }),
+                injections,
+                cancel: Some(cancel),
+            };
+            Box::pin(futures::StreamExt::map(
+                agent_loop(config, conversation_snapshot),
+                move |event| (pane_id, stream_gen, event),
+            ))
+        });
 }
 
 fn pane_model(session: &Session, default_model: &Model) -> Model {

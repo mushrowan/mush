@@ -5,11 +5,7 @@ use std::time::{Duration, Instant};
 
 use mush_session::inbox::{Consumer, Event, append, contains};
 
-use super::{
-    TuiConfig,
-    runtime::RunnerRuntime,
-    streams::{AgentStreams, StreamState},
-};
+use super::{TuiConfig, runtime::RunnerRuntime, streams::StreamState};
 
 pub(super) struct OrchestratorInbox {
     consumer: Arc<Consumer>,
@@ -34,7 +30,6 @@ pub(super) fn attach(
 
 pub(super) async fn poll(
     inbox: &mut Option<OrchestratorInbox>,
-    streams: &AgentStreams<'_>,
     state: &StreamState,
     runtime: &mut RunnerRuntime,
     config: &TuiConfig,
@@ -42,7 +37,7 @@ pub(super) async fn poll(
     let Some(active) = inbox.as_mut() else {
         return true;
     };
-    match active.poll(streams, state, runtime, config).await {
+    match active.poll(state, runtime, config).await {
         Ok(ready) => ready,
         Err(error) => {
             if let Some((event, _)) = &active.staged
@@ -103,7 +98,6 @@ impl OrchestratorInbox {
 
     pub(super) async fn poll(
         &mut self,
-        streams: &AgentStreams<'_>,
         state: &StreamState,
         runtime: &mut RunnerRuntime,
         config: &TuiConfig,
@@ -123,7 +117,7 @@ impl OrchestratorInbox {
             }
             return Ok(false);
         }
-        if self.next_poll > Instant::now() || !safe_to_consume(streams, state, runtime).await {
+        if self.next_poll > Instant::now() || !safe_to_consume(state, runtime).await {
             return Ok(true);
         }
         self.next_poll = Instant::now() + Duration::from_secs(1);
@@ -183,12 +177,8 @@ impl OrchestratorInbox {
     }
 }
 
-pub(super) async fn safe_to_consume(
-    streams: &AgentStreams<'_>,
-    state: &StreamState,
-    runtime: &RunnerRuntime,
-) -> bool {
-    streams.is_empty()
+pub(super) async fn safe_to_consume(state: &StreamState, runtime: &RunnerRuntime) -> bool {
+    !runtime.session.runtime.turn_active()
         && state.meta(mush_ai::types::PaneId::new(1)).is_none()
         && !runtime.session.app.stream.active
         && runtime.session.app.input.text.is_empty()
@@ -224,9 +214,8 @@ pub(super) async fn safe_to_consume(
 
 #[cfg(test)]
 mod tests {
-    use super::super::streams::{StreamMeta, new_agent_streams};
+    use super::super::streams::StreamMeta;
     use super::*;
-    use futures::StreamExt;
     use mush_agent::AgentEvent;
     use mush_ai::types::{PaneId, TokenCount};
     use mush_session::inbox::{Binding, Inbox, TerminalReason};
@@ -289,16 +278,7 @@ mod tests {
         );
         let mut inbox = attach(result.map(Some), &mut runtime);
         assert!(inbox.is_none());
-        assert!(
-            poll(
-                &mut inbox,
-                &new_agent_streams(),
-                &StreamState::new(),
-                &mut runtime,
-                &config,
-            )
-            .await
-        );
+        assert!(poll(&mut inbox, &StreamState::new(), &mut runtime, &config,).await);
         assert_eq!(
             runtime
                 .session
@@ -332,16 +312,7 @@ mod tests {
         queue["binding"]["session_id"] = "different-session".into();
         let changed = serde_json::to_vec(&queue).unwrap();
         std::fs::write(&path, &changed).unwrap();
-        assert!(
-            poll(
-                &mut inbox,
-                &new_agent_streams(),
-                &StreamState::new(),
-                &mut runtime,
-                &config,
-            )
-            .await
-        );
+        assert!(poll(&mut inbox, &StreamState::new(), &mut runtime, &config,).await);
         assert!(inbox.is_none());
         assert!(runtime.session.runtime.conversation.context().is_empty());
         assert!(runtime.session.runtime.pending_prompt.is_none());
@@ -366,13 +337,12 @@ mod tests {
         active.store_dir = dir.path().join("sessions");
         let mut inbox = Some(active);
         let mut runtime = runtime();
-        let streams = new_agent_streams();
         let state = StreamState::new();
-        assert!(!poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
+        assert!(!poll(&mut inbox, &state, &mut runtime, &config).await);
         assert!(runtime.session.runtime.pending_prompt.is_some());
         inbox.as_mut().unwrap().staged.as_mut().unwrap().1 =
             Instant::now() - Duration::from_secs(6);
-        assert!(poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
+        assert!(poll(&mut inbox, &state, &mut runtime, &config).await);
         assert!(inbox.is_none());
         assert!(runtime.session.runtime.pending_prompt.is_none());
         assert!(contains(
@@ -396,16 +366,7 @@ mod tests {
         let mut runtime = runtime();
         runtime.session.app.input.text = "unsent draft".into();
         runtime.session.app.input.cursor = 4;
-        assert!(
-            poll(
-                &mut inbox,
-                &new_agent_streams(),
-                &StreamState::new(),
-                &mut runtime,
-                &config
-            )
-            .await
-        );
+        assert!(poll(&mut inbox, &StreamState::new(), &mut runtime, &config).await);
         assert_eq!(runtime.session.app.input.text, "unsent draft");
         assert_eq!(runtime.session.app.input.cursor, 4);
         assert!(runtime.session.runtime.pending_prompt.is_none());
@@ -489,44 +450,42 @@ mod tests {
                 cancel: Default::default(),
             },
         );
-        let mut streams = new_agent_streams();
-        streams.push(Box::pin(futures::stream::iter(
-            [
-                AgentEvent::ToolExecStart {
-                    tool_call_id: "call".into(),
-                    tool_name: "read".into(),
-                    args: serde_json::json!({}),
-                },
-                AgentEvent::AgentEnd,
-                AgentEvent::ToolExecEnd {
-                    tool_call_id: "call".into(),
-                    tool_name: "read".into(),
-                    result: mush_agent::tool::ToolResult::text("result"),
-                },
-                AgentEvent::AgentEnd,
-            ]
-            .map(|event| (pane, generation, event)),
-        )));
-        while let Some((_, _, event)) = streams.next().await {
+        runtime
+            .session
+            .runtime
+            .turns
+            .spawn(mush_ai::registry::ApiRegistry::new(), move |_| {
+                Box::pin(futures::stream::iter(
+                    [
+                        AgentEvent::ToolExecStart {
+                            tool_call_id: "call".into(),
+                            tool_name: "read".into(),
+                            args: serde_json::json!({}),
+                        },
+                        AgentEvent::AgentEnd,
+                        AgentEvent::ToolExecEnd {
+                            tool_call_id: "call".into(),
+                            tool_name: "read".into(),
+                            result: mush_agent::tool::ToolResult::text("result"),
+                        },
+                        AgentEvent::AgentEnd,
+                    ]
+                    .map(|event| (pane, generation, event)),
+                ))
+            });
+        while let Some((_, _, event)) = runtime.session.runtime.turns.next().await {
             if matches!(event, AgentEvent::AgentEnd) {
                 state.remove(pane);
             }
-            assert!(
-                adapter
-                    .poll(&streams, &state, &mut runtime, &config)
-                    .await
-                    .unwrap()
-            );
+            if !runtime.session.runtime.turn_active() {
+                break;
+            }
+            assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
             assert!(runtime.session.runtime.conversation.is_empty());
             assert_eq!(inbox.pending().unwrap().len(), 1);
         }
         runtime.pending_prompt = Some("automatic continuation".into());
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert!(runtime.session.runtime.conversation.is_empty());
         runtime.pending_prompt = None;
         runtime
@@ -534,29 +493,14 @@ mod tests {
             .runtime
             .pending_compaction_inputs
             .push(("queued during compaction".into(), Vec::new()));
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert!(runtime.session.runtime.conversation.is_empty());
         runtime.session.runtime.pending_compaction_inputs.clear();
         runtime.session.app.stream.active = true;
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert!(runtime.session.runtime.conversation.is_empty());
         runtime.session.app.stream.active = false;
-        assert!(
-            !adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(!adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert_eq!(runtime.session.runtime.conversation.context_len(), 1);
         assert!(
             runtime
@@ -568,12 +512,7 @@ mod tests {
                 .is_persisted()
         );
         assert_eq!(inbox.pending().unwrap(), vec![event.clone()]);
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert!(inbox.pending().unwrap().is_empty());
         let saved = mush_session::SessionStore::new(store_dir)
             .load(&config.session_id)
@@ -582,12 +521,7 @@ mod tests {
         runtime.session.runtime.pending_prompt = None;
         adapter.replayed = false;
         adapter.next_poll = Instant::now();
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .unwrap()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.unwrap());
         assert!(
             runtime
                 .session
@@ -599,11 +533,6 @@ mod tests {
         );
         assert_eq!(runtime.session.runtime.conversation.context_len(), 1);
         config.session_id = mush_ai::types::SessionId::new();
-        assert!(
-            adapter
-                .poll(&streams, &state, &mut runtime, &config)
-                .await
-                .is_err()
-        );
+        assert!(adapter.poll(&state, &mut runtime, &config).await.is_err());
     }
 }
