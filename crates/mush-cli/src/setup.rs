@@ -29,6 +29,7 @@ pub struct AppSetup {
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: mush_tui::SkillCatalogue,
     pub rlm: bool,
+    pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
 }
 
 pub struct SetupArgs {
@@ -89,11 +90,22 @@ impl AppSetup {
 
         let rlm = args.rlm || cfg.rlm;
         let classic_tools = !args.no_tools && !rlm;
+        let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
         let mut tools = if rlm && !args.no_tools {
-            mush_agent::tool::ToolRegistry::from_shared(vec![Arc::new(
-                mush_tools::ipython::IpythonTool::new(Arc::from(cwd.as_path())),
-            )
-                as mush_agent::tool::SharedTool])
+            let cwd_arc: Arc<std::path::Path> = Arc::from(cwd.as_path());
+            let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
+            if let Some(sink) = args.kernel_notice_sink.clone() {
+                host.jobs().set_notice_sink(sink);
+            }
+            let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
+            if let Some(sink) = args.output_sink.clone() {
+                ipython = ipython.with_output_sink(sink);
+            }
+            let ipython = Arc::new(ipython);
+            kernel_state = Some(ipython.clone());
+            mush_agent::tool::ToolRegistry::from_shared(vec![
+                ipython as mush_agent::tool::SharedTool,
+            ])
         } else {
             init_builtin_tools(
                 &model,
@@ -213,6 +225,7 @@ impl AppSetup {
                     diagnostics: project_context.skill_diagnostics,
                 },
                 rlm,
+                kernel_state,
             },
             report,
         ))

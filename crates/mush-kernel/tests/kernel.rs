@@ -94,9 +94,15 @@ impl HostRequestHandler for Echo {
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
         match kind {
             "echo" => Ok(json!({ "echoed": payload })),
-            "bash" => {
-                Ok(json!({ "exit_code": 3, "output": format!("ran {}", payload["command"]) }))
-            }
+            "bash.start" => Ok(json!({
+                "job_id": format!("job:{}", payload["command"].as_str().unwrap_or("")),
+                "pid": 42
+            })),
+            "bash.wait" => Ok(json!({
+                "exit_code": 3,
+                "output": format!("ran {}", payload["job_id"]),
+                "running": false
+            })),
             other => Err(HostError(format!("unknown request {other}"))),
         }
     }
@@ -120,11 +126,14 @@ async fn bash_is_a_typed_host_request() {
     let kernel = kernel_with(Arc::new(Echo)).await;
 
     let output = kernel
-        .execute("r = await bash('ls')\n(r.exit_code, r.ok, r.output)")
+        .execute("h = bash('ls')\nr = await h\n(r.exit_code, r.ok, r.output, h.pid)")
         .await
         .unwrap();
 
-    assert_eq!(output.result.as_deref(), Some("(3, False, 'ran \"ls\"')"));
+    assert_eq!(
+        output.result.as_deref(),
+        Some("(3, False, 'ran \"job:ls\"', 42)")
+    );
     kernel.shutdown().await.unwrap();
 }
 

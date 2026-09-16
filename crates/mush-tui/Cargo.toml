@@ -16,6 +16,7 @@ mush-ai.workspace = true
 mush-agent.workspace = true
 mush-mcp.workspace = true
 mush-session.workspace = true
+mush-kernel.workspace = true
 mush-supervisor.workspace = true
 mush-ext.workspace = true
 mush-tools.workspace = true

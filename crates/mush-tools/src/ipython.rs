@@ -127,6 +127,7 @@ pub struct IpythonTool {
     host: Arc<dyn HostRequestHandler>,
     kernel: tokio::sync::Mutex<Option<Kernel>>,
     output_sink: Option<crate::bash::OutputSink>,
+    pending_restore: tokio::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -149,6 +150,7 @@ impl IpythonTool {
             host,
             kernel: tokio::sync::Mutex::new(None),
             output_sink: None,
+            pending_restore: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -167,7 +169,20 @@ impl IpythonTool {
     async fn run(&self, code: &str) -> Result<CellOutput, KernelError> {
         let mut slot = self.kernel.lock().await;
         if slot.is_none() {
-            *slot = Some(Kernel::start(self.config.clone(), self.host.clone()).await?);
+            let kernel = Kernel::start(self.config.clone(), self.host.clone()).await?;
+            if let Some(path) = self.pending_restore.lock().await.take()
+                && path.is_file()
+            {
+                match kernel.restore(&path).await {
+                    Ok(report) => tracing::info!(
+                        restored = report.restored.len(),
+                        failed = report.failed.len(),
+                        "kernel state restored"
+                    ),
+                    Err(error) => tracing::warn!(%error, "kernel state restore failed"),
+                }
+            }
+            *slot = Some(kernel);
         }
         let kernel = slot.as_ref().ok_or(KernelError::Pipes)?;
         let sink = self.output_sink.clone();
@@ -198,6 +213,43 @@ impl IpythonTool {
             *slot = None;
         }
         outcome
+    }
+}
+
+#[async_trait::async_trait]
+impl mush_kernel::KernelState for IpythonTool {
+    async fn snapshot(&self, path: &Path) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+        let slot = self.kernel.lock().await;
+        let Some(kernel) = slot.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        kernel
+            .snapshot(path, None)
+            .await
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+
+    async fn restore_from(&self, path: &Path) {
+        if let Some(kernel) = self.kernel.lock().await.as_ref() {
+            if path.is_file()
+                && let Err(error) = kernel.restore(path).await
+            {
+                tracing::warn!(%error, "kernel state restore failed");
+            }
+            return;
+        }
+        *self.pending_restore.lock().await = Some(path.to_path_buf());
+    }
+
+    async fn reset(&self) {
+        *self.pending_restore.lock().await = None;
+        if let Some(kernel) = self.kernel.lock().await.take() {
+            let _ = kernel.shutdown().await;
+        }
     }
 }
 
@@ -462,6 +514,38 @@ mod tests {
         assert_eq!(seen[0], "tick 0", "{seen:?}");
         assert_eq!(seen.last().unwrap(), "tick 0\ntick 1\ntick 2", "{seen:?}");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn state_round_trips_through_a_snapshot_and_a_reset() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifacts/kernel-state.pickle");
+        let tool = tool(dir.path());
+        let _ = tool.execute(json!({ "code": "carried = [1, 2, 3]" })).await;
+
+        let report = tool.snapshot(&path).await.unwrap().unwrap();
+        tool.reset().await;
+        let gone = tool.execute(json!({ "code": "'carried' in dir()" })).await;
+        tool.restore_from(&path).await;
+        let back = tool.execute(json!({ "code": "sum(carried)" })).await;
+
+        assert_eq!(report.saved, ["carried"]);
+        assert_eq!(extract_text(&gone), "False");
+        assert_eq!(extract_text(&back), "6");
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn snapshotting_a_never_started_kernel_is_a_no_op() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+
+        let report = tool.snapshot(&dir.path().join("x.pickle")).await.unwrap();
+
+        assert!(report.is_none());
+        assert!(!dir.path().join("x.pickle").exists());
     }
 
     #[test]

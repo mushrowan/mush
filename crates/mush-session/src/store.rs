@@ -68,6 +68,14 @@ impl SessionStore {
         data_dir().join("sessions")
     }
 
+    pub fn default_artifact_dir(id: &SessionId) -> PathBuf {
+        data_dir().join("session-artifacts").join(id.as_str())
+    }
+
+    pub fn kernel_state_path(id: &SessionId) -> PathBuf {
+        Self::default_artifact_dir(id).join("kernel-state.pickle")
+    }
+
     pub fn new(base_dir: PathBuf) -> Self {
         Self { base_dir }
     }

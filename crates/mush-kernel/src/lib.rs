@@ -8,6 +8,13 @@ pub use kernel::{
 };
 pub use protocol::{Event, PROTOCOL_VERSION, Request};
 
+#[async_trait::async_trait]
+pub trait KernelState: Send + Sync {
+    async fn snapshot(&self, path: &std::path::Path) -> Result<Option<SnapshotReport>, String>;
+    async fn restore_from(&self, path: &std::path::Path);
+    async fn reset(&self);
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
     #[error("no python interpreter found on PATH (set {})", python::PYTHON_ENV)]

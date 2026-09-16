@@ -20,7 +20,7 @@ pub(super) struct SlashEnv<'a> {
         &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
 }
 
-fn start_session_from(
+async fn start_session_from(
     session: &mut Session,
     tui_config: &mut TuiConfig,
     messages: Vec<mush_ai::types::Message>,
@@ -28,6 +28,9 @@ fn start_session_from(
     if let Some(ref saver) = tui_config.save_session {
         saver(super::streams::build_session_snapshot(session, tui_config));
     }
+    tui_config
+        .snapshot_kernel_state(&tui_config.session_id.clone())
+        .await;
     let new_id = mush_ai::types::SessionId::new();
     tui_config.session_id = new_id.clone();
     tui_config.options.session_id = Some(new_id);
@@ -165,6 +168,12 @@ pub(super) async fn handle_slash_action(
             if let Some(ref saver) = tui_config.save_session {
                 saver(super::streams::build_session_snapshot(session, tui_config));
             }
+            tui_config
+                .snapshot_kernel_state(&tui_config.session_id.clone())
+                .await;
+            if let Some(kernel) = &tui_config.kernel_state {
+                kernel.reset().await;
+            }
             let new_id = mush_ai::types::SessionId::new();
             tui_config.session_id = new_id.clone();
             tui_config.options.session_id = Some(new_id);
@@ -201,7 +210,7 @@ pub(super) async fn handle_slash_action(
                         _ => String::new(),
                     };
                     let prefix = messages[..position].to_vec();
-                    start_session_from(session, tui_config, prefix);
+                    start_session_from(session, tui_config, prefix).await;
                     session.app.input.text = prompt;
                     session.app.input.cursor = session.app.input.text.len();
                     session.app.status = Some(format!("forked before message {index}").into());
@@ -211,7 +220,7 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::Clone => {
             let branch = session.conversation.context();
-            start_session_from(session, tui_config, branch);
+            start_session_from(session, tui_config, branch).await;
             session.app.status = Some("cloned the current branch into a new session".into());
             state_changed = true;
         }
@@ -265,6 +274,7 @@ pub(super) async fn handle_slash_action(
             session.app.status = None;
         }
         other_action => {
+            let before = tui_config.session_id.clone();
             let pane = &mut *session;
             let (app, conversation, _) = pane.fields_mut();
             if let Some(prompt) =
@@ -276,6 +286,7 @@ pub(super) async fn handle_slash_action(
             if matches!(other_action, SlashAction::Undo | SlashAction::Branch { .. }) {
                 state_changed = true;
             }
+            tui_config.switch_kernel_state(&before).await;
         }
     }
 

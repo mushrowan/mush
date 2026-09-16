@@ -1903,6 +1903,7 @@ mod tests {
             skills: Default::default(),
             tool_allowlist: None,
             kernel_notices: None,
+            kernel_state: None,
             forbidden_chars: Default::default(),
         }
     }

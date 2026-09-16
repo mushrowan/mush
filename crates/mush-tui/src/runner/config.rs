@@ -98,10 +98,43 @@ pub struct TuiConfig {
     pub skills: SkillCatalogue,
     pub tool_allowlist: Option<Vec<String>>,
     pub kernel_notices: Option<KernelNotices>,
+    pub kernel_state: Option<std::sync::Arc<dyn mush_kernel::KernelState>>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
 impl TuiConfig {
+    pub async fn snapshot_kernel_state(&self, session_id: &mush_ai::types::SessionId) {
+        let Some(kernel) = &self.kernel_state else {
+            return;
+        };
+        let path = mush_session::SessionStore::kernel_state_path(session_id);
+        match kernel.snapshot(&path).await {
+            Ok(Some(report)) => tracing::info!(
+                saved = report.saved.len(),
+                skipped = report.skipped.len(),
+                "kernel state saved"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "kernel state snapshot failed"),
+        }
+    }
+
+    pub async fn switch_kernel_state(&self, from: &mush_ai::types::SessionId) {
+        let Some(kernel) = &self.kernel_state else {
+            return;
+        };
+        if *from == self.session_id {
+            return;
+        }
+        self.snapshot_kernel_state(from).await;
+        kernel.reset().await;
+        kernel
+            .restore_from(&mush_session::SessionStore::kernel_state_path(
+                &self.session_id,
+            ))
+            .await;
+    }
+
     #[must_use]
     pub fn stream_options(&self) -> mush_ai::types::StreamOptions {
         let mut options = self.options.clone();
@@ -200,6 +233,7 @@ impl TuiConfig {
             skills: SkillCatalogue::default(),
             tool_allowlist: None,
             kernel_notices: None,
+            kernel_state: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }

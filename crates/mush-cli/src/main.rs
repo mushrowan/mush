@@ -669,6 +669,11 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         let store = SessionStore::new(SessionStore::default_dir());
         let meta = store.resolve(resume_id)?;
         _session_lease = store.lease(&meta.id)?;
+        if let Some(kernel) = &setup.kernel_state {
+            kernel
+                .restore_from(&SessionStore::kernel_state_path(&meta.id))
+                .await;
+        }
         store.load(&meta.id)?
     } else if let Some(ref fork_id) = cli.fork {
         let store = SessionStore::new(SessionStore::default_dir());
@@ -753,6 +758,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         thinking_display: setup.cfg.thinking_display,
         tool_output_live: Some(tool_output_live),
         kernel_notices: Some(kernel_notices),
+        kernel_state: setup.kernel_state.clone(),
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
