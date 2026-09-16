@@ -11,6 +11,7 @@ pub enum Failure {
     Quota,
     RateLimit,
     Authentication,
+    Transport,
     Other,
 }
 
@@ -29,10 +30,14 @@ pub fn decide(state: &str, failure: Option<Failure>, fallback: bool, retries: u3
     match failure {
         None => Action::Continue,
         Some(Failure::Quota) if !fallback => Action::Fallback,
-        Some(Failure::RateLimit) if retries < 2 => Action::Retry,
-        Some(Failure::Quota | Failure::RateLimit | Failure::Authentication | Failure::Other) => {
-            Action::Stop
-        }
+        Some(Failure::RateLimit | Failure::Transport) if retries < 2 => Action::Retry,
+        Some(
+            Failure::Quota
+            | Failure::RateLimit
+            | Failure::Authentication
+            | Failure::Transport
+            | Failure::Other,
+        ) => Action::Stop,
     }
 }
 
@@ -75,6 +80,15 @@ pub fn classify(error: &str) -> Failure {
     .any(|s| error.contains(s))
     {
         Failure::Authentication
+    } else if [
+        "error decoding response body",
+        "error reading a body from connection",
+        "unexpected eof during chunk size line",
+    ]
+    .iter()
+    .any(|s| error.contains(s))
+    {
+        Failure::Transport
     } else {
         Failure::Other
     }
@@ -139,5 +153,31 @@ mod tests {
         assert_eq!(classify("429 too many requests"), Failure::RateLimit);
         assert_eq!(classify("401 unauthorized"), Failure::Authentication);
         assert_eq!(classify("unknown model: test"), Failure::Other);
+    }
+
+    #[test]
+    fn response_body_errors_retry_with_a_bound() {
+        for message in [
+            "error decoding response body",
+            "stream error: error decoding response body: unexpected EOF during chunk size line",
+            "error reading a body from connection",
+        ] {
+            assert_eq!(classify(message), Failure::Transport);
+            for fallback in [false, true] {
+                assert_eq!(
+                    decide("working", Some(classify(message)), fallback, 0),
+                    Action::Retry
+                );
+                assert_eq!(
+                    decide("working", Some(classify(message)), fallback, 1),
+                    Action::Retry
+                );
+                assert_eq!(
+                    decide("working", Some(classify(message)), fallback, 2),
+                    Action::Stop
+                );
+            }
+        }
+        assert_eq!(classify("invalid_request: cyber_policy"), Failure::Other);
     }
 }

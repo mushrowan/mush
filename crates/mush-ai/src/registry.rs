@@ -66,7 +66,9 @@ pub fn truncate_error_body(body: &str) -> String {
 impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Request(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            Self::Request(e) => {
+                e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
+            }
             Self::ApiError { status, .. } => status.as_u16() == 429 || status.as_u16() >= 500,
             _ => false,
         }
@@ -86,6 +88,9 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
         "service unavailable",
         "timeout",
         "temporarily unavailable",
+        "error decoding response body",
+        "error reading a body from connection",
+        "unexpected eof during chunk size line",
     ]
     .iter()
     .any(|pat| lower.contains(pat))
@@ -279,6 +284,48 @@ mod tests {
         assert_eq!(truncate_error_body(body), "short error");
     }
 
+    #[tokio::test]
+    async fn truncated_response_body_is_retryable() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(socket);
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            let mut socket = reader.into_inner();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap_err();
+        assert!(error.is_body() || error.is_decode());
+        assert!(ProviderError::Request(error).is_retryable());
+        server.await.unwrap();
+    }
+
     #[test]
     fn truncate_error_body_long() {
         let body = "x".repeat(5000);
@@ -326,6 +373,13 @@ mod tests {
         assert!(is_retryable_stream_error_message("Service Unavailable"));
         assert!(is_retryable_stream_error_message("Request timeout"));
         assert!(is_retryable_stream_error_message("OVERLOADED"));
+        for message in [
+            "error decoding response body",
+            "error reading a body from connection",
+            "stream error: error decoding response body: unexpected EOF during chunk size line",
+        ] {
+            assert!(is_retryable_stream_error_message(message), "{message}");
+        }
     }
 
     #[test]
@@ -340,5 +394,8 @@ mod tests {
             "permission_denied for this model"
         ));
         assert!(!is_retryable_stream_error_message(""));
+        assert!(!is_retryable_stream_error_message(
+            "invalid_request: cyber_policy"
+        ));
     }
 }

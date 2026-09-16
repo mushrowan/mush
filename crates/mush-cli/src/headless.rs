@@ -71,6 +71,12 @@ pub(crate) fn classify_error(error: &str) -> &'static str {
         "unknown_model"
     } else if has(&["rate_limit", "rate limit", "429 too many requests"]) {
         "rate_limit"
+    } else if has(&[
+        "error decoding response body",
+        "error reading a body from connection",
+        "unexpected eof during chunk size line",
+    ]) {
+        "transport"
     } else {
         "other"
     }
@@ -517,6 +523,12 @@ mod tests {
             ("unknown model: imaginary", "unknown_model"),
             (r#"{"error":{"code":"model_not_found"}}"#, "unknown_model"),
             ("connection reset", "other"),
+            ("error decoding response body", "transport"),
+            (
+                "stream error: unexpected EOF during chunk size line",
+                "transport",
+            ),
+            ("invalid_request: cyber_policy", "other"),
         ] {
             assert_eq!(classify_error(error), expected, "{error}");
         }

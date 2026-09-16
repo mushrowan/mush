@@ -306,3 +306,29 @@ async fn restarting_an_interrupted_run_resumes_its_saved_session() {
     );
     assert!(fixture.run.join("test/round-002.log").exists());
 }
+
+#[tokio::test]
+async fn response_body_failure_resumes_the_same_model_and_session() {
+    let fixture = Fixture::new(
+        &format!(
+            r#"{ARGUMENTS}
+if [ -f retried ]; then
+  echo '{{"state":"done"}}' >report.json
+else
+  touch retried
+  echo '{{"state":"working"}}' >report.json
+  printf '{{"session_id":"fixture","state":"error","model":"%s","error_classification":"transport"}}' "$model" >"$status"
+  echo 'stream error: error decoding response body: unexpected EOF during chunk size line'
+  exit 1
+fi"#
+        ),
+        30,
+    );
+    fixture.run().await;
+    assert_eq!(
+        fs::read_to_string(fixture.cwd.join("calls")).unwrap(),
+        "primary:\nprimary:fixture\n"
+    );
+    assert_eq!(fixture.state()["state"], "done");
+    assert_eq!(fixture.state()["session_id"], "fixture");
+}

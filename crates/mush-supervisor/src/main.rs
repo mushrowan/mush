@@ -421,6 +421,7 @@ fn failure_from_status(path: &Path) -> Option<Failure> {
         "quota" | "quota_exhausted" => Failure::Quota,
         "rate_limit" => Failure::RateLimit,
         "authentication" => Failure::Authentication,
+        "transport" => Failure::Transport,
         _ => Failure::Other,
     })
 }
@@ -992,7 +993,12 @@ async fn worker(
         }
         sleep_or_stop(
             if action == Action::Retry {
-                60 * u64::from(retries)
+                let seconds = if failure == Some(Failure::Transport) {
+                    2
+                } else {
+                    60
+                };
+                seconds * u64::from(retries)
             } else {
                 job.pause_seconds
             },
