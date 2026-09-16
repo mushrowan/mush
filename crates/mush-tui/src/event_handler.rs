@@ -28,6 +28,7 @@ pub fn handle_agent_event(
         conversation,
         image_protos,
     } = ctx;
+    let applied = mush_runtime::apply_agent_event(conversation, event);
     match event {
         AgentEvent::StreamEvent { event } => match event {
             StreamEvent::TextDelta { delta, .. } => app.push_text_delta(delta),
@@ -38,8 +39,6 @@ pub fn handle_agent_event(
         AgentEvent::MessageEnd { message } => {
             app.announce_tool_calls(message);
             apply_message_end(app, message, model, debug_cache);
-            let msg = Message::Assistant(message.clone());
-            conversation.append_message(msg);
         }
         AgentEvent::ToolExecStart {
             tool_call_id,
@@ -92,14 +91,6 @@ pub fn handle_agent_event(
                     image_data,
                 );
             }
-            let msg = Message::ToolResult(ToolResultMessage {
-                tool_call_id: tool_call_id.clone(),
-                tool_name: tool_name.clone(),
-                content: result.content.clone(),
-                outcome: result.outcome,
-                timestamp_ms: Timestamp::now(),
-            });
-            conversation.append_message(msg);
         }
         AgentEvent::TurnStart { .. } => {
             app.active_tools.clear();
@@ -116,15 +107,8 @@ pub fn handle_agent_event(
             {
                 msg.queued = false;
             }
-            for msg in messages {
-                conversation.append_message(msg.clone());
-            }
         }
-        AgentEvent::FollowUpInjected { messages } => {
-            for msg in messages {
-                conversation.append_message(msg.clone());
-            }
-        }
+        AgentEvent::FollowUpInjected { .. } => {}
         AgentEvent::ContextTransformed {
             before_count,
             after_count,
@@ -139,14 +123,12 @@ pub fn handle_agent_event(
             compaction,
         } => {
             let tokens_after = mush_session::compact::estimate_tokens(&compaction.messages);
-            conversation.apply_compaction(
-                compaction.summary.clone(),
-                compaction.summarised_count,
-                compaction.messages.clone(),
-            );
             app.stats
                 .reset_live_state(TokenCount::new(tokens_after as u64));
-            let after_count = conversation.context_len();
+            let after_count = match applied {
+                mush_runtime::Applied::Compacted { after_count } => after_count,
+                _ => conversation.context_len(),
+            };
             app.push_system_message(format!(
                 "━ compacted: {before_count} → {after_count} messages ━"
             ));

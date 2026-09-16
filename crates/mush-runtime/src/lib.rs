@@ -1,0 +1,156 @@
+use mush_agent::AgentEvent;
+use mush_ai::types::{Message, Timestamp, ToolResultMessage};
+use mush_session::ConversationState;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Nothing,
+    Appended,
+    Compacted { after_count: usize },
+}
+
+pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEvent) -> Applied {
+    match event {
+        AgentEvent::MessageEnd { message } => {
+            conversation.append_message(Message::Assistant(message.clone()));
+            Applied::Appended
+        }
+        AgentEvent::ToolExecEnd {
+            tool_call_id,
+            tool_name,
+            result,
+        } => {
+            conversation.append_message(Message::ToolResult(ToolResultMessage {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                content: result.content.clone(),
+                outcome: result.outcome,
+                timestamp_ms: Timestamp::now(),
+            }));
+            Applied::Appended
+        }
+        AgentEvent::SteeringInjected { messages } | AgentEvent::FollowUpInjected { messages } => {
+            for message in messages {
+                conversation.append_message(message.clone());
+            }
+            Applied::Appended
+        }
+        AgentEvent::ContextCompacted { compaction, .. } => {
+            conversation.apply_compaction(
+                compaction.summary.clone(),
+                compaction.summarised_count,
+                compaction.messages.clone(),
+            );
+            Applied::Compacted {
+                after_count: conversation.context_len(),
+            }
+        }
+        _ => Applied::Nothing,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mush_ai::types::{
+        Api, AssistantMessage, Provider, TextContent, ToolCallId, ToolName, ToolOutcome,
+        ToolResultContentPart, UserContent, UserMessage,
+    };
+
+    fn user(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    #[test]
+    fn an_assistant_message_end_lands_in_the_tree() {
+        let mut conversation = ConversationState::new();
+        let message = AssistantMessage::builder()
+            .content(vec![mush_ai::types::AssistantContentPart::Text(
+                TextContent { text: "hi".into() },
+            )])
+            .model("m".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+
+        let applied = apply_agent_event(&mut conversation, &AgentEvent::MessageEnd { message });
+
+        assert_eq!(applied, Applied::Appended);
+        assert!(matches!(
+            conversation.context().as_slice(),
+            [Message::Assistant(_)]
+        ));
+    }
+
+    #[test]
+    fn a_tool_result_is_recorded_with_its_call_id() {
+        let mut conversation = ConversationState::new();
+        let result = mush_agent::tool::ToolResult {
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "ok".into(),
+            })],
+            outcome: ToolOutcome::Success,
+        };
+
+        apply_agent_event(
+            &mut conversation,
+            &AgentEvent::ToolExecEnd {
+                tool_call_id: ToolCallId::from("tc_1"),
+                tool_name: ToolName::from("bash"),
+                result,
+            },
+        );
+
+        match conversation.context().as_slice() {
+            [Message::ToolResult(tool)] => {
+                assert_eq!(tool.tool_call_id.as_str(), "tc_1");
+                assert_eq!(tool.outcome, ToolOutcome::Success);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn injected_steering_and_follow_ups_are_persisted() {
+        let mut conversation = ConversationState::new();
+
+        apply_agent_event(
+            &mut conversation,
+            &AgentEvent::SteeringInjected {
+                messages: vec![user("steer")],
+            },
+        );
+        apply_agent_event(
+            &mut conversation,
+            &AgentEvent::FollowUpInjected {
+                messages: vec![user("later")],
+            },
+        );
+
+        let texts: Vec<String> = conversation
+            .context()
+            .iter()
+            .map(|m| match m {
+                Message::User(u) => u.text(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["steer", "later"]);
+    }
+
+    #[test]
+    fn stream_deltas_change_nothing() {
+        let mut conversation = ConversationState::new();
+
+        let applied = apply_agent_event(&mut conversation, &AgentEvent::AgentStart);
+
+        assert_eq!(applied, Applied::Nothing);
+        assert!(conversation.is_empty());
+    }
+}

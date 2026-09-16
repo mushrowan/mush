@@ -9,6 +9,7 @@ default-members = [
   "crates/mush-kernel",
   "crates/mush-lsp",
   "crates/mush-mcp",
+  "crates/mush-runtime",
   "crates/mush-session",
   "crates/mush-supervisor",
   "crates/mush-tools",
@@ -27,6 +28,7 @@ mush-ai = { path = "crates/mush-ai" }
 mush-agent = { path = "crates/mush-agent" }
 mush-tools = { path = "crates/mush-tools" }
 mush-session = { path = "crates/mush-session" }
+mush-runtime = { path = "crates/mush-runtime" }
 mush-supervisor = { path = "crates/mush-supervisor" }
 mush-ext = { path = "crates/mush-ext" }
 mush-mcp = { path = "crates/mush-mcp" }

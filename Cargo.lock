@@ -2901,6 +2901,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mush-runtime"
+version = "0.1.0"
+dependencies = [
+ "mush-agent",
+ "mush-ai",
+ "mush-session",
+]
+
+[[package]]
 name = "mush-session"
 version = "0.1.0"
 dependencies = [
@@ -3019,6 +3028,7 @@ dependencies = [
  "mush-kernel",
  "mush-mcp",
  "mush-notify",
+ "mush-runtime",
  "mush-session",
  "mush-supervisor",
  "mush-tools",

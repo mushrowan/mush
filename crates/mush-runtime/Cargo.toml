@@ -1,0 +1,15 @@
+[package]
+name = "mush-runtime"
+description = "session runtime: owns the conversation and drives the agent loop for a client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mush-ai.workspace = true
+mush-agent.workspace = true
+mush-session.workspace = true
+
+[lints]
+workspace = true
