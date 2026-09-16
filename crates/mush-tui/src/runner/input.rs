@@ -186,7 +186,11 @@ async fn handle_compaction_recovery_action(
             )
             .await;
             let pane = &mut *session;
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.connection.runtime,
+                applied,
+            );
             super::runtime::replay_compaction_inputs(pane);
             if let Some(saver) = &deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(
@@ -476,7 +480,9 @@ pub(super) async fn handle_idle_terminal_events(
                             }
                             let expanded = slash::expand_template(&text);
                             let pane = &mut *session;
-                            if pane.label.is_none() && pane.runtime.conversation.is_empty() {
+                            if pane.label.is_none()
+                                && pane.connection.runtime.conversation.is_empty()
+                            {
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
                             let pane = &mut *session;
@@ -502,7 +508,7 @@ pub(super) async fn handle_idle_terminal_events(
                             let pane = &mut *session;
                             pane.app.active_tools.clear();
                             pane.app.start_streaming();
-                            pane.runtime.pending_prompt =
+                            pane.connection.runtime.pending_prompt =
                                 Some(crate::session::PendingPrompt::with_images(expanded, images));
                             super::runtime::save_pane_pending_prompt(pane);
                             if let Some(ref saver) = deps.tui_config.save_session {
@@ -903,7 +909,7 @@ mod tests {
         );
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut stream_state = StreamState::new();
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             PaneId::new(1),
             mush_runtime::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),

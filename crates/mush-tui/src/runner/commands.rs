@@ -25,7 +25,7 @@ async fn run_session_command(
     tui_config: &mut TuiConfig,
     command: mush_runtime::SessionCommand,
 ) -> bool {
-    let events = session.runtime.handle(command).await;
+    let events = session.connection.runtime.handle(command).await;
     let changed = events.iter().any(|event| {
         matches!(
             event,
@@ -62,11 +62,11 @@ pub(super) async fn handle_slash_action(
             | SlashAction::Clone
     );
     if changes_conversation
-        && session.runtime.control.is_some()
-        && (session.runtime.turn_active()
+        && session.connection.runtime.control.is_some()
+        && (session.connection.runtime.turn_active()
             || session.app.stream.active
             || !session.app.active_tools.is_empty()
-            || session.runtime.pending_prompt.is_some()
+            || session.connection.runtime.pending_prompt.is_some()
             || pending_prompt.is_some()
             || !pending_compactions.is_empty())
     {
@@ -79,7 +79,7 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::Compact { focus } => {
             let pane_id = PaneId::new(1);
-            let messages = session.runtime.conversation.context();
+            let messages = session.connection.runtime.conversation.context();
             if messages.len() <= slash::MIN_MESSAGES_FOR_COMPACTION {
                 session
                     .app
@@ -116,7 +116,7 @@ pub(super) async fn handle_slash_action(
         SlashAction::Side { question } => {
             let context = slash::side_question::side_question_context(
                 tui_config.system_prompt.as_deref(),
-                session.runtime.conversation.context(),
+                session.connection.runtime.conversation.context(),
                 &question,
             );
             let pending = slash::side_question::start_side_question(
@@ -133,7 +133,7 @@ pub(super) async fn handle_slash_action(
             let pane = &mut *session;
             slash::handle_export(
                 &mut pane.app,
-                &pane.runtime.conversation,
+                &pane.connection.runtime.conversation,
                 path.as_deref().unwrap_or(""),
             );
         }
@@ -251,7 +251,7 @@ pub(super) async fn handle_slash_action(
             };
             let reloaded = reload(cwd);
             tui_config.system_prompt = Some(reloaded.system_prompt.clone());
-            session.runtime.system_prompt = Some(reloaded.system_prompt);
+            session.connection.runtime.system_prompt = Some(reloaded.system_prompt);
             apply_reloaded_templates(session, &reloaded.templates);
             let warnings = reloaded.skills.diagnostics.len();
             tui_config.skills = reloaded.skills;
@@ -296,7 +296,7 @@ pub(super) async fn handle_slash_action(
             let pane = &mut *session;
             if let Some(prompt) = slash::handle(
                 &mut pane.app,
-                &mut pane.runtime,
+                &mut pane.connection.runtime,
                 tui_config,
                 thinking_prefs,
                 &other_action,
@@ -308,7 +308,7 @@ pub(super) async fn handle_slash_action(
         }
     }
 
-    if changes_conversation && let Some(control) = &session.runtime.control {
+    if changes_conversation && let Some(control) = &session.connection.runtime.control {
         control.activate(tui_config.session_id.to_string());
     }
     state_changed
@@ -653,7 +653,10 @@ mod tests {
         );
 
         assert_ne!(config.session_id, old_id);
-        assert_eq!(session.runtime.conversation.context(), vec![user("first")]);
+        assert_eq!(
+            session.connection.runtime.conversation.context(),
+            vec![user("first")]
+        );
         assert_eq!(session.app.input.text, "second");
         assert!(session.app.session_title.is_none());
     }
@@ -671,7 +674,7 @@ mod tests {
         );
 
         assert_eq!(config.session_id, old_id);
-        assert_eq!(session.runtime.conversation.context_len(), 1);
+        assert_eq!(session.connection.runtime.conversation.context_len(), 1);
     }
 
     #[test]
@@ -704,14 +707,14 @@ mod tests {
         let mut config = TuiConfig::for_test();
 
         run(&mut session, &mut config, SlashAction::Undo);
-        assert_eq!(session.runtime.conversation.context_len(), 2);
+        assert_eq!(session.connection.runtime.conversation.context_len(), 2);
 
         run(
             &mut session,
             &mut config,
             SlashAction::Branch { index: Some(1) },
         );
-        assert_eq!(session.runtime.conversation.context_len(), 0);
+        assert_eq!(session.connection.runtime.conversation.context_len(), 0);
         assert!(session.app.messages.is_empty());
     }
 
@@ -725,7 +728,7 @@ mod tests {
 
         assert_ne!(config.session_id, old_id);
         assert_eq!(
-            session.runtime.conversation.context(),
+            session.connection.runtime.conversation.context(),
             vec![user("first"), user("second")]
         );
     }

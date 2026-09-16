@@ -37,7 +37,7 @@ use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
 use self::size_cached_backend::{SizeCachedBackend, spawn_sigwinch_listener};
-use self::streams::{StreamDeps, StreamState, start_pending_streams};
+use self::streams::StreamState;
 use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
@@ -95,6 +95,10 @@ pub async fn run_tui(
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
     let mut runtime = RunnerRuntime::new(&mut tui_config).await;
+    runtime
+        .session
+        .connection
+        .set_deps(tools.clone(), registry.clone());
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
     }
@@ -108,8 +112,8 @@ pub async fn run_tui(
         let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
         let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
         let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        runtime.session.runtime.control = Some(control);
-        runtime.session.runtime.control_socket = Some(sock);
+        runtime.session.connection.runtime.control = Some(control);
+        runtime.session.connection.runtime.control_socket = Some(sock);
         Some(listener)
     } else {
         None
@@ -173,25 +177,24 @@ pub async fn run_tui(
         if inbox_ready {
             control::poll(&stream_state, &mut runtime, &tui_config).await?;
             let control_endpoint = runtime.session.control_endpoint();
-            start_pending_streams(
-                &mut stream_state,
-                &mut runtime.session,
-                &mut runtime.pending_prompt,
-                StreamDeps {
-                    config: tui_config.turn_config(),
-                    injections: mush_agent::AgentInjections {
-                        lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
-                        cwd: Some(tui_config.cwd.clone()),
-                        dynamic_system_context: tui_config.dynamic_system_context.clone(),
-                        file_rules: tui_config.file_rules.clone(),
-                        lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                        control_endpoint,
-                    },
-                    tools,
-                    registry,
-                },
-            )
-            .await;
+            let thinking_level = runtime.session.app.thinking_level.clone();
+            let context_tokens = runtime.session.app.stats.context_tokens;
+            let connection = &mut runtime.session.connection;
+            connection.set_config(tui_config.turn_config());
+            connection.set_injections(mush_agent::AgentInjections {
+                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
+                cwd: Some(tui_config.cwd.clone()),
+                dynamic_system_context: tui_config.dynamic_system_context.clone(),
+                file_rules: tui_config.file_rules.clone(),
+                lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
+                control_endpoint,
+            });
+            if let Some(prompt) = runtime.pending_prompt.take() {
+                connection.runtime.pending_prompt = Some(mush_runtime::PendingPrompt::text(prompt));
+            }
+            connection.runtime.thinking_level = thinking_level;
+            connection.runtime.context_tokens = context_tokens;
+            connection.start_pending().await;
         }
 
         report_loop_progress(
@@ -280,11 +283,17 @@ pub async fn run_tui(
 
     runtime
         .session
+        .connection
         .runtime
         .turns
         .abort(mush_ai::types::PaneId::new(1));
-    let session_id = runtime.session.runtime.session_id.clone();
-    runtime.session.runtime.snapshot_kernel(&session_id).await;
+    let session_id = runtime.session.connection.runtime.session_id.clone();
+    runtime
+        .session
+        .connection
+        .runtime
+        .snapshot_kernel(&session_id)
+        .await;
     if let Some(listener) = ipc_listener {
         listener.shutdown().await.map_err(io::Error::other)?;
     }
@@ -309,7 +318,7 @@ fn report_loop_progress(
         diag::LoopSnapshot {
             loop_iteration,
             draw_count,
-            active_streams: runtime.session.runtime.turns.active_turns(),
+            active_streams: runtime.session.connection.runtime.turns.active_turns(),
             active_tools: runtime.active_tool_labels(),
         },
     );

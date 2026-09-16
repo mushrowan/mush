@@ -4,10 +4,9 @@ use mush_agent::AgentEvent;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
     Message, Model, Provider, StreamOptions, Timestamp, TokenCount, ToolOutcome, ToolResultMessage,
-    UserContent, UserMessage,
 };
 
-use crate::session::{PendingPrompt, Session};
+use crate::session::{AgentConnection, PendingPrompt, Session};
 use mush_ai::types::PaneId;
 
 const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
@@ -16,7 +15,6 @@ use super::TuiConfig;
 
 #[cfg(test)]
 use mush_runtime::{ConfirmRequest, StreamMeta};
-pub(super) use mush_runtime::{PendingConfirmation, StreamGeneration};
 
 #[cfg(not(test))]
 fn default_notification_sink(summary: &str, body: &str, sound: Option<crate::notify::Sound>) {
@@ -36,8 +34,6 @@ pub(super) struct StreamState {
     #[cfg(feature = "signal")]
     completion_sequence: u64,
 }
-
-pub(super) use mush_runtime::TurnDeps as StreamDeps;
 
 impl StreamState {
     pub(super) fn new() -> Self {
@@ -76,20 +72,12 @@ impl StreamState {
         }
     }
 
-    pub(super) fn save_session_debounced(
-        &mut self,
-        session: &mut Session,
-        _tui_config: &super::TuiConfig,
-    ) {
-        session.runtime.save_debounced();
-    }
-
     pub(super) fn save_dirty_session(
         &mut self,
         session: &mut Session,
         _tui_config: &super::TuiConfig,
     ) {
-        session.runtime.save_if_dirty();
+        session.connection.runtime.save_if_dirty();
     }
 
     pub(super) fn save_session_now(
@@ -97,55 +85,25 @@ impl StreamState {
         session: &mut Session,
         _tui_config: &super::TuiConfig,
     ) {
-        session.runtime.save_now_and_settle();
+        session.connection.runtime.save_now_and_settle();
     }
 }
 
-pub(super) fn take_pending_prompts(
+pub(super) fn show_confirm_request(
     session: &mut Session,
-    pending_prompt: &mut Option<String>,
-) -> Vec<(PaneId, PendingPrompt)> {
-    let mut prompts = Vec::new();
-    if let Some(prompt) = pending_prompt.take() {
-        prompts.push((PaneId::new(1), PendingPrompt::text(prompt)));
-    }
-    for pane in std::slice::from_mut(session) {
-        if let Some(prompt) = pane.runtime.pending_prompt.take()
-            && !prompts.iter().any(|(id, _)| *id == PaneId::new(1))
-        {
-            prompts.push((PaneId::new(1), prompt));
-        }
-    }
-    prompts
-}
-
-pub(super) async fn poll_confirmation_prompt(
-    session: &mut Session,
-    stream_state: &mut StreamState,
-) -> bool {
-    let focused_id = PaneId::new(1);
-    if let Some(meta) = session.runtime.turns.meta_mut(focused_id)
-        && !meta.cancel.is_cancelled()
-        && meta.confirm_reply.lock().await.is_none()
-        && let Ok(confirm) = meta.confirm_req_rx.try_recv()
-        && !confirm.reply.is_closed()
-    {
-        let app = &mut session.app;
-        app.interaction.mode = crate::app::AppMode::ToolConfirm;
-        app.interaction.confirm_tool_call_id = Some(confirm.tool_call_id.clone());
-        app.interaction.confirm_prompt = Some(confirm.prompt);
-        *meta.confirm_reply.lock().await = Some(PendingConfirmation {
-            tool_call_id: confirm.tool_call_id,
-            reply: confirm.reply,
-        });
-        (stream_state.notify)(
-            "tool confirmation required",
-            "awaiting your approval",
-            Some(crate::notify::Sound::Attention),
-        );
-        return true;
-    }
-    false
+    stream_state: &StreamState,
+    tool_call_id: mush_ai::types::ToolCallId,
+    prompt: String,
+) {
+    let app = &mut session.app;
+    app.interaction.mode = crate::app::AppMode::ToolConfirm;
+    app.interaction.confirm_tool_call_id = Some(tool_call_id);
+    app.interaction.confirm_prompt = Some(prompt);
+    (stream_state.notify)(
+        "tool confirmation required",
+        "awaiting your approval",
+        Some(crate::notify::Sound::Attention),
+    );
 }
 
 pub(super) fn poll_kernel_busy_prompt(
@@ -210,21 +168,14 @@ pub(super) async fn answer_confirmation(
     _stream_state: &mut StreamState,
     allowed: bool,
 ) {
-    let focused_id = PaneId::new(1);
-    let pending_tool_call_id = if let Some(meta) = session.runtime.turns.meta_mut(focused_id)
-        && let Some(pending) = meta.confirm_reply.lock().await.take()
-    {
-        let tool_call_id = pending.tool_call_id.clone();
-        let _ = pending.reply.send(allowed);
-        Some(tool_call_id)
-    } else {
-        None
-    };
-
+    let _ = session
+        .connection
+        .send(mush_runtime::ClientCommand::ConfirmTool { allow: allowed })
+        .await;
     let app = &mut session.app;
+    let pending_tool_call_id = app.interaction.confirm_tool_call_id.take();
     app.interaction.mode = crate::app::AppMode::Insert;
     app.interaction.confirm_prompt = None;
-    app.interaction.confirm_tool_call_id = None;
     if !allowed {
         app.status = Some(crate::app_state::Status::from(match pending_tool_call_id {
             Some(tool_call_id) => format!("tool denied: {tool_call_id}"),
@@ -252,23 +203,22 @@ pub(super) async fn submit_kernel_notices(
 }
 
 async fn submit_notice(session: &mut Session, notice: mush_tools::kernel_jobs::JobNotice) {
-    let focused_id = PaneId::new(1);
     let text = notice.done.text();
     session
         .app
         .push_bash_done(&notice.done, notice.origin.as_deref());
-    if let Some(meta) = session.runtime.turns.meta(focused_id) {
-        meta.steering_queue.lock().await.push(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(text))
-                .timestamp_ms(Timestamp::now())
-                .prompt_id(mush_ai::types::PromptId::new())
-                .build(),
-        ));
+    if session.connection.turn_active() {
+        let _ = session
+            .connection
+            .send(mush_runtime::ClientCommand::Steer {
+                text,
+                images: Vec::new(),
+            })
+            .await;
     } else {
         session.app.active_tools.clear();
         session.app.start_streaming();
-        session.runtime.pending_prompt = Some(PendingPrompt::text(text));
+        session.connection.runtime.pending_prompt = Some(PendingPrompt::text(text));
     }
 }
 
@@ -291,23 +241,23 @@ pub(super) fn poll_live_tool_output(
     changed
 }
 
-async fn handle_agent_end(
+pub(super) async fn handle_turn_ended(
     session: &mut Session,
     stream_state: &mut StreamState,
     pane_id: PaneId,
     tui_config: &TuiConfig,
     registry: &ApiRegistry,
     automatic_continuation: bool,
+    cancelled: bool,
 ) {
-    let stopped = session
-        .runtime
-        .turns
-        .remove(pane_id)
-        .is_some_and(|meta| !meta.cancel.is_cancelled());
-    if stopped
+    if !cancelled
         && !automatic_continuation
-        && session.runtime.pending_prompt.is_none()
-        && session.runtime.pending_compaction_inputs.is_empty()
+        && session.connection.runtime.pending_prompt.is_none()
+        && session
+            .connection
+            .runtime
+            .pending_compaction_inputs
+            .is_empty()
         && !session.app.has_queued_messages()
     {
         (stream_state.notify)(
@@ -318,12 +268,13 @@ async fn handle_agent_end(
         stream_state.completion_signal();
     }
 
-    if tui_config.generate_title && session.runtime.title_due() {
+    if tui_config.generate_title && session.connection.runtime.title_due() {
         let opts = StreamOptions {
             api_key: tui_config.options.api_key.clone(),
             ..Default::default()
         };
         if let Some(title) = session
+            .connection
             .runtime
             .generate_title(registry, &tui_config.model, &opts)
             .await
@@ -341,54 +292,22 @@ async fn handle_agent_end(
 
 pub(super) async fn handle_agent_event_side_effects(
     session: &mut Session,
-    stream_state: &mut StreamState,
     pane_id: PaneId,
     event: &AgentEvent,
     tui_config: &TuiConfig,
-    registry: &ApiRegistry,
-    automatic_continuation: bool,
 ) {
-    if let AgentEvent::MessageEnd { message } = event
-        && let Some(meta) = session.runtime.turns.meta(pane_id)
-    {
-        meta.context_tokens.store(
-            message.usage.total_input_tokens().get(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-
     if let AgentEvent::MessageEnd { message } = event
         && message.provider == Provider::OpenRouter
         && let Some(gen_id) = message.generation_id.clone()
     {
         let model = session
+            .connection
             .runtime
             .turns
             .meta(pane_id)
             .map(|m| m.model.clone())
             .unwrap_or_else(|| tui_config.model.clone());
         reconcile_openrouter_generation(session, pane_id, gen_id, &model, tui_config).await;
-    }
-
-    if matches!(
-        event,
-        AgentEvent::MessageEnd { .. }
-            | AgentEvent::ToolExecEnd { .. }
-            | AgentEvent::ContextCompacted { .. }
-    ) {
-        stream_state.save_session_debounced(session, tui_config);
-    }
-
-    if matches!(event, AgentEvent::AgentEnd) {
-        handle_agent_end(
-            session,
-            stream_state,
-            pane_id,
-            tui_config,
-            registry,
-            automatic_continuation,
-        )
-        .await;
     }
 }
 
@@ -439,7 +358,7 @@ async fn auto_compact(
     let pane = &*session;
 
     let context_tokens = pane.app.stats.context_tokens;
-    let messages = pane.runtime.conversation.context();
+    let messages = pane.connection.runtime.conversation.context();
     let target = compaction_target(session, pane_id, tui_config).await;
 
     if !mush_session::compact::needs_compaction_for_messages(
@@ -469,7 +388,11 @@ async fn auto_compact(
     let pane = session;
     match result {
         crate::slash::CompactionTaskResult::Applied(result) => {
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, result);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.connection.runtime,
+                result,
+            );
         }
         crate::slash::CompactionTaskResult::Failed {
             failure,
@@ -484,25 +407,31 @@ async fn auto_compact(
                 Some(&tui_config.cwd),
             )
             .await;
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.connection.runtime,
+                applied,
+            );
         }
     }
 }
 
 pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
-    if let Some(control) = &session.runtime.control {
+    if let Some(control) = &session.connection.runtime.control {
         control.finish(mush_agent::ipc::control::Outcome::Cancelled);
-        session.runtime.pending_prompt = None;
+        session.connection.runtime.pending_prompt = None;
     }
-    let focused_id = PaneId::new(1);
     record_cancelled_tools(session);
 
-    session.runtime.turns.abort(focused_id);
+    let _ = session
+        .connection
+        .send(mush_runtime::ClientCommand::Abort)
+        .await;
 
     let pane = &mut *session;
     pane.app.finish_streaming(None, None);
     let restored = pane.app.take_queued_messages();
-    pane.runtime.steering_queue.lock().await.clear();
+    pane.connection.runtime.steering_queue.lock().await.clear();
     if !restored.is_empty() {
         let text = restored.join("\n");
         pane.app.input.text = text.clone();
@@ -528,7 +457,8 @@ fn record_cancelled_tools(pane: &mut crate::session::Session) {
             Some(USER_CANCELLED_TOOL_MESSAGE),
             None,
         );
-        pane.runtime
+        pane.connection
+            .runtime
             .conversation
             .append_message(Message::ToolResult(ToolResultMessage {
                 tool_call_id,
@@ -551,24 +481,19 @@ pub(super) async fn submit_streaming_input(
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
-    let focused_id = PaneId::new(1);
-    if let Some(meta) = session.runtime.turns.meta(focused_id) {
-        let content = build_user_content(&text, &images);
-        meta.steering_queue.lock().await.push(Message::User(
-            UserMessage::builder()
-                .content(content)
-                .timestamp_ms(Timestamp::now())
-                .prompt_id(mush_ai::types::PromptId::new())
-                .build(),
-        ));
-        let image_bytes: Vec<Vec<u8>> = images.into_iter().map(|img| img.data).collect();
+    if session.connection.turn_active() {
+        let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
         if image_bytes.is_empty() {
-            session.app.push_queued_message(text);
+            session.app.push_queued_message(text.clone());
         } else {
             session
                 .app
-                .push_queued_message_with_images(text, image_bytes);
+                .push_queued_message_with_images(text.clone(), image_bytes);
         }
+        let _ = session
+            .connection
+            .send(mush_runtime::ClientCommand::Steer { text, images })
+            .await;
     } else {
         let pane = &mut *session;
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
@@ -580,84 +505,36 @@ pub(super) async fn submit_streaming_input(
         }
         pane.app.active_tools.clear();
         pane.app.start_streaming();
-        pane.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
+        pane.connection.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
     }
 }
-
-pub(crate) use mush_runtime::turn::build_user_content;
 
 pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_state: &StreamState) {
-    let focused_id = PaneId::new(1);
-    let app = &mut session.app;
-
-    if let Some(queued_text) = app.pop_last_queued_message() {
-        let current_input = app.input.take_text();
-        if !current_input.trim().is_empty() {
-            app.push_queued_message(&current_input);
-            if let Some(meta) = session.runtime.turns.meta(focused_id) {
-                meta.steering_queue.lock().await.push(Message::User(
-                    UserMessage::builder()
-                        .content(UserContent::Text(current_input))
-                        .timestamp_ms(Timestamp::now())
-                        .prompt_id(mush_ai::types::PromptId::new())
-                        .build(),
-                ));
-            }
-        }
-
-        app.input.text.clone_from(&queued_text);
-        app.input.cursor = app.input.text.len();
-        app.input.ensure_cursor_visible();
-
-        if let Some(meta) = session.runtime.turns.meta(focused_id) {
-            let mut steering_queue = meta.steering_queue.lock().await;
-            let target = queued_text.trim();
-            let pos = steering_queue.iter().rposition(|message| {
-                if let Message::User(user_message) = message {
-                    user_message.content.text() == queued_text
-                } else {
-                    false
-                }
-            });
-            let pos = pos.or_else(|| {
-                steering_queue.iter().rposition(|message| {
-                    if let Message::User(user_message) = message {
-                        user_message.content.text().trim() == target
-                    } else {
-                        false
-                    }
-                })
-            });
-            if let Some(pos) = pos {
-                steering_queue.remove(pos);
-            } else {
-                tracing::warn!(
-                    queued_text = %queued_text,
-                    "could not find matching steering queue entry to remove \
-                     on lift; the next stream may see duplicate content"
-                );
-            }
-        }
-    } else {
-        app.status = Some("no queued messages to edit".into());
-    }
-}
-
-pub(super) async fn start_pending_streams<'a>(
-    _stream_state: &mut StreamState,
-    session: &mut Session,
-    pending_prompt: &mut Option<String>,
-    deps: StreamDeps<'a>,
-) {
-    if session.runtime.turn_active() {
+    let Some(queued_text) = session.app.pop_last_queued_message() else {
+        session.app.status = Some("no queued messages to edit".into());
         return;
+    };
+    let current_input = session.app.input.take_text();
+    if !current_input.trim().is_empty() {
+        session.app.push_queued_message(&current_input);
+        let _ = session
+            .connection
+            .send(mush_runtime::ClientCommand::Steer {
+                text: current_input,
+                images: Vec::new(),
+            })
+            .await;
     }
-    for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
-        session.runtime.thinking_level = session.app.thinking_level.clone();
-        session.runtime.context_tokens = session.app.stats.context_tokens;
-        let request = mush_runtime::TurnRequest { pane_id, prompt };
-        session.runtime.start_turn(request, &deps).await;
-    }
+
+    let app = &mut session.app;
+    app.input.text.clone_from(&queued_text);
+    app.input.cursor = app.input.text.len();
+    app.input.ensure_cursor_visible();
+
+    let _ = session
+        .connection
+        .send(mush_runtime::ClientCommand::RetractSteer { text: queued_text })
+        .await;
 }
 
 pub(super) use mush_runtime::CompactionTarget;
@@ -668,6 +545,7 @@ pub(super) async fn compaction_target(
     tui_config: &TuiConfig,
 ) -> CompactionTarget {
     session
+        .connection
         .runtime
         .compaction_target(&tui_config.turn_config())
         .await
@@ -677,7 +555,7 @@ pub(crate) fn build_session_snapshot(
     session: &Session,
     _tui_config: &super::TuiConfig,
 ) -> super::SessionSnapshot {
-    session.runtime.snapshot()
+    session.connection.runtime.snapshot()
 }
 
 pub(crate) fn apply_session_events(
@@ -724,7 +602,7 @@ mod tests {
     use super::*;
 
     use mush_ai::models;
-    use mush_ai::types::{ModelId, ToolCallId, UserContentPart};
+    use mush_ai::types::{ModelId, ToolCallId, UserContent, UserContentPart, UserMessage};
     use std::collections::HashMap;
 
     use mush_agent::{AgentConfig, agent_loop};
@@ -749,7 +627,7 @@ mod tests {
         let pane_id = PaneId::new(1);
         let app = crate::app::App::new(switched.id.clone(), switched.context_window);
         let mut session = crate::session::Session::new(app);
-        session.runtime.model_id = switched.id.to_string();
+        session.connection.runtime.model_id = switched.id.to_string();
 
         let target = compaction_target(&session, pane_id, &config).await;
 
@@ -888,8 +766,6 @@ mod tests {
         tui_config.save_session = Some(Arc::new(move |snapshot| {
             *save_target.lock().unwrap() = Some(snapshot);
         }));
-        let mut stream_state = StreamState::new();
-
         for turn in 0..2 {
             let messages = conversation.context();
             let transform = build_context_transform(
@@ -934,18 +810,25 @@ mod tests {
                 if matches!(event, AgentEvent::ContextCompacted { .. }) {
                     let mut session =
                         Session::new(App::new(model.id.clone(), model.context_window));
-                    session.runtime.conversation = conversation.clone();
-                    session.runtime.saver = tui_config.save_session.clone();
-                    handle_agent_event_side_effects(
-                        &mut session,
-                        &mut stream_state,
+                    session.connection.runtime.saver = tui_config.save_session.clone();
+                    let (_confirm_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+                    let generation = session.connection.runtime.turns.register_active(
                         PaneId::new(1),
-                        &event,
-                        &tui_config,
-                        &registry,
-                        false,
-                    )
-                    .await;
+                        StreamMeta {
+                            steering_queue: Arc::new(Mutex::new(Vec::new())),
+                            confirm_req_rx,
+                            confirm_reply: Arc::new(Mutex::new(None)),
+                            model: model.clone(),
+                            context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                            cancel: tokio_util::sync::CancellationToken::new(),
+                        },
+                    );
+                    session.connection.runtime.conversation = conversation.clone();
+                    session.connection.ingest_agent_event(
+                        PaneId::new(1),
+                        generation,
+                        event.clone(),
+                    );
                     assert_eq!(
                         saved
                             .lock()
@@ -1003,6 +886,7 @@ mod tests {
         assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
         assert_eq!(
             session
+                .connection
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -1017,7 +901,7 @@ mod tests {
 
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1120,7 +1004,7 @@ mod tests {
         assert_eq!(session.app.messages.len(), before);
         let attached = &session.app.messages.last().unwrap().tool_calls[0].bash_done;
         assert_eq!(attached.as_ref().map(|d| d.exit_code), Some(5));
-        assert!(session.runtime.pending_prompt.is_some());
+        assert!(session.connection.runtime.pending_prompt.is_some());
     }
 
     #[tokio::test]
@@ -1134,7 +1018,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1190,7 +1074,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1222,7 +1106,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1282,27 +1166,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn take_pending_prompts_prefers_the_typed_prompt() {
-        let mut session = Session::new(app());
-        let mut pending_prompt = Some("focused".to_string());
-        session.runtime.pending_prompt = Some(PendingPrompt::text("duplicate"));
-
-        let prompts = take_pending_prompts(&mut session, &mut pending_prompt);
-
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].1.text, "focused");
-        assert!(pending_prompt.is_none());
-        assert!(session.runtime.pending_prompt.is_none());
-    }
-
     #[tokio::test]
     async fn register_active_supersedes_previous_generation() {
         let mut session = Session::new(app());
         let pane_id = PaneId::new(7);
 
         let (_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-        let gen1 = session.runtime.turns.register_active(
+        let gen1 = session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1314,9 +1184,25 @@ mod tests {
             },
         );
 
-        assert!(session.runtime.turns.is_current(pane_id, gen1));
-        assert!(session.runtime.turns.meta(pane_id).is_some());
+        assert!(session.connection.runtime.turns.is_current(pane_id, gen1));
+        assert!(session.connection.runtime.turns.meta(pane_id).is_some());
         let _ = ToolCallId::from("unused");
+    }
+
+    async fn poll_confirmation_prompt(
+        session: &mut Session,
+        stream_state: &mut StreamState,
+    ) -> bool {
+        match session.connection.try_next_event() {
+            Some(mush_runtime::ClientEvent::ConfirmRequest {
+                tool_call_id,
+                prompt,
+            }) => {
+                show_confirm_request(session, stream_state, tool_call_id, prompt);
+                true
+            }
+            _ => false,
+        }
     }
 
     #[tokio::test]
@@ -1334,7 +1220,7 @@ mod tests {
         });
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1380,6 +1266,7 @@ mod tests {
         );
 
         let pending = session
+            .connection
             .runtime
             .turns
             .meta(pane_id)
@@ -1400,7 +1287,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1433,6 +1320,7 @@ mod tests {
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert!(
             session
+                .connection
                 .runtime
                 .turns
                 .meta(pane_id)
@@ -1451,7 +1339,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1607,7 +1495,7 @@ mod tests {
 
     #[test]
     fn build_user_content_persists_pending_prompt_text() {
-        let content = build_user_content("hello from pending", &[]);
+        let content = mush_runtime::turn::build_user_content("hello from pending", &[]);
 
         assert_eq!(content.text(), "hello from pending");
     }
@@ -1636,7 +1524,7 @@ mod tests {
         let pane_id = PaneId::new(1);
 
         let (_tx1, rx1) = tokio::sync::mpsc::channel(1);
-        let gen1 = session.runtime.turns.register_active(
+        let gen1 = session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1648,10 +1536,10 @@ mod tests {
             },
         );
 
-        session.runtime.turns.abort(pane_id);
+        session.connection.runtime.turns.abort(pane_id);
 
         let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
-        let gen2 = session.runtime.turns.register_active(
+        let gen2 = session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1666,12 +1554,12 @@ mod tests {
         assert_ne!(gen1, gen2, "generations must differ");
 
         assert!(
-            !session.runtime.turns.is_current(pane_id, gen1),
+            !session.connection.runtime.turns.is_current(pane_id, gen1),
             "stale generation must be rejected"
         );
 
         assert!(
-            session.runtime.turns.is_current(pane_id, gen2),
+            session.connection.runtime.turns.is_current(pane_id, gen2),
             "current generation must be accepted"
         );
     }
@@ -1682,7 +1570,7 @@ mod tests {
         let pane_id = PaneId::new(1);
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        let stream_gen = session.runtime.turns.register_active(
+        let stream_gen = session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1694,9 +1582,15 @@ mod tests {
             },
         );
 
-        session.runtime.turns.abort(pane_id);
+        session.connection.runtime.turns.abort(pane_id);
 
-        assert!(!session.runtime.turns.is_current(pane_id, stream_gen));
+        assert!(
+            !session
+                .connection
+                .runtime
+                .turns
+                .is_current(pane_id, stream_gen)
+        );
     }
 
     #[tokio::test]
@@ -1706,10 +1600,10 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.runtime.steering_queue.clone(),
+                steering_queue: session.connection.runtime.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -1734,7 +1628,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(session.runtime.steering_queue.lock().await.len(), 2);
+        assert_eq!(
+            session.connection.runtime.steering_queue.lock().await.len(),
+            2
+        );
         assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
 
         abort_focused_stream(&mut session, &mut stream_state).await;
@@ -1744,7 +1641,15 @@ mod tests {
             restored_input, "first steer\nsecond steer",
             "abort must restore each queued message exactly once, got: {restored_input:?}"
         );
-        assert!(session.runtime.steering_queue.lock().await.is_empty());
+        assert!(
+            session
+                .connection
+                .runtime
+                .steering_queue
+                .lock()
+                .await
+                .is_empty()
+        );
         assert!(!session.app.messages.iter().any(|m| m.queued));
     }
 
@@ -1760,10 +1665,10 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        session.runtime.turns.register_active(
+        session.connection.runtime.turns.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.runtime.steering_queue.clone(),
+                steering_queue: session.connection.runtime.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -1774,6 +1679,7 @@ mod tests {
 
         let tool_call_id = ToolCallId::from("tc_cancelled");
         session
+            .connection
             .runtime
             .conversation
             .append_message(Message::Assistant(
@@ -1800,7 +1706,7 @@ mod tests {
 
         abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let ctx = session.runtime.conversation.context();
+        let ctx = session.connection.runtime.conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {
             panic!("abort should append a tool result");
         };
@@ -1821,7 +1727,7 @@ mod tests {
     fn build_session_snapshot_carries_system_prompt() {
         let mut session = Session::new(app());
         let config = test_tui_config();
-        session.runtime.system_prompt =
+        session.connection.runtime.system_prompt =
             Some("you are running inside mush\nproject context: foo".into());
 
         let snapshot = build_session_snapshot(&session, &config);
@@ -1840,15 +1746,15 @@ mod tests {
         let count_clone = save_count.clone();
         let config = test_tui_config();
         let mut session = Session::new(app());
-        session.runtime.saver = Some(std::sync::Arc::new(move |_| {
+        session.connection.runtime.saver = Some(std::sync::Arc::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
         }));
         let mut stream_state = StreamState::new();
 
-        stream_state.save_session_debounced(&mut session, &config);
+        session.connection.runtime.save_debounced();
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
-        stream_state.save_session_debounced(&mut session, &config);
+        session.connection.runtime.save_debounced();
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
         stream_state.save_session_now(&mut session, &config);
@@ -1896,7 +1802,7 @@ mod tests {
         cache.save(&cache_path()).unwrap();
 
         let mut session = Session::new(app());
-        session.runtime.model_id = glm_id.to_string();
+        session.connection.runtime.model_id = glm_id.to_string();
 
         let default = Model {
             id: ModelId::from("claude-opus-4-7"),
@@ -1920,7 +1826,7 @@ mod tests {
             default_thinking_level: None,
         };
 
-        let resolved = session.runtime.model(&default);
+        let resolved = session.connection.runtime.model(&default);
 
         unsafe {
             match saved {

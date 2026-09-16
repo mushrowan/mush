@@ -114,14 +114,15 @@ impl RunnerRuntime {
             std::mem::take(&mut tui_config.initial_conversation),
         );
         let mut session = Session::with_conversation(app, conversation);
-        session.runtime.saver = tui_config.save_session.clone();
-        session.runtime.session_id = tui_config.session_id.clone();
-        session.runtime.title = tui_config.initial_title.clone();
-        session.runtime.model_id = tui_config.model.id.to_string();
-        session.runtime.system_prompt = tui_config.system_prompt.clone();
-        session.runtime.rlm_depth = tui_config.rlm_depth;
-        session.runtime.rlm_max_depth = tui_config.rlm_max_depth;
+        session.connection.runtime.saver = tui_config.save_session.clone();
+        session.connection.runtime.session_id = tui_config.session_id.clone();
+        session.connection.runtime.title = tui_config.initial_title.clone();
+        session.connection.runtime.model_id = tui_config.model.id.to_string();
+        session.connection.runtime.system_prompt = tui_config.system_prompt.clone();
+        session.connection.runtime.rlm_depth = tui_config.rlm_depth;
+        session.connection.runtime.rlm_max_depth = tui_config.rlm_max_depth;
         session
+            .connection
             .runtime
             .set_kernel_state(tui_config.kernel_state.clone());
 
@@ -273,7 +274,7 @@ impl RunnerRuntime {
                 crate::slash::CompactionTaskResult::Applied(result) => {
                     crate::slash::apply_applied_compaction(
                         &mut pane.app,
-                        &mut pane.runtime,
+                        &mut pane.connection.runtime,
                         result,
                     );
                     replay_compaction_inputs(pane);
@@ -390,12 +391,12 @@ pub(super) fn replay_compaction_inputs(pane: &mut Session) {
     }
     pane.app.active_tools.clear();
     pane.app.start_streaming();
-    pane.runtime.pending_prompt =
+    pane.connection.runtime.pending_prompt =
         Some(crate::session::PendingPrompt::with_images(combined, images));
 }
 
 pub(super) fn save_pane_pending_prompt(pane: &mut Session) {
-    pane.runtime.persist_pending_prompt();
+    pane.connection.runtime.persist_pending_prompt();
 }
 
 fn watch_config(
@@ -663,11 +664,12 @@ mod tests {
 
         replay_compaction_inputs(&mut pane);
 
-        assert!(pane.runtime.pending_compaction_inputs.is_empty());
+        assert!(pane.connection.runtime.pending_compaction_inputs.is_empty());
         assert!(!pane.app.has_queued_messages());
         assert!(pane.app.stream.active, "should kick off a new stream");
         assert_eq!(
-            pane.runtime
+            pane.connection
+                .runtime
                 .pending_prompt
                 .as_ref()
                 .map(|prompt| prompt.text.as_str()),
@@ -688,7 +690,7 @@ mod tests {
 
         replay_compaction_inputs(&mut pane);
 
-        assert!(pane.runtime.pending_prompt.is_none());
+        assert!(pane.connection.runtime.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
     }
@@ -712,7 +714,7 @@ mod tests {
         replay_compaction_inputs(&mut pane);
 
         save_pane_pending_prompt(&mut pane);
-        assert!(pane.runtime.pending_prompt.is_some());
+        assert!(pane.connection.runtime.pending_prompt.is_some());
         let snapshot = crate::runner::streams::build_session_snapshot(&pane, &test_config());
         let Message::User(user) = &snapshot.primary.context()[0] else {
             panic!("expected user message");
@@ -755,7 +757,7 @@ mod tests {
         }
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.runtime.conversation = ConversationState::from_messages(msgs);
+        pane.connection.runtime.conversation = ConversationState::from_messages(msgs);
         let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
 
         let saved: Arc<Mutex<Option<crate::runner::SessionSnapshot>>> = Arc::new(Mutex::new(None));
@@ -765,7 +767,7 @@ mod tests {
             *saved_clone.lock().unwrap() = Some(snapshot);
         }));
 
-        let context = runtime.session.runtime.conversation.context();
+        let context = runtime.session.connection.runtime.conversation.context();
         let applied = crate::slash::AppliedCompaction {
             messages: context,
             summary: "summary of earlier turns".into(),
@@ -891,15 +893,20 @@ mod tests {
         };
         {
             let pane = &mut runtime.session;
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.connection.runtime,
+                applied,
+            );
             replay_compaction_inputs(pane);
         }
 
         let pane = &mut runtime.session;
-        assert!(pane.runtime.conversation.context_len() < 3);
+        assert!(pane.connection.runtime.conversation.context_len() < 3);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
-            pane.runtime
+            pane.connection
+                .runtime
                 .pending_prompt
                 .as_ref()
                 .map(|prompt| prompt.text.as_str()),
@@ -911,13 +918,13 @@ mod tests {
     fn cancel_recovery_replays_queued_input_without_compacting() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.runtime.conversation = ConversationState::from_messages(vec![
+        pane.connection.runtime.conversation = ConversationState::from_messages(vec![
             user_message("old question"),
             assistant_message("old answer"),
         ]);
         pane.queue_input_during_compaction("queued thought".into(), vec![]);
         pane.app.open_compaction_recovery(
-            failure_report(pane.runtime.conversation.context()),
+            failure_report(pane.connection.runtime.conversation.context()),
             100,
             "test".into(),
         );
@@ -931,10 +938,11 @@ mod tests {
         }
 
         let pane = &mut runtime.session;
-        assert_eq!(pane.runtime.conversation.context_len(), 2);
+        assert_eq!(pane.connection.runtime.conversation.context_len(), 2);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
-            pane.runtime
+            pane.connection
+                .runtime
                 .pending_prompt
                 .as_ref()
                 .map(|prompt| prompt.text.as_str()),

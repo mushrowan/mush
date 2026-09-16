@@ -38,6 +38,13 @@ pub struct TurnRequest {
     pub prompt: PendingPrompt,
 }
 
+pub struct TurnPrep {
+    pub model: Model,
+    pub target: CompactionTarget,
+    pub api_key: Option<ApiKey>,
+    pub account_id: Option<String>,
+}
+
 pub struct CompactionTarget {
     pub model: Model,
     pub options: StreamOptions,
@@ -129,8 +136,36 @@ impl SessionRuntime {
         }
     }
 
+    pub async fn prepare_turn(&self, config: &TurnConfig) -> TurnPrep {
+        let model = self.model(&config.default_model);
+        let target = self.compaction_target(config).await;
+        let (api_key, account_id) = resolve_auth_for_model(&model, &config.provider_api_keys).await;
+        TurnPrep {
+            model,
+            target,
+            api_key,
+            account_id,
+        }
+    }
+
     pub async fn start_turn(&mut self, request: TurnRequest, deps: &TurnDeps<'_>) {
+        let prep = self.prepare_turn(&deps.config).await;
+        self.start_prepared_turn(request, prep, deps);
+    }
+
+    pub fn start_prepared_turn(
+        &mut self,
+        request: TurnRequest,
+        prep: TurnPrep,
+        deps: &TurnDeps<'_>,
+    ) {
         let TurnRequest { pane_id, prompt } = request;
+        let TurnPrep {
+            model,
+            target,
+            api_key,
+            account_id,
+        } = prep;
         let thinking_level = self.thinking_level.clone();
         let context_tokens = self.context_tokens;
         let TurnDeps {
@@ -142,13 +177,11 @@ impl SessionRuntime {
         let tools: &ToolRegistry = tools;
         let registry: &ApiRegistry = registry;
         let steering_queue = self.steering_queue.clone();
-        let model = self.model(&config.default_model);
         self.pending_prompt = Some(prompt);
         self.persist_pending_prompt();
         let conversation_snapshot = self.conversation.context();
         self.pending_prompt = None;
 
-        let target = self.compaction_target(config).await;
         let initial_estimated_tokens = estimated_tokens_u64(&conversation_snapshot);
         let context_tokens_shared =
             Arc::new(std::sync::atomic::AtomicU64::new(context_tokens.get()));
@@ -170,7 +203,6 @@ impl SessionRuntime {
         let (confirm_req_rx, confirm) = build_confirm_callback(config.confirm_tools);
 
         let mut call_options = config.options.clone();
-        let (api_key, account_id) = resolve_auth_for_model(&model, &config.provider_api_keys).await;
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.thinking = Some(thinking_level);

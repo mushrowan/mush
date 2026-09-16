@@ -26,6 +26,15 @@ pub fn apply_applied_compaction(
     runtime: &mut SessionRuntime,
     result: AppliedCompaction,
 ) {
+    let after_count = runtime.apply_compaction(
+        result.summary.clone(),
+        result.summarised_count,
+        result.messages.clone(),
+    );
+    show_applied_compaction(app, &result, after_count);
+}
+
+pub fn show_applied_compaction(app: &mut App, result: &AppliedCompaction, after_count: usize) {
     app.compacting = false;
     let summary_body = extract_fresh_summary(&result.messages);
     if let Some(Message::Event(event)) = result.messages.first()
@@ -34,8 +43,6 @@ pub fn apply_applied_compaction(
         app.push_event_message(event);
     }
 
-    let after_count =
-        runtime.apply_compaction(result.summary, result.summarised_count, result.messages);
     app.stats
         .reset_live_state(TokenCount::new(result.tokens_after as u64));
 

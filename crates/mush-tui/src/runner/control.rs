@@ -7,7 +7,7 @@ pub(super) async fn poll(
     runtime: &mut RunnerRuntime,
     config: &TuiConfig,
 ) -> std::io::Result<()> {
-    let Some(control) = runtime.session.runtime.control.clone() else {
+    let Some(control) = runtime.session.connection.runtime.control.clone() else {
         return Ok(());
     };
     if control.target().session != config.session_id.as_str() {
@@ -26,7 +26,7 @@ pub(super) async fn poll(
     };
     runtime.session.app.push_event_message(&event);
     runtime.session.app.start_streaming();
-    runtime.session.runtime.accept_event(event);
+    runtime.session.connection.runtime.accept_event(event);
     Ok(())
 }
 

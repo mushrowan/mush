@@ -5,11 +5,11 @@ use mush_session::ConversationState;
 use crate::app::App;
 use crate::input_buffer::PendingImage;
 
-pub use mush_runtime::{PendingPrompt, SessionRuntime};
+pub use mush_runtime::{AgentConnection, InProcessConnection, PendingPrompt, SessionRuntime};
 
 pub struct Session {
     pub app: App,
-    pub runtime: SessionRuntime,
+    pub connection: InProcessConnection,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub label: Option<String>,
     pub pending_side_questions: Vec<crate::slash::side_question::PendingSideQuestion>,
@@ -21,9 +21,16 @@ impl Session {
     }
 
     pub fn with_conversation(app: App, conversation: ConversationState) -> Self {
+        Self::with_connection(
+            app,
+            InProcessConnection::detached(SessionRuntime::new(conversation)),
+        )
+    }
+
+    pub fn with_connection(app: App, connection: InProcessConnection) -> Self {
         Self {
             app,
-            runtime: SessionRuntime::new(conversation),
+            connection,
             image_protos: HashMap::new(),
             label: None,
             pending_side_questions: Vec::new(),
@@ -38,17 +45,20 @@ impl Session {
             self.app
                 .push_queued_message_with_images(text.clone(), image_bytes);
         }
-        self.runtime.pending_compaction_inputs.push((text, images));
+        self.connection
+            .runtime
+            .pending_compaction_inputs
+            .push((text, images));
         self.app.input.text.clear();
         self.app.input.cursor = 0;
     }
 
     pub fn control_endpoint(&self) -> Option<mush_agent::exec_context::ControlEndpoint> {
-        self.runtime.control_endpoint()
+        self.connection.runtime.control_endpoint()
     }
 
     pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
-        let drained = self.runtime.drain_compaction_inputs();
+        let drained = self.connection.runtime.drain_compaction_inputs();
         let _ = self.app.take_queued_messages();
         drained
     }

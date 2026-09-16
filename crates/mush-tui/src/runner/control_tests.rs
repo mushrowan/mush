@@ -1,5 +1,5 @@
 use super::control::*;
-use super::streams::{StreamDeps, StreamState, start_pending_streams};
+use super::streams::StreamState;
 use super::{TuiConfig, runtime::RunnerRuntime};
 use mush_agent::AgentEvent;
 use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 #[ignore = "requires MUSH_REVIEW_CLI_BIN"]
 async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authority() {
     let binary = std::env::var("MUSH_REVIEW_CLI_BIN").expect("set MUSH_REVIEW_CLI_BIN");
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = mush_agent::ipc::IpcListener::start_control(
@@ -66,26 +66,30 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
     for (index, id) in ["first", "second"].into_iter().enumerate() {
         poll(&state, &mut runtime, &config).await.unwrap();
         assert_eq!(outcome(&control, id), Outcome::Running);
-        let stream_deps = deps(&config, &runtime, &tools, &registry);
-        start_pending_streams(
-            &mut state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            stream_deps,
-        )
-        .await;
+        start_pending(&mut runtime, &config, &tools, &registry, false).await;
         poll(&state, &mut runtime, &config).await.unwrap();
         if index == 0 {
             assert_eq!(outcome(&control, "second"), Outcome::Queued);
         }
-        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-            dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        while let Some((pane, generation, event)) =
+            runtime.session.connection.runtime.turns.next().await
+        {
+            dispatch(
+                &mut runtime,
+                &mut state,
+                &mut config,
+                &registry,
+                pane,
+                generation,
+                event,
+            )
+            .await;
         }
         assert_eq!(outcome(&control, id), Outcome::Completed);
         assert_eq!(requests.lock().unwrap().len(), index + 1);
     }
     poll(&state, &mut runtime, &config).await.unwrap();
-    assert!(runtime.session.runtime.pending_prompt.is_none());
+    assert!(runtime.session.connection.runtime.pending_prompt.is_none());
     assert_eq!(control.target(), target);
     let result = tokio::process::Command::new(&binary)
         .env_clear()
@@ -114,16 +118,20 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
     assert_eq!(outcome(&control, "wake"), Outcome::Scheduled);
     tokio::time::sleep(std::time::Duration::from_millis(110)).await;
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert_eq!(outcome(&control, "wake"), Outcome::Completed);
     assert_eq!(requests.lock().unwrap().len(), 3);
@@ -146,7 +154,7 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
 
 #[tokio::test]
 async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(FakeProvider {
@@ -165,32 +173,27 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     enqueue(&control, "confirm");
     let mut state = StreamState::new();
     poll(&state, &mut runtime, &config).await.unwrap();
-    let mut stream_deps = deps(&config, &runtime, &tools, &registry);
-    stream_deps.config.confirm_tools = true;
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
-    let confirmation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    start_pending(&mut runtime, &config, &tools, &registry, true).await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if let Ok(request) = runtime
-                .session
-                .runtime
-                .turns
-                .meta_mut(mush_ai::types::PaneId::new(1))
-                .unwrap()
-                .confirm_req_rx
-                .try_recv()
-            {
-                break request;
+            while let Some(event) = runtime.session.connection.try_next_event() {
+                super::looping::dispatch_client_event(
+                    event,
+                    &mut state,
+                    &mut runtime,
+                    &mut config,
+                    &registry,
+                    &None,
+                )
+                .await;
+            }
+            if runtime.session.app.interaction.mode == crate::app::AppMode::ToolConfirm {
+                break;
             }
             tokio::select! {
-                event = runtime.session.runtime.turns.next() => {
-                    let (pane, _, event) = event.unwrap();
-                    dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+                event = runtime.session.connection.runtime.turns.next() => {
+                    let (pane, generation, event) = event.unwrap();
+                    dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
             }
@@ -202,9 +205,20 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     enqueue(&control, "during-confirm");
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "during-confirm"), Outcome::Queued);
-    confirmation.reply.send(false).unwrap();
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    super::streams::answer_confirmation(&mut runtime.session, &mut state, false).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert!(endpoint.lock().unwrap().is_none());
     assert_eq!(outcome(&control, "during-confirm"), Outcome::Queued);
@@ -237,20 +251,13 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     enqueue(&control, "previous-session");
     let mut state = StreamState::new();
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = runtime.session.runtime.turns.next() => {
-                let (pane, _, event) = event.unwrap();
-                dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+            event = runtime.session.connection.runtime.turns.next() => {
+                let (pane, generation, event) = event.unwrap();
+                dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
             }
         }
     }
@@ -272,8 +279,19 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     assert_eq!(control.target().session, old_session);
     assert_eq!(outcome(&control, "previous-session"), Outcome::Running);
     release.notify_one();
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert_eq!(outcome(&control, "previous-session"), Outcome::Completed);
     super::commands::handle_slash_action(
@@ -292,7 +310,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     .await;
     assert_ne!(control.target().session, old_session);
     assert!(
-        runtime.session.runtime.conversation.is_empty(),
+        runtime.session.connection.runtime.conversation.is_empty(),
         "previous control turn entered the new session"
     );
 }
@@ -461,8 +479,8 @@ fn fixture() -> (RunnerRuntime, TuiConfig, Control) {
         config.model.context_window,
     ));
     let control = Control::new(config.session_id.to_string());
-    session.runtime.control = Some(control.clone());
-    session.runtime.control_socket = Some("/fixture/control.sock".into());
+    session.connection.runtime.control = Some(control.clone());
+    session.connection.runtime.control_socket = Some("/fixture/control.sock".into());
     (
         RunnerRuntime::from_pane(session, Default::default()),
         config,
@@ -687,68 +705,62 @@ async fn control_pty_lifecycle_is_opt_in_and_delivers_once() {
     }
 }
 
-fn deps<'a>(
+async fn start_pending(
+    runtime: &mut RunnerRuntime,
     config: &TuiConfig,
-    runtime: &RunnerRuntime,
-    tools: &'a ToolRegistry,
-    registry: &'a ApiRegistry,
-) -> StreamDeps<'a> {
-    StreamDeps {
-        config: mush_runtime::TurnConfig {
-            default_model: config.model.clone(),
-            options: Default::default(),
-            max_turns: 8,
-            provider_api_keys: config.provider_api_keys.clone(),
-            confirm_tools: false,
-            auto_compact: false,
-            compaction_model: None,
-            forbidden_chars: Default::default(),
-            tool_allowlist: None,
-        },
-        injections: mush_agent::AgentInjections {
-            control_endpoint: runtime.session.control_endpoint(),
-            ..Default::default()
-        },
-        tools,
-        registry,
+    tools: &ToolRegistry,
+    registry: &ApiRegistry,
+    confirm_tools: bool,
+) {
+    let control_endpoint = runtime.session.control_endpoint();
+    let connection = &mut runtime.session.connection;
+    connection.set_deps(tools.clone(), registry.clone());
+    connection.set_config(mush_runtime::TurnConfig {
+        default_model: config.model.clone(),
+        options: Default::default(),
+        max_turns: 8,
+        provider_api_keys: config.provider_api_keys.clone(),
+        confirm_tools,
+        auto_compact: false,
+        compaction_model: None,
+        forbidden_chars: Default::default(),
+        tool_allowlist: None,
+    });
+    connection.set_injections(mush_agent::AgentInjections {
+        control_endpoint,
+        ..Default::default()
+    });
+    if let Some(prompt) = runtime.pending_prompt.take() {
+        connection.runtime.pending_prompt = Some(mush_runtime::PendingPrompt::text(prompt));
     }
+    connection.start_pending().await;
 }
 
 async fn dispatch(
     runtime: &mut RunnerRuntime,
     state: &mut StreamState,
-    config: &TuiConfig,
+    config: &mut TuiConfig,
     registry: &ApiRegistry,
     pane: PaneId,
+    generation: mush_runtime::StreamGeneration,
     event: AgentEvent,
 ) {
-    complete(runtime.session.runtime.control.as_ref(), &event);
-    let applied = runtime.session.runtime.apply_event(&event);
-    let (app, image_protos) = runtime.session.fields_mut();
-    crate::event_handler::handle_agent_event(
-        &mut crate::event_handler::EventCtx { app, image_protos },
-        &event,
-        applied,
-        &config.model,
-        false,
-        &None,
-    );
-    super::streams::handle_agent_event_side_effects(
-        &mut runtime.session,
-        state,
-        pane,
-        &event,
-        config,
-        registry,
-        false,
-    )
-    .await;
+    if let Some(event) = runtime
+        .session
+        .connection
+        .ingest_agent_event(pane, generation, event)
+    {
+        super::looping::dispatch_client_event(event, state, runtime, config, registry, &None).await;
+    }
+    while let Some(event) = runtime.session.connection.try_next_event() {
+        super::looping::dispatch_client_event(event, state, runtime, config, registry, &None).await;
+    }
 }
 
 #[tokio::test]
 async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
     for fail in [false, true] {
-        let (mut runtime, config, control) = fixture();
+        let (mut runtime, mut config, control) = fixture();
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let listener = mush_agent::ipc::IpcListener::start_control(
@@ -794,16 +806,20 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
             })
         ));
         poll(&state, &mut runtime, &config).await.unwrap();
-        let deps = deps(&config, &runtime, &tools, &registry);
-        start_pending_streams(
-            &mut state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            deps,
-        )
-        .await;
-        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-            dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        start_pending(&mut runtime, &config, &tools, &registry, false).await;
+        while let Some((pane, generation, event)) =
+            runtime.session.connection.runtime.turns.next().await
+        {
+            dispatch(
+                &mut runtime,
+                &mut state,
+                &mut config,
+                &registry,
+                pane,
+                generation,
+                event,
+            )
+            .await;
         }
         poll(&state, &mut runtime, &config).await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 1);
@@ -815,12 +831,17 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
                 Outcome::Completed
             }
         );
-        assert!(runtime.session.runtime.pending_prompt.is_none());
+        assert!(runtime.session.connection.runtime.pending_prompt.is_none());
         assert_eq!(
             runtime.session.app.messages[0].role,
             crate::app::MessageRole::Event(EventKind::Message)
         );
-        let replay = runtime.session.runtime.conversation.display_history();
+        let replay = runtime
+            .session
+            .connection
+            .runtime
+            .conversation
+            .display_history();
         crate::conversation_display::rebuild_display(&mut runtime.session.app, &replay);
         assert_eq!(
             runtime.session.app.messages[0].role,
@@ -839,7 +860,7 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
 
 #[tokio::test]
 async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(FakeProvider {
@@ -857,27 +878,36 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         endpoint: endpoint.clone(),
     }));
     let mut state = StreamState::new();
-    runtime.session.runtime.pending_prompt =
+    runtime.session.connection.runtime.pending_prompt =
         Some(crate::session::PendingPrompt::text("ordinary user"));
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
     loop {
-        let (pane, _, event) = runtime.session.runtime.turns.next().await.unwrap();
+        let (pane, generation, event) = runtime
+            .session
+            .connection
+            .runtime
+            .turns
+            .next()
+            .await
+            .unwrap();
         let tool = matches!(event, AgentEvent::ToolExecStart { .. });
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
         if tool {
             break;
         }
     }
     tokio::select! {
         _ = entered.notified() => {},
-        _ = runtime.session.runtime.turns.next() => panic!("tool returned before release"),
+        _ = runtime.session.connection.runtime.turns.next() => panic!("tool returned before release"),
     }
     enqueue(&control, "during-tool");
     super::streams::submit_streaming_input(
@@ -895,21 +925,36 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         control.target()
     );
     release.notify_one();
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert_eq!(outcome(&control, "during-tool"), Outcome::Queued);
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert_eq!(outcome(&control, "during-tool"), Outcome::Completed);
     let requests = requests.lock().unwrap();
@@ -921,7 +966,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
 
 #[tokio::test]
 async fn cancelled_tool_is_dropped_before_queued_event_starts() {
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(FakeProvider {
@@ -939,45 +984,75 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     let mut state = StreamState::new();
     enqueue(&control, "active");
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
     loop {
-        let (pane, _, event) = runtime.session.runtime.turns.next().await.unwrap();
+        let (pane, generation, event) = runtime
+            .session
+            .connection
+            .runtime
+            .turns
+            .next()
+            .await
+            .unwrap();
         let tool = matches!(event, AgentEvent::ToolExecStart { .. });
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
         if tool {
             break;
         }
     }
-    tokio::select! { _ = entered.notified() => {}, _ = runtime.session.runtime.turns.next() => panic!() }
+    tokio::select! { _ = entered.notified() => {}, _ = runtime.session.connection.runtime.turns.next() => panic!() }
     enqueue(&control, "after-cancel");
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Queued);
-    while let Some((pane, generation, event)) = runtime.session.runtime.turns.next().await {
-        if runtime.session.runtime.turns.is_current(pane, generation) {
-            dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        if runtime
+            .session
+            .connection
+            .runtime
+            .turns
+            .is_current(pane, generation)
+        {
+            dispatch(
+                &mut runtime,
+                &mut state,
+                &mut config,
+                &registry,
+                pane,
+                generation,
+                event,
+            )
+            .await;
         }
     }
     entered.notified().await;
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
-    while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-        dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
+    while let Some((pane, generation, event)) =
+        runtime.session.connection.runtime.turns.next().await
+    {
+        dispatch(
+            &mut runtime,
+            &mut state,
+            &mut config,
+            &registry,
+            pane,
+            generation,
+            event,
+        )
+        .await;
     }
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Completed);
     assert_eq!(requests.lock().unwrap().len(), 2);
@@ -1027,7 +1102,7 @@ async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
 
 #[tokio::test]
 async fn cancellation_drops_pending_provider_connection() {
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let entered = Arc::new(tokio::sync::Notify::new());
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(PendingProvider(entered.clone())));
@@ -1035,26 +1110,27 @@ async fn cancellation_drops_pending_provider_connection() {
     let mut state = StreamState::new();
     enqueue(&control, "active");
     poll(&state, &mut runtime, &config).await.unwrap();
-    let stream_deps = deps(&config, &runtime, &tools, &registry);
-    start_pending_streams(
-        &mut state,
-        &mut runtime.session,
-        &mut runtime.pending_prompt,
-        stream_deps,
-    )
-    .await;
+    start_pending(&mut runtime, &config, &tools, &registry, false).await;
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = runtime.session.runtime.turns.next() => {
-                let (pane, _, event) = event.unwrap();
-                dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+            event = runtime.session.connection.runtime.turns.next() => {
+                let (pane, generation, event) = event.unwrap();
+                dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
             }
         }
     }
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while runtime.session.runtime.turns.next().await.is_some() {}
+        while runtime
+            .session
+            .connection
+            .runtime
+            .turns
+            .next()
+            .await
+            .is_some()
+        {}
         entered.notified().await;
     })
     .await
@@ -1064,7 +1140,7 @@ async fn cancellation_drops_pending_provider_connection() {
 
 #[tokio::test(start_paused = true)]
 async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
-    let (mut runtime, config, control) = fixture();
+    let (mut runtime, mut config, control) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(FakeProvider {
@@ -1085,19 +1161,23 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
             },
         );
         poll(&state, &mut runtime, &config).await.unwrap();
-        assert!(runtime.session.runtime.pending_prompt.is_none());
+        assert!(runtime.session.connection.runtime.pending_prompt.is_none());
         tokio::time::advance(std::time::Duration::from_millis(100)).await;
         poll(&state, &mut runtime, &config).await.unwrap();
-        let stream_deps = deps(&config, &runtime, &tools, &registry);
-        start_pending_streams(
-            &mut state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            stream_deps,
-        )
-        .await;
-        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-            dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        start_pending(&mut runtime, &config, &tools, &registry, false).await;
+        while let Some((pane, generation, event)) =
+            runtime.session.connection.runtime.turns.next().await
+        {
+            dispatch(
+                &mut runtime,
+                &mut state,
+                &mut config,
+                &registry,
+                pane,
+                generation,
+                event,
+            )
+            .await;
         }
         assert_eq!(outcome(&control, id), Outcome::Completed);
     }
@@ -1140,7 +1220,7 @@ async fn failed_event_remains_running_until_agent_end() {
 
 #[tokio::test]
 async fn pending_prompts_start_one_agent_at_a_time() {
-    let (mut runtime, config, _) = fixture();
+    let (mut runtime, mut config, _) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
     registry.register(Box::new(FakeProvider {
@@ -1151,27 +1231,24 @@ async fn pending_prompts_start_one_agent_at_a_time() {
     let tools = ToolRegistry::new();
     let mut state = StreamState::new();
     for expected in 1..=2 {
-        runtime.session.runtime.pending_prompt = Some(crate::session::PendingPrompt::text(
-            format!("prompt-{expected}"),
-        ));
-        let stream_deps = deps(&config, &runtime, &tools, &registry);
-        start_pending_streams(
-            &mut state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            stream_deps,
-        )
-        .await;
-        let stream_deps = deps(&config, &runtime, &tools, &registry);
-        start_pending_streams(
-            &mut state,
-            &mut runtime.session,
-            &mut runtime.pending_prompt,
-            stream_deps,
-        )
-        .await;
-        while let Some((pane, _, event)) = runtime.session.runtime.turns.next().await {
-            dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
+        runtime.session.connection.runtime.pending_prompt = Some(
+            crate::session::PendingPrompt::text(format!("prompt-{expected}")),
+        );
+        start_pending(&mut runtime, &config, &tools, &registry, false).await;
+        start_pending(&mut runtime, &config, &tools, &registry, false).await;
+        while let Some((pane, generation, event)) =
+            runtime.session.connection.runtime.turns.next().await
+        {
+            dispatch(
+                &mut runtime,
+                &mut state,
+                &mut config,
+                &registry,
+                pane,
+                generation,
+                event,
+            )
+            .await;
         }
         assert_eq!(requests.lock().unwrap().len(), expected);
     }

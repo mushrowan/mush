@@ -29,6 +29,9 @@ pub enum ClientCommand {
         text: String,
         images: Vec<PendingImage>,
     },
+    RetractSteer {
+        text: String,
+    },
     Abort,
     ConfirmTool {
         allow: bool,
@@ -62,7 +65,9 @@ pub enum ClientEvent {
         tokens_before: usize,
         model_id: String,
     },
-    Saved,
+    TurnEnded {
+        cancelled: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +132,41 @@ impl InProcessConnection {
         }
     }
 
+    #[must_use]
+    pub fn detached(runtime: SessionRuntime) -> Self {
+        let default_model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| unreachable!("the model catalogue is never empty"));
+        Self::new(
+            runtime,
+            ToolRegistry::new(),
+            ApiRegistry::new(),
+            TurnConfig {
+                default_model,
+                options: mush_ai::types::StreamOptions::default(),
+                max_turns: 1,
+                provider_api_keys: std::collections::HashMap::new(),
+                confirm_tools: false,
+                auto_compact: false,
+                compaction_model: None,
+                forbidden_chars: Default::default(),
+                tool_allowlist: None,
+            },
+            mush_agent::AgentInjections::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn turn_active(&self) -> bool {
+        self.runtime.turns.meta(PRIMARY_PANE).is_some() || self.runtime.turn_active()
+    }
+
+    pub fn set_deps(&mut self, tools: ToolRegistry, registry: ApiRegistry) {
+        self.tools = tools;
+        self.registry = registry;
+    }
+
     pub fn set_config(&mut self, config: TurnConfig) {
         self.config = config;
     }
@@ -135,10 +175,86 @@ impl InProcessConnection {
         self.injections = injections;
     }
 
+    pub async fn start_pending(&mut self) -> bool {
+        self.start_pending_prompt().await
+    }
+
+    pub fn try_next_event(&mut self) -> Option<ClientEvent> {
+        if let Some(event) = self.queued.pop_front() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_confirm() {
+            return Some(event);
+        }
+        self.try_poll_compaction()
+    }
+
+    fn try_poll_confirm(&mut self) -> Option<ClientEvent> {
+        let meta = self.runtime.turns.meta_mut(PRIMARY_PANE)?;
+        if meta.cancel.is_cancelled() {
+            return None;
+        }
+        let mut reply = meta.confirm_reply.try_lock().ok()?;
+        if reply.is_some() {
+            return None;
+        }
+        let request = meta.confirm_req_rx.try_recv().ok()?;
+        if request.reply.is_closed() {
+            return None;
+        }
+        let event = ClientEvent::ConfirmRequest {
+            tool_call_id: request.tool_call_id.clone(),
+            prompt: request.prompt,
+        };
+        *reply = Some(PendingConfirmation {
+            tool_call_id: request.tool_call_id,
+            reply: request.reply,
+        });
+        Some(event)
+    }
+
+    fn try_poll_compaction(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        let task = self.compaction.as_mut()?;
+        if !task.is_finished() {
+            return None;
+        }
+        let result = task.now_or_never()?;
+        self.compaction = None;
+        Some(self.finish_compaction(result.ok()?))
+    }
+
+    fn finish_compaction(&mut self, result: CompactionTaskResult) -> ClientEvent {
+        match result {
+            CompactionTaskResult::Applied(applied) => {
+                self.runtime.apply_compaction(
+                    applied.summary.clone(),
+                    applied.summarised_count,
+                    applied.messages.clone(),
+                );
+                self.runtime.save_debounced();
+                ClientEvent::Compacted(applied)
+            }
+            CompactionTaskResult::Failed {
+                failure,
+                tokens_before,
+                model_id,
+            } => ClientEvent::CompactionFailed {
+                failure,
+                tokens_before,
+                model_id,
+            },
+        }
+    }
+
     async fn start_pending_prompt(&mut self) -> bool {
-        if self.runtime.turn_active() || self.compaction.is_some() {
+        if self.runtime.turn_active()
+            || self.compaction.is_some()
+            || self.runtime.pending_prompt.is_none()
+        {
             return false;
         }
+        let prep = self.runtime.prepare_turn(&self.config).await;
         let Some(prompt) = self.runtime.pending_prompt.take() else {
             return false;
         };
@@ -152,7 +268,7 @@ impl InProcessConnection {
             pane_id: PRIMARY_PANE,
             prompt,
         };
-        self.runtime.start_turn(request, &deps).await;
+        self.runtime.start_prepared_turn(request, prep, &deps);
         self.queued.push_back(ClientEvent::TurnStarted);
         true
     }
@@ -169,6 +285,25 @@ impl InProcessConnection {
                 .prompt_id(mush_ai::types::PromptId::new())
                 .build(),
         ));
+    }
+
+    async fn retract_steer(&mut self, text: &str) -> bool {
+        let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) else {
+            return false;
+        };
+        let mut queue = meta.steering_queue.lock().await;
+        let matches = |exact: bool| {
+            queue.iter().rposition(|message| match message {
+                Message::User(user) if exact => user.content.text() == text,
+                Message::User(user) => user.content.text().trim() == text.trim(),
+                _ => false,
+            })
+        };
+        let Some(position) = matches(true).or_else(|| matches(false)) else {
+            return false;
+        };
+        queue.remove(position);
+        true
     }
 
     async fn confirm(&mut self, allow: bool) {
@@ -202,66 +337,46 @@ impl InProcessConnection {
         Ok(())
     }
 
-    async fn poll_confirm(&mut self) -> Option<ClientEvent> {
-        let meta = self.runtime.turns.meta_mut(PRIMARY_PANE)?;
-        if meta.cancel.is_cancelled() || meta.confirm_reply.lock().await.is_some() {
+    pub fn ingest_agent_event(
+        &mut self,
+        pane: PaneId,
+        generation: StreamGeneration,
+        event: AgentEvent,
+    ) -> Option<ClientEvent> {
+        if !self.runtime.turns.is_current(pane, generation) {
             return None;
         }
-        let request = meta.confirm_req_rx.try_recv().ok()?;
-        if request.reply.is_closed() {
-            return None;
-        }
-        let event = ClientEvent::ConfirmRequest {
-            tool_call_id: request.tool_call_id.clone(),
-            prompt: request.prompt,
-        };
-        *meta.confirm_reply.lock().await = Some(PendingConfirmation {
-            tool_call_id: request.tool_call_id,
-            reply: request.reply,
-        });
-        Some(event)
-    }
-
-    async fn poll_compaction(&mut self) -> Option<ClientEvent> {
-        if !self
-            .compaction
-            .as_ref()
-            .is_some_and(tokio::task::JoinHandle::is_finished)
-        {
-            return None;
-        }
-        let task = self.compaction.take()?;
-        let result = task.await.ok()?;
-        Some(match result {
-            CompactionTaskResult::Applied(applied) => {
-                self.runtime.apply_compaction(
-                    applied.summary.clone(),
-                    applied.summarised_count,
-                    applied.messages.clone(),
-                );
-                self.runtime.save_debounced();
-                ClientEvent::Compacted(applied)
-            }
-            CompactionTaskResult::Failed {
-                failure,
-                tokens_before,
-                model_id,
-            } => ClientEvent::CompactionFailed {
-                failure,
-                tokens_before,
-                model_id,
-            },
+        let applied = self.runtime.apply_event(&event);
+        self.on_agent_event(&event);
+        Some(ClientEvent::Agent {
+            generation,
+            event,
+            applied,
         })
     }
 
     fn on_agent_event(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::MessageEnd { .. } | AgentEvent::ToolExecEnd { .. } => {
+            AgentEvent::MessageEnd { message } => {
+                if let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) {
+                    meta.context_tokens.store(
+                        message.usage.total_input_tokens().get(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                self.runtime.save_debounced();
+            }
+            AgentEvent::ToolExecEnd { .. } | AgentEvent::ContextCompacted { .. } => {
                 self.runtime.save_debounced();
             }
             AgentEvent::AgentEnd => {
+                let cancelled = self
+                    .runtime
+                    .turns
+                    .remove(PRIMARY_PANE)
+                    .is_none_or(|meta| meta.cancel.is_cancelled());
                 self.runtime.save_now_and_settle();
-                self.queued.push_back(ClientEvent::Saved);
+                self.queued.push_back(ClientEvent::TurnEnded { cancelled });
             }
             _ => {}
         }
@@ -276,7 +391,7 @@ impl AgentConnection for InProcessConnection {
         }
         match command {
             ClientCommand::Prompt { text, images } => {
-                if self.runtime.turn_active() {
+                if self.turn_active() {
                     self.steer(text, images).await;
                 } else {
                     self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
@@ -284,6 +399,11 @@ impl AgentConnection for InProcessConnection {
                 }
             }
             ClientCommand::Steer { text, images } => self.steer(text, images).await,
+            ClientCommand::RetractSteer { text } => {
+                if !self.retract_steer(&text).await {
+                    tracing::warn!(%text, "no steering queue entry matched the retracted message");
+                }
+            }
             ClientCommand::Abort => self.runtime.turns.abort(PRIMARY_PANE),
             ClientCommand::ConfirmTool { allow } => self.confirm(allow).await,
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
@@ -313,13 +433,7 @@ impl AgentConnection for InProcessConnection {
             if self.closed {
                 return None;
             }
-            if self.start_pending_prompt().await {
-                continue;
-            }
-            if let Some(event) = self.poll_confirm().await {
-                return Some(event);
-            }
-            if let Some(event) = self.poll_compaction().await {
+            if let Some(event) = self.try_next_event() {
                 return Some(event);
             }
             if !self.runtime.turn_active() {
@@ -333,16 +447,9 @@ impl AgentConnection for InProcessConnection {
             let Some((pane, generation, event)) = turn_event else {
                 continue;
             };
-            if !self.runtime.turns.is_current(pane, generation) {
-                continue;
+            if let Some(event) = self.ingest_agent_event(pane, generation, event) {
+                return Some(event);
             }
-            let applied = self.runtime.apply_event(&event);
-            self.on_agent_event(&event);
-            return Some(ClientEvent::Agent {
-                generation,
-                event,
-                applied,
-            });
         }
     }
 
@@ -354,7 +461,7 @@ impl AgentConnection for InProcessConnection {
             thinking_level: self.runtime.thinking_level.clone(),
             context_tokens: self.runtime.context_tokens,
             context_len: self.runtime.conversation.context_len(),
-            turn_active: self.runtime.turn_active(),
+            turn_active: self.turn_active(),
             compacting: self.compaction.is_some(),
         }
     }
@@ -455,7 +562,7 @@ mod tests {
                     .await
                     .expect("an event before the timeout")
                     .expect("the connection stays open");
-            let done = matches!(event, ClientEvent::Saved);
+            let done = matches!(event, ClientEvent::TurnEnded { .. });
             events.push(event);
             if done {
                 return events;

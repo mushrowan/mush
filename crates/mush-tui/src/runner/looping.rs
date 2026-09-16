@@ -11,7 +11,8 @@ use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
 use super::runtime::RunnerRuntime;
-use super::streams::{StreamState, poll_confirmation_prompt, poll_live_tool_output};
+use super::streams::{StreamState, poll_live_tool_output};
+use mush_runtime::{AgentConnection, ClientEvent};
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     crate::app::ANIMATION_FRAME_INTERVAL;
@@ -28,7 +29,7 @@ pub(super) async fn run_loop_iteration(
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    let action = if !runtime.session.runtime.turn_active() {
+    let action = if !runtime.session.connection.runtime.turn_active() {
         handle_idle_iteration(
             stream_state,
             runtime,
@@ -116,12 +117,12 @@ async fn handle_streaming_iteration(
     let mut tick_changed = false;
 
     tokio::select! {
-        result = runtime.session.runtime.turns.next() => {
+        result = runtime.session.connection.next_event() => {
             let drain_started = std::time::Instant::now();
-            if let Some((pane_id, stream_gen, event)) = result {
+            if let Some(event) = result {
                 saw_agent_event = true;
-                saw_settling_agent_event |= is_settling_agent_event(&event);
-                dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, tui_config, registry, image_picker).await;
+                saw_settling_agent_event |= is_settling_client_event(&event);
+                dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
                 trace_draw_reason("agent_event");
                 runtime.tick_streaming_text_panes();
             }
@@ -135,16 +136,16 @@ async fn handle_streaming_iteration(
                 ) {
                     break;
                 }
-                match runtime.session.runtime.turns.try_next() {
-                    Some((pane_id, stream_gen, event)) => {
+                match runtime.session.connection.try_next_event() {
+                    Some(event) => {
                         saw_agent_event = true;
-                        saw_settling_agent_event |= is_settling_agent_event(&event);
+                        saw_settling_agent_event |= is_settling_client_event(&event);
                         drained_events += 1;
-                        dispatch_agent_event(pane_id, stream_gen, event, stream_state, runtime, tui_config, registry, image_picker).await;
+                        dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
                         trace_draw_reason("agent_event_drain");
                         runtime.tick_streaming_text_panes();
                     }
-                    _ => break,
+                    None => break,
                 }
             }
 
@@ -160,9 +161,10 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("animation_tick");
             }
-            if poll_confirmation_prompt(&mut runtime.session, stream_state).await {
+            while let Some(event) = runtime.session.connection.try_next_event() {
                 tick_changed = true;
-                trace_draw_reason("confirmation_prompt");
+                dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
+                trace_draw_reason("client_event_tick");
             }
             if super::streams::poll_kernel_busy_prompt(
                 &mut runtime.session,
@@ -205,8 +207,14 @@ async fn handle_streaming_iteration(
     ))
 }
 
-fn is_settling_agent_event(event: &AgentEvent) -> bool {
-    matches!(event, AgentEvent::AgentEnd)
+fn is_settling_client_event(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::Agent {
+            event: AgentEvent::AgentEnd,
+            ..
+        } | ClientEvent::TurnEnded { .. }
+    )
 }
 
 fn should_continue_agent_drain(
@@ -253,36 +261,93 @@ fn trace_draw_reason(reason: &'static str) {
     tracing::trace!(target: "mush_tui::draw_reason", reason, "draw requested");
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_agent_event(
-    pane_id: mush_ai::types::PaneId,
-    stream_gen: super::streams::StreamGeneration,
-    event: AgentEvent,
+pub(super) async fn dispatch_client_event(
+    event: ClientEvent,
     stream_state: &mut super::streams::StreamState,
     runtime: &mut RunnerRuntime,
     tui_config: &mut super::TuiConfig,
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    if !runtime
-        .session
-        .runtime
-        .turns
-        .is_current(pane_id, stream_gen)
-    {
-        return;
+    let pane_id = mush_runtime::PRIMARY_PANE;
+    match event {
+        ClientEvent::Agent { event, applied, .. } => {
+            dispatch_agent_event(pane_id, event, applied, runtime, tui_config, image_picker).await;
+        }
+        ClientEvent::TurnStarted => {
+            let app = &mut runtime.session.app;
+            app.active_tools.clear();
+            if !app.stream.active {
+                app.start_streaming();
+            }
+        }
+        ClientEvent::TurnEnded { cancelled } => {
+            let automatic_continuation = runtime.pending_prompt.is_some()
+                || runtime.pending_compactions.contains_key(&pane_id);
+            super::streams::handle_turn_ended(
+                &mut runtime.session,
+                stream_state,
+                pane_id,
+                tui_config,
+                registry,
+                automatic_continuation,
+                cancelled,
+            )
+            .await;
+        }
+        ClientEvent::ConfirmRequest {
+            tool_call_id,
+            prompt,
+        } => {
+            super::streams::show_confirm_request(
+                &mut runtime.session,
+                stream_state,
+                tool_call_id,
+                prompt,
+            );
+        }
+        ClientEvent::Session(event) => {
+            super::streams::apply_session_events(&mut runtime.session, tui_config, vec![event]);
+        }
+        ClientEvent::Compacting => {
+            runtime.session.app.compacting = true;
+            runtime.session.app.status = Some("compacting\u{2026}".into());
+        }
+        ClientEvent::Compacted(applied) => {
+            let after_count = runtime
+                .session
+                .connection
+                .runtime
+                .conversation
+                .context_len();
+            crate::slash::show_applied_compaction(&mut runtime.session.app, &applied, after_count);
+        }
+        ClientEvent::CompactionFailed { .. } => {
+            runtime.session.app.compacting = false;
+            runtime.session.app.push_system_message("compaction failed");
+        }
     }
-    super::control::complete(runtime.session.runtime.control.as_ref(), &event);
+}
+
+async fn dispatch_agent_event(
+    pane_id: mush_ai::types::PaneId,
+    event: AgentEvent,
+    applied: mush_runtime::Applied,
+    runtime: &mut RunnerRuntime,
+    tui_config: &mut super::TuiConfig,
+    image_picker: &Option<ratatui_image::picker::Picker>,
+) {
+    super::control::complete(runtime.session.connection.runtime.control.as_ref(), &event);
 
     {
         let pane = &mut runtime.session;
         let model = pane
+            .connection
             .runtime
             .turns
             .meta(pane_id)
             .map(|meta| meta.model.clone())
             .unwrap_or_else(|| tui_config.model.clone());
-        let applied = pane.runtime.apply_event(&event);
         let (app, image_protos) = pane.fields_mut();
         let mut ctx = event_handler::EventCtx { app, image_protos };
         event_handler::handle_agent_event(
@@ -297,12 +362,9 @@ async fn dispatch_agent_event(
 
     super::streams::handle_agent_event_side_effects(
         &mut runtime.session,
-        stream_state,
         pane_id,
         &event,
         tui_config,
-        registry,
-        runtime.pending_prompt.is_some() || runtime.pending_compactions.contains_key(&pane_id),
     )
     .await;
 
@@ -351,13 +413,26 @@ async fn handle_idle_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
+    let mut events_seen = false;
+    while let Some(event) = runtime.session.connection.try_next_event() {
+        events_seen = true;
+        dispatch_client_event(
+            event,
+            stream_state,
+            runtime,
+            tui_config,
+            registry,
+            image_picker,
+        )
+        .await;
+    }
     stream_state.save_dirty_session(&mut runtime.session, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.session);
     let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 
     let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
     let action = handle_idle_terminal_events(session, stream_state, &mut deps).await?;
-    if matches!(action, LoopAction::Continue) && (picker_changed || login_changed) {
+    if matches!(action, LoopAction::Continue) && (picker_changed || login_changed || events_seen) {
         Ok(LoopAction::Redraw)
     } else {
         Ok(action)
@@ -489,7 +564,7 @@ mod tests {
             let pane = PaneId::new(1);
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             let cancel = tokio_util::sync::CancellationToken::new();
-            let generation = runtime.session.runtime.turns.register_active(
+            let generation = runtime.session.connection.runtime.turns.register_active(
                 pane,
                 StreamMeta {
                     steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -501,11 +576,11 @@ mod tests {
                 },
             );
             if case == "abort" {
-                runtime.session.runtime.turns.abort(pane);
+                runtime.session.connection.runtime.turns.abort(pane);
             }
             if case == "replaced" {
                 let (_tx, rx) = tokio::sync::mpsc::channel(1);
-                runtime.session.runtime.turns.register_active(
+                runtime.session.connection.runtime.turns.register_active(
                     pane,
                     StreamMeta {
                         steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -521,44 +596,48 @@ mod tests {
                 cancel.cancel();
             }
             let registry = ApiRegistry::new();
+            let feed = async |runtime: &mut RunnerRuntime,
+                              state: &mut StreamState,
+                              config: &mut TuiConfig,
+                              event: AgentEvent| {
+                let Some(event) = runtime
+                    .session
+                    .connection
+                    .ingest_agent_event(pane, generation, event)
+                else {
+                    return;
+                };
+                dispatch_client_event(event, state, runtime, config, &registry, &None).await;
+                while let Some(event) = runtime.session.connection.try_next_event() {
+                    dispatch_client_event(event, state, runtime, config, &registry, &None).await;
+                }
+            };
             for turn_index in 0..3 {
-                dispatch_agent_event(
-                    pane,
-                    generation,
-                    AgentEvent::TurnStart { turn_index },
-                    &mut state,
+                feed(
                     &mut runtime,
+                    &mut state,
                     &mut config,
-                    &registry,
-                    &None,
+                    AgentEvent::TurnStart { turn_index },
                 )
                 .await;
             }
             if case == "error" {
-                dispatch_agent_event(
-                    pane,
-                    generation,
+                feed(
+                    &mut runtime,
+                    &mut state,
+                    &mut config,
                     AgentEvent::Error {
                         error: "private error".into(),
                     },
-                    &mut state,
-                    &mut runtime,
-                    &mut config,
-                    &registry,
-                    &None,
                 )
                 .await;
             }
             if case == "max" {
-                dispatch_agent_event(
-                    pane,
-                    generation,
-                    AgentEvent::MaxTurnsReached { max_turns: 1 },
-                    &mut state,
+                feed(
                     &mut runtime,
+                    &mut state,
                     &mut config,
-                    &registry,
-                    &None,
+                    AgentEvent::MaxTurnsReached { max_turns: 1 },
                 )
                 .await;
             }
@@ -566,17 +645,7 @@ mod tests {
             #[cfg(feature = "signal")]
             assert_eq!(state.signal.as_mut().unwrap().finished().await, None);
             for _ in 0..2 {
-                dispatch_agent_event(
-                    pane,
-                    generation,
-                    AgentEvent::AgentEnd,
-                    &mut state,
-                    &mut runtime,
-                    &mut config,
-                    &registry,
-                    &None,
-                )
-                .await;
+                feed(&mut runtime, &mut state, &mut config, AgentEvent::AgentEnd).await;
             }
             let alerts = alerts.lock().unwrap().clone();
             let expected = usize::from(!matches!(
