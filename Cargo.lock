@@ -2907,8 +2907,10 @@ dependencies = [
  "futures",
  "mush-agent",
  "mush-ai",
+ "mush-kernel",
  "mush-session",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

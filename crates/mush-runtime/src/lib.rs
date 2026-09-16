@@ -1,13 +1,17 @@
+pub mod commands;
 pub mod session;
+pub mod snapshot;
 
 use mush_agent::AgentEvent;
 use mush_ai::types::{Message, Timestamp, ToolResultMessage};
 use mush_session::ConversationState;
 
+pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use session::{
     PendingImage, PendingPrompt, SessionRuntime, StreamGeneration, TurnEvent, TurnEvents,
     TurnStream,
 };
+pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {

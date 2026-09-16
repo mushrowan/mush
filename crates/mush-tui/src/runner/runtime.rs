@@ -112,7 +112,10 @@ impl RunnerRuntime {
             &mut app,
             std::mem::take(&mut tui_config.initial_conversation),
         );
-        let session = Session::with_conversation(app, conversation);
+        let mut session = Session::with_conversation(app, conversation);
+        session.runtime.saver = tui_config.save_session.clone();
+        session.runtime.kernel_state = tui_config.kernel_state.clone();
+        super::streams::sync_runtime_from_tui(&mut session, tui_config);
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 

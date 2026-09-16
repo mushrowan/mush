@@ -8,23 +8,7 @@ pub type RecentModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 pub type LiveToolOutput =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
 
-pub struct SessionSnapshot {
-    pub session_id: mush_ai::types::SessionId,
-    pub title: Option<String>,
-    pub primary: ConversationState,
-    pub model_id: String,
-    pub panes: Vec<PaneSnapshot>,
-    pub system_prompt: Option<String>,
-}
-
-pub struct PaneSnapshot {
-    pub pane_id: mush_ai::types::PaneId,
-    pub label: Option<String>,
-    pub model_id: String,
-    pub conversation: ConversationState,
-}
-
-pub type SessionSaver = std::sync::Arc<dyn Fn(SessionSnapshot) + Send + Sync>;
+pub use mush_runtime::{PaneSnapshot, SessionSaver, SessionSnapshot};
 
 pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
@@ -103,38 +87,6 @@ pub struct TuiConfig {
 }
 
 impl TuiConfig {
-    pub async fn snapshot_kernel_state(&self, session_id: &mush_ai::types::SessionId) {
-        let Some(kernel) = &self.kernel_state else {
-            return;
-        };
-        let path = mush_session::SessionStore::kernel_state_path(session_id);
-        match kernel.snapshot(&path).await {
-            Ok(Some(report)) => tracing::info!(
-                saved = report.saved.len(),
-                skipped = report.skipped.len(),
-                "kernel state saved"
-            ),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "kernel state snapshot failed"),
-        }
-    }
-
-    pub async fn switch_kernel_state(&self, from: &mush_ai::types::SessionId) {
-        let Some(kernel) = &self.kernel_state else {
-            return;
-        };
-        if *from == self.session_id {
-            return;
-        }
-        self.snapshot_kernel_state(from).await;
-        kernel.reset().await;
-        kernel
-            .restore_from(&mush_session::SessionStore::kernel_state_path(
-                &self.session_id,
-            ))
-            .await;
-    }
-
     #[must_use]
     pub fn stream_options(&self) -> mush_ai::types::StreamOptions {
         let mut options = self.options.clone();

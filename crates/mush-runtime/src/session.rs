@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::StreamExt;
 use mush_agent::AgentEvent;
 use mush_ai::registry::ApiRegistry;
-use mush_ai::types::{ImageMimeType, Message, PaneId};
+use mush_ai::types::{ImageMimeType, Message, PaneId, SessionId};
 use mush_session::ConversationState;
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -130,6 +130,10 @@ impl PendingPrompt {
 }
 
 pub struct SessionRuntime {
+    pub session_id: SessionId,
+    pub title: Option<String>,
+    pub model_id: String,
+    pub system_prompt: Option<String>,
     pub conversation: ConversationState,
     pub pending_prompt: Option<PendingPrompt>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
@@ -138,12 +142,18 @@ pub struct SessionRuntime {
     pub control: Option<mush_agent::ipc::control::Control>,
     pub control_socket: Option<PathBuf>,
     pub turns: TurnEvents,
+    pub saver: Option<crate::snapshot::SessionSaver>,
+    pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
 }
 
 impl SessionRuntime {
     #[must_use]
     pub fn new(conversation: ConversationState) -> Self {
         Self {
+            session_id: SessionId::new(),
+            title: None,
+            model_id: String::new(),
+            system_prompt: None,
             conversation,
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -152,6 +162,8 @@ impl SessionRuntime {
             control: None,
             control_socket: None,
             turns: TurnEvents::default(),
+            saver: None,
+            kernel_state: None,
         }
     }
 

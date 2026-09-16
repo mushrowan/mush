@@ -1,0 +1,487 @@
+use std::sync::Arc;
+
+use mush_ai::types::{Message, SessionId};
+use mush_kernel::KernelState;
+use mush_session::{ConversationState, SessionStore};
+
+use crate::session::SessionRuntime;
+use crate::snapshot::SessionSnapshot;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionCommand {
+    New,
+    Resume { id: SessionId },
+    Fork { before_user_message: usize },
+    Clone,
+    Branch { user_message: usize },
+    Undo,
+    Clear,
+    Name { title: Option<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Replaced {
+    New,
+    Resumed,
+    Forked,
+    Cloned,
+    Branched,
+    Undone,
+    Cleared,
+}
+
+impl Replaced {
+    #[must_use]
+    pub fn keeps_live_stats(self) -> bool {
+        matches!(self, Self::Branched | Self::Undone | Self::Cleared)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionEvent {
+    SessionIdChanged(SessionId),
+    SystemPromptChanged(Option<String>),
+    Title(Option<String>),
+    TranscriptReplaced {
+        reason: Replaced,
+        messages: Vec<Message>,
+        editor_text: Option<String>,
+    },
+    Status(String),
+    Failed(String),
+}
+
+impl SessionRuntime {
+    pub async fn handle(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
+        match command {
+            SessionCommand::New => {
+                self.save_now();
+                self.snapshot_kernel(&self.session_id.clone()).await;
+                if let Some(kernel) = &self.kernel_state {
+                    kernel.reset().await;
+                }
+                self.replace_session(SessionId::new(), ConversationState::new(), None);
+                let mut events = self.session_changed_events();
+                events.push(SessionEvent::TranscriptReplaced {
+                    reason: Replaced::New,
+                    messages: Vec::new(),
+                    editor_text: None,
+                });
+                events.push(SessionEvent::Status(
+                    "new session started (previous session saved)".into(),
+                ));
+                events
+            }
+            SessionCommand::Resume { id } => {
+                let store = SessionStore::new(SessionStore::default_dir());
+                if store.is_leased(&id) {
+                    return vec![SessionEvent::Failed(
+                        "resume this supervised session from the cli".into(),
+                    )];
+                }
+                let loaded = match store.load(&id) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        return vec![SessionEvent::Failed(format!(
+                            "failed to load session: {error}"
+                        ))];
+                    }
+                };
+                self.save_now();
+                let previous = self.session_id.clone();
+                self.snapshot_kernel(&previous).await;
+                if let Some(kernel) = &self.kernel_state {
+                    kernel.reset().await;
+                    kernel
+                        .restore_from(&SessionStore::kernel_state_path(&id))
+                        .await;
+                }
+                if let Some(prompt) = loaded.system_prompt {
+                    self.system_prompt = Some(prompt);
+                }
+                let title = loaded.meta.title.clone();
+                self.replace_session(id, loaded.conversation, title.clone());
+                self.title_generated = title.is_some();
+                let mut events = self.session_changed_events();
+                events.push(SessionEvent::SystemPromptChanged(
+                    self.system_prompt.clone(),
+                ));
+                events.push(SessionEvent::TranscriptReplaced {
+                    reason: Replaced::Resumed,
+                    messages: self.conversation.context(),
+                    editor_text: None,
+                });
+                events.push(SessionEvent::Status(format!(
+                    "resumed: {}",
+                    title.as_deref().unwrap_or("untitled")
+                )));
+                events
+            }
+            SessionCommand::Fork {
+                before_user_message,
+            } => {
+                let messages = self.conversation.context();
+                let positions = user_positions(&messages);
+                let Some(&position) = positions.get(before_user_message.wrapping_sub(1)) else {
+                    return vec![SessionEvent::Failed(format!(
+                        "invalid: use 1-{} (try /tree to see messages)",
+                        positions.len()
+                    ))];
+                };
+                let prompt = match &messages[position] {
+                    Message::User(user) => user.text(),
+                    _ => String::new(),
+                };
+                let prefix = messages[..position].to_vec();
+                self.save_now();
+                self.snapshot_kernel(&self.session_id.clone()).await;
+                self.replace_session(
+                    SessionId::new(),
+                    ConversationState::from_messages(prefix),
+                    None,
+                );
+                let mut events = self.session_changed_events();
+                events.push(SessionEvent::TranscriptReplaced {
+                    reason: Replaced::Forked,
+                    messages: self.conversation.context(),
+                    editor_text: Some(prompt),
+                });
+                events.push(SessionEvent::Status(format!(
+                    "forked before message {before_user_message}"
+                )));
+                events
+            }
+            SessionCommand::Clone => {
+                let branch = self.conversation.context();
+                self.save_now();
+                self.snapshot_kernel(&self.session_id.clone()).await;
+                self.replace_session(
+                    SessionId::new(),
+                    ConversationState::from_messages(branch),
+                    None,
+                );
+                let mut events = self.session_changed_events();
+                events.push(SessionEvent::TranscriptReplaced {
+                    reason: Replaced::Cloned,
+                    messages: self.conversation.context(),
+                    editor_text: None,
+                });
+                events.push(SessionEvent::Status(
+                    "cloned the current branch into a new session".into(),
+                ));
+                events
+            }
+            SessionCommand::Branch { user_message } => {
+                let user_messages = self.conversation.user_messages_in_branch();
+                let count = user_messages.len();
+                let target = user_messages
+                    .get(user_message.wrapping_sub(1))
+                    .map(|entry| (entry.parent_id.clone(), entry_preview(entry)));
+                drop(user_messages);
+                let Some((parent, preview)) = target else {
+                    return vec![SessionEvent::Failed(format!(
+                        "invalid: use 1-{count} (try /tree to see messages)"
+                    ))];
+                };
+                match parent {
+                    Some(parent) => {
+                        self.conversation.branch(&parent);
+                    }
+                    None => self.conversation.reset_leaf(),
+                }
+                vec![
+                    SessionEvent::TranscriptReplaced {
+                        reason: Replaced::Branched,
+                        messages: self.conversation.context(),
+                        editor_text: None,
+                    },
+                    SessionEvent::Status(format!("branched before: {preview}")),
+                ]
+            }
+            SessionCommand::Undo => {
+                let parent = self
+                    .conversation
+                    .user_messages_in_branch()
+                    .last()
+                    .map(|entry| entry.parent_id.clone());
+                match parent {
+                    None => vec![SessionEvent::Failed("nothing to undo".into())],
+                    Some(parent) => {
+                        match parent {
+                            Some(parent) => {
+                                self.conversation.branch(&parent);
+                            }
+                            None => self.conversation.reset_leaf(),
+                        }
+                        vec![
+                            SessionEvent::TranscriptReplaced {
+                                reason: Replaced::Undone,
+                                messages: self.conversation.context(),
+                                editor_text: None,
+                            },
+                            SessionEvent::Status("undid last turn".into()),
+                        ]
+                    }
+                }
+            }
+            SessionCommand::Clear => {
+                self.conversation.replace_messages(Vec::new());
+                vec![
+                    SessionEvent::TranscriptReplaced {
+                        reason: Replaced::Cleared,
+                        messages: Vec::new(),
+                        editor_text: None,
+                    },
+                    SessionEvent::Status("conversation cleared".into()),
+                ]
+            }
+            SessionCommand::Name { title } => {
+                self.title = title.clone();
+                self.title_generated = title.is_some();
+                let mut events = vec![SessionEvent::Title(title.clone())];
+                if let Some(title) = title {
+                    events.push(SessionEvent::Status(format!("session named: {title}")));
+                }
+                events
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> SessionSnapshot {
+        SessionSnapshot {
+            session_id: self.session_id.clone(),
+            title: self.title.clone(),
+            primary: self.conversation.clone(),
+            model_id: self.model_id.clone(),
+            panes: Vec::new(),
+            system_prompt: self.system_prompt.clone(),
+        }
+    }
+
+    pub fn save_now(&self) {
+        if let Some(saver) = &self.saver {
+            saver(self.snapshot());
+        }
+    }
+
+    pub async fn snapshot_kernel(&self, session_id: &SessionId) {
+        let Some(kernel) = &self.kernel_state else {
+            return;
+        };
+        let path = SessionStore::kernel_state_path(session_id);
+        match kernel.snapshot(&path).await {
+            Ok(Some(report)) => tracing::info!(
+                saved = report.saved.len(),
+                skipped = report.skipped.len(),
+                "kernel state saved"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "kernel state snapshot failed"),
+        }
+    }
+
+    pub fn set_kernel_state(&mut self, kernel: Option<Arc<dyn KernelState>>) {
+        self.kernel_state = kernel;
+    }
+
+    fn replace_session(
+        &mut self,
+        id: SessionId,
+        conversation: ConversationState,
+        title: Option<String>,
+    ) {
+        self.session_id = id;
+        self.conversation = conversation;
+        self.title = title;
+        self.title_generated = false;
+        self.pending_prompt = None;
+        self.pending_compaction_inputs.clear();
+    }
+
+    fn session_changed_events(&self) -> Vec<SessionEvent> {
+        vec![
+            SessionEvent::SessionIdChanged(self.session_id.clone()),
+            SessionEvent::Title(self.title.clone()),
+        ]
+    }
+}
+
+fn user_positions(messages: &[Message]) -> Vec<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| matches!(message, Message::User(_)))
+        .map(|(position, _)| position)
+        .collect()
+}
+
+fn entry_preview(entry: &mush_session::tree::SessionEntry) -> String {
+    match &entry.kind {
+        mush_session::tree::EntryKind::Message {
+            message: Message::User(user),
+        } => {
+            let text = user.text();
+            let mut chars = text.chars();
+            let head: String = chars.by_ref().take(40).collect();
+            if chars.next().is_some() {
+                format!("{head}...")
+            } else {
+                head
+            }
+        }
+        _ => "message".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mush_ai::types::{Timestamp, UserContent, UserMessage};
+
+    fn user(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn runtime(messages: Vec<Message>) -> SessionRuntime {
+        SessionRuntime::new(ConversationState::from_messages(messages))
+    }
+
+    fn replaced(events: &[SessionEvent]) -> Option<(Replaced, Vec<Message>, Option<String>)> {
+        events.iter().find_map(|event| match event {
+            SessionEvent::TranscriptReplaced {
+                reason,
+                messages,
+                editor_text,
+            } => Some((*reason, messages.clone(), editor_text.clone())),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn new_swaps_the_id_and_empties_the_transcript() {
+        let mut runtime = runtime(vec![user("first")]);
+        runtime.title = Some("old".into());
+        let old = runtime.session_id.clone();
+        let saved = Arc::new(std::sync::Mutex::new(Vec::new()));
+        runtime.saver = Some({
+            let saved = saved.clone();
+            Arc::new(move |snapshot: SessionSnapshot| {
+                saved.lock().unwrap().push(snapshot.session_id.clone());
+            })
+        });
+
+        let events = runtime.handle(SessionCommand::New).await;
+
+        assert_ne!(runtime.session_id, old);
+        assert!(runtime.conversation.is_empty());
+        assert!(runtime.title.is_none());
+        assert_eq!(saved.lock().unwrap().as_slice(), [old]);
+        assert!(events.contains(&SessionEvent::Title(None)));
+        assert_eq!(replaced(&events), Some((Replaced::New, Vec::new(), None)));
+    }
+
+    #[tokio::test]
+    async fn fork_keeps_the_prefix_and_hands_back_the_prompt() {
+        let mut runtime = runtime(vec![user("first"), user("second"), user("third")]);
+        let old = runtime.session_id.clone();
+
+        let events = runtime
+            .handle(SessionCommand::Fork {
+                before_user_message: 2,
+            })
+            .await;
+
+        assert_ne!(runtime.session_id, old);
+        assert_eq!(
+            replaced(&events),
+            Some((Replaced::Forked, vec![user("first")], Some("second".into())))
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_out_of_range_fails_without_touching_anything() {
+        let mut runtime = runtime(vec![user("first")]);
+        let old = runtime.session_id.clone();
+
+        let events = runtime
+            .handle(SessionCommand::Fork {
+                before_user_message: 5,
+            })
+            .await;
+
+        assert_eq!(runtime.session_id, old);
+        assert!(matches!(events.as_slice(), [SessionEvent::Failed(_)]));
+    }
+
+    #[tokio::test]
+    async fn clone_copies_the_branch_under_a_new_id() {
+        let mut runtime = runtime(vec![user("a"), user("b")]);
+        let old = runtime.session_id.clone();
+
+        let events = runtime.handle(SessionCommand::Clone).await;
+
+        assert_ne!(runtime.session_id, old);
+        assert_eq!(
+            replaced(&events).map(|(reason, messages, _)| (reason, messages.len())),
+            Some((Replaced::Cloned, 2))
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_drops_the_last_turn_and_branch_rewinds_to_a_message() {
+        let mut runtime = runtime(vec![user("a"), user("b"), user("c")]);
+
+        let undone = runtime.handle(SessionCommand::Undo).await;
+        assert_eq!(runtime.conversation.context_len(), 2);
+        assert!(matches!(
+            replaced(&undone),
+            Some((Replaced::Undone, _, None))
+        ));
+
+        let branched = runtime
+            .handle(SessionCommand::Branch { user_message: 1 })
+            .await;
+        assert_eq!(runtime.conversation.context_len(), 0);
+        assert!(matches!(
+            replaced(&branched),
+            Some((Replaced::Branched, _, None))
+        ));
+
+        let nothing = runtime.handle(SessionCommand::Undo).await;
+        assert!(matches!(nothing.as_slice(), [SessionEvent::Failed(_)]));
+    }
+
+    #[tokio::test]
+    async fn name_sets_the_title_and_stops_generation() {
+        let mut runtime = runtime(vec![]);
+
+        let events = runtime
+            .handle(SessionCommand::Name {
+                title: Some("port prime".into()),
+            })
+            .await;
+
+        assert_eq!(runtime.title.as_deref(), Some("port prime"));
+        assert!(runtime.title_generated);
+        assert_eq!(events[0], SessionEvent::Title(Some("port prime".into())));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_missing_session_fails() {
+        let mut runtime = runtime(vec![]);
+
+        let events = runtime
+            .handle(SessionCommand::Resume {
+                id: SessionId::from("does-not-exist"),
+            })
+            .await;
+
+        assert!(matches!(events.as_slice(), [SessionEvent::Failed(_)]));
+    }
+}

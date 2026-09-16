@@ -20,28 +20,22 @@ pub(super) struct SlashEnv<'a> {
         &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
 }
 
-async fn start_session_from(
+async fn run_session_command(
     session: &mut Session,
     tui_config: &mut TuiConfig,
-    messages: Vec<mush_ai::types::Message>,
-) {
-    if let Some(ref saver) = tui_config.save_session {
-        saver(super::streams::build_session_snapshot(session, tui_config));
-    }
-    tui_config
-        .snapshot_kernel_state(&tui_config.session_id.clone())
-        .await;
-    let new_id = mush_ai::types::SessionId::new();
-    tui_config.session_id = new_id.clone();
-    tui_config.options.session_id = Some(new_id);
-    session.runtime.title_generated = false;
-    let (app, conversation, _) = session.fields_mut();
-    app.session_title = None;
-    *conversation = mush_session::ConversationState::from_messages(messages);
-    let context = conversation.context();
-    crate::slash::rebuild_display(app, &context);
-    app.stats.reset();
-    crate::conversation_display::accumulate_session_stats(app, &context);
+    command: mush_runtime::SessionCommand,
+) -> bool {
+    super::streams::sync_runtime_from_tui(session, tui_config);
+    let events = session.runtime.handle(command).await;
+    let changed = events.iter().any(|event| {
+        matches!(
+            event,
+            mush_runtime::SessionEvent::TranscriptReplaced { .. }
+                | mush_runtime::SessionEvent::SessionIdChanged(_)
+        )
+    });
+    super::streams::apply_session_events(session, tui_config, events);
+    changed
 }
 
 pub(super) async fn handle_slash_action(
@@ -166,25 +160,7 @@ pub(super) async fn handle_slash_action(
             session.app.push_system_message(report);
         }
         SlashAction::New => {
-            if let Some(ref saver) = tui_config.save_session {
-                saver(super::streams::build_session_snapshot(session, tui_config));
-            }
-            tui_config
-                .snapshot_kernel_state(&tui_config.session_id.clone())
-                .await;
-            if let Some(kernel) = &tui_config.kernel_state {
-                kernel.reset().await;
-            }
-            let new_id = mush_ai::types::SessionId::new();
-            tui_config.session_id = new_id.clone();
-            tui_config.options.session_id = Some(new_id);
-            session.runtime.title_generated = false;
-            let pane = &mut *session;
-            let (app, conversation, _) = pane.fields_mut();
-            app.clear_messages();
-            app.session_title = None;
-            *conversation = mush_session::ConversationState::new();
-            app.status = Some("new session started (previous session saved)".into());
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::New).await;
             state_changed = true;
         }
         SlashAction::Fork { index: None } => {
@@ -193,37 +169,79 @@ pub(super) async fn handle_slash_action(
             );
         }
         SlashAction::Fork { index: Some(index) } => {
-            let messages = session.runtime.conversation.context();
-            let user_positions: Vec<usize> = messages
-                .iter()
-                .enumerate()
-                .filter(|(_, message)| matches!(message, mush_ai::types::Message::User(_)))
-                .map(|(position, _)| position)
-                .collect();
-            match user_positions.get(index.wrapping_sub(1)) {
-                None => session.app.push_system_message(format!(
-                    "invalid: use 1-{} (try /tree to see messages)",
-                    user_positions.len()
-                )),
-                Some(&position) => {
-                    let prompt = match &messages[position] {
-                        mush_ai::types::Message::User(user) => user.text(),
-                        _ => String::new(),
-                    };
-                    let prefix = messages[..position].to_vec();
-                    start_session_from(session, tui_config, prefix).await;
-                    session.app.input.text = prompt;
-                    session.app.input.cursor = session.app.input.text.len();
-                    session.app.status = Some(format!("forked before message {index}").into());
-                    state_changed = true;
-                }
-            }
+            state_changed = run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::Fork {
+                    before_user_message: index,
+                },
+            )
+            .await;
         }
         SlashAction::Clone => {
-            let branch = session.runtime.conversation.context();
-            start_session_from(session, tui_config, branch).await;
-            session.app.status = Some("cloned the current branch into a new session".into());
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clone).await;
             state_changed = true;
+        }
+        SlashAction::Clear => {
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clear).await;
+        }
+        SlashAction::Undo => {
+            state_changed =
+                run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await;
+        }
+        SlashAction::Branch { index: Some(index) } => {
+            state_changed = run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::Branch {
+                    user_message: index,
+                },
+            )
+            .await;
+        }
+        SlashAction::Name { title: Some(title) } => {
+            let title = crate::widgets::top_bar::sanitise_title(&title);
+            if title.is_empty() {
+                session.app.push_system_message("usage: /name <title>");
+            } else {
+                run_session_command(
+                    session,
+                    tui_config,
+                    mush_runtime::SessionCommand::Name { title: Some(title) },
+                )
+                .await;
+            }
+        }
+        SlashAction::Resume { session_id } => {
+            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+            let target = match session_id {
+                Some(id) => Some(id),
+                None => {
+                    let cwd_str = tui_config.cwd.display().to_string();
+                    match store.list() {
+                        Ok(metas) => metas.into_iter().find(|m| m.cwd == cwd_str).map(|m| m.id),
+                        Err(error) => {
+                            session
+                                .app
+                                .push_system_message(format!("failed to list sessions: {error}"));
+                            None
+                        }
+                    }
+                }
+            };
+            match target {
+                Some(id) => {
+                    state_changed = run_session_command(
+                        session,
+                        tui_config,
+                        mush_runtime::SessionCommand::Resume { id },
+                    )
+                    .await;
+                }
+                None => session.app.push_system_message(
+                    "no recent session for this directory. start one with /new",
+                ),
+            }
         }
         SlashAction::Reload => {
             let Some(reload) = tui_config.reload_context.clone() else {
@@ -275,7 +293,6 @@ pub(super) async fn handle_slash_action(
             session.app.status = None;
         }
         other_action => {
-            let before = tui_config.session_id.clone();
             let pane = &mut *session;
             let (app, conversation, _) = pane.fields_mut();
             if let Some(prompt) =
@@ -284,10 +301,6 @@ pub(super) async fn handle_slash_action(
                 app.start_streaming();
                 *pending_prompt = Some(prompt);
             }
-            if matches!(other_action, SlashAction::Undo | SlashAction::Branch { .. }) {
-                state_changed = true;
-            }
-            tui_config.switch_kernel_state(&before).await;
         }
     }
 
@@ -655,6 +668,47 @@ mod tests {
 
         assert_eq!(config.session_id, old_id);
         assert_eq!(session.runtime.conversation.context_len(), 1);
+    }
+
+    #[test]
+    fn name_sets_the_session_title_and_a_blank_one_is_refused() {
+        let mut session = conversation_session(vec![]);
+        let mut config = TuiConfig::for_test();
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::Name {
+                title: Some("  port\tprime  ".into()),
+            },
+        );
+        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::Name {
+                title: Some("\x07".into()),
+            },
+        );
+        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+    }
+
+    #[test]
+    fn undo_and_branch_rewind_the_transcript() {
+        let mut session = conversation_session(vec![user("a"), user("b"), user("c")]);
+        let mut config = TuiConfig::for_test();
+
+        run(&mut session, &mut config, SlashAction::Undo);
+        assert_eq!(session.runtime.conversation.context_len(), 2);
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::Branch { index: Some(1) },
+        );
+        assert_eq!(session.runtime.conversation.context_len(), 0);
+        assert!(session.app.messages.is_empty());
     }
 
     #[test]

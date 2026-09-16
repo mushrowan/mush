@@ -1050,6 +1050,13 @@ fn build_system_prompt(base_system_prompt: &Option<String>) -> Option<String> {
     base_system_prompt.clone()
 }
 
+pub(crate) fn sync_runtime_from_tui(session: &mut Session, tui_config: &super::TuiConfig) {
+    session.runtime.session_id = tui_config.session_id.clone();
+    session.runtime.title = session.app.session_title.clone();
+    session.runtime.model_id = session.app.model_id.to_string();
+    session.runtime.system_prompt = tui_config.system_prompt.clone();
+}
+
 pub(crate) fn build_session_snapshot(
     session: &Session,
     tui_config: &super::TuiConfig,
@@ -1061,6 +1068,45 @@ pub(crate) fn build_session_snapshot(
         model_id: session.app.model_id.to_string(),
         panes: Vec::new(),
         system_prompt: tui_config.system_prompt.clone(),
+    }
+}
+
+pub(crate) fn apply_session_events(
+    session: &mut Session,
+    tui_config: &mut super::TuiConfig,
+    events: Vec<mush_runtime::SessionEvent>,
+) {
+    use mush_runtime::SessionEvent;
+    for event in events {
+        match event {
+            SessionEvent::SessionIdChanged(id) => {
+                tui_config.session_id = id.clone();
+                tui_config.options.session_id = Some(id);
+            }
+            SessionEvent::SystemPromptChanged(prompt) => tui_config.system_prompt = prompt,
+            SessionEvent::Title(title) => session.app.session_title = title,
+            SessionEvent::TranscriptReplaced {
+                reason,
+                messages,
+                editor_text,
+            } => {
+                let app = &mut session.app;
+                crate::conversation_display::rebuild_display(app, &messages);
+                if reason.keeps_live_stats() {
+                    let estimate = mush_session::compact::estimate_tokens(&messages);
+                    app.stats.reset_live_state(TokenCount::new(estimate as u64));
+                } else {
+                    app.stats.reset();
+                    crate::conversation_display::accumulate_session_stats(app, &messages);
+                }
+                if let Some(text) = editor_text {
+                    app.input.text = text;
+                    app.input.cursor = app.input.text.len();
+                }
+            }
+            SessionEvent::Status(status) => session.app.status = Some(status.into()),
+            SessionEvent::Failed(message) => session.app.push_system_message(message),
+        }
     }
 }
 

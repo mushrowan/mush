@@ -290,8 +290,11 @@ pub async fn run_tui(
     }
 
     stream_state.abort(mush_ai::types::PaneId::new(1));
-    tui_config
-        .snapshot_kernel_state(&tui_config.session_id.clone())
+    streams::sync_runtime_from_tui(&mut runtime.session, &tui_config);
+    runtime
+        .session
+        .runtime
+        .snapshot_kernel(&tui_config.session_id.clone())
         .await;
     if let Some(listener) = ipc_listener {
         listener.shutdown().await.map_err(io::Error::other)?;

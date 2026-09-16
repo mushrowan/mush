@@ -10,6 +10,8 @@ publish = false
 mush-ai.workspace = true
 mush-agent.workspace = true
 mush-session.workspace = true
+mush-kernel.workspace = true
+tracing.workspace = true
 tokio.workspace = true
 futures.workspace = true
 

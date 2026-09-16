@@ -131,21 +131,18 @@ pub fn handle(
             app.push_system_message(keys);
             None
         }
-        SlashAction::Clear => {
-            app.clear_messages();
-            conversation.replace_messages(vec![]);
-            app.status = Some("conversation cleared".into());
-            None
-        }
-        SlashAction::New | SlashAction::Fork { .. } | SlashAction::Clone => None,
+        SlashAction::New
+        | SlashAction::Fork { .. }
+        | SlashAction::Clone
+        | SlashAction::Clear
+        | SlashAction::Undo
+        | SlashAction::Resume { .. }
+        | SlashAction::Branch { index: Some(_) }
+        | SlashAction::Name { title: Some(_) } => None,
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {
             show_tree(app, conversation);
-            None
-        }
-        SlashAction::Branch { index: Some(index) } => {
-            handle_branch(app, conversation, *index);
             None
         }
         SlashAction::Branch { index: None } => {
@@ -175,56 +172,6 @@ pub fn handle(
                     });
                 }
                 Err(e) => app.push_system_message(format!("failed to list sessions: {e}")),
-            }
-            None
-        }
-        SlashAction::Resume { session_id } => {
-            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-
-            let target_id = match session_id {
-                Some(id) => Some(id.clone()),
-                None => {
-                    let cwd_str = tui_config.cwd.display().to_string();
-                    match store.list() {
-                        Ok(metas) => metas.into_iter().find(|m| m.cwd == cwd_str).map(|m| m.id),
-                        Err(e) => {
-                            app.push_system_message(format!("failed to list sessions: {e}"));
-                            None
-                        }
-                    }
-                }
-            };
-
-            let Some(id) = target_id else {
-                if session_id.is_none() {
-                    app.push_system_message(
-                        "no recent session for this directory. start one with /new".to_string(),
-                    );
-                }
-                return None;
-            };
-
-            if store.is_leased(&id) {
-                app.push_system_message("resume this supervised session from the cli");
-                return None;
-            }
-            match store.load(&id) {
-                Ok(session) => {
-                    *conversation = session.conversation;
-                    let messages = conversation.context();
-                    rebuild_display(app, &messages);
-                    app.stats.reset();
-                    crate::conversation_display::accumulate_session_stats(app, &messages);
-                    tui_config.session_id = id.clone();
-                    tui_config.options.session_id = Some(id);
-                    if let Some(prompt) = session.system_prompt {
-                        tui_config.system_prompt = Some(prompt);
-                    }
-                    let title = session.meta.title.as_deref().unwrap_or("untitled");
-                    app.status = Some(format!("resumed: {title}").into());
-                    app.session_title = session.meta.title;
-                }
-                Err(e) => app.push_system_message(format!("failed to load session: {e}")),
             }
             None
         }
@@ -290,16 +237,6 @@ pub fn handle(
             }
             None
         }
-        SlashAction::Name { title: Some(title) } => {
-            let title = crate::widgets::top_bar::sanitise_title(title);
-            if title.is_empty() {
-                app.push_system_message("usage: /name <title>");
-                return None;
-            }
-            app.status = Some(format!("session named: {title}").into());
-            app.session_title = Some(title);
-            None
-        }
         SlashAction::Credits => None,
         SlashAction::Endpoints { .. } => None,
         SlashAction::Logs { count } => {
@@ -325,10 +262,6 @@ pub fn handle(
         }
         SlashAction::Login { provider: _ } => None,
         SlashAction::LoginComplete { code: _ } => None,
-        SlashAction::Undo => {
-            handle_undo(app, conversation);
-            None
-        }
         SlashAction::Card => {
             if let Some(card) = &tui_config.agent_card {
                 app.push_system_message(format!("agent card:\n```json\n{}\n```", card.to_json()));
@@ -582,39 +515,6 @@ fn show_tree(app: &mut App, conversation: &ConversationState) {
         }
     }
     app.push_system_message(info);
-}
-
-fn handle_branch(app: &mut App, conversation: &mut ConversationState, n: usize) {
-    let user_msgs = conversation.user_messages_in_branch();
-    let count = user_msgs.len();
-    let target_info = user_msgs.get(n.wrapping_sub(1)).map(|e| {
-        let parent = e.parent_id.clone();
-        let preview = match &e.kind {
-            mush_session::tree::EntryKind::Message {
-                message: Message::User(u),
-            } => match &u.content {
-                UserContent::Text(t) => truncate_with_ellipsis(t, 40),
-                _ => "message".into(),
-            },
-            _ => "message".into(),
-        };
-        (parent, preview)
-    });
-    drop(user_msgs);
-
-    if n == 0 || n > count {
-        app.push_system_message(format!(
-            "invalid: use 1-{count} (try /tree to see messages)"
-        ));
-    } else if let Some((parent_id, preview)) = target_info {
-        if let Some(ref pid) = parent_id {
-            conversation.branch(pid);
-        } else {
-            conversation.reset_leaf();
-        }
-        rebuild_display_and_clear_live_stats(app, conversation);
-        app.status = Some(format!("branched before: {preview}").into());
-    }
 }
 
 fn handle_model_switch(
@@ -967,33 +867,6 @@ pub(crate) fn build_login_entries(tui_config: &TuiConfig) -> Vec<crate::login_pi
         .collect()
 }
 
-fn handle_undo(app: &mut App, conversation: &mut ConversationState) {
-    let parent = conversation
-        .user_messages_in_branch()
-        .last()
-        .map(|e| e.parent_id.clone());
-    match parent {
-        None => app.push_system_message("nothing to undo"),
-        Some(None) => {
-            conversation.reset_leaf();
-            rebuild_display_and_clear_live_stats(app, conversation);
-            app.status = Some("undid last turn".into());
-        }
-        Some(Some(pid)) => {
-            conversation.branch(&pid);
-            rebuild_display_and_clear_live_stats(app, conversation);
-            app.status = Some("undid last turn".into());
-        }
-    }
-}
-
-fn rebuild_display_and_clear_live_stats(app: &mut App, conversation: &ConversationState) {
-    let messages = conversation.context();
-    rebuild_display(app, &messages);
-    let estimate = mush_session::compact::estimate_tokens(&messages);
-    app.stats.reset_live_state(TokenCount::new(estimate as u64));
-}
-
 fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
     let Some(tmpl) = mush_ext::find_template(&app.completion.templates, name) else {
         app.input.text = if args.is_empty() {
@@ -1271,15 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn name_sets_the_session_title() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-
-        name_session(&mut app, Some("  port\tprime  "));
-
-        assert_eq!(app.session_title.as_deref(), Some("port prime"));
-    }
-
-    #[test]
     fn name_without_a_title_reports_the_current_one() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.session_title = Some("port prime".into());
@@ -1333,16 +1197,6 @@ mod tests {
             format_skill_catalogue(&crate::runner::SkillCatalogue::default()),
             "no skills loaded"
         );
-    }
-
-    #[test]
-    fn a_blank_name_is_refused() {
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.session_title = Some("kept".into());
-
-        name_session(&mut app, Some("\x07"));
-
-        assert_eq!(app.session_title.as_deref(), Some("kept"));
     }
 
     #[test]
