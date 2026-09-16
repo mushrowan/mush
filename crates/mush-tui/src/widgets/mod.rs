@@ -16,3 +16,4 @@ pub mod slash_menu;
 pub mod status_bar;
 pub mod top_bar;
 pub mod usage_bar;
+pub mod working_icon;

@@ -239,6 +239,13 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     if app.interaction.status_bar.show_status_messages {
         if let Some(label) = app.activity_label() {
             b.section_break();
+            b.push_inline(Span::styled(
+                format!(
+                    "{} ",
+                    crate::widgets::working_icon::working_icon(app.shimmer_phase())
+                ),
+                dim,
+            ));
             b.extend_inline(crate::widgets::shimmer::shimmer_spans(
                 &label,
                 &app.theme.shimmer,
