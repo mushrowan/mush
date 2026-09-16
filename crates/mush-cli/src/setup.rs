@@ -27,6 +27,7 @@ pub struct AppSetup {
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     pub http_client: mush_ai::http::HttpClient,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
+    pub skills: mush_tui::SkillCatalogue,
 }
 
 pub struct SetupArgs {
@@ -103,6 +104,9 @@ impl AppSetup {
         }
 
         let project_context = loader::discover_project_context(&cwd);
+        for diagnostic in &project_context.skill_diagnostics {
+            tracing::warn!("skill: {diagnostic}");
+        }
         init_skill_tools(&project_context, args.no_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("project context");
@@ -168,6 +172,10 @@ impl AppSetup {
                 lsp_diagnostics,
                 http_client,
                 mcp,
+                skills: mush_tui::SkillCatalogue {
+                    skills: project_context.skills,
+                    diagnostics: project_context.skill_diagnostics,
+                },
             },
             report,
         ))
@@ -337,7 +345,10 @@ pub fn format_error(error: &str) -> String {
 }
 
 fn format_available_skills(skills: &[loader::Skill]) -> String {
-    let mut skills = skills.to_vec();
+    let mut skills: Vec<&loader::Skill> = skills
+        .iter()
+        .filter(|skill| !skill.disable_model_invocation)
+        .collect();
     skills.sort_by(|left, right| left.name.cmp(&right.name));
 
     let mut out = String::from("<available_skills>\n");
@@ -396,7 +407,11 @@ pub fn build_system_prompt_from_context(
         prompt.push_str(&agents.content);
     }
 
-    if !context.skills.is_empty() {
+    if context
+        .skills
+        .iter()
+        .any(|skill| !skill.disable_model_invocation)
+    {
         prompt.push_str(
             "\n\nSkills provide specialised instructions for specific tasks. \
              Use the skill tool to load a skill when a task matches its description. \
@@ -738,10 +753,31 @@ mod tests {
     }
 
     #[test]
+    fn hidden_skills_stay_out_of_the_prompt() {
+        let context = ProjectContext {
+            agents_md: vec![],
+            skills: vec![Skill {
+                name: "secret".into(),
+                description: "explicit only".into(),
+                path: "/tmp/secret/SKILL.md".into(),
+                source: mush_ext::SkillSource::User,
+                disable_model_invocation: true,
+            }],
+            skill_diagnostics: vec![],
+        };
+
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+
+        assert!(!prompt.contains("secret"));
+        assert!(!prompt.contains("<available_skills>"));
+    }
+
+    #[test]
     fn default_prompt_encourages_targeted_exploration() {
         let context = ProjectContext {
             agents_md: vec![],
             skills: vec![],
+            skill_diagnostics: vec![],
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(
@@ -759,6 +795,7 @@ mod tests {
         let context = ProjectContext {
             agents_md: vec![],
             skills: vec![],
+            skill_diagnostics: vec![],
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
@@ -774,6 +811,7 @@ mod tests {
         let context = ProjectContext {
             agents_md: vec![],
             skills: vec![],
+            skill_diagnostics: vec![],
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(prompt.contains("Continue authorised work within the task scope."));
@@ -802,13 +840,18 @@ mod tests {
                     name: "zeta".into(),
                     description: "zeta skill".into(),
                     path: "/tmp/zeta/SKILL.md".into(),
+                    source: mush_ext::SkillSource::User,
+                    disable_model_invocation: false,
                 },
                 Skill {
                     name: "alpha".into(),
                     description: "alpha skill".into(),
                     path: "/tmp/alpha/SKILL.md".into(),
+                    source: mush_ext::SkillSource::User,
+                    disable_model_invocation: false,
                 },
             ],
+            skill_diagnostics: vec![],
         };
 
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));

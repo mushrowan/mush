@@ -2831,6 +2831,7 @@ name = "mush-ext"
 version = "0.1.0"
 dependencies = [
  "globset",
+ "ignore",
  "mush-agent",
  "mush-ai",
  "mush-treesitter",

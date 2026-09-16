@@ -748,10 +748,15 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 mush_tui::ReloadedContext {
                     system_prompt,
                     templates,
+                    skills: mush_tui::SkillCatalogue {
+                        skills: project.skills,
+                        diagnostics: project.skill_diagnostics,
+                    },
                 }
             },
         )),
         mcp: setup.mcp.clone(),
+        skills: setup.skills,
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
             setup.cfg.forbidden_chars.iter().copied(),
             setup.cfg.forbidden_char_classes.iter().copied(),

@@ -1,9 +1,12 @@
 use std::path::{Component, Path, PathBuf};
 
+use crate::skill_scan::{SkillDiagnostic, SkillSet, SkillSource, scan_skills_root};
+
 #[derive(Debug, Default)]
 pub struct ProjectContext {
     pub agents_md: Vec<AgentsMd>,
     pub skills: Vec<Skill>,
+    pub skill_diagnostics: Vec<SkillDiagnostic>,
 }
 
 #[derive(Debug, Clone)]
@@ -12,11 +15,13 @@ pub struct AgentsMd {
     pub content: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+    pub source: SkillSource,
+    pub disable_model_invocation: bool,
 }
 
 fn resolve_config_dir() -> Option<PathBuf> {
@@ -144,6 +149,8 @@ pub fn parse_skills_from_agents_md(content: &str) -> Vec<Skill> {
                 name,
                 description,
                 path: PathBuf::from(location),
+                source: SkillSource::AgentsMd,
+                disable_model_invocation: false,
             });
         }
 
@@ -163,55 +170,6 @@ fn extract_tag(text: &str, tag: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
-    let (frontmatter, _) = crate::frontmatter::extract(content)?;
-
-    let mut name = None;
-    let mut description = None;
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("name:") {
-            name = Some(val.trim().to_string());
-        } else if let Some(val) = line.strip_prefix("description:") {
-            description = Some(val.trim().to_string());
-        }
-    }
-
-    Some((name?, description?))
-}
-
-fn scan_skills_dir(dir: &Path) -> Vec<Skill> {
-    let mut skills = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return skills,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_md = path.join("SKILL.md");
-        if !skill_md.is_file() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&skill_md) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if let Some((name, description)) = parse_skill_frontmatter(&content) {
-            skills.push(Skill {
-                name,
-                description,
-                path: skill_md,
-            });
-        }
-    }
-
-    skills
 }
 
 #[tracing::instrument(name = "discover_context", skip_all)]
@@ -242,20 +200,6 @@ fn ancestor_dirs_to_home(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-fn upsert_skill(
-    skills: &mut Vec<Skill>,
-    positions: &mut std::collections::HashMap<String, usize>,
-    skill: Skill,
-) {
-    let key = skill.name.to_lowercase();
-    if let Some(index) = positions.get(&key).copied() {
-        skills[index] = skill;
-    } else {
-        positions.insert(key, skills.len());
-        skills.push(skill);
-    }
-}
-
 fn discover_project_context_inner(
     cwd: &Path,
     home: Option<&Path>,
@@ -263,28 +207,41 @@ fn discover_project_context_inner(
 ) -> ProjectContext {
     let agents_md = find_agents_md_inner(cwd, home, config_dir);
 
-    let mut skills = Vec::new();
-    let mut positions = std::collections::HashMap::new();
+    let mut set = SkillSet::default();
 
-    for agents in &agents_md {
-        for skill in parse_skills_from_agents_md(&agents.content) {
-            upsert_skill(&mut skills, &mut positions, skill);
-        }
+    for dir in ancestor_dirs_to_home(cwd, home).iter().rev() {
+        set.add(scan_skills_root(
+            &dir.join(".mush/skills"),
+            SkillSource::Project,
+        ));
+        set.add(scan_skills_root(
+            &dir.join(".agents/skills"),
+            SkillSource::Project,
+        ));
     }
 
     if let Some(cd) = config_dir {
-        for skill in scan_skills_dir(&cd.join("skills")) {
-            upsert_skill(&mut skills, &mut positions, skill);
+        set.add(scan_skills_root(&cd.join("skills"), SkillSource::User));
+    }
+    if let Some(home) = home {
+        set.add(scan_skills_root(
+            &home.join(".agents/skills"),
+            SkillSource::User,
+        ));
+    }
+
+    for agents in &agents_md {
+        for skill in parse_skills_from_agents_md(&agents.content) {
+            set.insert(skill);
         }
     }
 
-    for dir in ancestor_dirs_to_home(cwd, home) {
-        for skill in scan_skills_dir(&dir.join(".mush/skills")) {
-            upsert_skill(&mut skills, &mut positions, skill);
-        }
+    let (skills, skill_diagnostics) = set.into_skills();
+    ProjectContext {
+        agents_md,
+        skills,
+        skill_diagnostics,
     }
-
-    ProjectContext { agents_md, skills }
 }
 
 #[cfg(test)]
@@ -486,51 +443,51 @@ more content
     }
 
     #[test]
-    fn parse_skill_frontmatter_valid() {
-        let content = "---\nname: rust\ndescription: Rust conventions\n---\n\n# content";
-        let (name, desc) = parse_skill_frontmatter(content).unwrap();
-        assert_eq!(name, "rust");
-        assert_eq!(desc, "Rust conventions");
-    }
-
-    #[test]
-    fn parse_skill_frontmatter_missing_fields() {
-        assert!(parse_skill_frontmatter("---\nname: rust\n---").is_none());
-        assert!(parse_skill_frontmatter("no frontmatter").is_none());
-    }
-
-    #[test]
-    fn scan_skills_dir_finds_skills() {
+    fn project_skills_beat_user_skills_and_the_loser_is_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let skill_dir = dir.path().join("rust");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: rust\ndescription: Rust conventions\n---\n\ncontent",
-        )
-        .unwrap();
+        let home = dir.path();
+        let cwd = home.join("repo");
+        let project = cwd.join(".mush/skills/shared");
+        let user = home.join(".config/mush/skills/shared");
+        for (path, description) in [(&project, "project"), (&user, "user")] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: shared\ndescription: {description}\n---\nbody"),
+            )
+            .unwrap();
+        }
 
-        let skills = scan_skills_dir(dir.path());
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "rust");
-        assert_eq!(skills[0].description, "Rust conventions");
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+
+        let skill = ctx.skills.iter().find(|s| s.name == "shared").unwrap();
+        assert_eq!(skill.description, "project");
+        assert_eq!(skill.source, SkillSource::Project);
+        assert_eq!(ctx.skill_diagnostics.len(), 1);
+        assert_eq!(ctx.skill_diagnostics[0].path, user.join("SKILL.md"));
     }
 
     #[test]
-    fn scan_skills_dir_skips_invalid() {
+    fn agents_skills_dirs_are_discovered_for_project_and_home() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("empty")).unwrap();
-        let bad = dir.path().join("bad");
-        std::fs::create_dir_all(&bad).unwrap();
-        std::fs::write(bad.join("SKILL.md"), "no frontmatter here").unwrap();
+        let home = dir.path();
+        let cwd = home.join("repo");
+        for (path, name) in [
+            (cwd.join(".agents/skills/repo-skill"), "repo-skill"),
+            (home.join(".agents/skills/home-skill"), "home-skill"),
+        ] {
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: d\n---\nbody"),
+            )
+            .unwrap();
+        }
 
-        let skills = scan_skills_dir(dir.path());
-        assert!(skills.is_empty());
-    }
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
 
-    #[test]
-    fn scan_skills_dir_nonexistent() {
-        let skills = scan_skills_dir(Path::new("/does/not/exist"));
-        assert!(skills.is_empty());
+        let mut names: Vec<_> = ctx.skills.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["home-skill", "repo-skill"]);
     }
 }

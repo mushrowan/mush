@@ -1842,6 +1842,7 @@ mod tests {
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
             mcp: None,
+            skills: Default::default(),
             forbidden_chars: Default::default(),
         }
     }

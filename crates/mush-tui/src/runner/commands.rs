@@ -148,13 +148,26 @@ pub(super) async fn handle_slash_action(
             let reloaded = reload(cwd);
             tui_config.system_prompt = Some(reloaded.system_prompt);
             apply_reloaded_templates(session, &reloaded.templates);
+            let warnings = reloaded.skills.diagnostics.len();
+            tui_config.skills = reloaded.skills;
             session.app.status = Some(crate::app_state::Status::from(format!(
-                "reloaded AGENTS.md and {n} prompt template{s}",
+                "reloaded AGENTS.md, {n} prompt template{s}, {k} skill{ks}{w}",
                 n = reloaded.templates.len(),
                 s = if reloaded.templates.len() == 1 {
                     ""
                 } else {
                     "s"
+                },
+                k = tui_config.skills.skills.len(),
+                ks = if tui_config.skills.skills.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                w = if warnings == 0 {
+                    String::new()
+                } else {
+                    format!(" ({warnings} warnings, /skills)")
                 },
             )));
         }

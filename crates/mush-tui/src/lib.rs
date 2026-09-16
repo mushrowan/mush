@@ -46,8 +46,8 @@ pub use app_state::StatusBarConfig;
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use runner::{
     DiscoveryUpdate, LastModels, LastModelsSaver, PaneSnapshot, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, canonical_dir,
-    run_tui,
+    SessionSaver, SessionSnapshot, SkillCatalogue, ThinkingPrefs, ThinkingPrefsSaver, TuiConfig,
+    canonical_dir, run_tui,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,

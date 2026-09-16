@@ -43,6 +43,9 @@ pub fn handle(
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /name [title]  - show or set the session title\n");
+            help.push_str(
+                "  /skills        - list loaded skills, their sources and any warnings\n",
+            );
             help.push_str("  /credits       - show openrouter credit balance\n");
             help.push_str(
                 "  /endpoints [id] - list openrouter providers + cache support for a model\n",
@@ -250,6 +253,10 @@ pub fn handle(
         SlashAction::Cost => {
             app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
+            None
+        }
+        SlashAction::Skills => {
+            app.push_system_message(format_skill_catalogue(&tui_config.skills));
             None
         }
         SlashAction::Name { title: None } => {
@@ -1071,6 +1078,38 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
     }
 }
 
+pub(crate) fn format_skill_catalogue(catalogue: &crate::runner::SkillCatalogue) -> String {
+    let mut out = String::new();
+    if catalogue.skills.is_empty() {
+        out.push_str("no skills loaded");
+    } else {
+        let _ = writeln!(out, "{} skills loaded:", catalogue.skills.len());
+        let mut skills: Vec<&mush_ext::Skill> = catalogue.skills.iter().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        for skill in skills {
+            let hidden = if skill.disable_model_invocation {
+                " (hidden from the model)"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "  {}  [{}]{hidden}\n    {}",
+                skill.name,
+                skill.source.label(),
+                skill.path.display()
+            );
+        }
+    }
+    if !catalogue.diagnostics.is_empty() {
+        let _ = writeln!(out, "\n{} warnings:", catalogue.diagnostics.len());
+        for diagnostic in &catalogue.diagnostics {
+            let _ = writeln!(out, "  {diagnostic}");
+        }
+    }
+    out.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,6 +1267,47 @@ mod tests {
             app.messages
                 .iter()
                 .any(|message| message.content.contains("port prime"))
+        );
+    }
+
+    #[test]
+    fn skills_lists_sources_and_warnings() {
+        let catalogue = crate::runner::SkillCatalogue {
+            skills: vec![
+                mush_ext::Skill {
+                    name: "nix".into(),
+                    description: "nix things".into(),
+                    path: "/home/u/.config/mush/skills/nix/SKILL.md".into(),
+                    source: mush_ext::SkillSource::User,
+                    disable_model_invocation: false,
+                },
+                mush_ext::Skill {
+                    name: "deploy".into(),
+                    description: "deploy things".into(),
+                    path: "/repo/.mush/skills/deploy/SKILL.md".into(),
+                    source: mush_ext::SkillSource::Project,
+                    disable_model_invocation: true,
+                },
+            ],
+            diagnostics: vec![mush_ext::SkillDiagnostic {
+                path: "/repo/.mush/skills/bad/SKILL.md".into(),
+                kind: mush_ext::SkillDiagnosticKind::Warning("description is required".into()),
+            }],
+        };
+
+        let text = format_skill_catalogue(&catalogue);
+
+        assert_eq!(
+            text,
+            "2 skills loaded:\n  deploy  [project] (hidden from the model)\n    /repo/.mush/skills/deploy/SKILL.md\n  nix  [user]\n    /home/u/.config/mush/skills/nix/SKILL.md\n\n1 warnings:\n  /repo/.mush/skills/bad/SKILL.md: description is required"
+        );
+    }
+
+    #[test]
+    fn skills_with_nothing_loaded_says_so() {
+        assert_eq!(
+            format_skill_catalogue(&crate::runner::SkillCatalogue::default()),
+            "no skills loaded"
         );
     }
 

@@ -79,6 +79,8 @@ mod tests {
             name: name.into(),
             description: desc.into(),
             path: path.to_path_buf(),
+            source: crate::skill_scan::SkillSource::User,
+            disable_model_invocation: false,
         }
     }
 

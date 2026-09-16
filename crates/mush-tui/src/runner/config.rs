@@ -26,9 +26,16 @@ pub struct PaneSnapshot {
 
 pub type SessionSaver = std::sync::Arc<dyn Fn(SessionSnapshot) + Send + Sync>;
 
+#[derive(Debug, Clone, Default)]
+pub struct SkillCatalogue {
+    pub skills: Vec<mush_ext::Skill>,
+    pub diagnostics: Vec<mush_ext::SkillDiagnostic>,
+}
+
 pub struct ReloadedContext {
     pub system_prompt: String,
     pub templates: Vec<mush_ext::PromptTemplate>,
+    pub skills: SkillCatalogue,
 }
 
 pub type ReloadCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> ReloadedContext + Send + Sync>;
@@ -86,6 +93,7 @@ pub struct TuiConfig {
     pub keymap: crate::keybinds::KeyMap,
     pub reload_context: Option<ReloadCallback>,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
+    pub skills: SkillCatalogue,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
@@ -185,6 +193,7 @@ impl TuiConfig {
             keymap: crate::keybinds::KeyMap::default(),
             reload_context: None,
             mcp: None,
+            skills: SkillCatalogue::default(),
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }
