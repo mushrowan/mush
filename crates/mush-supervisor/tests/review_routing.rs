@@ -2412,3 +2412,89 @@ fn retained_outbox_replays_when_latest_action_cannot_be_persisted() {
         1
     );
 }
+
+#[test]
+fn failed_compaction_preserves_pending_events_and_rejects_rebound_parent() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let report = fixture.cwd.join("report.json");
+    let original_report = fs::read(&report).unwrap();
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original_policy = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original_policy).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    fixture.route();
+    for index in 0..62 {
+        if index % 2 == 0 {
+            fs::write(&report, "{\"manual\":true}").unwrap();
+        } else {
+            fs::write(&report, &original_report).unwrap();
+        }
+        fixture.route();
+    }
+    let history_path = fixture.route.join("parent-events.json");
+    let history = fs::read(&history_path).unwrap();
+    let events = inbox.events().unwrap();
+    assert_eq!(events.len(), 64);
+    for event in events.iter().skip(1).rev() {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    let queue = fixture.inbox.join("queue.json");
+    let queue_bytes = fs::read(&queue).unwrap();
+    let mut rebound: Value = serde_json::from_slice(&queue_bytes).unwrap();
+    rebound["binding"]["session_id"] = json!("different-parent");
+    write(&queue, &rebound);
+    let rebound_bytes = fs::read(&queue).unwrap();
+    fs::write(&policy, original_policy).unwrap();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(fixture.state()["parent"], "pending");
+    assert_eq!(fixture.state()["detail"], "parent binding changed");
+    assert_eq!(fs::read(&queue).unwrap(), rebound_bytes);
+    assert_eq!(fs::read(&history_path).unwrap(), history);
+    fs::write(&queue, &queue_bytes).unwrap();
+    let obstruction = history_path.with_extension("pending-write");
+    directory(&obstruction);
+    for _ in 0..3 {
+        fixture.route();
+        assert_eq!(fixture.state()["parent"], "pending");
+        assert_eq!(fs::read(&history_path).unwrap(), history);
+        assert_eq!(fs::read(&queue).unwrap(), queue_bytes);
+        assert_eq!(inbox.pending().unwrap(), vec![events[0].clone()]);
+    }
+    fs::remove_dir(&obstruction).unwrap();
+    fixture.route();
+    fixture.route();
+    let retained: Vec<mush_supervisor::inbox::Event> =
+        serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+    assert_eq!(retained.len(), 2);
+    assert_eq!(retained[0], events[0]);
+    assert_eq!(retained[1].assignment_id, 65);
+    assert!(
+        retained[1]
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+    assert_eq!(inbox.pending().unwrap(), retained);
+    assert_eq!(inbox.events().unwrap().len(), 65);
+    inbox.acknowledge(&retained[1].event_id).unwrap();
+    fixture.route();
+    assert_eq!(inbox.pending().unwrap(), vec![events[0].clone()]);
+    inbox.acknowledge(&events[0].event_id).unwrap();
+    fixture.route();
+    fixture.route();
+    assert_eq!(fixture.state()["parent"], "acknowledged");
+    assert!(inbox.pending().unwrap().is_empty());
+    assert_eq!(inbox.events().unwrap().len(), 65);
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
