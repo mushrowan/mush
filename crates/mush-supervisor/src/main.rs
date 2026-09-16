@@ -34,8 +34,24 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Operation {
+    #[command(about = "establish a task pair once, use continue-review for successors")]
     RegisterReview {
         config: PathBuf,
+    },
+    #[command(about = "reuse the task pair for an operator-prepared successor")]
+    ContinueReview {
+        directory: PathBuf,
+        preparation: PathBuf,
+    },
+    #[command(about = "inspect original sessions, current pairing and generation receipt")]
+    ReviewPair {
+        admission: PathBuf,
+        task: String,
+    },
+    #[command(about = "replace a pair explicitly with expected receipt and context-loss reason")]
+    ReviewReassign {
+        admission: PathBuf,
+        request: PathBuf,
     },
     RouteReviews {
         directory: PathBuf,
@@ -136,6 +152,8 @@ struct Manifest {
     admission: Option<PathBuf>,
     #[serde(skip)]
     routing_guard: Option<PathBuf>,
+    #[serde(skip)]
+    routing_review: bool,
     #[serde(skip)]
     admitted: Option<String>,
     #[serde(skip)]
@@ -257,8 +275,13 @@ struct Lock(File);
 impl Lock {
     fn acquire(path: &Path) -> Result<Self> {
         let file = private_file(path)?;
-        file.try_lock()
-            .map_err(|_| "another supervisor owns this run")?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "another supervisor owns this run",
+            ),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
         Ok(Self(file))
     }
 }
@@ -728,7 +751,7 @@ async fn worker(
             break;
         }
         if let Some(directory) = &manifest.routing_guard {
-            routing::launch_ready(directory)?;
+            routing::launch_ready(directory, manifest.routing_review)?;
         }
         let mut child = match cmd.spawn() {
             Ok(child) => child,
@@ -1154,6 +1177,12 @@ fn spawn_worker(
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Operation::RegisterReview { config } => routing::register(&config),
+        Operation::ContinueReview {
+            directory,
+            preparation,
+        } => routing::continue_review(&directory, &preparation),
+        Operation::ReviewPair { admission, task } => routing::pair_status(&admission, &task),
+        Operation::ReviewReassign { admission, request } => routing::reassign(&admission, &request),
         Operation::RouteReviews { directory, once } => routing::run(&directory, once).await,
         Operation::ReviewStatus { directory } => routing::status(&directory),
         Operation::ReviewDisable { directory } => routing::disable(&directory),

@@ -125,6 +125,7 @@ pub struct Evidence {
 #[serde(deny_unknown_fields)]
 pub struct Verdict {
     pub version: u32,
+    pub task: String,
     pub assignment: String,
     pub generation: u32,
     pub candidate: String,
@@ -142,6 +143,7 @@ impl Verdict {
     pub fn validate(&self) -> io::Result<()> {
         let mut ids = HashSet::new();
         if self.version != 1
+            || !crate::inbox::identifier(&self.task)
             || !crate::inbox::identifier(&self.assignment)
             || self.generation == 0
             || !commit(&self.candidate)
@@ -210,10 +212,53 @@ pub struct Notice {
     pub capture_sha256: String,
     pub producer_action: String,
     pub evidence_directory: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<Pairing>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Participant {
+    pub run_id: String,
+    pub worker: String,
+    pub session: String,
+    pub directory: PathBuf,
+    pub workspace: PathBuf,
+    pub manifest: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pair {
+    pub producer: Participant,
+    pub reviewer: Participant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pairing {
+    pub task: String,
+    pub pair: Pair,
 }
 
 impl Notice {
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(pairing) = &self.pairing {
+            if !crate::inbox::identifier(&pairing.task) || pairing.task != self.verdict.task {
+                return Err(io::Error::other("invalid review task"));
+            }
+            for actor in [&pairing.pair.producer, &pairing.pair.reviewer] {
+                if !crate::inbox::identifier(&actor.run_id)
+                    || !crate::status::worker_name(&actor.worker)
+                    || !crate::inbox::identifier(&actor.session)
+                    || [&actor.directory, &actor.workspace, &actor.manifest]
+                        .iter()
+                        .any(|p| !p.is_absolute() || p.as_os_str().len() > 4096)
+                {
+                    return Err(io::Error::other("invalid review pairing"));
+                }
+            }
+        }
         self.verdict.validate()?;
         if !hash(&self.capture_sha256)
             || self.producer_action.len() > 512

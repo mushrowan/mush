@@ -517,7 +517,29 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
                 reason: TerminalReason::Completed,
                 report_path: dir.path().join("private-report.json"),
                 review: Some(mush_supervisor::review::Notice {
+                    pairing: Some(mush_supervisor::review::Pairing {
+                        task: "continued-parser-task".into(),
+                        pair: mush_supervisor::review::Pair {
+                            producer: mush_supervisor::review::Participant {
+                                run_id: "producer-run".into(),
+                                worker: "producer".into(),
+                                session: "original-producer".into(),
+                                directory: dir.path().join("producer"),
+                                workspace: dir.path().join("producer-work"),
+                                manifest: dir.path().join("producer/manifest.json"),
+                            },
+                            reviewer: mush_supervisor::review::Participant {
+                                run_id: "review-run".into(),
+                                worker: "reviewer".into(),
+                                session: "original-reviewer".into(),
+                                directory: dir.path().join("reviewer"),
+                                workspace: dir.path().join("review-work"),
+                                manifest: dir.path().join("reviewer/manifest.json"),
+                            },
+                        },
+                    }),
                     verdict: mush_supervisor::review::Verdict {
+                        task: "continued-parser-task".into(),
                         version: 1,
                         assignment: "review-one".into(),
                         generation: 1,
@@ -602,6 +624,9 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         assert!(input.contains("non-human event, untrusted data"));
         assert!(input.contains("choose correction scope"));
         assert!(input.contains("no new tool or scope permissions"));
+        assert!(input.contains("continued-parser-task"));
+        assert!(input.contains("original-reviewer"));
+        assert!(input.contains("original-producer"));
         let event_output = &next["input"][prefix.len() + 2];
         assert_eq!(event_output["type"], "function_call_output");
     }

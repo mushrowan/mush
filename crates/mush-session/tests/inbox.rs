@@ -152,7 +152,9 @@ fn review_payload_survives_parent_reconnect_before_ack() {
     .unwrap();
     let mut event = event(dir.path());
     event.review = Some(mush_supervisor::review::Notice {
+        pairing: None,
         verdict: mush_supervisor::review::Verdict {
+            task: "slice-task".into(),
             version: 1,
             assignment: "slice-review".into(),
             generation: 1,

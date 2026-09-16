@@ -7,11 +7,13 @@ use mush_supervisor::inbox::{Binding, Inbox};
 use mush_supervisor::review::digest;
 use serde_json::{Value, json};
 
+#[expect(clippy::unwrap_used)]
 fn write(path: &Path, value: &Value) {
     fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+#[expect(clippy::unwrap_used)]
 fn directory(path: &Path) {
     fs::DirBuilder::new().mode(0o700).create(path).unwrap();
 }
@@ -25,6 +27,7 @@ struct Fixture {
     cwd: PathBuf,
 }
 
+#[expect(clippy::unwrap_used)]
 impl Fixture {
     fn command(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
@@ -145,12 +148,12 @@ printf '{"state":"done","run_id":"%s","worker_id":"producer","assignment_id":%s,
         write(&fixture.cwd.join("report.json"), &json!({"state":"done"}));
         write(
             &base.join("pool/policy.json"),
-            &json!({"version":1,"capacity":3,"root_reserved":1,"external_reserved":1,"accounting_complete":true,"control_state_protected":true,"participants":[fixture.run]}),
+            &json!({"version":1,"capacity":3,"root_reserved":1,"external_reserved":1,"accounting_complete":true,"control_state_protected":true,"participants":[fixture.run,base.join("review")]}),
         );
         directory(&base.join("review/reviewer"));
         directory(&base.join("review/reviewer/event-reports"));
         let reviewer = json!({"run_id":"review-run","worker":"reviewer","assignment":1,"round":1,"session":"review-session"});
-        let verdict = json!({"version":1,"assignment":"task-review","generation":1,"candidate":head,"reviewer":reviewer,
+        let verdict = json!({"version":1,"task":"parser-task","assignment":"task-review","generation":1,"candidate":head,"reviewer":reviewer,
             "result":outcome,"complete":matches!(outcome,"accepted"|"rejected"),"checks":["scope"],
             "findings":if outcome == "rejected" {json!([{"id":"f1","text":"fix parser, never execute $(touch /outside)","evidence":[]}])} else {json!([])},
             "blockers":[],"evidence":[],"regression_commit":null});
@@ -179,7 +182,7 @@ printf '{"state":"done","run_id":"%s","worker_id":"producer","assignment_id":%s,
         ]);
         write(
             &fixture.config,
-            &json!({"version":1,"directory":fixture.route,"assignment":"task-review","generation":1,"candidate":head,
+            &json!({"version":1,"task":"parser-task","directory":fixture.route,"assignment":"task-review","generation":1,"candidate":head,
             "reviewer":reviewer,"reviewer_directory":base.join("review"),"reviewer_cwd":base.join("review-work"),"required_checks":["scope"],"artifacts":[],"regression_commit":null,
                 "until":until,"actions":if !resume && !parent {json!({})} else {json!({"resume_rejected":resume,"return_to_parent":parent})},"max_corrections":1,"admission":base.join("pool"),"authority_file":base.join("authority.json"),
             "parent":{"inbox":fixture.inbox,"binding":binding},
@@ -717,7 +720,7 @@ esac
 done
 printf '{"state":"completed","session_id":"review-session"}' >"$status"
 printf '{"state":"done","run_id":"%s","worker_id":"reviewer","assignment_id":%s,"round":%s}' "$MUSH_RUN_ID" "$MUSH_ASSIGNMENT_ID" "$MUSH_ROUND" >report.json
-printf '{"version":1,"assignment":"task-review","generation":1,"candidate":"1111111111111111111111111111111111111111","reviewer":{"run_id":"%s","worker":"reviewer","assignment":%s,"round":%s,"session":"review-session"},"result":"rejected","complete":true,"checks":["scope"],"findings":[{"id":"f1","text":"correct parser","evidence":[]}],"blockers":[],"evidence":[],"regression_commit":null}' "$MUSH_RUN_ID" "$MUSH_ASSIGNMENT_ID" "$MUSH_ROUND" >../verdict.json
+printf '{"version":1,"task":"parser-task","assignment":"task-review","generation":1,"candidate":"1111111111111111111111111111111111111111","reviewer":{"run_id":"%s","worker":"reviewer","assignment":%s,"round":%s,"session":"review-session"},"result":"rejected","complete":true,"checks":["scope"],"findings":[{"id":"f1","text":"correct parser","evidence":[]}],"blockers":[],"evidence":[],"regression_commit":null}' "$MUSH_RUN_ID" "$MUSH_ASSIGNMENT_ID" "$MUSH_ROUND" >../verdict.json
 "#).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let manifest = root.join("review-manifest.json");
@@ -785,6 +788,12 @@ fn bound_regression_evidence_is_captured_and_worker_paths_cannot_redirect_it() {
         let mut config: Value =
             serde_json::from_slice(&fs::read(&fixture.config).unwrap()).unwrap();
         config["directory"] = json!(fixture.route);
+        config["task"] = json!("evidence-task");
+        config["authority_file"] = json!(fixture.root.path().join("evidence-authority.json"));
+        write(
+            &fixture.root.path().join("evidence-authority.json"),
+            &json!({"assignment":"task-review","generation":1,"enabled":true}),
+        );
         config["artifacts"] = json!([{"id":"regression","path":artifact,"sha256":sha}]);
         write(&fixture.config, &config);
         fixture.ok(&["register-review", fixture.config.to_str().unwrap()]);
@@ -796,6 +805,7 @@ fn bound_regression_evidence_is_captured_and_worker_paths_cannot_redirect_it() {
         let bytes: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
         let mut verdict: Value = serde_json::from_slice(&bytes).unwrap();
         verdict["evidence"] = json!([{"id":"regression","sha256":sha}]);
+        verdict["task"] = json!("evidence-task");
         verdict["findings"][0]["evidence"] = json!(["regression"]);
         if malicious {
             verdict["evidence"][0]["path"] = json!("/outside");
@@ -863,4 +873,722 @@ fn disabling_an_active_correction_cancels_without_retry() {
     assert_eq!(producer["terminal_event"]["reason"], "cancelled");
     fixture.route();
     assert!(!fixture.root.path().join("calls").exists());
+}
+
+#[expect(clippy::unwrap_used)]
+impl Fixture {
+    fn reviewer_history(&self) {
+        let root = self.root.path();
+        let run = root.join("review");
+        let dir = run.join("reviewer");
+        for path in [dir.join("mush-data"), dir.join("mush-data/sessions")] {
+            directory(&path);
+        }
+        write(
+            &dir.join("mush-data/sessions/review-session.json"),
+            &json!({"conversation":["original independent review"]}),
+        );
+        write(
+            &dir.join("round-001.json"),
+            &json!({"state":"completed","session_id":"review-session"}),
+        );
+        write(&run.join("event-run.json"), &json!({"run_id":"review-run"}));
+        write(&run.join("supervisor.json"), &json!({"state":"stopped"}));
+        write(
+            &root.join("review-work/report.json"),
+            &json!({"state":"done"}),
+        );
+        let event = json!({"event_id":"review-run.reviewer.1","run_id":"review-run","worker_id":"reviewer","assignment_id":1,"round":1,"session_id":"review-session","reason":"completed","report_path":root.join("review-work/report.json")});
+        write(
+            &dir.join("state.json"),
+            &json!({"state":"done","round":1,"assignment_id":1,"model":"fixture","session_id":"review-session","terminal_event":event}),
+        );
+        let executable = root.join("review-worker");
+        fs::write(&executable,r#"#!/bin/sh
+set -eu
+umask 077
+status= resume= prompt=
+while [ "$#" -gt 0 ]; do
+case "$1" in
+--status-file) status=$2; shift 2;;
+--continue) resume=$2; shift 2;;
+-p) prompt=$2; shift 2;;
+*) shift;;
+esac
+done
+test "$resume" = review-session
+test "$(cat "$MUSH_DATA_DIR/sessions/review-session.json")" = '{"conversation":["original independent review"]}'
+printf '%s' "$prompt" >../review-received
+printf '%s:%s\n' "$resume" "$PWD" >>../review-calls
+printf '{"state":"completed","session_id":"review-session"}' >"$status"
+printf '{"state":"done","run_id":"%s","worker_id":"reviewer","assignment_id":%s,"round":%s}' "$MUSH_RUN_ID" "$MUSH_ASSIGNMENT_ID" "$MUSH_ROUND" >report.json
+printf '{"version":1,"task":"parser-task","assignment":"task-review","generation":2,"candidate":"2222222222222222222222222222222222222222","reviewer":{"run_id":"review-run","worker":"reviewer","assignment":2,"round":2,"session":"review-session"},"result":"accepted","complete":true,"checks":["scope"],"findings":[],"blockers":[],"evidence":[],"regression_commit":null}' >../next-verdict.json
+"#).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        write(
+            &run.join("manifest.json"),
+            &json!({"directory":run,"executable":executable,"until":chrono::Utc::now()+chrono::Duration::minutes(10),"concurrency":1,"attempt_seconds":5,"silence_seconds":3,"max_rounds":5,"model":"fixture","fallback_model":"fixture","status_file":true,"durable_events":true,"admission":root.join("pool"),"workers":[{"name":"reviewer","cwd":root.join("review-work"),"prompt":root.join("prompt"),"report":root.join("review-work/report.json"),"review_verdict":root.join("next-verdict.json"),"pause_seconds":0}]}),
+        );
+    }
+
+    fn snapshot(&self, run: &Path, worker: &str) -> Value {
+        let manifest_path = run.join("manifest.json");
+        let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let dir = run.join(worker);
+        let state: Value =
+            serde_json::from_slice(&fs::read(dir.join("state.json")).unwrap()).unwrap();
+        let round = state["round"].as_u64().unwrap();
+        let session = state["session_id"].as_str().unwrap();
+        let job = &manifest["workers"][0];
+        let workspace = self.ok(&[
+            "prepared-workspace",
+            job["cwd"].as_str().unwrap(),
+            "--report",
+            job["report"].as_str().unwrap(),
+        ]);
+        json!({"round":round,"assignment":state["terminal_event"]["assignment_id"],"manifest_sha256":digest(&fs::read(&manifest_path).unwrap()),"executable_sha256":digest(&fs::read(manifest["executable"].as_str().unwrap()).unwrap()),"state_sha256":digest(&fs::read(dir.join("state.json")).unwrap()),"report_sha256":digest(&fs::read(job["report"].as_str().unwrap()).unwrap()),"checkpoint_sha256":digest(&fs::read(dir.join(format!("round-{round:03}.json"))).unwrap()),"session_sha256":digest(&fs::read(dir.join("mush-data/sessions").join(format!("{session}.json"))).unwrap()),"prompt_sha256":digest(&fs::read(job["prompt"].as_str().unwrap()).unwrap()),"head":"1".repeat(40),"workspace_sha256":String::from_utf8(workspace.stdout).unwrap().trim(),"brief":"continue original independent review on the prepared candidate"})
+    }
+
+    fn pairing(&self) -> Value {
+        serde_json::from_slice(
+            &self
+                .ok(&[
+                    "review-pair",
+                    self.root.path().join("pool").to_str().unwrap(),
+                    "parser-task",
+                ])
+                .stdout,
+        )
+        .unwrap()
+    }
+
+    fn continuation(&self) -> PathBuf {
+        let root = self.root.path();
+        let jj = root.join("bin/jj");
+        fs::write(&jj,format!("#!/bin/sh\nset -eu\ncase \"$*\" in *'conflicts() & @'*) exit 0;; esac\nprintf '%s' '{}'\n","2".repeat(40))).unwrap();
+        let path = root.join("next.json");
+        let mut producer = self.snapshot(&self.run, "producer");
+        let mut reviewer = self.snapshot(&root.join("review"), "reviewer");
+        producer["head"] = json!("2".repeat(40));
+        reviewer["head"] = json!("2".repeat(40));
+        write(
+            &path,
+            &json!({"directory":root.join("next-route"),"expected":self.pairing()["receipt"],"candidate":"2".repeat(40),"until":chrono::Utc::now()+chrono::Duration::minutes(5),"producer":producer,"reviewer":reviewer,"artifacts":[],"regression_commit":null}),
+        );
+        write(
+            &root.join("authority.json"),
+            &json!({"assignment":"task-review","generation":2,"enabled":true}),
+        );
+        path
+    }
+}
+
+#[test]
+fn task_continuation_reuses_original_reviewer_after_process_restart() {
+    let fixture = Fixture::new_worker(true, true, "rejected", "sleep 0.1");
+    fixture.reviewer_history();
+    let offline = fixture.root.path().join("parent-offline");
+    fs::rename(&fixture.inbox, &offline).unwrap();
+    fixture.route();
+    let original = fixture.pairing()["history"]["pair"].clone();
+    let preparation = fixture.continuation();
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    fs::rename(offline, &fixture.inbox).unwrap();
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    fixture.route();
+    fixture.route();
+    assert!(
+        fixture.root.path().join("review-calls").exists(),
+        "{}",
+        fs::read_to_string(fixture.root.path().join("next-route/state.json")).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("review-calls")).unwrap(),
+        format!(
+            "review-session:{}\n",
+            fixture.root.path().join("review-work").display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let pairing = fixture.pairing();
+    assert_eq!(pairing["history"]["pair"], original);
+    assert_eq!(
+        pairing["history"]["generations"].as_array().unwrap().len(),
+        2
+    );
+    let events = Inbox::open(&fixture.inbox).unwrap().pending().unwrap();
+    assert!(events.iter().any(
+        |e| e.review.as_ref().is_some_and(|n| n.verdict.generation == 2
+            && n.pairing.as_ref().is_some_and(
+                |p| p.task == "parser-task" && p.pair.reviewer.session == "review-session"
+            ))
+    ));
+    assert!(fixture.route.join("capture/verdict.json").exists());
+    let request: Value = serde_json::from_slice(&fs::read(preparation).unwrap()).unwrap();
+    println!("{}", json!({"kind":"continuation","value":request}));
+    println!("{}", json!({"kind":"pairing","value":pairing}));
+    assert!(
+        events.iter().any(|event| event
+            .review
+            .as_ref()
+            .is_some_and(|n| n.verdict.generation == 1
+                && n.pairing
+                    .as_ref()
+                    .is_some_and(|p| p.pair.reviewer.session == "review-session")))
+    );
+}
+
+#[test]
+fn manual_and_parent_only_continuations_keep_pair_without_launching() {
+    for parent in [false, true] {
+        let fixture = Fixture::new(false, parent, "rejected");
+        fixture.reviewer_history();
+        fixture.route();
+        let original = fixture.pairing()["history"]["pair"].clone();
+        let preparation = fixture.continuation();
+        fixture.ok(&[
+            "continue-review",
+            fixture.route.to_str().unwrap(),
+            preparation.to_str().unwrap(),
+        ]);
+        fixture.route();
+        assert!(!fixture.root.path().join("review-calls").exists());
+        assert_eq!(fixture.pairing()["history"]["pair"], original);
+        let state: Value = serde_json::from_slice(
+            &fs::read(fixture.root.path().join("next-route/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["reviewer_action"], "manual");
+    }
+}
+
+#[test]
+fn ordinary_registration_cannot_replace_pair_or_bypass_task_by_directory() {
+    for field in [
+        "session",
+        "worker",
+        "directory",
+        "workspace",
+        "producer",
+        "generation",
+        "task",
+    ] {
+        let fixture = Fixture::new(false, false, "accepted");
+        fixture.route();
+        let mut config: Value =
+            serde_json::from_slice(&fs::read(&fixture.config).unwrap()).unwrap();
+        config["directory"] = json!(fixture.root.path().join("different-directory"));
+        match field {
+            "session" => config["reviewer"]["session"] = json!("fresh-session"),
+            "worker" => config["reviewer"]["worker"] = json!("fresh-reviewer"),
+            "directory" => config["reviewer_directory"] = json!(fixture.run),
+            "workspace" => config["reviewer_cwd"] = json!(fixture.cwd),
+            "producer" => config["producer"]["identity"]["session"] = json!("fresh-producer"),
+            "generation" => config["generation"] = json!(2),
+            "task" => config["task"] = json!("pretend-new-task"),
+            _ => unreachable!(),
+        }
+        let path = fixture.root.path().join("replacement.json");
+        write(&path, &config);
+        assert!(
+            !fixture
+                .command(&["register-review", path.to_str().unwrap()])
+                .status
+                .success(),
+            "{field}"
+        );
+        assert_eq!(
+            fixture.pairing()["history"]["generations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn busy_missing_blocked_reviewer_does_not_get_replaced() {
+    for scenario in [
+        "busy",
+        "busy_session",
+        "missing",
+        "blocked",
+        "stopped",
+        "capacity",
+        "workspace",
+    ] {
+        let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
+        fixture.reviewer_history();
+        fixture.route();
+        let preparation = fixture.continuation();
+        fixture.ok(&[
+            "continue-review",
+            fixture.route.to_str().unwrap(),
+            preparation.to_str().unwrap(),
+        ]);
+        let run = fixture.root.path().join("review");
+        let mut lock = None;
+        match scenario {
+            "busy" => {
+                let file = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(run.join("supervisor.lock"))
+                    .unwrap();
+                file.lock().unwrap();
+                lock = Some(file);
+            }
+            "busy_session" => {
+                lock = Some(
+                    mush_supervisor::admission::session_lock(
+                        &run.join("reviewer/mush-data/sessions"),
+                        "review-session",
+                        None,
+                    )
+                    .unwrap(),
+                );
+            }
+            "missing" => {
+                fs::remove_file(run.join("reviewer/mush-data/sessions/review-session.json"))
+                    .unwrap()
+            }
+            "blocked" => {
+                let path = run.join("reviewer/state.json");
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["state"] = json!("blocked");
+                write(&path, &value);
+            }
+            "stopped" => fs::write(run.join("STOP"), "stop").unwrap(),
+            "workspace" => fs::rename(
+                fixture.root.path().join("review-work"),
+                fixture.root.path().join("unavailable-review-work"),
+            )
+            .unwrap(),
+            "capacity" => {
+                let path = fixture.root.path().join("pool/policy.json");
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["external_reserved"] = json!(2);
+                write(&path, &value);
+            }
+            _ => unreachable!(),
+        }
+        fixture.route();
+        assert!(!fixture.root.path().join("review-calls").exists());
+        let state: Value = serde_json::from_slice(
+            &fs::read(fixture.root.path().join("next-route/state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            state["reviewer_action"],
+            if scenario == "busy" || scenario == "busy_session" {
+                "queued_busy"
+            } else if scenario == "capacity" {
+                "queued_capacity"
+            } else {
+                "needs_input"
+            }
+        );
+        drop(lock);
+    }
+}
+
+#[test]
+fn explicit_reassignment_is_receipt_bound_idempotent_and_cannot_bypass_denial() {
+    for denied in [false, true] {
+        let fixture = Fixture::new(false, false, if denied { "blocked" } else { "accepted" });
+        fixture.reviewer_history();
+        fixture.route();
+        let replacement = Fixture::new(false, false, "accepted");
+        replacement.reviewer_history();
+        let replacement_state = replacement.root.path().join("review/reviewer/state.json");
+        let mut saved: Value =
+            serde_json::from_slice(&fs::read(&replacement_state).unwrap()).unwrap();
+        saved["session_id"] = json!("intentional-new-reviewer");
+        saved["terminal_event"]["session_id"] = json!("intentional-new-reviewer");
+        write(&replacement_state, &saved);
+        write(
+            &replacement
+                .root
+                .path()
+                .join("review/reviewer/round-001.json"),
+            &json!({"state":"completed","session_id":"intentional-new-reviewer"}),
+        );
+        fs::rename(
+            replacement
+                .root
+                .path()
+                .join("review/reviewer/mush-data/sessions/review-session.json"),
+            replacement
+                .root
+                .path()
+                .join("review/reviewer/mush-data/sessions/intentional-new-reviewer.json"),
+        )
+        .unwrap();
+        let original = fixture.pairing();
+        let mut pair = original["history"]["pair"].clone();
+        pair["reviewer"] = replacement.pairing()["history"]["pair"]["reviewer"].clone();
+        pair["reviewer"]["session"] = json!("intentional-new-reviewer");
+        let request = json!({"task":"parser-task","request":"replace-reviewer","expected":original["receipt"],"generation":1,"reason":"operator accepts loss of the previous reviewer context","pair":pair});
+        let requests = fixture.root.path().join("pool/reassignments");
+        directory(&requests);
+        let path = requests.join("request.json");
+        write(&path, &request);
+        let args = [
+            "review-reassign".to_owned(),
+            fixture
+                .root
+                .path()
+                .join("pool")
+                .to_str()
+                .unwrap()
+                .to_owned(),
+            path.to_str().unwrap().to_owned(),
+        ];
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        let result = fixture.command(&args);
+        assert_eq!(
+            result.status.success(),
+            !denied,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if !denied {
+            fixture.ok(&args);
+            let changed = fixture.pairing();
+            assert_eq!(changed["history"]["original"], original["history"]["pair"]);
+            assert_eq!(
+                changed["history"]["pair"]["reviewer"]["session"],
+                "intentional-new-reviewer"
+            );
+            assert_eq!(
+                changed["history"]["reassignments"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let mut stale = request.clone();
+            stale["request"] = json!("stale-request");
+            write(&path, &stale);
+            assert!(!fixture.command(&args).status.success());
+            let mut wrong_actor = request.clone();
+            wrong_actor["actor"] = json!("reviewer");
+            write(&path, &wrong_actor);
+            assert!(!fixture.command(&args).status.success());
+            let preparation = fixture.continuation();
+            let mut next: Value = serde_json::from_slice(&fs::read(&preparation).unwrap()).unwrap();
+            next["reviewer"] =
+                replacement.snapshot(&replacement.root.path().join("review"), "reviewer");
+            next["reviewer"]["head"] = json!("2".repeat(40));
+            write(&preparation, &next);
+            fixture.ok(&[
+                "continue-review",
+                fixture.route.to_str().unwrap(),
+                preparation.to_str().unwrap(),
+            ]);
+            let registered: Value = serde_json::from_slice(
+                &fs::read(fixture.root.path().join("next-route/config.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                registered["reviewer"]["session"],
+                "intentional-new-reviewer"
+            );
+            assert_eq!(
+                registered["reviewer_directory"],
+                json!(replacement.root.path().join("review"))
+            );
+        }
+        let worker_path = fixture.root.path().join("review-work/reassign.json");
+        write(&worker_path, &request);
+        assert!(
+            !fixture
+                .command(&[
+                    "review-reassign",
+                    fixture.root.path().join("pool").to_str().unwrap(),
+                    worker_path.to_str().unwrap()
+                ])
+                .status
+                .success()
+        );
+    }
+}
+
+#[test]
+fn concurrent_generation_registration_and_crash_replay_preserve_history() {
+    let fixture = Fixture::new(false, false, "accepted");
+    fixture.reviewer_history();
+    fixture.route();
+    let preparation = fixture.continuation();
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+            .args([
+                "continue-review",
+                fixture.route.to_str().unwrap(),
+                preparation.to_str().unwrap(),
+            ])
+            .env("HOME", fixture.root.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.root.path().join("bin").display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut first = start();
+    let mut second = start();
+    let one = first.wait().unwrap();
+    let two = second.wait().unwrap();
+    assert!(one.success() || two.success());
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    let ledger_path = fixture.root.path().join("pool/review-tasks.json");
+    let mut ledger: Value = serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
+    assert_eq!(
+        ledger["tasks"]["parser-task"]["generations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    ledger["tasks"]["parser-task"]["generations"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    write(&ledger_path, &ledger);
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        fixture.pairing()["history"]["generations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let mut old: Value = serde_json::from_slice(&fs::read(&preparation).unwrap()).unwrap();
+    old["directory"] = json!(fixture.root.path().join("stale-third-route"));
+    write(&preparation, &old);
+    assert!(
+        !fixture
+            .command(&[
+                "continue-review",
+                fixture.route.to_str().unwrap(),
+                preparation.to_str().unwrap()
+            ])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn unrelated_task_can_establish_a_separate_pair_in_shared_registry() {
+    let fixture = Fixture::new(false, false, "accepted");
+    let other = Fixture::new(false, false, "accepted");
+    let mut config: Value = serde_json::from_slice(&fs::read(&other.config).unwrap()).unwrap();
+    config["task"] = json!("unrelated-task");
+    config["admission"] = json!(fixture.root.path().join("pool"));
+    config["directory"] = json!(other.root.path().join("unrelated-route"));
+    let path = other.root.path().join("unrelated.json");
+    write(&path, &config);
+    other.ok(&["register-review", path.to_str().unwrap()]);
+    let first = fixture.pairing();
+    let second: Value = serde_json::from_slice(
+        &other
+            .ok(&[
+                "review-pair",
+                fixture.root.path().join("pool").to_str().unwrap(),
+                "unrelated-task",
+            ])
+            .stdout,
+    )
+    .unwrap();
+    assert_ne!(
+        first["history"]["pair"]["reviewer"]["workspace"],
+        second["history"]["pair"]["reviewer"]["workspace"]
+    );
+}
+
+#[test]
+fn running_owner_discovers_prepared_successor_without_another_wake() {
+    let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
+    fixture.reviewer_history();
+    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .args(["route-reviews", fixture.route.to_str().unwrap()])
+        .env("HOME", fixture.root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while fixture.state()["producer"] != "attempt_finished" {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let preparation = fixture.continuation();
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    while !fixture.root.path().join("review-calls").exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    fs::write(fixture.root.path().join("next-route/STOP"), "stop").unwrap();
+    assert!(router.wait().unwrap().success());
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("review-calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn stopped_generation_and_candidate_mismatch_cannot_advance() {
+    for scenario in ["stop", "disabled", "candidate"] {
+        let fixture = Fixture::new(false, false, "accepted");
+        fixture.reviewer_history();
+        fixture.route();
+        let preparation = fixture.continuation();
+        match scenario {
+            "stop" => fs::write(fixture.route.join("STOP"), "stop").unwrap(),
+            "disabled" => {
+                fixture.ok(&["review-disable", fixture.route.to_str().unwrap()]);
+            }
+            "candidate" => {
+                let mut value: Value =
+                    serde_json::from_slice(&fs::read(&preparation).unwrap()).unwrap();
+                value["candidate"] = json!("3".repeat(40));
+                write(&preparation, &value);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !fixture
+                .command(&[
+                    "continue-review",
+                    fixture.route.to_str().unwrap(),
+                    preparation.to_str().unwrap()
+                ])
+                .status
+                .success()
+        );
+        assert_eq!(
+            fixture.pairing()["history"]["generations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!fixture.root.path().join("review-calls").exists());
+    }
+}
+
+#[test]
+fn reviewer_launch_crash_keeps_original_session_and_never_replays() {
+    let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
+    fixture.reviewer_history();
+    fixture.route();
+    let worker = fixture.root.path().join("review-worker");
+    let script = fs::read_to_string(&worker).unwrap();
+    fs::write(
+        &worker,
+        script.replace(
+            "test \"$resume\" = review-session",
+            "printf '%s' \"$$\" >../review-spawned\nsleep 30\ntest \"$resume\" = review-session",
+        ),
+    )
+    .unwrap();
+    let preparation = fixture.continuation();
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
+        .env("HOME", fixture.root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let marker = fixture.root.path().join("review-spawned");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    router.kill().unwrap();
+    router.wait().unwrap();
+    let pid: i32 = fs::read_to_string(marker).unwrap().parse().unwrap();
+    assert!(pid > 1);
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    fixture.route();
+    fixture.route();
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join("next-route/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["reviewer_action"], "needs_input_launch_unknown");
+    assert_eq!(
+        fixture.pairing()["history"]["pair"]["reviewer"]["session"],
+        "review-session"
+    );
+    assert!(!fixture.root.path().join("review-calls").exists());
+    assert!(
+        !fixture
+            .command(&[
+                "review-retry",
+                fixture.root.path().join("next-route").to_str().unwrap()
+            ])
+            .status
+            .success()
+    );
 }

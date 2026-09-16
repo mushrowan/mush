@@ -150,6 +150,7 @@ pub async fn prepare(args: Prepare) -> Result<()> {
         orchestrator_inbox: None,
         admission: None,
         routing_guard: None,
+        routing_review: false,
         admitted: None,
         execution_locked: false,
         session_lease: None,

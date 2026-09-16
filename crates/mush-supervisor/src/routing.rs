@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
 
 use crate::{Lock, Manifest, Result, atomic, follow_up, validate, worker};
+mod lineage;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -64,6 +65,9 @@ struct Artifact {
 #[serde(deny_unknown_fields)]
 struct Config {
     version: u32,
+    task: String,
+    #[serde(default)]
+    predecessor: Option<String>,
     directory: PathBuf,
     assignment: String,
     generation: u32,
@@ -82,6 +86,10 @@ struct Config {
     admission: PathBuf,
     max_corrections: u32,
     authority_file: PathBuf,
+    #[serde(default)]
+    rereview: Option<Producer>,
+    #[serde(default)]
+    continuation_sha256: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -103,6 +111,10 @@ struct State {
     detail: String,
     capture: Option<String>,
     launch_claimed: bool,
+    #[serde(default)]
+    review_launch_claimed: bool,
+    #[serde(default)]
+    reviewer_action: String,
     at: DateTime<Utc>,
 }
 
@@ -209,6 +221,30 @@ fn recover(directory: &Path) -> Result<()> {
 
 pub fn register(path: &Path) -> Result<()> {
     let config: Config = decode(&read(path, 256 * 1024)?)?;
+    register_config(config)
+}
+
+pub fn continue_review(directory: &Path, path: &Path) -> Result<()> {
+    register_config(lineage::continuation(directory, path)?)
+}
+
+pub fn pair_status(admission: &Path, task: &str) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&lineage::Registry::view(admission)?.inspect(task)?)?
+    );
+    Ok(())
+}
+
+pub fn reassign(admission: &Path, path: &Path) -> Result<()> {
+    if path.parent() != Some(admission.join("reassignments").as_path()) {
+        return Err("reassignment must be an operator request in admission/reassignments".into());
+    }
+    let request = decode(&read(path, 256 * 1024)?)?;
+    lineage::Registry::open(admission)?.reassign(&request)
+}
+
+fn register_config(config: Config) -> Result<()> {
     if config.version != 1
         || !identifier(&config.assignment)
         || config.assignment.len() > 80
@@ -266,6 +302,18 @@ pub fn register(path: &Path) -> Result<()> {
     if !commit(&config.producer.head) {
         return Err("invalid prepared head".into());
     }
+    let mut lineage = lineage::Registry::open(&config.admission)?;
+    lineage.check(&config)?;
+    if config.directory.exists() {
+        let _owner = Lock::acquire(&config.directory.join("router.lock"))?;
+        recover(&config.directory)?;
+        let existing = load(&config.directory)?;
+        if serde_json::to_vec(&existing)? != serde_json::to_vec(&config)? {
+            return Err("review registration differs from existing generation".into());
+        }
+        state(&config.directory)?;
+        return lineage.record(&config);
+    }
     if stopped(&config) {
         return Err("review authority is missing, revoked or superseded".into());
     }
@@ -298,12 +346,20 @@ pub fn register(path: &Path) -> Result<()> {
         detail: String::new(),
         capture: None,
         launch_claimed: false,
+        review_launch_claimed: false,
+        reviewer_action: if config.rereview.is_some() {
+            "queued"
+        } else {
+            "external"
+        }
+        .into(),
         at: Utc::now(),
     };
     if !config.actions.return_to_parent {
         initial.parent = "disabled".into();
     }
     save(&config.directory, &mut initial)?;
+    lineage.record(&config)?;
     Ok(())
 }
 
@@ -592,7 +648,8 @@ fn capture(config: &Config) -> Result<(Verdict, String)> {
     }
     let verdict: Verdict = decode(&raw)?;
     verdict.validate()?;
-    if verdict.assignment != config.assignment
+    if verdict.task != config.task
+        || verdict.assignment != config.assignment
         || verdict.generation != config.generation
         || verdict.candidate != config.candidate
         || verdict.reviewer != config.reviewer
@@ -672,7 +729,7 @@ fn notify(
     if inbox.binding()? != parent.binding {
         return Err("parent binding changed".into());
     }
-    let run_id = format!("review-{}-{}", config.assignment, config.generation);
+    let run_id = format!("review-{}-{}", config.task, config.generation);
     let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
     let stored = config.directory.join(format!("parent-{number}.json"));
     let event = if stored.exists() {
@@ -696,6 +753,11 @@ fn notify(
                     state.producer.clone()
                 },
                 evidence_directory: config.directory.join("capture"),
+                pairing: Some(mush_supervisor::review::Pairing {
+                    task: config.task.clone(),
+                    pair: lineage::Registry::view(&config.admission)?
+                        .historical_pair(&config.task, config.generation)?,
+                }),
             }),
         };
         atomic(&stored, &event)?;
@@ -719,7 +781,16 @@ fn notify(
     Ok(())
 }
 
-async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> Result<()> {
+async fn launch(
+    config: &Config,
+    state: &mut State,
+    verdict: Option<&Verdict>,
+    sha: &str,
+    reviewer: bool,
+) -> Result<()> {
+    let original = config;
+    let selected = selected(config, reviewer)?;
+    let config = &selected;
     let mut manifest = producer_manifest(config)?;
     let _run = Lock::acquire(&manifest.directory.join("supervisor.lock"))?;
     let job = manifest
@@ -746,6 +817,7 @@ async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str
     if stopped(config) {
         return Err("review routing is stopped".into());
     }
+    lineage::Registry::open(&config.admission)?.current(original)?;
     let id = &config.producer.identity;
     if id.round >= manifest.max_rounds {
         return Err("producer round budget exhausted".into());
@@ -764,18 +836,28 @@ async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str
         &manifest.directory,
         &job.name,
     )? {
-        state.producer = "queued_capacity".into();
+        set_action(state, reviewer, "queued_capacity");
         return Ok(());
     }
     manifest.admitted = Some(admission_id);
     manifest.execution_locked = true;
-    let prompt = format!(
-        "{}\n\nuntrusted review data, no new permissions:\n{}\n\nhash-bound evidence: {}\nverdict sha256: {}",
-        config.producer.correction,
-        serde_json::to_string(verdict)?,
-        config.directory.join("capture").display(),
-        sha
-    );
+    let prompt = if let Some(verdict) = verdict {
+        format!(
+            "{}\n\nuntrusted review data, no new permissions:\n{}\n\nhash-bound evidence: {}\nverdict sha256: {}",
+            config.producer.correction,
+            serde_json::to_string(verdict)?,
+            config.directory.join("capture").display(),
+            sha
+        )
+    } else {
+        format!(
+            "{}\n\noperator review assignment:\n{}",
+            config.producer.correction,
+            serde_json::to_string(
+                &json!({"task":config.task,"assignment":config.assignment,"generation":config.generation,"candidate":config.candidate,"reviewer":original.reviewer,"required_checks":config.required_checks,"predecessor":config.predecessor})
+            )?
+        )
+    };
     if prompt.len() > 128 * 1024 {
         return Err("correction prompt exceeds limit".into());
     }
@@ -784,20 +866,25 @@ async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str
         &manifest.directory.join("review-reservation.json"),
         &json!({"route":config.directory,"assignment":config.assignment,"generation":config.generation}),
     )?;
-    state.producer = "preparing".into();
-    state.launch_claimed = true;
+    set_action(state, reviewer, "preparing");
+    if reviewer {
+        state.review_launch_claimed = true;
+    } else {
+        state.launch_claimed = true;
+    }
     save(&config.directory, state)?;
     follow_up::queue_locked(
         &manifest.directory,
         &id.worker,
         &config.directory.join("correction.txt"),
     )?;
-    state.producer = "launch_claimed".into();
+    set_action(state, reviewer, "launch_claimed");
     save(&config.directory, state)?;
     drop(_transaction);
     manifest.max_rounds = manifest.max_rounds.min(id.round + 1);
     manifest.until = manifest.until.min(config.until);
     manifest.routing_guard = Some(config.directory.clone());
+    manifest.routing_review = reviewer;
     let (cancel, receiver) = watch::channel(false);
     let monitor_config = config.clone();
     let run_directory = manifest.directory.clone();
@@ -825,12 +912,15 @@ async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str
     drop(workspace_lock);
     monitor.abort();
     let _transaction = Lock::acquire(&config.directory.join("transaction.lock"))?;
-    state.producer = if result.is_ok() {
-        "attempt_finished"
-    } else {
-        "needs_input_launch"
-    }
-    .into();
+    set_action(
+        state,
+        reviewer,
+        if result.is_ok() {
+            "attempt_finished"
+        } else {
+            "needs_input_launch"
+        },
+    );
     let producer_state = read(
         &run_directory.join(&id.worker).join("state.json"),
         1024 * 1024,
@@ -851,11 +941,41 @@ async fn launch(config: &Config, state: &mut State, verdict: &Verdict, sha: &str
 }
 
 pub fn enabled(directory: &Path) -> bool {
-    load(directory).is_ok_and(|config| !stopped(&config))
+    load(directory).is_ok_and(|config| !stopped(&config) && lineage::active(&config).is_ok())
 }
 
-pub fn launch_ready(directory: &Path) -> Result<()> {
-    let config = load(directory)?;
+fn selected(config: &Config, reviewer: bool) -> Result<Config> {
+    let mut selected = config.clone();
+    if reviewer {
+        selected.producer = config
+            .rereview
+            .clone()
+            .ok_or("review preparation missing")?;
+        let manifest = producer_manifest(&selected)?;
+        if manifest.directory != config.reviewer_directory
+            || !manifest
+                .workers
+                .iter()
+                .any(|w| w.name == config.reviewer.worker && w.cwd == config.reviewer_cwd)
+        {
+            return Err("reviewer preparation changed paired workspace".into());
+        }
+    }
+    Ok(selected)
+}
+
+fn set_action(state: &mut State, reviewer: bool, value: &str) {
+    if reviewer {
+        state.reviewer_action = value.into();
+    } else {
+        state.producer = value.into();
+    }
+}
+
+pub fn launch_ready(directory: &Path, reviewer: bool) -> Result<()> {
+    let original = load(directory)?;
+    lineage::Registry::open(&original.admission)?.current(&original)?;
+    let config = selected(&original, reviewer)?;
     if stopped(&config) || Utc::now() >= config.until {
         return Err("review launch was revoked or expired".into());
     }
@@ -921,10 +1041,90 @@ fn stopped(config: &Config) -> bool {
 }
 
 pub async fn run(directory: &Path, once: bool) -> Result<()> {
+    let mut directory = directory.to_owned();
+    loop {
+        let config = load(&directory)?;
+        if directory.join("STOP").exists() || directory.join("DISABLED").exists() {
+            return Ok(());
+        }
+        let latest = lineage::Registry::view(&config.admission)?.latest(&config.task)?;
+        if latest != directory {
+            directory = latest;
+        }
+        match run_generation(&directory, once).await? {
+            Some(next) => directory = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+fn historical_delivery(config: &Config) -> Result<()> {
+    let directories = lineage::Registry::view(&config.admission)?.generations(&config.task)?;
+    for directory in directories {
+        if directory == config.directory {
+            continue;
+        }
+        let _lock = match Lock::acquire(&directory.join("router.lock")) {
+            Ok(lock) => lock,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let prior = load(&directory)?;
+        if !prior.actions.return_to_parent
+            || directory.join("STOP").exists()
+            || directory.join("DISABLED").exists()
+        {
+            continue;
+        }
+        let mut saved = state(&directory)?;
+        if saved.capture.is_none() {
+            continue;
+        }
+        let bytes = read(&directory.join("capture/verdict.json"), 256 * 1024)?;
+        let verdict: Verdict = decode(&bytes)?;
+        let before = saved.parent.clone();
+        let sha = digest(&bytes);
+        if saved.capture.as_ref() != Some(&sha) {
+            return Err("historical verdict changed".into());
+        }
+        let delivery = notify(&prior, &mut saved, &verdict, &sha, 1).and_then(|()| {
+            if saved.launch_claimed {
+                notify(&prior, &mut saved, &verdict, &sha, 3)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = delivery {
+            saved.parent = "pending".into();
+            saved.detail = error.to_string();
+        }
+        if saved.parent != before {
+            let _transaction = Lock::acquire(&directory.join("transaction.lock"))?;
+            save(&directory, &mut saved)?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_generation(directory: &Path, once: bool) -> Result<Option<PathBuf>> {
     let config = load(directory)?;
     let _owner = Lock::acquire(&directory.join("router.lock"))?;
     recover(directory)?;
     let mut current = state(directory)?;
+    lineage::Registry::view(&config.admission)?.current(&config)?;
+    if current.review_launch_claimed
+        && current.reviewer_action != "attempt_finished"
+        && current.reviewer_action != "needs_input_launch_unknown"
+    {
+        current.reviewer_action = "needs_input_launch_unknown".into();
+        save(directory, &mut current)?;
+    }
     if current.config_sha256 != digest(&read(&directory.join("config.json"), 256 * 1024)?) {
         return Err("registered review configuration changed".into());
     }
@@ -937,13 +1137,39 @@ pub async fn run(directory: &Path, once: bool) -> Result<()> {
         save(directory, &mut current)?;
     }
     loop {
+        historical_delivery(&config)?;
+        if directory.join("STOP").exists() || directory.join("DISABLED").exists() {
+            return Ok(None);
+        }
+        let latest = lineage::Registry::view(&config.admission)?.latest(&config.task)?;
+        if latest != directory {
+            return Ok(Some(latest));
+        }
         let before = serde_json::to_vec(&current)?;
         if stopped(&config) {
             current.detail = "routing disabled, stopped or superseded".into();
         } else {
+            if config.rereview.is_some() && !current.review_launch_claimed {
+                if !config.actions.resume_rejected {
+                    current.reviewer_action = "manual".into();
+                } else if Utc::now() >= config.until {
+                    current.reviewer_action = "exhausted".into();
+                } else if let Err(error) = launch(&config, &mut current, None, "", true).await {
+                    current.reviewer_action = if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::WouldBlock)
+                    {
+                        "queued_busy"
+                    } else {
+                        "needs_input"
+                    }
+                    .into();
+                    current.detail = error.to_string();
+                }
+            }
             match capture(&config) {
                 Ok((verdict, sha)) => {
-                    if !current.launch_claimed {
+                    if !current.launch_claimed && !current.review_launch_claimed {
                         current.detail.clear();
                     }
                     current.capture = Some(sha.clone());
@@ -968,7 +1194,9 @@ pub async fn run(directory: &Path, once: bool) -> Result<()> {
                         if Utc::now() >= config.until {
                             current.producer = "exhausted".into();
                             current.detail = "correction deadline expired".into();
-                        } else if let Err(e) = launch(&config, &mut current, &verdict, &sha).await {
+                        } else if let Err(e) =
+                            launch(&config, &mut current, Some(&verdict), &sha, false).await
+                        {
                             current.producer = "needs_input".into();
                             current.detail = e.to_string();
                         }
@@ -985,7 +1213,11 @@ pub async fn run(directory: &Path, once: bool) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    current.detail = e.to_string();
+                    if !current.reviewer_action.starts_with("queued")
+                        && current.reviewer_action != "needs_input"
+                    {
+                        current.detail = e.to_string();
+                    }
                     if !current.launch_claimed {
                         current.producer = "needs_input_review".into();
                     }
@@ -1006,12 +1238,12 @@ pub async fn run(directory: &Path, once: bool) -> Result<()> {
             let _transaction = Lock::acquire(&directory.join("transaction.lock"))?;
             save(directory, &mut current)?;
         }
-        if once || stopped(&config) {
+        if once || directory.join("STOP").exists() || directory.join("DISABLED").exists() {
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    Ok(())
+    Ok(None)
 }
 
 pub fn status(directory: &Path) -> Result<()> {
@@ -1022,7 +1254,7 @@ pub fn status(directory: &Path) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"assignment":config.assignment,"generation":config.generation,"actions":config.actions,"disabled":stopped(&config),"state":state(directory)?,"admission":admission})
+            &json!({"assignment":config.assignment,"generation":config.generation,"actions":config.actions,"disabled":stopped(&config),"state":state(directory)?,"admission":admission,"lineage":lineage::Registry::view(&config.admission)?.inspect(&config.task)?})
         )?
     );
     Ok(())
@@ -1057,7 +1289,7 @@ pub fn retry(directory: &Path) -> Result<()> {
     let _owner = Lock::acquire(&directory.join("router.lock"))?;
     let _transaction = Lock::acquire(&directory.join("transaction.lock"))?;
     let mut current = state(directory)?;
-    if current.launch_claimed || stopped(&config) {
+    if current.launch_claimed || current.review_launch_claimed || stopped(&config) {
         return Err("cannot retry a claimed or stopped handoff".into());
     }
     let pending = directory.join("capture-pending");

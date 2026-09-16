@@ -57,7 +57,12 @@ pub fn execution_lock(directory: &Path, workspace: &Path) -> io::Result<File> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(&path)?;
     read_private(&path, 0)?;
-    file.try_lock().map_err(io::Error::other)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "workspace is busy")
+        }
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     Ok(file)
 }
 
@@ -95,7 +100,12 @@ pub fn session_lock(directory: &Path, session: &str, inherited: Option<i32>) -> 
     } else {
         file
     };
-    lock.try_lock().map_err(io::Error::other)?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "session is busy")
+        }
+        std::fs::TryLockError::Error(error) => error,
+    })?;
     Ok(lock)
 }
 
