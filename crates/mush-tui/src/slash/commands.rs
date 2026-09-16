@@ -46,6 +46,7 @@ pub fn handle(
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /name [title]  - show or set the session title\n");
             help.push_str("  /session       - show the session id, file and message counts\n");
+            help.push_str("  /rlm-max-depth - show or set how deep subagents may nest\n");
             help.push_str(
                 "  /btw <q>       - ask a side question without adding it to the session\n",
             );
@@ -231,6 +232,20 @@ pub fn handle(
                 conversation.tree().len(),
                 app.model_id,
             ));
+            None
+        }
+        SlashAction::RlmMaxDepth { max_depth: None } => {
+            app.push_system_message(format!(
+                "rlm max depth: {} (depth {})",
+                runtime.rlm_max_depth, runtime.rlm_depth
+            ));
+            None
+        }
+        SlashAction::RlmMaxDepth {
+            max_depth: Some(max_depth),
+        } => {
+            runtime.set_rlm_max_depth(*max_depth);
+            app.status = Some(format!("rlm max depth set: {max_depth}").into());
             None
         }
         SlashAction::Name { title: None } => {

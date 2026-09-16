@@ -779,6 +779,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         kernel_notices: Some(kernel_notices),
         kernel_prompts: Some(kernel_prompts),
         kernel_state: setup.kernel_state.clone(),
+        rlm_depth: env_depth("RLM_DEPTH").unwrap_or(0),
+        rlm_max_depth: setup
+            .cfg
+            .rlm_max_depth
+            .or_else(|| env_depth("RLM_MAX_DEPTH"))
+            .unwrap_or(mush_tui::DEFAULT_RLM_MAX_DEPTH),
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
@@ -941,6 +947,10 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
         .collect();
     session.auto_title();
     session
+}
+
+fn env_depth(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.trim().parse().ok()
 }
 
 #[cfg(test)]

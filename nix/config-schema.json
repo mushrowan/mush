@@ -1075,6 +1075,15 @@
       "default": false,
       "type": "boolean"
     },
+    "rlm_max_depth": {
+      "default": null,
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "settings": {
       "$ref": "#/$defs/Settings",
       "default": {

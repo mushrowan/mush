@@ -1600,6 +1600,8 @@ mod tests {
             kernel_notices: None,
             kernel_prompts: None,
             kernel_state: None,
+            rlm_depth: 0,
+            rlm_max_depth: 2,
             forbidden_chars: Default::default(),
         }
     }

@@ -36,6 +36,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("cost", "show session cost"),
     ("name", "show or set the session title"),
     ("session", "show the session id, file and message counts"),
+    ("rlm-max-depth", "show or set how deep subagents may nest"),
     (
         "btw",
         "ask a side question without adding it to the session",
@@ -114,11 +115,15 @@ impl RunnerRuntime {
         );
         let mut session = Session::with_conversation(app, conversation);
         session.runtime.saver = tui_config.save_session.clone();
-        session.runtime.kernel_state = tui_config.kernel_state.clone();
         session.runtime.session_id = tui_config.session_id.clone();
         session.runtime.title = tui_config.initial_title.clone();
         session.runtime.model_id = tui_config.model.id.to_string();
         session.runtime.system_prompt = tui_config.system_prompt.clone();
+        session.runtime.rlm_depth = tui_config.rlm_depth;
+        session.runtime.rlm_max_depth = tui_config.rlm_max_depth;
+        session
+            .runtime
+            .set_kernel_state(tui_config.kernel_state.clone());
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 

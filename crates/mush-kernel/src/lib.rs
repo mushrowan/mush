@@ -13,6 +13,28 @@ pub trait KernelState: Send + Sync {
     async fn snapshot(&self, path: &std::path::Path) -> Result<Option<SnapshotReport>, String>;
     async fn restore_from(&self, path: &std::path::Path);
     async fn reset(&self);
+    fn attach_session(&self, session: KernelSession);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelSession {
+    pub session_dir: std::path::PathBuf,
+    pub depth: u32,
+    pub max_depth: u32,
+}
+
+impl KernelSession {
+    #[must_use]
+    pub fn env(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "RLM_SESSION_DIR".into(),
+                self.session_dir.to_string_lossy().into_owned(),
+            ),
+            ("RLM_DEPTH".into(), self.depth.to_string()),
+            ("RLM_MAX_DEPTH".into(), self.max_depth.to_string()),
+        ]
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

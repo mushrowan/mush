@@ -37,6 +37,8 @@ pub enum SlashParseError {
     LoginCodeUsage,
     #[error("usage: /btw <question>")]
     SideUsage,
+    #[error("usage: /rlm-max-depth [<non-negative integer>]")]
+    RlmMaxDepthUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
     CompactionModelUsage,
     #[error(
@@ -92,6 +94,9 @@ pub enum SlashAction {
     },
     Skills,
     SessionInfo,
+    RlmMaxDepth {
+        max_depth: Option<u32>,
+    },
     Side {
         question: String,
     },
@@ -206,6 +211,13 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "cost" => Ok(SlashAction::Cost),
         "skills" => Ok(SlashAction::Skills),
         "session" => Ok(SlashAction::SessionInfo),
+        "rlm-max-depth" if args.is_empty() => Ok(SlashAction::RlmMaxDepth { max_depth: None }),
+        "rlm-max-depth" => args
+            .parse()
+            .map(|max_depth| SlashAction::RlmMaxDepth {
+                max_depth: Some(max_depth),
+            })
+            .map_err(|_| SlashParseError::RlmMaxDepthUsage),
         "btw" | "side" if args.is_empty() => Err(SlashParseError::SideUsage),
         "btw" | "side" => Ok(SlashAction::Side {
             question: args.to_string(),
@@ -305,6 +317,22 @@ fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_rlm_max_depth_shows_or_sets() {
+        assert_eq!(
+            parse("/rlm-max-depth").unwrap(),
+            SlashAction::RlmMaxDepth { max_depth: None }
+        );
+        assert_eq!(
+            parse("/rlm-max-depth 3").unwrap(),
+            SlashAction::RlmMaxDepth { max_depth: Some(3) }
+        );
+        assert!(matches!(
+            parse("/rlm-max-depth -1"),
+            Err(SlashParseError::RlmMaxDepthUsage)
+        ));
+    }
 
     #[test]
     fn parse_mcp_bare_is_status() {

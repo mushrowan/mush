@@ -147,6 +147,7 @@ struct CellRun {
 
 pub struct IpythonTool {
     config: KernelConfig,
+    session: std::sync::Mutex<Option<mush_kernel::KernelSession>>,
     host: Arc<dyn HostRequestHandler>,
     kernel: tokio::sync::Mutex<Option<Kernel>>,
     output_sink: Option<crate::bash::OutputSink>,
@@ -171,6 +172,7 @@ impl IpythonTool {
                 cwd: cwd.to_path_buf(),
                 ..KernelConfig::default()
             },
+            session: std::sync::Mutex::new(None),
             host,
             kernel: tokio::sync::Mutex::new(None),
             output_sink: None,
@@ -193,6 +195,19 @@ impl IpythonTool {
 
     pub fn kernel_config_mut(&mut self) -> &mut KernelConfig {
         &mut self.config
+    }
+
+    fn kernel_config(&self) -> KernelConfig {
+        let mut config = self.config.clone();
+        if let Some(session) = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            config.env.extend(session.env());
+        }
+        config
     }
 
     pub async fn shutdown(&self) {
@@ -234,7 +249,7 @@ impl IpythonTool {
     async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
         let mut slot = self.kernel.lock().await;
         if slot.is_none() {
-            let kernel = Kernel::start(self.config.clone(), self.host.clone()).await?;
+            let kernel = Kernel::start(self.kernel_config(), self.host.clone()).await?;
             if let Some(path) = self.pending_restore.lock().await.take()
                 && path.is_file()
             {
@@ -316,6 +331,13 @@ impl mush_kernel::KernelState for IpythonTool {
         if let Some(kernel) = self.kernel.lock().await.take() {
             let _ = kernel.shutdown().await;
         }
+    }
+
+    fn attach_session(&self, session: mush_kernel::KernelSession) {
+        *self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
     }
 }
 

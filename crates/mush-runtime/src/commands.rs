@@ -288,6 +288,27 @@ impl SessionRuntime {
 
     pub fn set_kernel_state(&mut self, kernel: Option<Arc<dyn KernelState>>) {
         self.kernel_state = kernel;
+        self.attach_kernel_session();
+    }
+
+    pub fn set_rlm_max_depth(&mut self, max_depth: u32) {
+        self.rlm_max_depth = max_depth;
+        self.attach_kernel_session();
+    }
+
+    #[must_use]
+    pub fn kernel_session(&self) -> mush_kernel::KernelSession {
+        mush_kernel::KernelSession {
+            session_dir: SessionStore::default_artifact_dir(&self.session_id),
+            depth: self.rlm_depth,
+            max_depth: self.rlm_max_depth,
+        }
+    }
+
+    fn attach_kernel_session(&self) {
+        if let Some(kernel) = &self.kernel_state {
+            kernel.attach_session(self.kernel_session());
+        }
     }
 
     fn replace_session(
@@ -302,6 +323,7 @@ impl SessionRuntime {
         self.title_generated = false;
         self.pending_prompt = None;
         self.pending_compaction_inputs.clear();
+        self.attach_kernel_session();
     }
 
     fn session_changed_events(&self) -> Vec<SessionEvent> {
@@ -343,6 +365,45 @@ fn entry_preview(entry: &mush_session::tree::SessionEntry) -> String {
 mod tests {
     use super::*;
     use mush_ai::types::{Timestamp, UserContent, UserMessage};
+
+    struct RecordingKernel(std::sync::Mutex<Vec<mush_kernel::KernelSession>>);
+
+    #[async_trait::async_trait]
+    impl KernelState for RecordingKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(&self, _path: &std::path::Path) {}
+        async fn reset(&self) {}
+        fn attach_session(&self, session: mush_kernel::KernelSession) {
+            self.0.lock().unwrap().push(session);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_kernel_learns_the_session_dir_and_depth_on_every_switch() {
+        let kernel = Arc::new(RecordingKernel(std::sync::Mutex::new(Vec::new())));
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.set_kernel_state(Some(kernel.clone()));
+        runtime.set_rlm_max_depth(4);
+        runtime.handle(SessionCommand::New).await;
+
+        let seen = kernel.0.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[1].max_depth, 4);
+        assert_eq!(seen[2].depth, 0);
+        assert_eq!(
+            seen[2].session_dir,
+            SessionStore::default_artifact_dir(&runtime.session_id)
+        );
+        assert_ne!(seen[0].session_dir, seen[2].session_dir);
+        let env = seen[2].env();
+        assert!(env.iter().any(|(k, v)| k == "RLM_MAX_DEPTH" && v == "4"));
+        assert!(env.iter().any(|(k, v)| k == "RLM_DEPTH" && v == "0"));
+    }
 
     fn user(text: &str) -> Message {
         Message::User(

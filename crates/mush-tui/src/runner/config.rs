@@ -90,6 +90,8 @@ pub struct TuiConfig {
     pub kernel_notices: Option<KernelNotices>,
     pub kernel_prompts: Option<KernelPrompts>,
     pub kernel_state: Option<std::sync::Arc<dyn mush_kernel::KernelState>>,
+    pub rlm_depth: u32,
+    pub rlm_max_depth: u32,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
@@ -209,6 +211,8 @@ impl TuiConfig {
             kernel_notices: None,
             kernel_prompts: None,
             kernel_state: None,
+            rlm_depth: 0,
+            rlm_max_depth: mush_runtime::session::DEFAULT_RLM_MAX_DEPTH,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }

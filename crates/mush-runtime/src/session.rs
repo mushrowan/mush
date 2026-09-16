@@ -211,11 +211,14 @@ pub struct SessionRuntime {
     pub turns: TurnEvents,
     pub saver: Option<crate::snapshot::SessionSaver>,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
+    pub rlm_depth: u32,
+    pub rlm_max_depth: u32,
     last_save: std::time::Instant,
     dirty: bool,
 }
 
 pub const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
 
 impl SessionRuntime {
     #[must_use]
@@ -235,6 +238,8 @@ impl SessionRuntime {
             turns: TurnEvents::default(),
             saver: None,
             kernel_state: None,
+            rlm_depth: 0,
+            rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }
