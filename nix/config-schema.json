@@ -416,6 +416,13 @@
           },
           "default": {},
           "type": "object"
+        },
+        "subagents": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BindingSource"
+          },
+          "default": {},
+          "type": "object"
         }
       },
       "type": "object"
@@ -759,6 +766,17 @@
             "base17": null
           }
         },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThemePreset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "status": {
           "default": null,
           "type": [
@@ -810,6 +828,12 @@
         }
       },
       "type": "object"
+    },
+    "ThemePreset": {
+      "enum": [
+        "prime"
+      ],
+      "type": "string"
     },
     "ThinkingConfigWire": {
       "anyOf": [
@@ -977,7 +1001,8 @@
         "insert": {},
         "model_picker": {},
         "pane": {},
-        "shared": {}
+        "shared": {},
+        "subagents": {}
       }
     },
     "log_filter": {
@@ -1134,6 +1159,7 @@
           "base16": null,
           "base17": null
         },
+        "preset": null,
         "status": null,
         "system": null,
         "thinking": null,

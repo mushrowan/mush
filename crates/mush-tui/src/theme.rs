@@ -353,6 +353,9 @@ impl Theme {
     pub fn from_config(config: &ThemeConfig) -> Self {
         let mut theme = Self::default();
 
+        if let Some(preset) = config.preset {
+            apply_palette(&mut theme, &preset.palette());
+        }
         apply_palette(&mut theme, &config.palette);
 
         if let Some(c) = config.user.as_deref().and_then(parse_colour) {
@@ -503,9 +506,40 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreset {
+    Prime,
+}
+
+impl ThemePreset {
+    #[must_use]
+    pub fn palette(self) -> Base24Palette {
+        match self {
+            Self::Prime => Base24Palette {
+                base00: Some("#0d0d10".into()),
+                base01: Some("#1a1a1f".into()),
+                base02: Some("#222226".into()),
+                base03: Some("#71717a".into()),
+                base05: Some("#f4f4f5".into()),
+                base08: Some("#d06f82".into()),
+                base0A: Some("#f59e0b".into()),
+                base0B: Some("#7da876".into()),
+                base0C: Some("#8ba888".into()),
+                base0D: Some("#7c6faf".into()),
+                base0E: Some("#8d7fc0".into()),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ThemeConfig {
+    pub preset: Option<ThemePreset>,
     pub user: Option<String>,
     pub assistant: Option<String>,
     pub system: Option<String>,
@@ -577,6 +611,11 @@ pub fn auto_theme(config: &ThemeConfig) -> Theme {
     };
 
     let mut theme = base;
+
+    if let Some(preset) = config.preset {
+        apply_palette(&mut theme, &preset.palette());
+    }
+    apply_palette(&mut theme, &config.palette);
 
     if let Some(c) = config.user.as_deref().and_then(parse_colour) {
         theme.user_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
@@ -672,6 +711,37 @@ mod tests {
         };
         let theme = Theme::from_config(&config);
         assert_eq!(theme.tool_running.fg, Some(Color::Rgb(255, 255, 0)));
+    }
+
+    #[test]
+    fn the_prime_preset_paints_the_accent_purple() {
+        let config = ThemeConfig {
+            preset: Some(ThemePreset::Prime),
+            ..Default::default()
+        };
+        let theme = Theme::from_config(&config);
+        assert_eq!(theme.user_label.fg, Some(Color::Rgb(0x7c, 0x6f, 0xaf)));
+        assert_eq!(theme.tool_panel_bg.bg, Some(Color::Rgb(0x0d, 0x0d, 0x10)));
+    }
+
+    #[test]
+    fn a_palette_entry_overrides_the_preset() {
+        let config = ThemeConfig {
+            preset: Some(ThemePreset::Prime),
+            palette: Base24Palette {
+                base0D: Some("#0000ff".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let theme = Theme::from_config(&config);
+        assert_eq!(theme.user_label.fg, Some(Color::Rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn the_preset_parses_from_config() {
+        let config: ThemeConfig = toml::from_str("preset = \"prime\"").unwrap();
+        assert_eq!(config.preset, Some(ThemePreset::Prime));
     }
 
     #[test]

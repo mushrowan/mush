@@ -53,4 +53,4 @@ pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,
     TerminalPolicy, TerminalPolicyOverrides,
 };
-pub use theme::{Theme, ThemeConfig};
+pub use theme::{Theme, ThemeConfig, ThemePreset};
