@@ -2360,3 +2360,55 @@ fn router_killed_after_outbox_write_replays_the_same_parent_event() {
     assert_eq!(inbox.events().unwrap(), pending);
     assert!(!fixture.root.path().join("calls").exists());
 }
+
+#[test]
+fn retained_outbox_replays_when_latest_action_cannot_be_persisted() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let detached = fixture.root.path().join("detached-parent");
+    fs::rename(&fixture.inbox, &detached).unwrap();
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original_policy = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original_policy).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    fixture.route();
+    let history_path = fixture.route.join("parent-events.json");
+    let history = fs::read(&history_path).unwrap();
+    let retained: Vec<mush_supervisor::inbox::Event> = serde_json::from_slice(&history).unwrap();
+    assert_eq!(retained.len(), 2);
+    let obstruction = history_path.with_extension("pending-write");
+    directory(&obstruction);
+    fs::rename(&detached, &fixture.inbox).unwrap();
+    fs::write(&policy, original_policy).unwrap();
+    fixture.route();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(fixture.state()["parent"], "pending");
+    assert_eq!(fs::read(&history_path).unwrap(), history);
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    assert_eq!(inbox.pending().unwrap(), retained);
+    for event in &retained {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    fs::remove_dir(&obstruction).unwrap();
+    fixture.route();
+    fixture.route();
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].assignment_id, 3);
+    assert!(
+        pending[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}

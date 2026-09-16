@@ -777,7 +777,7 @@ fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> R
     } else {
         state.producer.clone()
     };
-    if events.last().is_none_or(|event| {
+    let append = if events.last().is_none_or(|event| {
         event
             .review
             .as_ref()
@@ -788,48 +788,62 @@ fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> R
             .map_or(0, |event| event.assignment_id)
             .checked_add(1)
             .ok_or("parent action sequence exhausted")?;
-        if events.len() == 64 {
-            let inbox = Inbox::open(&parent.inbox)?;
-            if inbox.binding()? != parent.binding {
-                return Err("parent binding changed".into());
-            }
-            let mut pending = Vec::new();
-            for event in events {
-                if !inbox.acknowledged(&event.event_id)? {
-                    pending.push(event);
+        (|| -> Result<()> {
+            let mut retained = events.clone();
+            if retained.len() == 64 {
+                let inbox = Inbox::open(&parent.inbox)?;
+                if inbox.binding()? != parent.binding {
+                    return Err("parent binding changed".into());
+                }
+                let mut pending = Vec::new();
+                for event in retained {
+                    if !inbox.acknowledged(&event.event_id)? {
+                        pending.push(event);
+                    }
+                }
+                retained = pending;
+                if retained.len() == 64 {
+                    return Err("parent action history awaits acknowledgement".into());
                 }
             }
-            events = pending;
-            if events.len() == 64 {
-                return Err("parent action history awaits acknowledgement".into());
-            }
-        }
-        let run_id = format!("review-{}-{}", config.task, config.generation);
-        let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
-        let event = Event {
-            event_id,
-            run_id,
-            worker_id: config.reviewer.worker.clone(),
-            assignment_id: number,
-            round: number,
-            session_id: Some(config.reviewer.session.clone()),
-            reason: TerminalReason::Completed,
-            report_path: config.directory.join("capture/verdict.json"),
-            review: Some(Notice {
-                verdict: verdict.clone(),
-                capture_sha256: sha.into(),
-                producer_action: action,
-                evidence_directory: config.directory.join("capture"),
-                pairing: Some(mush_supervisor::review::Pairing {
-                    task: config.task.clone(),
-                    pair: lineage::Registry::view(&config.admission)?
-                        .historical_pair(&config.task, config.generation)?,
+            let run_id = format!("review-{}-{}", config.task, config.generation);
+            let event_id = format!("{run_id}.{}.{number}", config.reviewer.worker);
+            let event = Event {
+                event_id,
+                run_id,
+                worker_id: config.reviewer.worker.clone(),
+                assignment_id: number,
+                round: number,
+                session_id: Some(config.reviewer.session.clone()),
+                reason: TerminalReason::Completed,
+                report_path: config.directory.join("capture/verdict.json"),
+                review: Some(Notice {
+                    verdict: verdict.clone(),
+                    capture_sha256: sha.into(),
+                    producer_action: action,
+                    evidence_directory: config.directory.join("capture"),
+                    pairing: Some(mush_supervisor::review::Pairing {
+                        task: config.task.clone(),
+                        pair: lineage::Registry::view(&config.admission)?
+                            .historical_pair(&config.task, config.generation)?,
+                    }),
                 }),
-            }),
-        };
-        events.push(event);
-        atomic(&stored, &events)?;
-    }
+            };
+            retained.push(event);
+            atomic(&stored, &retained)?;
+            events = retained;
+            Ok(())
+        })()
+    } else {
+        Ok(())
+    };
+    let replay = replay_parent(config, parent, &events);
+    append?;
+    state.parent = if replay? { "acknowledged" } else { "queued" }.into();
+    Ok(())
+}
+
+fn replay_parent(config: &Config, parent: &Parent, events: &[Event]) -> Result<bool> {
     let inbox = Inbox::open(&parent.inbox)?;
     if inbox.binding()? != parent.binding {
         return Err("parent binding changed".into());
@@ -839,13 +853,7 @@ fn notify(config: &Config, state: &mut State, verdict: &Verdict, sha: &str) -> R
         inbox.enqueue(event.clone(), &config.reviewer_cwd)?;
         acknowledged &= inbox.acknowledged(&event.event_id)?;
     }
-    state.parent = if acknowledged {
-        "acknowledged"
-    } else {
-        "queued"
-    }
-    .into();
-    Ok(())
+    Ok(acknowledged)
 }
 
 async fn launch(
