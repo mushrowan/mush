@@ -1623,3 +1623,46 @@ fn a_user_image_renders_as_a_placeholder_line() {
 fn an_unreadable_image_still_gets_a_placeholder() {
     assert_eq!(image_placeholder(2, b"not an image"), "[image 2: image]");
 }
+
+#[test]
+fn the_code_preview_skips_imports_and_counts_the_rest() {
+    let (preview, hidden) =
+        code_preview("import os\n\n# scan\nfiles = list(os.scandir('.'))\nlen(files)");
+    assert_eq!(preview, "files = list(os.scandir('.'))");
+    assert_eq!(hidden, 4);
+
+    let (only_import, hidden) = code_preview("import os");
+    assert_eq!(only_import, "import os");
+    assert_eq!(hidden, 0);
+}
+
+#[test]
+fn an_ipython_cell_collapses_to_a_preview_and_expands_with_detail() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "on it"));
+    app.start_streaming();
+    app.start_tool(
+        &mush_ai::types::ToolCallId::from("tc_1"),
+        "ipython",
+        "import re\nmatches = re.findall('x', text)\nlen(matches)",
+    );
+    app.end_tool(
+        &mush_ai::types::ToolCallId::from("tc_1"),
+        "ipython",
+        mush_ai::types::ToolOutcome::Success,
+        Some("3"),
+        None,
+    );
+
+    let overview = rendered_text(&all_lines(&app, 80));
+    assert!(overview.contains("matches = re.findall"), "{overview}");
+    assert!(overview.contains("+2 lines"), "{overview}");
+    assert!(!overview.contains("import re"), "{overview}");
+
+    app.cycle_detail();
+    let details = rendered_text(&all_lines(&app, 80));
+    assert!(details.contains("import re"), "{details}");
+    assert!(details.contains("len(matches)"), "{details}");
+    assert!(!details.contains("+2 lines"), "{details}");
+}

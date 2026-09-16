@@ -10,6 +10,7 @@ publish = false
 mush-ai.workspace = true
 mush-agent.workspace = true
 mush-treesitter.workspace = true
+mush-kernel.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 serde.workspace = true

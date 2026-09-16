@@ -2950,6 +2950,7 @@ dependencies = [
  "libc",
  "mush-agent",
  "mush-ai",
+ "mush-kernel",
  "mush-treesitter",
  "pretty_assertions",
  "schemars",

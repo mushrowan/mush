@@ -28,6 +28,7 @@ pub struct AppSetup {
     pub http_client: mush_ai::http::HttpClient,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: mush_tui::SkillCatalogue,
+    pub rlm: bool,
 }
 
 pub struct SetupArgs {
@@ -37,6 +38,7 @@ pub struct SetupArgs {
     pub max_turns: Option<usize>,
     pub system: Option<String>,
     pub no_tools: bool,
+    pub rlm: bool,
     pub tools: Option<Vec<String>>,
     pub append_system: Option<String>,
     pub discovery: mush_ext::DiscoveryOptions,
@@ -84,24 +86,33 @@ impl AppSetup {
             t.phase("model + http");
         }
 
-        let mut tools = init_builtin_tools(
-            &model,
-            &cwd,
-            args.output_sink,
-            args.no_tools,
-            &http_client,
-            mush_tools::forbidden_chars::ForbiddenChars::with_classes(
-                cfg.forbidden_chars.iter().copied(),
-                cfg.forbidden_char_classes.iter().copied(),
-            ),
-            cfg.max_image_mb,
-            cfg.web_search.clone(),
-        );
+        let rlm = args.rlm || cfg.rlm;
+        let classic_tools = !args.no_tools && !rlm;
+        let mut tools = if rlm && !args.no_tools {
+            mush_agent::tool::ToolRegistry::from_shared(vec![Arc::new(
+                mush_tools::ipython::IpythonTool::new(Arc::from(cwd.as_path())),
+            )
+                as mush_agent::tool::SharedTool])
+        } else {
+            init_builtin_tools(
+                &model,
+                &cwd,
+                args.output_sink,
+                args.no_tools,
+                &http_client,
+                mush_tools::forbidden_chars::ForbiddenChars::with_classes(
+                    cfg.forbidden_chars.iter().copied(),
+                    cfg.forbidden_char_classes.iter().copied(),
+                ),
+                cfg.max_image_mb,
+                cfg.web_search.clone(),
+            )
+        };
         if let Some(t) = &mut timer {
             t.phase("builtin tools");
         }
 
-        let mcp = init_mcp(&cfg, args.no_tools, &mut tools).await;
+        let mcp = init_mcp(&cfg, !classic_tools, &mut tools).await;
         if let Some(t) = &mut timer {
             t.phase("mcp");
         }
@@ -110,7 +121,7 @@ impl AppSetup {
         for diagnostic in &project_context.skill_diagnostics {
             tracing::warn!("skill: {diagnostic}");
         }
-        init_skill_tools(&project_context, args.no_tools, &mut tools);
+        init_skill_tools(&project_context, !classic_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("project context");
         }
@@ -118,7 +129,13 @@ impl AppSetup {
         let mut system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
-            .unwrap_or_else(|| build_system_prompt_from_context(&project_context, &cwd));
+            .unwrap_or_else(|| {
+                if rlm {
+                    build_rlm_system_prompt(&project_context, &cwd)
+                } else {
+                    build_system_prompt_from_context(&project_context, &cwd)
+                }
+            });
         if let Some(extra) = args.append_system.as_deref().map(str::trim) {
             system_prompt.push_str("\n\n");
             system_prompt.push_str(extra);
@@ -143,19 +160,19 @@ impl AppSetup {
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
-        init_repo_map(&cfg, &cwd, args.no_tools, &mut tools);
+        init_repo_map(&cfg, &cwd, !classic_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("repo map");
         }
 
         let file_rules = build_file_rules(&cwd);
-        let lsp_diagnostics = init_lsp(&cfg, &cwd, args.no_tools, &mut tools);
+        let lsp_diagnostics = init_lsp(&cfg, &cwd, !classic_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("lsp + rules");
         }
 
-        if !args.no_tools && model.supports_native_parallel_calls() {
-        } else if !args.no_tools {
+        if !classic_tools || model.supports_native_parallel_calls() {
+        } else {
             mush_tools::add_batch_tool(&mut tools);
         }
         if let Some(allowed) = &args.tools {
@@ -194,6 +211,7 @@ impl AppSetup {
                     skills: project_context.skills,
                     diagnostics: project_context.skill_diagnostics,
                 },
+                rlm,
             },
             report,
         ))
@@ -415,6 +433,68 @@ fn default_system_prompt(cwd_str: &str) -> String {
          all in a single call. This saves round-trips and helps you reason about \
          related changes holistically before making them"
     )
+}
+
+fn rlm_base_prompt(cwd_str: &str) -> String {
+    format!(
+        "You are running inside mush, a coding agent harness. You work by writing and running \
+         Python in a persistent REPL: the `ipython` tool is your only tool. Break a task into \
+         steps, run code, read what comes back, and iterate. When the task is done, stop \
+         calling tools and give your answer.\n\n\
+         Working directory: {cwd_str}\n\n\
+         The kernel:\n\
+         - State persists across calls: variables, imports, functions and parsed results stay \
+         available. Bind anything you will need again to a name instead of recomputing it.\n\
+         - Top-level `await` works.\n\
+         - `await bash(command, timeout=None)` runs a command through bash and returns a result \
+         with `.exit_code`, `.ok` and `.output` (stdout and stderr together). Each call is its \
+         own process; use `os.chdir` and `os.environ` for state that should carry over.\n\
+         - `await edit(path, old, new)` replaces exactly one occurrence of `old` in the file. \
+         `old` must match the file text exactly, so read the file first and keep `old` as \
+         small as it can be while still unique.\n\
+         - Read files with `pathlib.Path(p).read_text()`, search with `re` or \
+         `await bash('rg ...')`, create files with `Path.write_text`.\n\
+         - Use Python for loops, conditionals and parsing. Use `bash()` to run programs, not \
+         to write shell programs.\n\
+         - Run a project's own commands through its own environment (`cargo test`, `npm run \
+         check`, `uv run ...`). Do not install a project's dependencies into the kernel to \
+         import it directly.\n\
+         - Keep tool output small: slice, filter and summarise in Python before printing. \
+         Long results are truncated.\n\n\
+         Your final answers are plain text styled by the terminal TUI: short paragraphs, simple \
+         lists, inline backticks for paths and commands, fenced code blocks for snippets. No \
+         HTML or ANSI codes."
+    )
+}
+
+pub fn build_rlm_system_prompt(context: &loader::ProjectContext, cwd: &std::path::Path) -> String {
+    let cwd_str = cwd.display().to_string();
+    let mut prompt = match &context.system_prompt {
+        Some(file) => file.content.trim_end().to_string(),
+        None => rlm_base_prompt(&cwd_str),
+    };
+    if let Some(extra) = &context.append_system_prompt {
+        prompt.push_str("\n\n");
+        prompt.push_str(extra.content.trim_end());
+    }
+    for agents in &context.agents_md {
+        prompt.push_str("\n\n# Project Context\n\n");
+        prompt.push_str(&agents.content);
+    }
+    if context
+        .skills
+        .iter()
+        .any(|skill| !skill.disable_model_invocation)
+    {
+        prompt.push_str(
+            "\n\nSkills provide specialised instructions for specific tasks. When a task matches a \
+             skill's description, read its SKILL.md with `Path(location).read_text()` before \
+             acting, and resolve relative paths in it against the skill's directory. If the user \
+             names a skill with `$skill-name`, read it first.\n\n",
+        );
+        prompt.push_str(&format_available_skills(&context.skills));
+    }
+    prompt
 }
 
 pub fn build_system_prompt_from_context(
@@ -779,6 +859,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_rlm_prompt_names_the_one_tool_and_the_kernel_helpers() {
+        let context = ProjectContext {
+            agents_md: vec![mush_ext::AgentsMd {
+                path: "/repo/AGENTS.md".into(),
+                content: "project rules".into(),
+            }],
+            skills: vec![Skill {
+                name: "nix".into(),
+                description: "nix things".into(),
+                path: "/home/u/.config/mush/skills/nix/SKILL.md".into(),
+                source: mush_ext::SkillSource::User,
+                disable_model_invocation: false,
+            }],
+            skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
+        };
+
+        let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"));
+
+        assert!(prompt.contains("the `ipython` tool is your only tool"));
+        assert!(prompt.contains("await bash(command"));
+        assert!(prompt.contains("await edit(path, old, new)"));
+        assert!(prompt.contains("Working directory: /repo"));
+        assert!(prompt.contains("# Project Context\n\nproject rules"));
+        assert!(prompt.contains("read_text()"));
+        assert!(prompt.contains("<name>nix</name>"));
+        assert!(!prompt.contains("Use the skill tool"));
+        assert!(!prompt.contains("Batch tool"));
     }
 
     #[test]

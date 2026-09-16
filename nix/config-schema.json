@@ -1071,6 +1071,10 @@
         "enabled": true
       }
     },
+    "rlm": {
+      "default": false,
+      "type": "boolean"
+    },
     "settings": {
       "$ref": "#/$defs/Settings",
       "default": {

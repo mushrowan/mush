@@ -28,6 +28,7 @@ fn extract_summary(tool_name: &str, args: &serde_json::Value) -> Option<String> 
     match tool_name.to_lowercase().replace('_', "").as_str() {
         "read" | "write" | "edit" => args["path"].as_str().map(str::to_string),
         "bash" => args["command"].as_str().map(collapse_command_newlines),
+        "ipython" => args["code"].as_str().map(str::to_string),
         "grep" => {
             let pattern = args["pattern"].as_str()?;
             let path = args["path"].as_str().unwrap_or(".");

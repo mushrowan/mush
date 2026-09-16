@@ -62,6 +62,9 @@ struct Cli {
     #[arg(long)]
     no_tools: bool,
 
+    #[arg(long)]
+    rlm: bool,
+
     #[arg(long = "tools", short = 't', value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
@@ -262,6 +265,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
+        rlm: cli.rlm,
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
         discovery: cli.discovery(),
@@ -633,6 +637,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
+        rlm: cli.rlm,
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
         discovery: cli.discovery(),
@@ -796,7 +801,11 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         })),
         mcp: setup.mcp.clone(),
         skills: setup.skills,
-        tool_allowlist: cli.tools.clone(),
+        tool_allowlist: if setup.rlm {
+            Some(vec!["ipython".into()])
+        } else {
+            cli.tools.clone()
+        },
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
             setup.cfg.forbidden_chars.iter().copied(),
             setup.cfg.forbidden_char_classes.iter().copied(),

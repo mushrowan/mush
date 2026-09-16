@@ -117,7 +117,6 @@ pub fn truncate_lines(lines: &[&str], noun: &str) -> String {
     }
 }
 
-#[cfg(test)]
 pub fn extract_text(result: &mush_agent::tool::ToolResult) -> String {
     result
         .content

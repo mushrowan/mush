@@ -52,6 +52,8 @@ pub struct Config {
     pub auto_compact: bool,
     #[serde(default)]
     pub auto_fork_compact: bool,
+    #[serde(default)]
+    pub rlm: bool,
     pub confirm_tools: bool,
     pub show_cost: bool,
     pub show_usage_lines: bool,
@@ -117,6 +119,7 @@ impl Default for Config {
             force_budget_thinking: false,
             auto_compact: false,
             auto_fork_compact: false,
+            rlm: false,
             confirm_tools: false,
             show_cost: false,
             show_usage_lines: false,

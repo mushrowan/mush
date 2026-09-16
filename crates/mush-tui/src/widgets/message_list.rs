@@ -662,7 +662,31 @@ fn render_tool_panel(
         lines,
     );
 
-    if let Some(lang) = tool_summary_language(tc) {
+    if tc.name == "ipython" {
+        let ctx = ToolHighlightCtx {
+            bg,
+            fallback_style: theme.dim,
+            lang: "py",
+            theme,
+        };
+        if style.detail.shows_thinking() {
+            for code_line in tc.summary.lines() {
+                push_highlighted_box_line(code_line, inner, &ctx, lines);
+            }
+        } else {
+            let (preview, hidden) = code_preview(&tc.summary);
+            push_highlighted_box_line(preview, inner, &ctx, lines);
+            if hidden > 0 {
+                push_box_content_line(
+                    &format!("... (+{hidden} lines, ctrl+r to expand)"),
+                    inner,
+                    bg,
+                    theme.dim,
+                    lines,
+                );
+            }
+        }
+    } else if let Some(lang) = tool_summary_language(tc) {
         push_highlighted_box_line(
             &tc.summary,
             inner,
@@ -729,6 +753,24 @@ fn render_tool_panel(
     }
 }
 
+pub(crate) fn code_preview(code: &str) -> (&str, usize) {
+    let lines: Vec<&str> = code.lines().collect();
+    let low_signal = |line: &str| {
+        let trimmed = line.trim();
+        trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("from ")
+    };
+    let preview = lines
+        .iter()
+        .copied()
+        .find(|line| !low_signal(line))
+        .or_else(|| lines.iter().copied().find(|line| !line.trim().is_empty()))
+        .unwrap_or("");
+    (preview.trim_end(), lines.len().saturating_sub(1))
+}
+
 fn tool_summary_language(tc: &DisplayToolCall) -> Option<&'static str> {
     match tc.name.to_lowercase().replace('_', "").as_str() {
         "bash" => Some("sh"),
@@ -765,6 +807,7 @@ fn push_fitted_box_line(
 fn tool_output_language(tc: &DisplayToolCall) -> Option<&'static str> {
     match tc.name.to_lowercase().replace('_', "").as_str() {
         "bash" => Some("sh"),
+        "ipython" => Some("text"),
         "write" | "applypatch" => crate::syntax::lang_from_path(&tc.summary),
         "grep" | "find" | "glob" | "ls" | "repomap" | "websearch" | "webfetch" => Some("text"),
         _ => None,

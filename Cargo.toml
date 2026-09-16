@@ -30,6 +30,7 @@ mush-session = { path = "crates/mush-session" }
 mush-supervisor = { path = "crates/mush-supervisor" }
 mush-ext = { path = "crates/mush-ext" }
 mush-mcp = { path = "crates/mush-mcp" }
+mush-kernel = { path = "crates/mush-kernel" }
 mush-tui = { path = "crates/mush-tui" }
 mush-treesitter = { path = "crates/mush-treesitter" }
 mush-lsp = { path = "crates/mush-lsp" }

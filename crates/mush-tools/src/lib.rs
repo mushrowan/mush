@@ -9,6 +9,7 @@ pub mod find;
 pub mod forbidden_chars;
 pub mod glob;
 pub mod grep;
+pub mod ipython;
 pub mod ls;
 pub mod notification;
 pub mod notify_user;
