@@ -447,9 +447,15 @@ fn rlm_base_prompt(cwd_str: &str) -> String {
          - State persists across calls: variables, imports, functions and parsed results stay \
          available. Bind anything you will need again to a name instead of recomputing it.\n\
          - Top-level `await` works.\n\
-         - `await bash(command, timeout=None)` runs a command through bash and returns a result \
-         with `.exit_code`, `.ok` and `.output` (stdout and stderr together). Each call is its \
-         own process; use `os.chdir` and `os.environ` for state that should carry over.\n\
+         - `bash(command, timeout=None)` starts a command through bash in the background and \
+         returns a handle at once. `await bash(...)` or `await h` waits for the result with \
+         `.exit_code`, `.ok` and `.output` (stdout and stderr together). On a running handle, \
+         `await h.poll()` is the result or None, `await h.output()` and `await h.tail(n)` show \
+         output so far, `await h.kill()` stops it. Each call is its own process; use \
+         `os.chdir` and `os.environ` for state that should carry over.\n\
+         - For slow work (tests, builds, long scripts) start it, keep the handle in a variable \
+         and end your turn. You get a message when it finishes; read the handle then. Do not \
+         poll in a loop or sleep to wait.\n\
          - `await edit(path, old, new)` replaces exactly one occurrence of `old` in the file. \
          `old` must match the file text exactly, so read the file first and keep `old` as \
          small as it can be while still unique.\n\
@@ -884,7 +890,8 @@ mod tests {
         let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"));
 
         assert!(prompt.contains("the `ipython` tool is your only tool"));
-        assert!(prompt.contains("await bash(command"));
+        assert!(prompt.contains("`bash(command, timeout=None)` starts a command"));
+        assert!(prompt.contains("end your turn"));
         assert!(prompt.contains("await edit(path, old, new)"));
         assert!(prompt.contains("Working directory: /repo"));
         assert!(prompt.contains("# Project Context\n\nproject rules"));
