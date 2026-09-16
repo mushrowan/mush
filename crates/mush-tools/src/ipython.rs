@@ -93,7 +93,10 @@ pub struct IpythonTool {
     config: KernelConfig,
     host: Arc<dyn HostRequestHandler>,
     kernel: tokio::sync::Mutex<Option<Kernel>>,
+    output_sink: Option<crate::bash::OutputSink>,
 }
+
+const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl IpythonTool {
     pub fn new(cwd: Arc<Path>) -> Self {
@@ -109,7 +112,14 @@ impl IpythonTool {
             },
             host,
             kernel: tokio::sync::Mutex::new(None),
+            output_sink: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_output_sink(mut self, sink: crate::bash::OutputSink) -> Self {
+        self.output_sink = Some(sink);
+        self
     }
 
     pub async fn shutdown(&self) {
@@ -124,7 +134,30 @@ impl IpythonTool {
             *slot = Some(Kernel::start(self.config.clone(), self.host.clone()).await?);
         }
         let kernel = slot.as_ref().ok_or(KernelError::Pipes)?;
-        let outcome = kernel.execute(code).await;
+        let sink = self.output_sink.clone();
+        let exec_id = mush_agent::exec_context::current_exec_id();
+        let mut live = String::new();
+        let mut last_emit = std::time::Instant::now() - LIVE_OUTPUT_INTERVAL;
+        let mut pending = false;
+        let outcome = kernel
+            .execute_streaming(code, |event| {
+                let Some(sink) = &sink else { return };
+                match event {
+                    mush_kernel::Event::Stdout { text, .. }
+                    | mush_kernel::Event::Stderr { text, .. } => live.push_str(text),
+                    _ => return,
+                }
+                pending = true;
+                if last_emit.elapsed() >= LIVE_OUTPUT_INTERVAL {
+                    sink(&exec_id, live.trim_end());
+                    last_emit = std::time::Instant::now();
+                    pending = false;
+                }
+            })
+            .await;
+        if pending && let Some(sink) = &sink {
+            sink(&exec_id, live.trim_end());
+        }
         if matches!(outcome, Err(KernelError::Exited(_))) {
             *slot = None;
         }
@@ -308,6 +341,32 @@ mod tests {
             "{}",
             extract_text(&result)
         );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn live_output_streams_through_the_sink_while_a_cell_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink: crate::bash::OutputSink = {
+            let seen = seen.clone();
+            Arc::new(move |_exec_id: &str, text: &str| {
+                seen.lock().unwrap().push(text.to_string());
+            })
+        };
+        let tool = tool(dir.path()).with_output_sink(sink);
+
+        let result = tool
+            .execute(json!({
+                "code": "import time\nfor i in range(3):\n    print('tick', i)\n    time.sleep(0.15)"
+            }))
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.len() >= 2, "{seen:?}");
+        assert_eq!(seen[0], "tick 0", "{seen:?}");
+        assert_eq!(seen.last().unwrap(), "tick 0\ntick 1\ntick 2", "{seen:?}");
         tool.shutdown().await;
     }
 

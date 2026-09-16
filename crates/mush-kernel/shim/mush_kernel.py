@@ -37,17 +37,27 @@ def emit(event: dict) -> None:
 class _TaggedWriter(io.TextIOBase):
     def __init__(self, stream: str):
         self._stream = stream
+        self._buffer = ""
 
     def writable(self) -> bool:
         return True
 
     def write(self, text: str) -> int:
-        if text:
-            emit({"type": self._stream, "id": _current_cell.get(), "text": str(text)})
+        text = str(text)
+        self._buffer += text
+        cut = self._buffer.rfind("\n")
+        if cut >= 0:
+            self._emit(self._buffer[: cut + 1])
+            self._buffer = self._buffer[cut + 1 :]
         return len(text)
 
     def flush(self) -> None:
-        pass
+        if self._buffer:
+            self._emit(self._buffer)
+            self._buffer = ""
+
+    def _emit(self, text: str) -> None:
+        emit({"type": self._stream, "id": _current_cell.get(), "text": text})
 
 
 def _pump(fd: int, stream: str) -> None:
