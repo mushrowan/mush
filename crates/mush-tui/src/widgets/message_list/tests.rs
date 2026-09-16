@@ -3,10 +3,7 @@ use crate::test_support::buffer_to_string;
 use mush_ai::types::{Dollars, Usage};
 
 fn all_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let style = MessageStyle {
-        theme: &app.theme,
-        show_usage: app.interaction.show_usage_lines,
-    };
+    let style = MessageStyle::for_app(app);
     let mut lines = Vec::new();
     for msg in app.messages.iter() {
         lines.extend(message_lines(msg, &style, width));
@@ -313,7 +310,7 @@ fn usage_line_deferred_while_tool_running() {
             name: "bash".into(),
             summary: "ls -la".into(),
             status: ToolCallStatus::Running,
-            output_preview: None,
+            output: None,
             image_data: None,
             batch: 1,
         }],
@@ -335,7 +332,7 @@ fn usage_line_deferred_while_tool_running() {
 
     let mut msg = app.messages.get_mut(0).expect("message");
     msg.tool_calls[0].status = ToolCallStatus::Done;
-    msg.tool_calls[0].output_preview = Some("ok".into());
+    msg.tool_calls[0].output = Some("ok".into());
     drop(msg);
     let done = buffer_to_string(&render_app(&app, 70, 12));
     assert!(
@@ -354,7 +351,7 @@ fn tool_calls_render() {
                 name: "bash".into(),
                 summary: "ls -la".into(),
                 status: ToolCallStatus::Done,
-                output_preview: Some("file1.txt\nfile2.txt".into()),
+                output: Some("file1.txt\nfile2.txt".into()),
                 image_data: None,
                 batch: 1,
             },
@@ -363,7 +360,7 @@ fn tool_calls_render() {
                 name: "read".into(),
                 summary: "src/main.rs".into(),
                 status: ToolCallStatus::Error,
-                output_preview: None,
+                output: None,
                 image_data: None,
                 batch: 2,
             },
@@ -385,7 +382,7 @@ fn edit_tool_renders_inline_diff_when_wide() {
             name: "edit".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
+            output: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
             image_data: None,
             batch: 1,
         }],
@@ -413,7 +410,7 @@ fn edit_tool_renders_inline_diff_when_narrow() {
             name: "edit".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
+            output: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
             image_data: None,
             batch: 1,
         }],
@@ -509,7 +506,7 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
             name: "bash".into(),
             summary: "cargo test".into(),
             status: ToolCallStatus::Done,
-            output_preview: None,
+            output: None,
             image_data: None,
             batch: 1,
         }],
@@ -548,7 +545,7 @@ fn batched_tools_stack_one_panel_per_call() {
         name: name.into(),
         summary: format!("{name} summary"),
         status: ToolCallStatus::Done,
-        output_preview: None,
+        output: None,
         image_data: None,
         batch: 1,
     };
@@ -578,7 +575,7 @@ fn a_failed_tool_says_error_in_red() {
             name: "bash".into(),
             summary: "cargo check".into(),
             status: ToolCallStatus::Error,
-            output_preview: Some("error[E0063]: missing field".into()),
+            output: Some("error[E0063]: missing field".into()),
             image_data: None,
             batch: 1,
         }],
@@ -636,7 +633,7 @@ fn tool_box_wraps_long_summary() {
             name: "read".into(),
             summary: long_path.into(),
             status: ToolCallStatus::Done,
-            output_preview: None,
+            output: None,
             image_data: None,
             batch: 1,
         }],
@@ -661,7 +658,7 @@ fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
             name: "noop".into(),
             summary: "ok".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some(output.clone()),
+            output: Some(output.clone()),
             image_data: None,
             batch: 1,
         }],
@@ -685,7 +682,7 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
             name: "read".into(),
             summary: "src/lib.rs".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some(format!("L1: {}", "abcｶﾞ".repeat(4))),
+            output: Some(format!("L1: {}", "abcｶﾞ".repeat(4))),
             image_data: None,
             batch: 1,
         }],
@@ -787,7 +784,7 @@ fn read_tool_box_trims_shared_leading_indent() {
             name: "read".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some(
+            output: Some(
                 "L1:         fn main() {\n\
                  L2:             println!(\"hi\");\n\
                  L3:         }"
@@ -822,7 +819,7 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
             name: "read".into(),
             summary: "src/main.rs".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("L1: fn main() {\nL2:     println!(\"hi\");\nL3: }".into()),
+            output: Some("L1: fn main() {\nL2:     println!(\"hi\");\nL3: }".into()),
             image_data: None,
             batch: 1,
         }],
@@ -861,7 +858,7 @@ fn bash_tool_summary_is_syntax_highlighted() {
             name: "bash".into(),
             summary: "for file in *.rs; do echo $file; done".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("done".into()),
+            output: Some("done".into()),
             image_data: None,
             batch: 1,
         }],
@@ -900,7 +897,7 @@ fn bash_tool_output_is_syntax_highlighted_when_plain() {
             name: "bash".into(),
             summary: "script".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("for file in *.rs; do echo $file; done".into()),
+            output: Some("for file in *.rs; do echo $file; done".into()),
             image_data: None,
             batch: 1,
         }],
@@ -940,7 +937,7 @@ fn bash_tool_output_wraps_long_highlighted_lines() {
             name: "bash".into(),
             summary: "cargo nextest run".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some(long_json.into()),
+            output: Some(long_json.into()),
             image_data: None,
             batch: 1,
         }],
@@ -1201,6 +1198,7 @@ fn plain_style(theme: &crate::theme::Theme) -> MessageStyle<'_> {
     MessageStyle {
         theme,
         show_usage: false,
+        detail: ChatDetail::Overview,
     }
 }
 
@@ -1293,6 +1291,7 @@ fn the_usage_line_is_gated_on_the_setting() {
         &MessageStyle {
             theme: &theme,
             show_usage: true,
+            detail: ChatDetail::Overview,
         },
         60,
     );
@@ -1313,7 +1312,7 @@ fn a_running_tool_defers_the_usage_line() {
         name: "bash".into(),
         summary: "ls".into(),
         status: ToolCallStatus::Running,
-        output_preview: None,
+        output: None,
         image_data: None,
         batch: 1,
     });
@@ -1323,6 +1322,7 @@ fn a_running_tool_defers_the_usage_line() {
         &MessageStyle {
             theme: &theme,
             show_usage: true,
+            detail: ChatDetail::Overview,
         },
         60,
     );
@@ -1550,7 +1550,7 @@ fn a_tool_result_rebuilds_only_the_message_that_owns_it() {
             name: "bash".into(),
             summary: "cargo build".into(),
             status: ToolCallStatus::Done,
-            output_preview: Some("compiled in 4.2s".into()),
+            output: Some("compiled in 4.2s".into()),
             image_data: None,
             batch: 0,
         });
@@ -1586,7 +1586,7 @@ fn a_running_tool_call_renders_its_header() {
             name: "bash".into(),
             summary: "ls -la".into(),
             status: ToolCallStatus::Running,
-            output_preview: None,
+            output: None,
             image_data: None,
             batch: 1,
         }],

@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::app::{App, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
+use crate::app::{App, ChatDetail, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
 use crate::widgets::shimmer::shimmer_spans;
 use std::cell::Ref;
 
@@ -178,10 +178,7 @@ impl TranscriptGuards<'_> {
 }
 
 pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
-    let style = MessageStyle {
-        theme: &app.theme,
-        show_usage: app.interaction.show_usage_lines,
-    };
+    let style = MessageStyle::for_app(app);
     let chunks = |queued: bool| {
         app.messages
             .iter()
@@ -198,10 +195,7 @@ pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
 }
 
 pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let style = MessageStyle {
-        theme: &app.theme,
-        show_usage: app.interaction.show_usage_lines,
-    };
+    let style = MessageStyle::for_app(app);
     let mut lines = Vec::new();
     for msg in app.messages.iter().filter(|m| !m.queued) {
         lines.extend(message_lines(msg, &style, width));
@@ -216,10 +210,7 @@ pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 }
 
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let style = MessageStyle {
-        theme: &app.theme,
-        show_usage: app.interaction.show_usage_lines,
-    };
+    let style = MessageStyle::for_app(app);
     let live = app.messages.get(app.commit_point()..).unwrap_or_default();
     let mut lines = Vec::new();
     for msg in live.iter().filter(|m| !m.queued) {
@@ -237,6 +228,17 @@ pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 pub struct MessageStyle<'a> {
     pub theme: &'a Theme,
     pub show_usage: bool,
+    pub detail: ChatDetail,
+}
+
+impl<'a> MessageStyle<'a> {
+    pub fn for_app(app: &'a App) -> Self {
+        Self {
+            theme: &app.theme,
+            show_usage: app.interaction.show_usage_lines,
+            detail: app.detail,
+        }
+    }
 }
 
 pub fn message_lines(
@@ -252,17 +254,16 @@ pub(crate) fn cached_message_lines<'a>(
     style: &MessageStyle<'_>,
     width: u16,
 ) -> Ref<'a, [Line<'static>]> {
-    let fresh = msg
-        .line_cache
-        .borrow()
-        .as_ref()
-        .is_some_and(|cache| cache.width == width && cache.show_usage == style.show_usage);
+    let fresh = msg.line_cache.borrow().as_ref().is_some_and(|cache| {
+        cache.width == width && cache.show_usage == style.show_usage && cache.detail == style.detail
+    });
     if !fresh {
         let lines = build_message_lines(msg, style, width);
         msg.line_cache
             .replace(Some(crate::display_types::LineCache {
                 width,
                 show_usage: style.show_usage,
+                detail: style.detail,
                 lines,
             }));
     }
@@ -292,7 +293,7 @@ fn build_message_lines(
             style.theme.system_label,
         )));
     }
-    push_thinking_lines(msg, style.theme, width, &mut lines);
+    push_thinking_lines(msg, style, width, &mut lines);
 
     if msg.queued {
         push_queued_lines(msg, style.theme, width, &mut lines);
@@ -306,7 +307,7 @@ fn build_message_lines(
         }
     }
 
-    push_tool_box_lines(style.theme, msg, width, &mut lines);
+    push_tool_box_lines(style, msg, width, &mut lines);
     push_usage_line(msg, style, &mut lines);
     lines
 }
@@ -356,15 +357,16 @@ fn is_markdown_heading(line: &str) -> bool {
 
 fn push_thinking_lines(
     msg: &DisplayMessage,
-    theme: &Theme,
+    style: &MessageStyle<'_>,
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
+    let theme = style.theme;
     let Some(ref thinking) = msg.thinking else {
         return;
     };
     let cw = message_content_width(width as usize);
-    if !msg.thinking_expanded {
+    if !(msg.thinking_expanded || style.detail.shows_thinking()) {
         let label = "thinking";
         let prefix = usize::from(label.cell_width()) + usize::from(HEADER_SEPARATOR.cell_width());
         let recap = Line::from(vec![
@@ -561,7 +563,7 @@ fn line_cell_width(line: &Line<'_>) -> usize {
 }
 
 fn push_tool_box_lines(
-    theme: &Theme,
+    style: &MessageStyle<'_>,
     msg: &DisplayMessage,
     width: u16,
     lines: &mut Vec<Line<'static>>,
@@ -569,7 +571,7 @@ fn push_tool_box_lines(
     let calls: Vec<&DisplayToolCall> = msg.tool_calls.iter().collect();
 
     for group in calls.chunk_by(|a, b| a.batch == b.batch) {
-        render_tool_box_group(group, width, lines, theme);
+        render_tool_box_group(group, width, lines, style);
     }
 }
 
@@ -577,13 +579,13 @@ fn render_tool_box_group(
     tools: &[&DisplayToolCall],
     total_width: u16,
     lines: &mut Vec<Line<'static>>,
-    theme: &Theme,
+    style: &MessageStyle<'_>,
 ) {
     if total_width < 8 {
         return;
     }
     for tc in tools {
-        render_tool_panel(tc, total_width as usize, lines, theme);
+        render_tool_panel(tc, total_width as usize, lines, style);
     }
 }
 
@@ -609,12 +611,21 @@ fn push_panel_line(
     lines.push(Line::from(spans));
 }
 
+fn visible_tool_output(tc: &DisplayToolCall, detail: ChatDetail) -> Option<String> {
+    let output = tc.output.as_deref()?;
+    if detail.shows_full_output() || tc.name == "edit" {
+        return Some(output.to_string());
+    }
+    Some(crate::batch_output::truncate_output(output))
+}
+
 fn render_tool_panel(
     tc: &DisplayToolCall,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    theme: &Theme,
+    style: &MessageStyle<'_>,
 ) {
+    let theme = style.theme;
     let bg = theme.tool_panel_bg;
     let inner = panel_content_width(width);
     let (status, colour) = tool_status_label(tc, theme);
@@ -649,9 +660,10 @@ fn render_tool_panel(
         push_box_content_line(&tc.summary, inner, bg, theme.dim, lines);
     }
 
-    let Some(ref output) = tc.output_preview else {
+    let Some(output) = visible_tool_output(tc, style.detail) else {
         return;
     };
+    let output = output.as_str();
     if tc.name == "edit" {
         let lang = crate::syntax::lang_from_path(&tc.summary);
         for row in super::diff::render_diff_with_lang_mode(

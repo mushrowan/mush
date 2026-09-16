@@ -91,6 +91,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(crate::keybinds::Action::FocusLog, key) {
         return focus_log(app);
     }
+    if app
+        .keymap
+        .matches(crate::keybinds::Action::CycleDetail, key)
+    {
+        app.cycle_detail();
+        return None;
+    }
     if app.keymap.matches(crate::keybinds::Action::SelectAll, key) {
         return select_all_composer(app);
     }
@@ -978,6 +985,10 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if app.keymap.matches(Action::FocusLog, key) {
         return focus_composer(app, false);
+    }
+    if app.keymap.matches(Action::CycleDetail, key) {
+        app.cycle_detail();
+        return None;
     }
     if app
         .keymap

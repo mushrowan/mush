@@ -64,7 +64,7 @@ fn tool_heavy_app(message_count: usize) -> App {
                 name: "read".into(),
                 summary: format!("crates/mush-tui/src/widgets/message_list{i}.rs"),
                 status: ToolCallStatus::Done,
-                output_preview: Some(output.clone()),
+                output: Some(output.clone()),
                 image_data: None,
                 batch: 0,
             });

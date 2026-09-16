@@ -50,6 +50,7 @@ session_picker::previous_item = Up | Ctrl-k
 session_picker::session_picker_toggle_scope = Tab
 shared::cancel = Esc | Ctrl-[
 shared::confirm = Enter
+shared::cycle_detail = Ctrl-r
 shared::focus_log = Ctrl-o
 shared::navigate_bottom = End | Shift-g
 shared::navigate_top = Home | g

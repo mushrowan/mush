@@ -102,10 +102,49 @@ impl Drop for MessageMut<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatDetail {
+    #[default]
+    Overview,
+    Details,
+    All,
+}
+
+impl ChatDetail {
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Overview => Self::Details,
+            Self::Details => Self::All,
+            Self::All => Self::Overview,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Details => "details",
+            Self::All => "all output",
+        }
+    }
+
+    #[must_use]
+    pub const fn shows_thinking(self) -> bool {
+        !matches!(self, Self::Overview)
+    }
+
+    #[must_use]
+    pub const fn shows_full_output(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LineCache {
     pub width: u16,
     pub show_usage: bool,
+    pub detail: ChatDetail,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -188,7 +227,7 @@ pub struct DisplayToolCall {
     pub name: String,
     pub summary: String,
     pub status: ToolCallStatus,
-    pub output_preview: Option<String>,
+    pub output: Option<String>,
     pub image_data: Option<Vec<u8>>,
     pub batch: u32,
 }

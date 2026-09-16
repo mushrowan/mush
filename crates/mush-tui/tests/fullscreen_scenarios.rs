@@ -1493,16 +1493,72 @@ fn a_finished_tool_keeps_the_tail_too() {
         None,
     );
 
-    let preview = app.messages[1].tool_calls[0]
-        .output_preview
-        .clone()
-        .unwrap_or_default();
+    let transcript = window_rows(&app);
 
     assert!(
-        preview.starts_with("… 40 earlier lines\nline 41\n"),
-        "{preview}"
+        transcript.iter().any(|r| r.contains("… 40 earlier lines")),
+        "{transcript:#?}"
     );
-    assert!(preview.ends_with("line 45"), "{preview}");
+    assert!(transcript.iter().any(|r| r.contains("line 45")));
+    assert!(!transcript.iter().any(|r| r.contains("line 40")));
+}
+
+#[test]
+fn all_output_shows_every_line_of_a_finished_tool() {
+    let mut app = bash_with_output(8);
+    let output: Vec<String> = (1..=8).map(|i| format!("line {i}")).collect();
+    app.end_tool(
+        &ToolCallId::from("tc_1"),
+        "bash",
+        mush_ai::types::ToolOutcome::Success,
+        Some(&output.join("\n")),
+        None,
+    );
+
+    app.cycle_detail();
+    app.cycle_detail();
+    let transcript = window_rows(&app);
+
+    assert!(
+        transcript.iter().any(|r| r.contains("line 1")),
+        "{transcript:#?}"
+    );
+    assert!(transcript.iter().any(|r| r.contains("line 8")));
+    assert!(!transcript.iter().any(|r| r.contains("earlier lines")));
+}
+
+#[test]
+fn details_reveals_collapsed_thinking() {
+    let mut app = conversation(1);
+    let mut reply = DisplayMessage::new(MessageRole::Assistant, "done");
+    reply.thinking = Some("first weigh the options\nthen pick one".into());
+    app.messages.push(reply);
+    let before = window_rows(&app);
+    assert!(
+        !before.iter().any(|r| r.contains("then pick one")),
+        "{before:#?}"
+    );
+
+    app.cycle_detail();
+    let after = window_rows(&app);
+
+    assert!(
+        after.iter().any(|r| r.contains("then pick one")),
+        "{after:#?}"
+    );
+}
+
+#[test]
+fn the_detail_key_cycles_from_the_composer_and_the_log() {
+    let mut app = conversation(1);
+
+    press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(app.detail, mush_tui::app::ChatDetail::Details);
+
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.detail, mush_tui::app::ChatDetail::All);
 }
 
 #[test]

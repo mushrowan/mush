@@ -10,8 +10,8 @@ pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
 };
 pub use crate::display_types::{
-    ActiveToolState, Block, BlockKind, CodeBlock, DisplayMessage, DisplayToolCall, ImageRenderArea,
-    MessageRole, MessageRowRange, Messages, ToolCallStatus,
+    ActiveToolState, Block, BlockKind, ChatDetail, CodeBlock, DisplayMessage, DisplayToolCall,
+    ImageRenderArea, MessageRole, MessageRowRange, Messages, ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 pub use crate::prompt_cache::{
@@ -133,6 +133,7 @@ pub struct App {
     pub compacting: bool,
     pub compaction_model_id: Option<ModelId>,
     pub session_title: Option<String>,
+    pub detail: ChatDetail,
 }
 
 mod modals;
@@ -193,6 +194,7 @@ impl App {
             compacting: false,
             compaction_model_id: None,
             session_title: None,
+            detail: ChatDetail::default(),
         }
     }
 
@@ -467,6 +469,11 @@ impl App {
             .position(DisplayMessage::is_live)
             .unwrap_or(self.messages.len());
         live_turn.min(unsettled)
+    }
+
+    pub fn cycle_detail(&mut self) {
+        self.detail = self.detail.next();
+        self.status = Some(format!("detail: {}", self.detail.label()).into());
     }
 
     pub fn toggle_thinking_expanded(&mut self) {

@@ -93,7 +93,7 @@ impl App {
                 name: name.to_string(),
                 summary: summary.to_string(),
                 status: ToolCallStatus::Running,
-                output_preview: None,
+                output: None,
                 image_data: None,
                 batch: batch_idx,
             });
@@ -132,7 +132,7 @@ impl App {
                     name: name.clone(),
                     summary: sub_summary.clone(),
                     status: ToolCallStatus::Running,
-                    output_preview: None,
+                    output: None,
                     image_data: None,
                     batch: batch_idx,
                 });
@@ -149,7 +149,7 @@ impl App {
         let text = output.unwrap_or_default();
         let sections = parse_batch_output(text);
         let batch_error =
-            (sections.is_empty() && !text.trim().is_empty()).then(|| truncate_output(text));
+            (sections.is_empty() && !text.trim().is_empty()).then(|| text.to_string());
         let resolve = |idx: usize| -> (ToolCallStatus, Option<String>) {
             if let Some(ref err) = batch_error {
                 (ToolCallStatus::from(outcome), Some(err.clone()))
@@ -159,9 +159,8 @@ impl App {
                 } else {
                     ToolCallStatus::Done
                 };
-                let preview =
-                    (!section.content.is_empty()).then(|| truncate_output(&section.content));
-                (status, preview)
+                let output = (!section.content.is_empty()).then(|| section.content.clone());
+                (status, output)
             } else {
                 (
                     ToolCallStatus::Error,
@@ -192,7 +191,7 @@ impl App {
                 let (status, preview) = resolve(idx);
                 tc.status = status;
                 if preview.is_some() {
-                    tc.output_preview = preview;
+                    tc.output = preview;
                 }
             }
         }
@@ -223,7 +222,7 @@ impl App {
                 .find(|t| &t.tool_call_id == tool_call_id)
         {
             tc.status = status;
-            tc.output_preview = output.map(|o| preview_for_tool(name, o));
+            tc.output = output.map(str::to_string);
             tc.image_data = image_data;
         }
     }
@@ -244,14 +243,13 @@ impl App {
             return false;
         }
         tool.live_output = Some(output.to_string());
-        let preview = crate::batch_output::truncate_output(output);
         if let Some(mut turn) = self.current_turn_message_mut()
             && let Some(call) = turn
                 .tool_calls
                 .iter_mut()
                 .find(|c| c.tool_call_id.as_str() == exec_id)
         {
-            call.output_preview = Some(preview);
+            call.output = Some(output.to_string());
         }
         true
     }

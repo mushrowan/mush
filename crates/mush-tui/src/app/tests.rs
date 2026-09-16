@@ -333,8 +333,8 @@ fn tool_output_stored() {
         None,
     );
     let tc = &app.messages.last().unwrap().tool_calls[0];
-    assert!(tc.output_preview.is_some());
-    assert!(tc.output_preview.as_ref().unwrap().contains("fn main()"));
+    assert!(tc.output.is_some());
+    assert!(tc.output.as_ref().unwrap().contains("fn main()"));
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn edit_tool_output_preserves_long_diffs_without_truncation() {
         None,
     );
     let tc = &app.messages.last().unwrap().tool_calls[0];
-    let preview = tc.output_preview.as_ref().expect("preview stored");
+    let preview = tc.output.as_ref().expect("preview stored");
     assert!(
         preview.contains("line 79"),
         "full edit diff should be preserved (last line missing): {preview}"
@@ -459,11 +459,11 @@ batch: 1/2 succeeded, 1 failed";
 
     let tcs = &app.messages.last().unwrap().tool_calls;
     assert_eq!(tcs[0].status, ToolCallStatus::Done);
-    assert!(tcs[0].output_preview.as_ref().unwrap().contains("fn main"));
+    assert!(tcs[0].output.as_ref().unwrap().contains("fn main"));
     assert_eq!(tcs[1].status, ToolCallStatus::Error);
     assert!(
         tcs[1]
-            .output_preview
+            .output
             .as_ref()
             .unwrap()
             .contains("could not compile")
@@ -494,7 +494,7 @@ fn batch_end_with_top_level_error_shows_error_on_subcalls() {
     assert_eq!(tcs[0].status, ToolCallStatus::Error);
     assert_eq!(tcs[1].status, ToolCallStatus::Error);
     for tc in tcs {
-        let preview = tc.output_preview.as_deref().unwrap_or_default();
+        let preview = tc.output.as_deref().unwrap_or_default();
         assert!(
             preview.contains("invalid arguments") && preview.contains("missing field `parameters`"),
             "expected real error in preview, got: {preview:?}",
@@ -859,7 +859,7 @@ fn tool_output_attaches_to_assistant_when_steering_queued_mid_tool() {
     assert_eq!(assistant.tool_calls[0].name, "bash");
     assert_eq!(assistant.tool_calls[0].status, ToolCallStatus::Done);
     let preview = assistant.tool_calls[0]
-        .output_preview
+        .output
         .as_deref()
         .unwrap_or_default();
     assert!(
@@ -2099,11 +2099,11 @@ fn live_output_reaches_the_tool_call_in_the_transcript() {
     app.push_tool_output_by_exec_id("tc_1", "line 1\nline 2");
 
     let call = &app.messages[0].tool_calls[0];
-    assert_eq!(call.output_preview.as_deref(), Some("line 1\nline 2"));
+    assert_eq!(call.output.as_deref(), Some("line 1\nline 2"));
 }
 
 #[test]
-fn a_running_tool_keeps_only_the_last_five_lines() {
+fn a_running_tool_keeps_its_whole_output() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages
         .push(DisplayMessage::new(MessageRole::Assistant, "on it"));
@@ -2114,8 +2114,22 @@ fn a_running_tool_keeps_only_the_last_five_lines() {
     app.push_tool_output_by_exec_id("tc_1", &output.join("\n"));
 
     let call = &app.messages[0].tool_calls[0];
+    assert_eq!(call.output.as_deref(), Some(output.join("\n").as_str()));
+}
+
+#[test]
+fn the_detail_level_cycles_and_wraps() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    assert_eq!(app.detail, ChatDetail::Overview);
+
+    app.cycle_detail();
+    assert_eq!(app.detail, ChatDetail::Details);
+    app.cycle_detail();
+    assert_eq!(app.detail, ChatDetail::All);
+    app.cycle_detail();
+    assert_eq!(app.detail, ChatDetail::Overview);
     assert_eq!(
-        call.output_preview.as_deref(),
-        Some("… 3 earlier lines\nline 4\nline 5\nline 6\nline 7\nline 8")
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("detail: overview")
     );
 }

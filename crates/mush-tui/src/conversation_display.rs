@@ -9,7 +9,7 @@ use mush_ai::types::{
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, MessageRole, ThinkingDisplay, ToolCallStatus,
 };
-use crate::batch_output::{parse_batch_output, truncate_output, truncate_output_large};
+use crate::batch_output::parse_batch_output;
 
 pub(crate) fn extract_compaction_summary(text: &str) -> Option<String> {
     let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
@@ -97,7 +97,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     name,
                                     summary,
                                     status: ToolCallStatus::Running,
-                                    output_preview: None,
+                                    output: None,
                                     image_data: None,
                                     batch: batch_counter,
                                 });
@@ -118,7 +118,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     &tool_call.arguments,
                                 ),
                                 status: ToolCallStatus::Running,
-                                output_preview: None,
+                                output: None,
                                 image_data: None,
                                 batch: batch_counter,
                             });
@@ -198,7 +198,7 @@ fn apply_tool_result(
     };
 
     tool_call.status = display_tool_status(result.outcome);
-    tool_call.output_preview = tool_result_preview(&result.tool_name, &result.content);
+    tool_call.output = tool_result_text(&result.content);
 }
 
 fn apply_batch_result(
@@ -225,11 +225,10 @@ fn apply_batch_result(
     };
 
     if sections.is_empty() && !text.trim().is_empty() {
-        let preview = truncate_output(&text);
         for i in 0..count {
             if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
                 tc.status = ToolCallStatus::Error;
-                tc.output_preview = Some(preview.clone());
+                tc.output = Some(text.clone());
             }
         }
         return;
@@ -247,14 +246,14 @@ fn apply_batch_result(
                 ToolCallStatus::Done
             };
             if !section.content.is_empty() {
-                tc.output_preview = Some(truncate_output(&section.content));
+                tc.output = Some(section.content.clone());
             }
         }
     }
     for i in sections.len()..count {
         if let Some(tc) = message.tool_calls.get_mut(first_tc + i) {
             tc.status = ToolCallStatus::Error;
-            tc.output_preview = Some("missing result in batch output".into());
+            tc.output = Some("missing result in batch output".into());
         }
     }
 }
@@ -267,10 +266,7 @@ fn display_tool_status(outcome: ToolOutcome) -> ToolCallStatus {
     }
 }
 
-fn tool_result_preview(
-    tool_name: &mush_ai::types::ToolName,
-    content: &[ToolResultContentPart],
-) -> Option<String> {
+fn tool_result_text(content: &[ToolResultContentPart]) -> Option<String> {
     let text = content
         .iter()
         .filter_map(|part| match part {
@@ -280,10 +276,7 @@ fn tool_result_preview(
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
-        if tool_name.as_str().eq_ignore_ascii_case("edit") {
-            return Some(text);
-        }
-        return Some(truncate_output_large(&text));
+        return Some(text);
     }
 
     content
@@ -380,7 +373,7 @@ mod tests {
         assert_eq!(app.messages[1].tool_calls[0].name, "read");
         assert_eq!(app.messages[1].tool_calls[0].status, ToolCallStatus::Done);
         assert_eq!(
-            app.messages[1].tool_calls[0].output_preview.as_deref(),
+            app.messages[1].tool_calls[0].output.as_deref(),
             Some("fn main() {}")
         );
     }
@@ -675,7 +668,7 @@ mod tests {
         assert_eq!(app.messages[0].tool_calls[1].status, ToolCallStatus::Done);
         assert_eq!(app.messages[0].tool_calls[2].status, ToolCallStatus::Error);
         assert_eq!(
-            app.messages[0].tool_calls[2].output_preview.as_deref(),
+            app.messages[0].tool_calls[2].output.as_deref(),
             Some("missing result in batch output")
         );
     }
@@ -724,7 +717,7 @@ mod tests {
         assert_eq!(app.messages[0].tool_calls.len(), 2);
         for tc in &app.messages[0].tool_calls {
             assert_eq!(tc.status, ToolCallStatus::Error);
-            let preview = tc.output_preview.as_deref().unwrap_or_default();
+            let preview = tc.output.as_deref().unwrap_or_default();
             assert!(
                 preview.contains("invalid arguments") && preview.contains("unknown field `params`"),
                 "expected real error in preview, got: {preview:?}",
@@ -749,7 +742,7 @@ mod tests {
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].tool_calls[0].status, ToolCallStatus::Error);
         assert_eq!(
-            app.messages[0].tool_calls[0].output_preview.as_deref(),
+            app.messages[0].tool_calls[0].output.as_deref(),
             Some("permission denied")
         );
     }

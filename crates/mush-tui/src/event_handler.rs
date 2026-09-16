@@ -730,7 +730,7 @@ mod tests {
             .unwrap()
             .tool_calls
             .iter()
-            .map(|tc| (tc.summary.clone(), tc.status, tc.output_preview.clone()))
+            .map(|tc| (tc.summary.clone(), tc.status, tc.output.clone()))
             .collect()
     }
 
