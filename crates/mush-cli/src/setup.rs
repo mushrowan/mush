@@ -44,6 +44,7 @@ pub struct SetupArgs {
     pub discovery: mush_ext::DiscoveryOptions,
     pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
+    pub kernel_notice_sink: Option<mush_tools::kernel_jobs::NoticeSink>,
     pub timer: Option<crate::timing::PhaseTimer>,
 }
 

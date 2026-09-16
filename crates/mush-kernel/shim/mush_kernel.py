@@ -104,9 +104,11 @@ class HostError(RuntimeError):
 
 
 class BashResult:
-    def __init__(self, exit_code: int, output: str):
+    def __init__(self, exit_code: int, output: str, timed_out: bool = False, killed: bool = False):
         self.exit_code = exit_code
         self.output = output
+        self.timed_out = timed_out
+        self.killed = killed
 
     @property
     def ok(self) -> bool:
@@ -119,12 +121,69 @@ class BashResult:
         return self.output
 
 
-async def bash(command: str, timeout: int | None = None) -> BashResult:
-    payload = {"command": command}
-    if timeout is not None:
-        payload["timeout"] = timeout
-    reply = await host_request("bash", payload)
-    return BashResult(int(reply.get("exit_code", 0)), str(reply.get("output", "")))
+def _result_from(reply: dict) -> BashResult:
+    end = reply.get("end") or {}
+    return BashResult(
+        int(reply.get("exit_code", -1)),
+        str(reply.get("output", "")),
+        timed_out=end.get("kind") == "timed_out",
+        killed=end.get("kind") == "killed",
+    )
+
+
+class BashHandle:
+    """A shell command started in the background. `await h` waits for it."""
+
+    def __init__(self, command: str, timeout: int | None):
+        self.command = command
+        self.job_id: str | None = None
+        self.pid: int | None = None
+        payload = {"command": command}
+        if timeout is not None:
+            payload["timeout"] = timeout
+        self._started = asyncio.ensure_future(self._start(payload))
+
+    async def _start(self, payload: dict) -> None:
+        reply = await host_request("bash.start", payload)
+        self.job_id = reply["job_id"]
+        self.pid = reply.get("pid")
+
+    async def _job(self) -> dict:
+        await self._started
+        return {"job_id": self.job_id}
+
+    def __await__(self):
+        return self.wait().__await__()
+
+    async def wait(self) -> BashResult:
+        return _result_from(await host_request("bash.wait", await self._job()))
+
+    async def poll(self) -> BashResult | None:
+        reply = await host_request("bash.poll", await self._job())
+        return None if reply.get("running") else _result_from(reply)
+
+    async def running(self) -> bool:
+        reply = await host_request("bash.poll", await self._job())
+        return bool(reply.get("running"))
+
+    async def output(self) -> str:
+        reply = await host_request("bash.poll", await self._job())
+        return str(reply.get("output", ""))
+
+    async def tail(self, lines: int = 20) -> str:
+        text = await self.output()
+        return "\n".join(text.splitlines()[-lines:])
+
+    async def kill(self) -> None:
+        await host_request("bash.kill", await self._job())
+
+    def __repr__(self) -> str:
+        state = "pending" if self.job_id is None else self.job_id
+        return f"BashHandle({self.command!r}, {state}, pid={self.pid})"
+
+
+def bash(command: str, timeout: int | None = None) -> BashHandle:
+    return BashHandle(command, timeout)
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -142,6 +201,7 @@ def _install_preload() -> None:
             "edit": edit,
             "host_request": host_request,
             "BashResult": BashResult,
+            "BashHandle": BashHandle,
             "HostError": HostError,
         }
     )

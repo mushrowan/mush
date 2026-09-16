@@ -271,6 +271,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         discovery: cli.discovery(),
         debug_cache: cli.debug_cache,
         output_sink: None,
+        kernel_notice_sink: None,
         timer,
     });
     let (mut setup, startup_report) = tokio::select! {
@@ -624,6 +625,16 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 guard.insert(exec_id.to_string(), line.to_string());
             }
         });
+    let kernel_notices: mush_tui::runner::KernelNotices =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kernel_notice_sink: mush_tools::kernel_jobs::NoticeSink = {
+        let notices = kernel_notices.clone();
+        std::sync::Arc::new(move |text: String| {
+            if let Ok(mut guard) = notices.lock() {
+                guard.push(text);
+            }
+        })
+    };
 
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())
@@ -643,6 +654,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         discovery: cli.discovery(),
         debug_cache: cli.debug_cache,
         output_sink: Some(output_sink),
+        kernel_notice_sink: Some(kernel_notice_sink),
         timer,
     })
     .await?;
@@ -740,6 +752,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         cache_timer: setup.cfg.cache_timer,
         thinking_display: setup.cfg.thinking_display,
         tool_output_live: Some(tool_output_live),
+        kernel_notices: Some(kernel_notices),
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))

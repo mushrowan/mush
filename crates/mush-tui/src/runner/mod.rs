@@ -27,8 +27,8 @@ use mush_ai::registry::ApiRegistry;
 use crate::screen::Screen;
 
 pub use self::config::{
-    LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
-    SessionSnapshot, SkillCatalogue, TuiConfig,
+    KernelNotices, LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext,
+    SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};
@@ -169,6 +169,12 @@ pub async fn run_tui(
         )
         .await;
         let inbox_disabled = inbox_connected && orchestrator_inbox.is_none();
+        let notice_submitted = streams::submit_kernel_notices(
+            &mut runtime.session,
+            &stream_state,
+            &tui_config.kernel_notices,
+        )
+        .await;
         if inbox_ready {
             control::poll(&agent_streams, &stream_state, &mut runtime, &tui_config).await?;
             let control_endpoint = runtime.session.control_endpoint();
@@ -255,6 +261,7 @@ pub async fn run_tui(
 
         let should_draw = matches!(action, LoopAction::Redraw)
             || inbox_disabled
+            || notice_submitted
             || discovery_updated
             || compaction_finished
             || side_question_finished

@@ -91,7 +91,7 @@ impl BashArgs {
     }
 }
 
-fn command_with_direnv(command: &str) -> String {
+pub(crate) fn command_with_direnv(command: &str) -> String {
     format!(
         r#"if command -v direnv >/dev/null 2>&1; then
   eval "$(DIRENV_LOG_FORMAT= direnv export bash)"

@@ -10,10 +10,12 @@ use crate::util::extract_text;
 
 const DESCRIPTION: &str = "Execute Python code in a persistent Python REPL. Top-level `await` works. \
 Variables, imports, functions and loaded data persist across calls. The value of a trailing \
-expression is returned. Preloaded: `await bash(command, timeout=None)` runs a shell command and \
-returns a result with `.exit_code`, `.ok` and `.output`; `await edit(path, old, new)` replaces \
-exactly one occurrence of `old` in the file at `path`. Use Python itself for reading, searching \
-and transforming files.";
+expression is returned. Preloaded: `bash(command, timeout=None)` starts a shell command in the \
+background and returns a handle; `await bash(...)` or `await h` waits for the result with \
+`.exit_code`, `.ok` and `.output`, and `await h.poll()`, `await h.output()`, `await h.tail(n)`, \
+`await h.kill()` inspect a running one. `await edit(path, old, new)` replaces exactly one \
+occurrence of `old` in the file at `path`. Use Python itself for reading, searching and \
+transforming files.";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,53 +24,84 @@ struct IpythonArgs {
 }
 
 pub struct MushHost {
-    bash: Arc<dyn AgentTool>,
+    cwd: Arc<Path>,
+    jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
 }
 
 impl MushHost {
     pub fn new(cwd: Arc<Path>) -> Self {
         Self {
-            bash: Arc::new(crate::bash::BashTool::new(cwd.clone())),
-            edit: Arc::new(crate::edit::EditTool::new(cwd)),
+            edit: Arc::new(crate::edit::EditTool::new(cwd.clone())),
+            jobs: crate::kernel_jobs::KernelJobs::default(),
+            cwd,
         }
     }
+
+    #[must_use]
+    pub fn jobs(&self) -> &crate::kernel_jobs::KernelJobs {
+        &self.jobs
+    }
+}
+
+fn job_reply(snapshot: &crate::kernel_jobs::JobSnapshot) -> Value {
+    let end = snapshot.end.as_ref().map(|end| match end {
+        crate::kernel_jobs::JobEnd::Exited(code) => json!({ "kind": "exited", "code": code }),
+        crate::kernel_jobs::JobEnd::TimedOut => json!({ "kind": "timed_out" }),
+        crate::kernel_jobs::JobEnd::Killed => json!({ "kind": "killed" }),
+        crate::kernel_jobs::JobEnd::Failed(reason) => json!({ "kind": "failed", "reason": reason }),
+    });
+    json!({
+        "job_id": snapshot.job_id,
+        "pid": snapshot.pid,
+        "running": snapshot.running,
+        "exit_code": snapshot.exit_code,
+        "output": snapshot.output,
+        "end": end,
+        "duration_ms": snapshot.duration.as_millis(),
+    })
+}
+
+fn job_id(payload: &Value) -> Result<&str, HostError> {
+    payload
+        .get("job_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError("job_id is required".into()))
 }
 
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
         match kind {
-            "bash" => {
+            "bash.start" => {
                 let command = payload
                     .get("command")
                     .and_then(Value::as_str)
                     .ok_or("bash needs a command")?;
-                let mut args = json!({ "command": command, "output": "json" });
-                if let Some(timeout) = payload.get("timeout").filter(|t| !t.is_null()) {
-                    args["timeout"] = timeout.clone();
-                }
-                let result = self.bash.execute(args).await;
-                let text = extract_text(&result);
-                match serde_json::from_str::<Value>(&text) {
-                    Ok(report) => {
-                        let stdout = report["stdout"].as_str().unwrap_or_default();
-                        let stderr = report["stderr"].as_str().unwrap_or_default();
-                        let mut output = stdout.to_string();
-                        if !stderr.is_empty() {
-                            if !output.is_empty() && !output.ends_with('\n') {
-                                output.push('\n');
-                            }
-                            output.push_str(stderr);
-                        }
-                        Ok(json!({
-                            "exit_code": report["exit_code"].as_i64().unwrap_or(-1),
-                            "output": output,
-                            "timed_out": report["timed_out"].as_bool().unwrap_or(false),
-                        }))
-                    }
-                    Err(_) => Err(HostError(text)),
-                }
+                let timeout = payload
+                    .get("timeout")
+                    .and_then(Value::as_u64)
+                    .map(std::time::Duration::from_secs);
+                let (job_id, pid) = self
+                    .jobs
+                    .start(&self.cwd, command, timeout)
+                    .await
+                    .map_err(HostError)?;
+                Ok(json!({ "job_id": job_id, "pid": pid }))
+            }
+            "bash.wait" => Ok(job_reply(
+                &self.jobs.wait(job_id(&payload)?).await.map_err(HostError)?,
+            )),
+            "bash.poll" => Ok(job_reply(
+                &self
+                    .jobs
+                    .snapshot(job_id(&payload)?)
+                    .await
+                    .map_err(HostError)?,
+            )),
+            "bash.kill" => {
+                self.jobs.kill(job_id(&payload)?).await.map_err(HostError)?;
+                Ok(json!({}))
             }
             "edit" => {
                 let args = json!({
@@ -100,8 +133,11 @@ const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 impl IpythonTool {
     pub fn new(cwd: Arc<Path>) -> Self {
-        let host: Arc<dyn HostRequestHandler> = Arc::new(MushHost::new(cwd.clone()));
-        Self::with_host(cwd, host)
+        Self::with_mush_host(MushHost::new(cwd.clone()), cwd)
+    }
+
+    pub fn with_mush_host(host: MushHost, cwd: Arc<Path>) -> Self {
+        Self::with_host(cwd, Arc::new(host))
     }
 
     pub fn with_host(cwd: Arc<Path>, host: Arc<dyn HostRequestHandler>) -> Self {
@@ -290,17 +326,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_runs_through_the_host_and_reports_the_exit_code() {
+    async fn awaiting_bash_gives_the_finished_result() {
         let dir = tempfile::tempdir().unwrap();
         let tool = tool(dir.path());
 
         let result = tool
             .execute(json!({
-                "code": "r = await bash('echo out; echo err >&2; exit 3')\n(r.exit_code, r.output)"
+                "code": "r = await bash('echo out; echo err >&2; exit 3')\n(r.exit_code, r.ok, r.output)"
             }))
             .await;
 
-        assert_eq!(extract_text(&result), "(3, 'out\\nerr\\n')");
+        assert_eq!(extract_text(&result), "(3, False, 'out\\nerr\\n')");
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_handle_survives_the_cell_and_can_be_polled_and_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+
+        let started = tool
+            .execute(json!({ "code": "h = bash('echo go; sleep 30; echo never')\nh.job_id" }))
+            .await;
+        let polled = tool
+            .execute(json!({
+                "code": "import asyncio\nawait asyncio.sleep(0.3)\n(await h.running(), await h.tail(1), h.pid is not None)"
+            }))
+            .await;
+        let killed = tool
+            .execute(json!({ "code": "await h.kill()\nr = await h\n(r.killed, r.exit_code, 'never' in r.output)" }))
+            .await;
+
+        assert_eq!(extract_text(&started), "(no output)");
+        assert_eq!(
+            extract_text(&polled),
+            "(True, 'go', True)",
+            "{}",
+            extract_text(&polled)
+        );
+        assert_eq!(
+            extract_text(&killed),
+            "(True, -1, False)",
+            "{}",
+            extract_text(&killed)
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_unawaited_finish_reaches_the_notice_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = MushHost::new(dir.path().into());
+        let notices = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        host.jobs().set_notice_sink({
+            let notices = notices.clone();
+            Arc::new(move |text| notices.lock().unwrap().push(text))
+        });
+        let tool = IpythonTool::with_mush_host(host, dir.path().into());
+
+        let result = tool
+            .execute(
+                json!({ "code": "h = bash('exit 5')\nawait asyncio.sleep(0.3)\n'left running'" }),
+            )
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let notices = notices.lock().unwrap().clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].contains("exit 5"), "{notices:?}");
         tool.shutdown().await;
     }
 

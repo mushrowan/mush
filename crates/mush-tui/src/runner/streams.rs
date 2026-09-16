@@ -288,6 +288,24 @@ pub(super) async fn answer_confirmation(
     }
 }
 
+pub(super) async fn submit_kernel_notices(
+    session: &mut Session,
+    stream_state: &StreamState,
+    notices: &Option<crate::runner::config::KernelNotices>,
+) -> bool {
+    let Some(notices) = notices else {
+        return false;
+    };
+    let pending: Vec<String> = match notices.lock() {
+        Ok(mut guard) if !guard.is_empty() => guard.drain(..).collect(),
+        _ => return false,
+    };
+    for text in pending {
+        submit_streaming_input(session, stream_state, text, Vec::new()).await;
+    }
+    true
+}
+
 pub(super) fn poll_live_tool_output(
     session: &mut Session,
     live: &Option<crate::runner::config::LiveToolOutput>,
@@ -1381,6 +1399,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
+        let pane_id = PaneId::new(1);
+        let mut session = Session::new(app());
+        let mut stream_state = StreamState::new();
+        let notices: crate::runner::config::KernelNotices = Arc::new(std::sync::Mutex::new(vec![
+            "Background command finished: `exit 5`".to_string(),
+        ]));
+
+        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
+        assert_eq!(
+            session.pending_prompt.as_ref().map(|p| p.text.as_str()),
+            Some("Background command finished: `exit 5`")
+        );
+        assert!(!submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
+
+        let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
+        let steering_queue = Arc::new(Mutex::new(Vec::new()));
+        stream_state.register_active(
+            pane_id,
+            StreamMeta {
+                steering_queue: steering_queue.clone(),
+                confirm_req_rx,
+                confirm_reply: Arc::new(Mutex::new(None)),
+                model: models::all_models_with_user().into_iter().next().unwrap(),
+                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+        );
+        notices.lock().unwrap().push("second".into());
+
+        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices)).await);
+        assert_eq!(steering_queue.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn submit_streaming_input_includes_pending_images_in_steering_queue() {
         use crate::input_buffer::PendingImage;
         use mush_ai::types::ImageMimeType;
@@ -1849,6 +1902,7 @@ mod tests {
             mcp: None,
             skills: Default::default(),
             tool_allowlist: None,
+            kernel_notices: None,
             forbidden_chars: Default::default(),
         }
     }

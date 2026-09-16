@@ -26,6 +26,8 @@ pub struct PaneSnapshot {
 
 pub type SessionSaver = std::sync::Arc<dyn Fn(SessionSnapshot) + Send + Sync>;
 
+pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct SkillCatalogue {
     pub skills: Vec<mush_ext::Skill>,
@@ -95,6 +97,7 @@ pub struct TuiConfig {
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
     pub tool_allowlist: Option<Vec<String>>,
+    pub kernel_notices: Option<KernelNotices>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
@@ -196,6 +199,7 @@ impl TuiConfig {
             mcp: None,
             skills: SkillCatalogue::default(),
             tool_allowlist: None,
+            kernel_notices: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }
