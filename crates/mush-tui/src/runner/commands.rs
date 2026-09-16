@@ -20,6 +20,27 @@ pub(super) struct SlashEnv<'a> {
         &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
 }
 
+fn start_session_from(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    messages: Vec<mush_ai::types::Message>,
+) {
+    if let Some(ref saver) = tui_config.save_session {
+        saver(super::streams::build_session_snapshot(session, tui_config));
+    }
+    let new_id = mush_ai::types::SessionId::new();
+    tui_config.session_id = new_id.clone();
+    tui_config.options.session_id = Some(new_id);
+    session.title_generated = false;
+    let (app, conversation, _) = session.fields_mut();
+    app.session_title = None;
+    *conversation = mush_session::ConversationState::from_messages(messages);
+    let context = conversation.context();
+    crate::slash::rebuild_display(app, &context);
+    app.stats.reset();
+    crate::conversation_display::accumulate_session_stats(app, &context);
+}
+
 pub(super) async fn handle_slash_action(
     session: &mut Session,
     action: SlashAction,
@@ -41,6 +62,8 @@ pub(super) async fn handle_slash_action(
             | SlashAction::Resume { .. }
             | SlashAction::Undo
             | SlashAction::Branch { .. }
+            | SlashAction::Fork { .. }
+            | SlashAction::Clone
     );
     if changes_conversation
         && session.control.is_some()
@@ -152,6 +175,44 @@ pub(super) async fn handle_slash_action(
             app.session_title = None;
             *conversation = mush_session::ConversationState::new();
             app.status = Some("new session started (previous session saved)".into());
+            state_changed = true;
+        }
+        SlashAction::Fork { index: None } => {
+            session.app.push_system_message(
+                "usage: /fork <n>, a new session from before the nth user message. try /tree to see messages",
+            );
+        }
+        SlashAction::Fork { index: Some(index) } => {
+            let messages = session.conversation.context();
+            let user_positions: Vec<usize> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| matches!(message, mush_ai::types::Message::User(_)))
+                .map(|(position, _)| position)
+                .collect();
+            match user_positions.get(index.wrapping_sub(1)) {
+                None => session.app.push_system_message(format!(
+                    "invalid: use 1-{} (try /tree to see messages)",
+                    user_positions.len()
+                )),
+                Some(&position) => {
+                    let prompt = match &messages[position] {
+                        mush_ai::types::Message::User(user) => user.text(),
+                        _ => String::new(),
+                    };
+                    let prefix = messages[..position].to_vec();
+                    start_session_from(session, tui_config, prefix);
+                    session.app.input.text = prompt;
+                    session.app.input.cursor = session.app.input.text.len();
+                    session.app.status = Some(format!("forked before message {index}").into());
+                    state_changed = true;
+                }
+            }
+        }
+        SlashAction::Clone => {
+            let branch = session.conversation.context();
+            start_session_from(session, tui_config, branch);
+            session.app.status = Some("cloned the current branch into a new session".into());
             state_changed = true;
         }
         SlashAction::Reload => {
@@ -510,7 +571,94 @@ mod tests {
     use crate::browser_login::PendingBrowserLogin;
     use crate::session::Session;
     use mush_ai::oauth::OAuthCredentials;
-    use mush_ai::types::{ModelId, TokenCount};
+    use mush_ai::types::{Message, ModelId, Timestamp, TokenCount, UserContent, UserMessage};
+
+    fn user(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn conversation_session(messages: Vec<Message>) -> Session {
+        let app = App::new(ModelId::from("test"), TokenCount::new(1024));
+        Session::with_conversation(
+            app,
+            mush_session::ConversationState::from_messages(messages),
+        )
+    }
+
+    fn run(session: &mut Session, config: &mut TuiConfig, action: SlashAction) {
+        let registry = mush_ai::registry::ApiRegistry::new();
+        let hooks = mush_agent::LifecycleHooks::default();
+        let mut pending_prompt = None;
+        let mut pending_compactions = std::collections::HashMap::new();
+        futures::executor::block_on(handle_slash_action(
+            session,
+            action,
+            SlashEnv {
+                tui_config: config,
+                thinking_prefs: &ThinkingPrefs::default(),
+                registry: &registry,
+                lifecycle_hooks: &hooks,
+                cwd: std::path::Path::new("/tmp"),
+                pending_prompt: &mut pending_prompt,
+                pending_compactions: &mut pending_compactions,
+            },
+        ));
+    }
+
+    #[test]
+    fn fork_starts_a_new_session_before_the_chosen_message() {
+        let mut session = conversation_session(vec![user("first"), user("second"), user("third")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+        session.app.session_title = Some("old".into());
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::Fork { index: Some(2) },
+        );
+
+        assert_ne!(config.session_id, old_id);
+        assert_eq!(session.conversation.context(), vec![user("first")]);
+        assert_eq!(session.app.input.text, "second");
+        assert!(session.app.session_title.is_none());
+    }
+
+    #[test]
+    fn fork_out_of_range_leaves_the_session_alone() {
+        let mut session = conversation_session(vec![user("first")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::Fork { index: Some(4) },
+        );
+
+        assert_eq!(config.session_id, old_id);
+        assert_eq!(session.conversation.context_len(), 1);
+    }
+
+    #[test]
+    fn clone_keeps_the_whole_branch_under_a_new_id() {
+        let mut session = conversation_session(vec![user("first"), user("second")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+
+        run(&mut session, &mut config, SlashAction::Clone);
+
+        assert_ne!(config.session_id, old_id);
+        assert_eq!(
+            session.conversation.context(),
+            vec![user("first"), user("second")]
+        );
+    }
 
     fn credentials() -> OAuthCredentials {
         OAuthCredentials {

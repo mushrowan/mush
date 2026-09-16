@@ -137,7 +137,7 @@ pub fn handle(
             app.status = Some("conversation cleared".into());
             None
         }
-        SlashAction::New => None,
+        SlashAction::New | SlashAction::Fork { .. } | SlashAction::Clone => None,
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {

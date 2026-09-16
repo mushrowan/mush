@@ -27,6 +27,8 @@ pub enum SlashParseError {
     MissingPrefix,
     #[error("usage: /branch <number> (try /tree first)")]
     BranchUsage,
+    #[error("usage: /fork <number> (try /tree first)")]
+    ForkUsage,
     #[error("usage: /logs [n]")]
     LogsUsage,
     #[error("usage: /mcp | /mcp tools [server] | /mcp schema <tool> | /mcp reconnect <server>")]
@@ -65,6 +67,10 @@ pub enum SlashAction {
     Branch {
         index: Option<usize>,
     },
+    Fork {
+        index: Option<usize>,
+    },
+    Clone,
     Tree,
     Compact {
         focus: mush_session::compact::CompactionFocus,
@@ -134,6 +140,8 @@ impl SlashAction {
                 | Self::New
                 | Self::Resume { .. }
                 | Self::Branch { .. }
+                | Self::Fork { .. }
+                | Self::Clone
                 | Self::Compact { .. }
                 | Self::Undo
                 | Self::Reload
@@ -177,6 +185,12 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .parse::<usize>()
             .map(|index| SlashAction::Branch { index: Some(index) })
             .map_err(|_| SlashParseError::BranchUsage),
+        "fork" if args.is_empty() => Ok(SlashAction::Fork { index: None }),
+        "fork" => args
+            .parse::<usize>()
+            .map(|index| SlashAction::Fork { index: Some(index) })
+            .map_err(|_| SlashParseError::ForkUsage),
+        "clone" => Ok(SlashAction::Clone),
         "tree" => Ok(SlashAction::Tree),
         "compact" => parse_compact_focus(args).map(|focus| SlashAction::Compact { focus }),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
