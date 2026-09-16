@@ -37,6 +37,7 @@ pub struct SetupArgs {
     pub max_turns: Option<usize>,
     pub system: Option<String>,
     pub no_tools: bool,
+    pub tools: Option<Vec<String>>,
     pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
     pub timer: Option<crate::timing::PhaseTimer>,
@@ -150,6 +151,17 @@ impl AppSetup {
         if !args.no_tools && model.supports_native_parallel_calls() {
         } else if !args.no_tools {
             mush_tools::add_batch_tool(&mut tools);
+        }
+        if let Some(allowed) = &args.tools {
+            tools.retain_named(allowed);
+            let loaded: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+            for name in allowed {
+                if !loaded.iter().any(|tool| {
+                    mush_agent::tool::ToolKey::new(tool) == mush_agent::tool::ToolKey::new(name)
+                }) {
+                    tracing::warn!("--tools names {name}, which is not a loaded tool");
+                }
+            }
         }
 
         let report = timer.map(|t| t.finish());

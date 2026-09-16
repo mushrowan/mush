@@ -90,6 +90,7 @@ pub(super) struct StreamConfig {
     pub auto_compact: bool,
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
+    pub tool_allowlist: Option<Vec<String>>,
 }
 
 pub(super) struct StreamDeps<'a> {
@@ -777,6 +778,9 @@ async fn start_stream_for_prompt<'a>(
         std::sync::Arc::from(effective_cwd),
         deps.config.forbidden_chars.clone(),
     );
+    if let Some(allowed) = &deps.config.tool_allowlist {
+        tool_registry.retain_named(allowed);
+    }
 
     let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -1118,6 +1122,7 @@ mod tests {
             auto_compact: false,
             compaction_model: None,
             forbidden_chars: Default::default(),
+            tool_allowlist: None,
         };
         assert_eq!(config.max_turns, 32);
         assert!(!config.confirm_tools);
@@ -1843,6 +1848,7 @@ mod tests {
             reload_context: None,
             mcp: None,
             skills: Default::default(),
+            tool_allowlist: None,
             forbidden_chars: Default::default(),
         }
     }

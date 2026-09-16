@@ -183,6 +183,15 @@ impl ToolRegistry {
         Some(removed)
     }
 
+    pub fn retain_named<S: AsRef<str>>(&mut self, names: &[S]) {
+        let keep: Vec<ToolKey> = names
+            .iter()
+            .map(|name| ToolKey::new(name.as_ref()))
+            .collect();
+        self.order.retain(|key| keep.contains(key));
+        self.tools.retain(|key, _| keep.contains(key));
+    }
+
     #[must_use]
     pub fn with_shared(&self, tools: impl IntoIterator<Item = SharedTool>) -> Self {
         let mut merged = self.clone();
@@ -339,6 +348,45 @@ mod tests {
     #[test]
     fn tool_key_normalises_case_and_underscores() {
         assert_eq!(ToolKey::new("WebSearch"), ToolKey::new("web_search"));
+    }
+
+    struct NamedTool(&'static str);
+
+    #[async_trait::async_trait]
+    impl AgentTool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn label(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            "named"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+        async fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::text(self.0)
+        }
+        fn output_limit(&self) -> OutputLimit {
+            OutputLimit::Head
+        }
+    }
+
+    #[test]
+    fn retain_named_keeps_only_the_listed_tools_in_order() {
+        let mut registry = ToolRegistry::from_shared(vec![
+            Arc::new(NamedTool("read")) as SharedTool,
+            Arc::new(NamedTool("bash")) as SharedTool,
+            Arc::new(NamedTool("web_search")) as SharedTool,
+        ]);
+
+        registry.retain_named(&["WebSearch", "read", "missing"]);
+
+        let names: Vec<&str> = registry.iter().map(|tool| tool.name()).collect();
+        assert_eq!(names, ["read", "web_search"]);
+        assert!(registry.get("bash").is_none());
     }
 
     #[test]

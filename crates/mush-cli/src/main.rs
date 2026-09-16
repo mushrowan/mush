@@ -59,6 +59,9 @@ struct Cli {
     #[arg(long)]
     no_tools: bool,
 
+    #[arg(long = "tools", short = 't', value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
     #[arg(long)]
     no_session: bool,
 
@@ -234,6 +237,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         max_turns: cli.max_turns,
         system: cli.system,
         no_tools: cli.no_tools,
+        tools: cli.tools.clone(),
         debug_cache: cli.debug_cache,
         output_sink: None,
         timer,
@@ -602,6 +606,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         max_turns: cli.max_turns,
         system: cli.system,
         no_tools: cli.no_tools,
+        tools: cli.tools.clone(),
         debug_cache: cli.debug_cache,
         output_sink: Some(output_sink),
         timer,
@@ -757,6 +762,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         )),
         mcp: setup.mcp.clone(),
         skills: setup.skills,
+        tool_allowlist: cli.tools.clone(),
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
             setup.cfg.forbidden_chars.iter().copied(),
             setup.cfg.forbidden_char_classes.iter().copied(),

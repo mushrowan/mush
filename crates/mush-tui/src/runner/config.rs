@@ -94,6 +94,7 @@ pub struct TuiConfig {
     pub reload_context: Option<ReloadCallback>,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
+    pub tool_allowlist: Option<Vec<String>>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
@@ -194,6 +195,7 @@ impl TuiConfig {
             reload_context: None,
             mcp: None,
             skills: SkillCatalogue::default(),
+            tool_allowlist: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }

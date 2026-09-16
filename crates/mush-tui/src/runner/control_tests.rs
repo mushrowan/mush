@@ -711,6 +711,7 @@ fn deps<'a>(
             auto_compact: false,
             compaction_model: None,
             forbidden_chars: Default::default(),
+            tool_allowlist: None,
         },
         injections: mush_agent::AgentInjections {
             control_endpoint: runtime.session.control_endpoint(),
