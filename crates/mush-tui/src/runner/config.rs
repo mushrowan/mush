@@ -5,13 +5,12 @@ pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
 pub type RecentModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
-pub type TitleUpdater = std::sync::Arc<dyn Fn(String) + Send + Sync>;
-
 pub type LiveToolOutput =
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
 
 pub struct SessionSnapshot {
     pub session_id: mush_ai::types::SessionId,
+    pub title: Option<String>,
     pub primary: ConversationState,
     pub model_id: String,
     pub panes: Vec<PaneSnapshot>,
@@ -52,7 +51,7 @@ pub struct TuiConfig {
     pub last_models: super::LastModels,
     pub save_last_models: Option<super::LastModelsSaver>,
     pub save_session: Option<SessionSaver>,
-    pub update_title: Option<TitleUpdater>,
+    pub generate_title: bool,
     pub confirm_tools: bool,
     pub auto_compact: bool,
     pub auto_fork_compact: bool,
@@ -151,7 +150,7 @@ impl TuiConfig {
             last_models: super::LastModels::default(),
             save_last_models: None,
             save_session: None,
-            update_title: None,
+            generate_title: false,
             confirm_tools: false,
             auto_compact: false,
             auto_fork_compact: false,

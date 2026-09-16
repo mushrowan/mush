@@ -331,16 +331,13 @@ async fn handle_agent_end(
         stream_state.completion_signal();
     }
 
-    let title_request = if !session.title_generated
-        && session.conversation.context_len() >= 2
-        && let Some(ref updater) = tui_config.update_title
-    {
-        Some((session.conversation.context_prefix(4), updater.clone()))
-    } else {
-        None
-    };
+    let title_request = (!session.title_generated
+        && tui_config.generate_title
+        && session.app.session_title.is_none()
+        && session.conversation.context_len() >= 2)
+        .then(|| session.conversation.context_prefix(4));
 
-    if let Some((msgs, updater)) = title_request {
+    if let Some(msgs) = title_request {
         let model = tui_config.model.clone();
         let opts = StreamOptions {
             api_key: tui_config.options.api_key.clone(),
@@ -352,7 +349,6 @@ async fn handle_agent_end(
         )
         .await
         {
-            updater(title.clone());
             session.app.session_title = Some(title);
         }
         {
@@ -1036,6 +1032,7 @@ pub(crate) fn build_session_snapshot(
 ) -> super::SessionSnapshot {
     super::SessionSnapshot {
         session_id: tui_config.session_id.clone(),
+        title: session.app.session_title.clone(),
         primary: session.conversation.clone(),
         model_id: session.app.model_id.to_string(),
         panes: Vec::new(),
@@ -1810,7 +1807,7 @@ mod tests {
             last_models: super::super::LastModels::default(),
             save_last_models: None,
             save_session: None,
-            update_title: None,
+            generate_title: false,
             confirm_tools: false,
             auto_compact: false,
             auto_fork_compact: false,

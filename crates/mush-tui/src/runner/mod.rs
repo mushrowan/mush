@@ -28,7 +28,7 @@ use crate::screen::Screen;
 
 pub use self::config::{
     LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
-    SessionSnapshot, TitleUpdater, TuiConfig,
+    SessionSnapshot, TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};

@@ -701,18 +701,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
         }),
-        update_title: if cli.no_session {
-            None
-        } else {
-            let sid = session_id.clone();
-            Some(std::sync::Arc::new(move |title: String| {
-                let store = SessionStore::new(SessionStore::default_dir());
-                if let Ok(mut session) = store.load(&sid) {
-                    session.meta.title = Some(title);
-                    let _ = store.save(&session);
-                }
-            }))
-        },
+        generate_title: !cli.no_session,
         terminal_policy,
         lifecycle_hooks: setup.lifecycle_hooks,
         cwd: std::env::current_dir().unwrap_or_default(),
@@ -834,6 +823,7 @@ impl SaverThread {
 fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Session {
     let mut session = Session::new(&snapshot.model_id, cwd);
     session.meta.id = snapshot.session_id;
+    session.meta.title = snapshot.title;
     session.conversation = snapshot.primary;
     session.system_prompt = snapshot.system_prompt;
     session.meta.message_count = session.conversation.context_len();
@@ -856,6 +846,37 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use super::*;
+
+    fn snapshot(title: Option<&str>) -> mush_tui::SessionSnapshot {
+        let conversation = mush_session::ConversationState::from_messages(vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("first question".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )]);
+        mush_tui::SessionSnapshot {
+            session_id: mush_ai::types::SessionId::new(),
+            title: title.map(str::to_string),
+            primary: conversation,
+            model_id: "test".into(),
+            panes: Vec::new(),
+            system_prompt: None,
+        }
+    }
+
+    #[test]
+    fn a_saved_session_keeps_the_generated_title() {
+        let session = session_from_snapshot(snapshot(Some("port prime")), "/tmp");
+
+        assert_eq!(session.meta.title.as_deref(), Some("port prime"));
+    }
+
+    #[test]
+    fn an_untitled_session_falls_back_to_the_first_question() {
+        let session = session_from_snapshot(snapshot(None), "/tmp");
+
+        assert_eq!(session.meta.title.as_deref(), Some("first question"));
+    }
 
     #[test]
     fn control_requires_an_explicit_launch_flag() {
