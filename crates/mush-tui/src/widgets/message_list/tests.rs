@@ -1598,3 +1598,28 @@ fn a_running_tool_call_renders_its_header() {
     assert!(content.contains("bash"), "{content}");
     assert!(content.contains("running"), "{content}");
 }
+
+#[test]
+fn a_user_image_renders_as_a_placeholder_line() {
+    let png = {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(12, 7)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    };
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut message = DisplayMessage::new(MessageRole::User, "look at this");
+    message.images.push(png);
+    app.messages.push(message);
+
+    let text = rendered_text(&all_lines(&app, 60));
+
+    assert!(text.contains("[image 1: png 12x7]"), "{text}");
+    assert!(text.contains("look at this"));
+}
+
+#[test]
+fn an_unreadable_image_still_gets_a_placeholder() {
+    assert_eq!(image_placeholder(2, b"not an image"), "[image 2: image]");
+}

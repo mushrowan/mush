@@ -83,7 +83,20 @@ fn content_hash_call_count() -> usize {
 }
 use crate::theme::Theme;
 
-const ATTACH_INNER_H: u16 = 8;
+pub(crate) fn image_placeholder(index: usize, bytes: &[u8]) -> String {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok();
+    let kind = reader
+        .as_ref()
+        .and_then(|reader| reader.format())
+        .map(|format| format.extensions_str()[0])
+        .unwrap_or("image");
+    match reader.and_then(|reader| reader.into_dimensions().ok()) {
+        Some((w, h)) => format!("[image {index}: {kind} {w}x{h}]"),
+        None => format!("[image {index}: {kind}]"),
+    }
+}
 
 fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -445,11 +458,16 @@ fn render_user_message_box(
     let content_width = w.saturating_sub(USER_PAD * 2).max(1);
     let blank = || Line::styled(" ".repeat(w), bg);
 
-    for _ in 0..ATTACH_INNER_H * u16::from(!msg.images.is_empty()) {
-        lines.push(blank());
-    }
-
     lines.push(blank());
+    for (index, bytes) in msg.images.iter().enumerate() {
+        let placeholder = image_placeholder(index + 1, bytes);
+        let pad = content_width.saturating_sub(text_cell_width(&placeholder));
+        lines.push(Line::from(vec![
+            Span::styled(" ".repeat(USER_PAD), bg),
+            Span::styled(placeholder, bg.patch(theme.dim)),
+            Span::styled(" ".repeat(pad + USER_PAD), bg),
+        ]));
+    }
     for line in msg.content.lines() {
         for wrapped in wrap_text(line, content_width) {
             let pad = content_width.saturating_sub(text_cell_width(&wrapped));
