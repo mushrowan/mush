@@ -105,6 +105,21 @@ impl TuiConfig {
         })
     }
 
+    #[must_use]
+    pub fn turn_config(&self) -> mush_runtime::TurnConfig {
+        mush_runtime::TurnConfig {
+            default_model: self.model.clone(),
+            options: self.stream_options(),
+            max_turns: self.max_turns,
+            provider_api_keys: self.provider_api_keys.clone(),
+            confirm_tools: self.confirm_tools,
+            auto_compact: self.auto_compact,
+            compaction_model: self.compaction_options(),
+            forbidden_chars: self.forbidden_chars.clone(),
+            tool_allowlist: self.tool_allowlist.clone(),
+        }
+    }
+
     pub(crate) fn seed_app(&self, app: &mut crate::app::App) {
         app.thinking_display = self.thinking_display;
         app.theme = self.theme.clone();

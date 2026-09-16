@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod session;
 pub mod snapshot;
+pub mod turn;
 
 use mush_agent::AgentEvent;
 use mush_ai::types::{Message, Timestamp, ToolResultMessage};
@@ -12,6 +13,7 @@ pub use session::{
     StreamGeneration, StreamMeta, TurnEvent, TurnEvents, TurnStream,
 };
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
+pub use turn::{CompactionTarget, TurnConfig, TurnDeps, TurnRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {

@@ -406,8 +406,9 @@ mod tests {
 
     #[tokio::test]
     async fn signal_completion_notifications_follow_production_events() {
-        use super::super::streams::{StreamMeta, StreamState};
+        use super::super::streams::StreamState;
         use mush_ai::types::PaneId;
+        use mush_runtime::StreamMeta;
         use std::sync::{Arc, Mutex};
 
         for case in [

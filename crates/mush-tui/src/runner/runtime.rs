@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, streams};
 use mush_ai::types::PaneId;
-use mush_ai::types::{Message, ThinkingLevel, Timestamp, UserMessage};
+use mush_ai::types::ThinkingLevel;
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
@@ -390,28 +390,7 @@ pub(super) fn replay_compaction_inputs(pane: &mut Session) {
 }
 
 pub(super) fn save_pane_pending_prompt(pane: &mut Session) {
-    let Some(prompt) = pane.runtime.pending_prompt.as_mut() else {
-        return;
-    };
-    if prompt.is_persisted() {
-        return;
-    }
-    save_prompt_to_conversation(&mut pane.runtime.conversation, prompt);
-    prompt.mark_persisted();
-}
-
-pub(super) fn save_prompt_to_conversation(
-    conversation: &mut ConversationState,
-    prompt: &crate::session::PendingPrompt,
-) {
-    let user_message = Message::User(
-        UserMessage::builder()
-            .content(streams::build_user_content(&prompt.text, &prompt.images))
-            .timestamp_ms(Timestamp::now())
-            .prompt_id(mush_ai::types::PromptId::new())
-            .build(),
-    );
-    conversation.append_message(user_message);
+    pane.runtime.persist_pending_prompt();
 }
 
 fn watch_config(
@@ -499,8 +478,8 @@ mod tests {
     use super::*;
 
     use mush_ai::types::{
-        Api, AssistantContentPart, AssistantMessage, Provider, TextContent, Timestamp, TokenCount,
-        Usage, UserContent, UserMessage,
+        Api, AssistantContentPart, AssistantMessage, Message, Provider, TextContent, Timestamp,
+        TokenCount, Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> mush_ai::types::Model {
@@ -1047,12 +1026,10 @@ mod tests {
     }
 
     fn submitted_prompt_id(text: &str) -> mush_ai::types::PromptId {
-        let mut conversation = ConversationState::new();
-        save_prompt_to_conversation(
-            &mut conversation,
-            &crate::session::PendingPrompt::text(text),
-        );
-        match conversation.messages().last().expect("a message") {
+        let mut runtime = mush_runtime::SessionRuntime::new(ConversationState::new());
+        runtime.pending_prompt = Some(crate::session::PendingPrompt::text(text));
+        runtime.persist_pending_prompt();
+        match runtime.conversation.messages().last().expect("a message") {
             Message::User(user) => user.prompt_id.clone().expect("a prompt id"),
             other => panic!("expected a user message, got {other:?}"),
         }

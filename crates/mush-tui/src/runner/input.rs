@@ -801,7 +801,7 @@ mod tests {
             let (reply, mut received) = tokio::sync::oneshot::channel();
             state.register_active(
                 PaneId::new(1),
-                super::super::streams::StreamMeta {
+                mush_runtime::StreamMeta {
                     cancel: tokio_util::sync::CancellationToken::new(),
                     steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                     confirm_req_rx: rx,
@@ -892,7 +892,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         session.runtime.turns.register_active(
             PaneId::new(1),
-            super::super::streams::StreamMeta {
+            mush_runtime::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 confirm_req_rx: rx,

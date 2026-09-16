@@ -1,5 +1,5 @@
 use super::control::*;
-use super::streams::{StreamConfig, StreamDeps, StreamState, start_pending_streams};
+use super::streams::{StreamDeps, StreamState, start_pending_streams};
 use super::{TuiConfig, runtime::RunnerRuntime};
 use mush_agent::AgentEvent;
 use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
@@ -694,9 +694,8 @@ fn deps<'a>(
     registry: &'a ApiRegistry,
 ) -> StreamDeps<'a> {
     StreamDeps {
-        config: StreamConfig {
+        config: mush_runtime::TurnConfig {
             default_model: config.model.clone(),
-            system_prompt: None,
             options: Default::default(),
             max_turns: 8,
             provider_api_keys: config.provider_api_keys.clone(),

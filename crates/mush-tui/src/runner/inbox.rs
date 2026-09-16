@@ -219,10 +219,10 @@ pub(super) async fn safe_to_consume(_state: &StreamState, runtime: &RunnerRuntim
 
 #[cfg(test)]
 mod tests {
-    use super::super::streams::StreamMeta;
     use super::*;
     use mush_agent::AgentEvent;
     use mush_ai::types::{PaneId, TokenCount};
+    use mush_runtime::StreamMeta;
     use mush_session::inbox::{Binding, Inbox, TerminalReason};
 
     fn register(dir: &Path, config: &TuiConfig) -> io::Result<Binding> {

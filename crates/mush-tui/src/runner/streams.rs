@@ -1,18 +1,12 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use mush_agent::tool::{SharedTool, ToolRegistry};
-use mush_agent::{AgentConfig, AgentEvent, agent_loop};
+use mush_agent::AgentEvent;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
-    ImageContent, Message, Model, Provider, StreamOptions, TextContent, ThinkingLevel, Timestamp,
-    TokenCount, ToolCallId, ToolOutcome, ToolResultMessage, UserContent, UserContentPart,
-    UserMessage,
+    Message, Model, Provider, StreamOptions, Timestamp, TokenCount, ToolOutcome, ToolResultMessage,
+    UserContent, UserMessage,
 };
-use tokio::sync::Mutex;
 
-use crate::event_handler;
-use crate::runner::runtime::save_pane_pending_prompt;
 use crate::session::{PendingPrompt, Session};
 use mush_ai::types::PaneId;
 
@@ -20,7 +14,9 @@ const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
-pub(super) use mush_runtime::{ConfirmRequest, PendingConfirmation, StreamGeneration, StreamMeta};
+#[cfg(test)]
+use mush_runtime::{ConfirmRequest, StreamMeta};
+pub(super) use mush_runtime::{PendingConfirmation, StreamGeneration};
 
 #[cfg(not(test))]
 fn default_notification_sink(summary: &str, body: &str, sound: Option<crate::notify::Sound>) {
@@ -41,25 +37,7 @@ pub(super) struct StreamState {
     completion_sequence: u64,
 }
 
-pub(super) struct StreamConfig {
-    pub default_model: Model,
-    pub system_prompt: Option<String>,
-    pub options: StreamOptions,
-    pub max_turns: usize,
-    pub provider_api_keys: HashMap<String, mush_ai::ApiKey>,
-    pub confirm_tools: bool,
-    pub auto_compact: bool,
-    pub compaction_model: Option<(Model, StreamOptions)>,
-    pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
-    pub tool_allowlist: Option<Vec<String>>,
-}
-
-pub(super) struct StreamDeps<'a> {
-    pub config: StreamConfig,
-    pub injections: mush_agent::AgentInjections,
-    pub tools: &'a ToolRegistry,
-    pub registry: &'a ApiRegistry,
-}
+pub(super) use mush_runtime::TurnDeps as StreamDeps;
 
 impl StreamState {
     pub(super) fn new() -> Self {
@@ -535,25 +513,7 @@ pub(super) async fn submit_streaming_input(
     }
 }
 
-pub(crate) fn build_user_content(
-    text: &str,
-    images: &[crate::input_buffer::PendingImage],
-) -> UserContent {
-    if images.is_empty() {
-        return UserContent::Text(text.to_owned());
-    }
-    let mut parts: Vec<UserContentPart> = vec![UserContentPart::Text(TextContent {
-        text: text.to_owned(),
-    })];
-    for image in images {
-        use base64::Engine;
-        parts.push(UserContentPart::Image(ImageContent {
-            data: base64::engine::general_purpose::STANDARD.encode(&image.data),
-            mime_type: image.mime_type,
-        }));
-    }
-    UserContent::Parts(parts)
-}
+pub(crate) use mush_runtime::turn::build_user_content;
 
 pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_state: &StreamState) {
     let focused_id = PaneId::new(1);
@@ -613,7 +573,7 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_sta
 }
 
 pub(super) async fn start_pending_streams<'a>(
-    stream_state: &mut StreamState,
+    _stream_state: &mut StreamState,
     session: &mut Session,
     pending_prompt: &mut Option<String>,
     deps: StreamDeps<'a>,
@@ -622,344 +582,27 @@ pub(super) async fn start_pending_streams<'a>(
         return;
     }
     for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
-        start_stream_for_prompt(stream_state, session, pane_id, prompt, &deps).await;
+        let request = mush_runtime::TurnRequest {
+            pane_id,
+            prompt,
+            thinking_level: session.app.thinking_level.clone(),
+            context_tokens: session.app.stats.context_tokens,
+        };
+        session.runtime.start_turn(request, &deps).await;
     }
 }
 
-async fn start_stream_for_prompt<'a>(
-    _stream_state: &mut StreamState,
-    session: &mut Session,
-    pane_id: PaneId,
-    prompt: PendingPrompt,
-    deps: &StreamDeps<'a>,
-) {
-    let tools = deps.tools;
-    let registry = deps.registry;
-    let pane_ref = &*session;
-    {};
-    let steering_queue = pane_ref.runtime.steering_queue.clone();
-    let model = pane_model(session, &deps.config.default_model);
-    let thinking_level = pane_thinking_level(session);
-    let conversation_snapshot = {
-        let pane = &mut *session;
-        pane.runtime.pending_prompt = Some(prompt);
-        save_pane_pending_prompt(pane);
-        let conversation = pane.runtime.conversation.context();
-        pane.runtime.pending_prompt = None;
-        conversation
-    };
-
-    let compaction_window = model.compaction_window();
-    let (compact_model, compact_options) = deps
-        .config
-        .compaction_model
-        .clone()
-        .unwrap_or_else(|| (model.clone(), deps.config.options.clone()));
-    let compact_options = crate::event_handler::resolve_auth_into_options(
-        &compact_model,
-        compact_options,
-        &deps.config.provider_api_keys,
-    )
-    .await;
-    let do_auto_compact = deps.config.auto_compact;
-    let initial_ctx = session.app.stats.context_tokens.get();
-    let initial_estimated_tokens = estimated_tokens_u64(&conversation_snapshot);
-    let context_tokens_shared = Arc::new(std::sync::atomic::AtomicU64::new(initial_ctx));
-    let transform = build_context_transform(
-        compact_model,
-        compact_options,
-        do_auto_compact,
-        compaction_window,
-        registry.clone(),
-        context_tokens_shared.clone(),
-        initial_estimated_tokens,
-        deps.injections.lifecycle_hooks.clone(),
-        deps.injections.cwd.clone().unwrap_or_default(),
-    );
-
-    let steering = build_steering_callback(steering_queue.clone());
-    let follow_up = build_steering_callback(steering_queue.clone());
-    let (confirm_req_rx, confirm) = build_confirm_callback(deps.config.confirm_tools);
-
-    let mut call_options = deps.config.options.clone();
-    let (api_key, account_id) =
-        event_handler::resolve_auth_for_model(&model, &deps.config.provider_api_keys).await;
-    call_options.api_key = api_key;
-    call_options.account_id = account_id;
-    call_options.thinking = Some(thinking_level);
-
-    let extra_tools: Vec<SharedTool> = Vec::new();
-    let system_prompt = build_system_prompt(&deps.config.system_prompt);
-
-    let mut tool_registry = tools.clone();
-    tool_registry.extend_shared(extra_tools);
-
-    let effective_cwd = deps
-        .injections
-        .cwd
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    mush_tools::align_for_model(
-        &mut tool_registry,
-        &model,
-        std::sync::Arc::from(effective_cwd),
-        deps.config.forbidden_chars.clone(),
-    );
-    if let Some(allowed) = &deps.config.tool_allowlist {
-        tool_registry.retain_named(allowed);
-    }
-
-    let cancel = tokio_util::sync::CancellationToken::new();
-
-    let stream_gen = session.runtime.turns.register_active(
-        pane_id,
-        StreamMeta {
-            steering_queue,
-            confirm_req_rx,
-            confirm_reply: Arc::new(Mutex::new(None)),
-            model: model.clone(),
-            context_tokens: context_tokens_shared,
-            cancel: cancel.clone(),
-        },
-    );
-
-    let max_turns = deps.config.max_turns;
-    let injections = deps.injections.clone();
-    session
-        .runtime
-        .turns
-        .spawn(registry.clone(), move |registry| {
-            let config = AgentConfig {
-                model,
-                system_prompt,
-                tools: tool_registry,
-                registry,
-                options: call_options,
-                max_turns,
-                hooks: Box::new(mush_agent::ClosureHooks {
-                    steering,
-                    follow_up,
-                    transform,
-                    confirm,
-                }),
-                injections,
-                cancel: Some(cancel),
-            };
-            Box::pin(futures::StreamExt::map(
-                agent_loop(config, conversation_snapshot),
-                move |event| (pane_id, stream_gen, event),
-            ))
-        });
-}
-
-fn pane_model(session: &Session, default_model: &Model) -> Model {
-    resolve_runtime_model(session.app.model_id.as_str(), default_model)
-}
-
-pub(super) struct CompactionTarget {
-    pub model: Model,
-    pub options: StreamOptions,
-    pub window: mush_ai::types::TokenCount,
-}
+pub(super) use mush_runtime::CompactionTarget;
 
 pub(super) async fn compaction_target(
     session: &Session,
     _pane_id: PaneId,
     tui_config: &TuiConfig,
 ) -> CompactionTarget {
-    let pane_model = pane_model(session, &tui_config.model);
-    let (model, options) = tui_config
-        .compaction_options()
-        .unwrap_or_else(|| (pane_model.clone(), tui_config.stream_options()));
-    let options = crate::event_handler::resolve_auth_into_options(
-        &model,
-        options,
-        &tui_config.provider_api_keys,
-    )
-    .await;
-    CompactionTarget {
-        model,
-        options,
-        window: pane_model.compaction_window(),
-    }
-}
-
-pub(super) fn resolve_runtime_model(id: &str, default: &Model) -> Model {
-    mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| default.clone())
-}
-
-fn pane_thinking_level(session: &Session) -> ThinkingLevel {
-    session.app.thinking_level.clone()
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_context_transform(
-    compact_model: Model,
-    compact_options: StreamOptions,
-    do_auto_compact: bool,
-    compaction_window: TokenCount,
-    registry: ApiRegistry,
-    context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
-    initial_estimated_tokens: u64,
-    lifecycle_hooks: mush_agent::LifecycleHooks,
-    cwd: std::path::PathBuf,
-) -> Option<mush_agent::TransformFn> {
-    if !do_auto_compact {
-        return None;
-    }
-    let ctx_tokens_for_transform = context_tokens_shared;
-    let baseline_estimated_tokens =
-        Arc::new(std::sync::atomic::AtomicU64::new(initial_estimated_tokens));
-    let hooks = Arc::new(lifecycle_hooks);
-    let cwd = Arc::new(cwd);
-    let registry = Arc::new(registry);
-
-    Some(Box::new(move |messages| {
-        let owned_messages = messages.to_vec();
-        let model = compact_model.clone();
-        let options = compact_options.clone();
-        let ctx_tokens = ctx_tokens_for_transform.clone();
-        let baseline_estimated_tokens = baseline_estimated_tokens.clone();
-        let hooks = hooks.clone();
-        let cwd = cwd.clone();
-        let registry = registry.clone();
-        Box::pin(async move {
-            let current_tokens =
-                TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
-
-            let current_estimated_tokens = TokenCount::new(estimated_tokens_u64(&owned_messages));
-            let baseline_tokens = TokenCount::new(
-                baseline_estimated_tokens.load(std::sync::atomic::Ordering::Relaxed),
-            );
-            let effective_compaction_tokens =
-                mush_session::compact::compaction_tokens_for_estimated_payload(
-                    current_tokens,
-                    baseline_tokens,
-                    current_estimated_tokens,
-                );
-            if !mush_session::compact::needs_compaction_at(
-                effective_compaction_tokens,
-                compaction_window,
-                owned_messages.len(),
-            ) {
-                baseline_estimated_tokens.store(
-                    current_estimated_tokens.get(),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                return mush_agent::ContextTransformResult::Unchanged;
-            }
-            let result = event_handler::auto_compact(
-                owned_messages,
-                effective_compaction_tokens,
-                compaction_window,
-                &registry,
-                &model,
-                &options,
-                Some(&hooks),
-                Some(cwd.as_path()),
-            )
-            .await;
-            let tokens_after = estimated_tokens_u64(&result.messages);
-            baseline_estimated_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
-            if result.summarised_count > 0 {
-                ctx_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
-                mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
-                    messages: result.messages,
-                    summary: result.summary,
-                    summarised_count: result.summarised_count,
-                })
-            } else if result.masked_count > 0 {
-                mush_agent::ContextTransformResult::Silent(result.messages)
-            } else {
-                mush_agent::ContextTransformResult::Unchanged
-            }
-        })
-    }))
-}
-
-fn estimated_tokens_u64(messages: &[Message]) -> u64 {
-    mush_session::compact::estimate_tokens(messages)
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn build_steering_callback(
-    steering_queue: Arc<Mutex<Vec<Message>>>,
-) -> Option<mush_agent::SteeringFn> {
-    Some(Box::new(move || {
-        let steering_queue = steering_queue.clone();
-        Box::pin(async move {
-            let mut queue = steering_queue.lock().await;
-            queue.drain(..).collect()
-        })
-    }))
-}
-
-fn build_confirm_callback(
-    confirm_tools: bool,
-) -> (
-    tokio::sync::mpsc::Receiver<ConfirmRequest>,
-    Option<mush_agent::ConfirmFn>,
-) {
-    let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel::<ConfirmRequest>(1);
-    let confirm: Option<mush_agent::ConfirmFn> = if confirm_tools {
-        Some(Box::new(
-            move |tool_call_id: &ToolCallId,
-                  name: &str,
-                  args: &serde_json::Value|
-                  -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = mush_agent::ConfirmAction> + Send>,
-            > {
-                let tx = confirm_req_tx.clone();
-                let summary = mush_agent::summarise_tool_args(name, args);
-                let prompt = format!("{name} {summary}");
-                let tool_call_id = tool_call_id.clone();
-                let name = name.to_string();
-                let args = args.clone();
-                Box::pin(async move {
-                    let _ = (&name, &args);
-                    if confirm_tools {
-                        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                        if tx
-                            .send(ConfirmRequest {
-                                tool_call_id,
-                                prompt,
-                                reply: resp_tx,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            return mush_agent::ConfirmAction::Allow;
-                        }
-                        match resp_rx.await {
-                            Ok(true) => mush_agent::ConfirmAction::Allow,
-                            _ => mush_agent::ConfirmAction::Deny,
-                        }
-                    } else {
-                        mush_agent::ConfirmAction::Allow
-                    }
-                })
-            },
-        )
-            as Box<
-                dyn Fn(
-                        &mush_ai::types::ToolCallId,
-                        &str,
-                        &serde_json::Value,
-                    )
-                        -> mush_agent::BoxFuture<'static, mush_agent::ConfirmAction>
-                    + Send
-                    + Sync,
-            >)
-    } else {
-        None
-    };
-
-    (confirm_req_rx, confirm)
-}
-
-fn build_system_prompt(base_system_prompt: &Option<String>) -> Option<String> {
-    base_system_prompt.clone()
+    session
+        .runtime
+        .compaction_target(&tui_config.turn_config())
+        .await
 }
 
 pub(crate) fn build_session_snapshot(
@@ -1013,7 +656,14 @@ mod tests {
     use super::*;
 
     use mush_ai::models;
-    use mush_ai::types::{ModelId, ToolCallId};
+    use mush_ai::types::{ModelId, ToolCallId, UserContentPart};
+    use std::collections::HashMap;
+
+    use mush_agent::{AgentConfig, agent_loop};
+    use mush_runtime::turn::{build_context_transform, estimated_tokens_u64};
+    use tokio::sync::Mutex;
+
+    use crate::event_handler;
 
     #[tokio::test]
     async fn compaction_target_follows_the_pane_model_not_the_startup_one() {
@@ -1029,9 +679,9 @@ mod tests {
         config.model = startup.clone();
 
         let pane_id = PaneId::new(1);
-        let mut app = crate::app::App::new(switched.id.clone(), switched.context_window);
-        app.model_id = switched.id.clone();
-        let session = crate::session::Session::new(app);
+        let app = crate::app::App::new(switched.id.clone(), switched.context_window);
+        let mut session = crate::session::Session::new(app);
+        session.runtime.model_id = switched.id.to_string();
 
         let target = compaction_target(&session, pane_id, &config).await;
 
@@ -1072,24 +722,6 @@ mod tests {
             pane_model.compaction_window(),
             "the window still comes from the pane's model, not the summariser"
         );
-    }
-
-    #[test]
-    fn stream_config_groups_owned_fields() {
-        let config = StreamConfig {
-            default_model: models::all_models_with_user().into_iter().next().unwrap(),
-            system_prompt: None,
-            options: StreamOptions::default(),
-            max_turns: 32,
-            provider_api_keys: HashMap::new(),
-            confirm_tools: false,
-            auto_compact: false,
-            compaction_model: None,
-            forbidden_chars: Default::default(),
-            tool_allowlist: None,
-        };
-        assert_eq!(config.max_turns, 32);
-        assert!(!config.confirm_tools);
     }
 
     #[test]
@@ -1278,71 +910,6 @@ mod tests {
             &requests[2][0],
             Message::User(user) if user.text().contains("<summary>\nwaiting for val push\n</summary>")
         ));
-    }
-
-    #[tokio::test]
-    async fn context_transform_compacts_after_unsent_payload_growth() {
-        let model = models::all_models_with_user().into_iter().next().unwrap();
-        let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(6_000));
-        let transform = build_context_transform(
-            model,
-            StreamOptions::default(),
-            true,
-            TokenCount::new(10_000),
-            ApiRegistry::new(),
-            context_tokens,
-            0,
-            mush_agent::LifecycleHooks::default(),
-            std::path::PathBuf::from("/tmp"),
-        )
-        .expect("auto-compaction enabled should build a transform");
-
-        let baseline: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
-        assert!(matches!(
-            transform(&baseline).await,
-            mush_agent::ContextTransformResult::Unchanged
-        ));
-
-        let mut grown = baseline;
-        grown.push(user_msg("x".repeat(16_000)));
-
-        match transform(&grown).await {
-            mush_agent::ContextTransformResult::Compacted(compaction) => {
-                assert!(
-                    compaction.messages.len() < grown.len(),
-                    "unsent payload growth should force compaction before the next provider call"
-                );
-            }
-            other => panic!("expected compaction update, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn context_transform_does_not_double_count_initial_payload_estimate() {
-        let model = models::all_models_with_user().into_iter().next().unwrap();
-        let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(9_000));
-        let messages: Vec<Message> = (0..20)
-            .map(|i| user_msg(format!("small {i}: {}", "x".repeat(120))))
-            .collect();
-        let transform = build_context_transform(
-            model,
-            StreamOptions::default(),
-            true,
-            TokenCount::new(10_000),
-            ApiRegistry::new(),
-            context_tokens,
-            estimated_tokens_u64(&messages),
-            mush_agent::LifecycleHooks::default(),
-            std::path::PathBuf::from("/tmp"),
-        )
-        .expect("auto-compaction enabled should build a transform");
-
-        match transform(&messages).await {
-            mush_agent::ContextTransformResult::Unchanged => {}
-            other => {
-                panic!("expected unchanged context without new estimated growth, got {other:?}")
-            }
-        }
     }
 
     #[tokio::test]
@@ -2154,7 +1721,7 @@ mod tests {
         cache.save(&cache_path()).unwrap();
 
         let mut session = Session::new(app());
-        session.app.model_id = ModelId::from(glm_id);
+        session.runtime.model_id = glm_id.to_string();
 
         let default = Model {
             id: ModelId::from("claude-opus-4-7"),
@@ -2178,7 +1745,7 @@ mod tests {
             default_thinking_level: None,
         };
 
-        let resolved = pane_model(&session, &default);
+        let resolved = session.runtime.model(&default);
 
         unsafe {
             match saved {

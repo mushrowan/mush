@@ -2904,11 +2904,14 @@ dependencies = [
 name = "mush-runtime"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "mush-agent",
  "mush-ai",
  "mush-kernel",
  "mush-session",
+ "mush-tools",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

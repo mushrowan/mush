@@ -37,7 +37,7 @@ use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
 use self::runtime::RunnerRuntime;
 use self::size_cached_backend::{SizeCachedBackend, spawn_sigwinch_listener};
-use self::streams::{StreamConfig, StreamDeps, StreamState, start_pending_streams};
+use self::streams::{StreamDeps, StreamState, start_pending_streams};
 use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
@@ -178,18 +178,7 @@ pub async fn run_tui(
                 &mut runtime.session,
                 &mut runtime.pending_prompt,
                 StreamDeps {
-                    config: StreamConfig {
-                        default_model: tui_config.model.clone(),
-                        system_prompt: tui_config.system_prompt.clone(),
-                        options: tui_config.stream_options(),
-                        max_turns: tui_config.max_turns,
-                        provider_api_keys: tui_config.provider_api_keys.clone(),
-                        confirm_tools: tui_config.confirm_tools,
-                        auto_compact: tui_config.auto_compact,
-                        compaction_model: tui_config.compaction_options(),
-                        forbidden_chars: tui_config.forbidden_chars.clone(),
-                        tool_allowlist: tui_config.tool_allowlist.clone(),
-                    },
+                    config: tui_config.turn_config(),
                     injections: mush_agent::AgentInjections {
                         lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
                         cwd: Some(tui_config.cwd.clone()),
