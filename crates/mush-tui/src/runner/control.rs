@@ -12,7 +12,7 @@ pub(super) async fn poll(
     runtime: &mut RunnerRuntime,
     config: &TuiConfig,
 ) -> std::io::Result<()> {
-    let Some(control) = runtime.session.control.clone() else {
+    let Some(control) = runtime.session.runtime.control.clone() else {
         return Ok(());
     };
     if control.target().session != config.session_id.as_str() {
@@ -31,11 +31,11 @@ pub(super) async fn poll(
     };
     let text = event.text();
     runtime.session.app.push_event_message(event);
-    runtime.session.conversation.append_message(message);
+    runtime.session.runtime.conversation.append_message(message);
     runtime.session.app.start_streaming();
     let mut prompt = crate::session::PendingPrompt::text(text);
     prompt.mark_persisted();
-    runtime.session.pending_prompt = Some(prompt);
+    runtime.session.runtime.pending_prompt = Some(prompt);
     Ok(())
 }
 

@@ -110,8 +110,8 @@ pub async fn run_tui(
         let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
         let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
         let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        runtime.session.control = Some(control);
-        runtime.session.control_socket = Some(sock);
+        runtime.session.runtime.control = Some(control);
+        runtime.session.runtime.control_socket = Some(sock);
         Some(listener)
     } else {
         None

@@ -34,7 +34,7 @@ async fn start_session_from(
     let new_id = mush_ai::types::SessionId::new();
     tui_config.session_id = new_id.clone();
     tui_config.options.session_id = Some(new_id);
-    session.title_generated = false;
+    session.runtime.title_generated = false;
     let (app, conversation, _) = session.fields_mut();
     app.session_title = None;
     *conversation = mush_session::ConversationState::from_messages(messages);
@@ -69,10 +69,10 @@ pub(super) async fn handle_slash_action(
             | SlashAction::Clone
     );
     if changes_conversation
-        && session.control.is_some()
+        && session.runtime.control.is_some()
         && (session.app.stream.active
             || !session.app.active_tools.is_empty()
-            || session.pending_prompt.is_some()
+            || session.runtime.pending_prompt.is_some()
             || pending_prompt.is_some()
             || !pending_compactions.is_empty())
     {
@@ -85,7 +85,7 @@ pub(super) async fn handle_slash_action(
         }
         SlashAction::Compact { focus } => {
             let pane_id = PaneId::new(1);
-            let messages = session.conversation.context();
+            let messages = session.runtime.conversation.context();
             if messages.len() <= slash::MIN_MESSAGES_FOR_COMPACTION {
                 session
                     .app
@@ -122,7 +122,7 @@ pub(super) async fn handle_slash_action(
         SlashAction::Side { question } => {
             let context = slash::side_question::side_question_context(
                 tui_config.system_prompt.as_deref(),
-                session.conversation.context(),
+                session.runtime.conversation.context(),
                 &question,
             );
             let pending = slash::side_question::start_side_question(
@@ -139,7 +139,7 @@ pub(super) async fn handle_slash_action(
             let pane = &mut *session;
             slash::handle_export(
                 &mut pane.app,
-                &pane.conversation,
+                &pane.runtime.conversation,
                 path.as_deref().unwrap_or(""),
             );
         }
@@ -177,7 +177,7 @@ pub(super) async fn handle_slash_action(
             let new_id = mush_ai::types::SessionId::new();
             tui_config.session_id = new_id.clone();
             tui_config.options.session_id = Some(new_id);
-            session.title_generated = false;
+            session.runtime.title_generated = false;
             let pane = &mut *session;
             let (app, conversation, _) = pane.fields_mut();
             app.clear_messages();
@@ -192,7 +192,7 @@ pub(super) async fn handle_slash_action(
             );
         }
         SlashAction::Fork { index: Some(index) } => {
-            let messages = session.conversation.context();
+            let messages = session.runtime.conversation.context();
             let user_positions: Vec<usize> = messages
                 .iter()
                 .enumerate()
@@ -219,7 +219,7 @@ pub(super) async fn handle_slash_action(
             }
         }
         SlashAction::Clone => {
-            let branch = session.conversation.context();
+            let branch = session.runtime.conversation.context();
             start_session_from(session, tui_config, branch).await;
             session.app.status = Some("cloned the current branch into a new session".into());
             state_changed = true;
@@ -290,7 +290,7 @@ pub(super) async fn handle_slash_action(
         }
     }
 
-    if changes_conversation && let Some(control) = &session.control {
+    if changes_conversation && let Some(control) = &session.runtime.control {
         control.activate(tui_config.session_id.to_string());
     }
     state_changed
@@ -635,7 +635,7 @@ mod tests {
         );
 
         assert_ne!(config.session_id, old_id);
-        assert_eq!(session.conversation.context(), vec![user("first")]);
+        assert_eq!(session.runtime.conversation.context(), vec![user("first")]);
         assert_eq!(session.app.input.text, "second");
         assert!(session.app.session_title.is_none());
     }
@@ -653,7 +653,7 @@ mod tests {
         );
 
         assert_eq!(config.session_id, old_id);
-        assert_eq!(session.conversation.context_len(), 1);
+        assert_eq!(session.runtime.conversation.context_len(), 1);
     }
 
     #[test]
@@ -666,7 +666,7 @@ mod tests {
 
         assert_ne!(config.session_id, old_id);
         assert_eq!(
-            session.conversation.context(),
+            session.runtime.conversation.context(),
             vec![user("first"), user("second")]
         );
     }

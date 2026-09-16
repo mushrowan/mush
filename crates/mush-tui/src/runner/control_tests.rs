@@ -90,7 +90,7 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
         assert_eq!(requests.lock().unwrap().len(), index + 1);
     }
     poll(&streams, &state, &mut runtime, &config).await.unwrap();
-    assert!(runtime.session.pending_prompt.is_none());
+    assert!(runtime.session.runtime.pending_prompt.is_none());
     assert_eq!(control.target(), target);
     let result = tokio::process::Command::new(&binary)
         .env_clear()
@@ -299,7 +299,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     .await;
     assert_ne!(control.target().session, old_session);
     assert!(
-        runtime.session.conversation.is_empty(),
+        runtime.session.runtime.conversation.is_empty(),
         "previous control turn entered the new session"
     );
 }
@@ -468,8 +468,8 @@ fn fixture() -> (RunnerRuntime, TuiConfig, Control) {
         config.model.context_window,
     ));
     let control = Control::new(config.session_id.to_string());
-    session.control = Some(control.clone());
-    session.control_socket = Some("/fixture/control.sock".into());
+    session.runtime.control = Some(control.clone());
+    session.runtime.control_socket = Some("/fixture/control.sock".into());
     (
         RunnerRuntime::from_pane(session, Default::default()),
         config,
@@ -730,7 +730,7 @@ async fn dispatch(
     pane: PaneId,
     event: AgentEvent,
 ) {
-    complete(runtime.session.control.as_ref(), &event);
+    complete(runtime.session.runtime.control.as_ref(), &event);
     let (app, conversation, image_protos) = runtime.session.fields_mut();
     crate::event_handler::handle_agent_event(
         &mut crate::event_handler::EventCtx {
@@ -827,12 +827,12 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
                 Outcome::Completed
             }
         );
-        assert!(runtime.session.pending_prompt.is_none());
+        assert!(runtime.session.runtime.pending_prompt.is_none());
         assert_eq!(
             runtime.session.app.messages[0].role,
             crate::app::MessageRole::Event(EventKind::Message)
         );
-        let replay = runtime.session.conversation.display_history();
+        let replay = runtime.session.runtime.conversation.display_history();
         crate::conversation_display::rebuild_display(&mut runtime.session.app, &replay);
         assert_eq!(
             runtime.session.app.messages[0].role,
@@ -870,7 +870,8 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     }));
     let mut streams = new_agent_streams();
     let mut state = StreamState::new();
-    runtime.session.pending_prompt = Some(crate::session::PendingPrompt::text("ordinary user"));
+    runtime.session.runtime.pending_prompt =
+        Some(crate::session::PendingPrompt::text("ordinary user"));
     let stream_deps = deps(&config, &runtime, &tools, &registry);
     start_pending_streams(
         &mut streams,
@@ -1105,7 +1106,7 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
             },
         );
         poll(&streams, &state, &mut runtime, &config).await.unwrap();
-        assert!(runtime.session.pending_prompt.is_none());
+        assert!(runtime.session.runtime.pending_prompt.is_none());
         tokio::time::advance(std::time::Duration::from_millis(100)).await;
         poll(&streams, &state, &mut runtime, &config).await.unwrap();
         let stream_deps = deps(&config, &runtime, &tools, &registry);
@@ -1174,9 +1175,9 @@ async fn pending_prompts_start_one_agent_at_a_time() {
     let mut streams = new_agent_streams();
     let mut state = StreamState::new();
     for expected in 1..=2 {
-        runtime.session.pending_prompt = Some(crate::session::PendingPrompt::text(format!(
-            "prompt-{expected}"
-        )));
+        runtime.session.runtime.pending_prompt = Some(crate::session::PendingPrompt::text(
+            format!("prompt-{expected}"),
+        ));
         let stream_deps = deps(&config, &runtime, &tools, &registry);
         start_pending_streams(
             &mut streams,

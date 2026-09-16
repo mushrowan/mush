@@ -47,17 +47,18 @@ pub(super) async fn poll(
         Err(error) => {
             if let Some((event, _)) = &active.staged
                 && let Some(mush_ai::types::Message::Event(message)) =
-                    runtime.session.conversation.context().last()
+                    runtime.session.runtime.conversation.context().last()
                 && message.receipts.iter().any(|receipt| {
                     receipt.id.as_str() == format!("orchestrator-event-{}", event.event_id)
                 })
                 && runtime
                     .session
+                    .runtime
                     .pending_prompt
                     .as_ref()
                     .is_some_and(|prompt| prompt.is_persisted() && prompt.text == message.text())
             {
-                runtime.session.pending_prompt = None;
+                runtime.session.runtime.pending_prompt = None;
             }
             *inbox = None;
             report_disabled(runtime, &error);
@@ -129,7 +130,7 @@ impl OrchestratorInbox {
         if !self.replayed {
             self.replayed = true;
             if let Some(mush_ai::types::Message::Event(event)) =
-                runtime.session.conversation.context().last()
+                runtime.session.runtime.conversation.context().last()
                 && event
                     .receipts
                     .iter()
@@ -138,7 +139,7 @@ impl OrchestratorInbox {
             {
                 let mut prompt = crate::session::PendingPrompt::text(event.text());
                 prompt.mark_persisted();
-                runtime.session.pending_prompt = Some(prompt);
+                runtime.session.runtime.pending_prompt = Some(prompt);
                 return Ok(true);
             }
         }
@@ -147,12 +148,12 @@ impl OrchestratorInbox {
             .await
             .map_err(io::Error::other)??;
         for event in pending {
-            if contains(&runtime.session.conversation, &event.event_id) {
+            if contains(&runtime.session.runtime.conversation, &event.event_id) {
                 self.acknowledge_saved(event.event_id.clone()).await?;
                 continue;
             }
-            append(&mut runtime.session.conversation, &event)?;
-            let context = runtime.session.conversation.context();
+            append(&mut runtime.session.runtime.conversation, &event)?;
+            let context = runtime.session.runtime.conversation.context();
             let Some(mush_ai::types::Message::Event(message)) = context.last() else {
                 return Err(io::Error::other("inbox event missing from history"));
             };
@@ -160,7 +161,7 @@ impl OrchestratorInbox {
             runtime.session.app.push_event_message(message);
             let mut prompt = crate::session::PendingPrompt::text(text);
             prompt.mark_persisted();
-            runtime.session.pending_prompt = Some(prompt);
+            runtime.session.runtime.pending_prompt = Some(prompt);
             if let Some(save) = &config.save_session {
                 save(super::streams::build_session_snapshot(
                     &runtime.session,
@@ -195,18 +196,30 @@ pub(super) async fn safe_to_consume(
         && runtime.session.app.active_tools.is_empty()
         && runtime.pending_prompt.is_none()
         && runtime.pending_compactions.is_empty()
-        && runtime.session.pending_prompt.is_none()
-        && runtime.session.pending_compaction_inputs.is_empty()
+        && runtime.session.runtime.pending_prompt.is_none()
+        && runtime.session.runtime.pending_compaction_inputs.is_empty()
         && !runtime.session.app.has_queued_messages()
-        && runtime.session.steering_queue.lock().await.is_empty()
-        && runtime.session.conversation.leaf_id().is_none_or(|leaf| {
-            runtime
-                .session
-                .conversation
-                .tree()
-                .unanswered_tool_calls(leaf)
-                .is_empty()
-        })
+        && runtime
+            .session
+            .runtime
+            .steering_queue
+            .lock()
+            .await
+            .is_empty()
+        && runtime
+            .session
+            .runtime
+            .conversation
+            .leaf_id()
+            .is_none_or(|leaf| {
+                runtime
+                    .session
+                    .runtime
+                    .conversation
+                    .tree()
+                    .unanswered_tool_calls(leaf)
+                    .is_empty()
+            })
 }
 
 #[cfg(test)]
@@ -267,7 +280,8 @@ mod tests {
         register(&inbox_dir, &config).unwrap();
         let owner = OrchestratorInbox::open(&inbox_dir, &config).unwrap();
         let mut runtime = runtime();
-        runtime.session.pending_prompt = Some(crate::session::PendingPrompt::text("continue"));
+        runtime.session.runtime.pending_prompt =
+            Some(crate::session::PendingPrompt::text("continue"));
         let result = OrchestratorInbox::open(&inbox_dir, &config);
         assert_eq!(
             result.as_ref().err().unwrap().kind(),
@@ -286,7 +300,13 @@ mod tests {
             .await
         );
         assert_eq!(
-            runtime.session.pending_prompt.as_ref().unwrap().text,
+            runtime
+                .session
+                .runtime
+                .pending_prompt
+                .as_ref()
+                .unwrap()
+                .text,
             "continue"
         );
         assert_eq!(runtime.session.app.messages.len(), 1);
@@ -323,8 +343,8 @@ mod tests {
             .await
         );
         assert!(inbox.is_none());
-        assert!(runtime.session.conversation.context().is_empty());
-        assert!(runtime.session.pending_prompt.is_none());
+        assert!(runtime.session.runtime.conversation.context().is_empty());
+        assert!(runtime.session.runtime.pending_prompt.is_none());
         assert_eq!(runtime.session.app.messages.len(), 1);
         assert!(!runtime.session.app.should_quit);
         assert_eq!(std::fs::read(&path).unwrap(), changed);
@@ -349,13 +369,16 @@ mod tests {
         let streams = new_agent_streams();
         let state = StreamState::new();
         assert!(!poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
-        assert!(runtime.session.pending_prompt.is_some());
+        assert!(runtime.session.runtime.pending_prompt.is_some());
         inbox.as_mut().unwrap().staged.as_mut().unwrap().1 =
             Instant::now() - Duration::from_secs(6);
         assert!(poll(&mut inbox, &streams, &state, &mut runtime, &config).await);
         assert!(inbox.is_none());
-        assert!(runtime.session.pending_prompt.is_none());
-        assert!(contains(&runtime.session.conversation, &event.event_id));
+        assert!(runtime.session.runtime.pending_prompt.is_none());
+        assert!(contains(
+            &runtime.session.runtime.conversation,
+            &event.event_id
+        ));
         let owner = Consumer::open(&inbox_dir, config.session_id.clone(), &config.cwd).unwrap();
         assert_eq!(owner.pending().unwrap(), vec![event]);
     }
@@ -385,8 +408,8 @@ mod tests {
         );
         assert_eq!(runtime.session.app.input.text, "unsent draft");
         assert_eq!(runtime.session.app.input.cursor, 4);
-        assert!(runtime.session.pending_prompt.is_none());
-        assert!(runtime.session.conversation.context().is_empty());
+        assert!(runtime.session.runtime.pending_prompt.is_none());
+        assert!(runtime.session.runtime.conversation.context().is_empty());
         assert_eq!(
             Inbox::open(&inbox_dir).unwrap().pending().unwrap(),
             vec![event]
@@ -458,7 +481,7 @@ mod tests {
         let generation = state.register_active(
             pane,
             StreamMeta {
-                steering_queue: runtime.session.steering_queue.clone(),
+                steering_queue: runtime.session.runtime.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
                 model: config.model.clone(),
@@ -494,7 +517,7 @@ mod tests {
                     .await
                     .unwrap()
             );
-            assert!(runtime.session.conversation.is_empty());
+            assert!(runtime.session.runtime.conversation.is_empty());
             assert_eq!(inbox.pending().unwrap().len(), 1);
         }
         runtime.pending_prompt = Some("automatic continuation".into());
@@ -504,10 +527,11 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(runtime.session.conversation.is_empty());
+        assert!(runtime.session.runtime.conversation.is_empty());
         runtime.pending_prompt = None;
         runtime
             .session
+            .runtime
             .pending_compaction_inputs
             .push(("queued during compaction".into(), Vec::new()));
         assert!(
@@ -516,8 +540,8 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(runtime.session.conversation.is_empty());
-        runtime.session.pending_compaction_inputs.clear();
+        assert!(runtime.session.runtime.conversation.is_empty());
+        runtime.session.runtime.pending_compaction_inputs.clear();
         runtime.session.app.stream.active = true;
         assert!(
             adapter
@@ -525,7 +549,7 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(runtime.session.conversation.is_empty());
+        assert!(runtime.session.runtime.conversation.is_empty());
         runtime.session.app.stream.active = false;
         assert!(
             !adapter
@@ -533,10 +557,11 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(runtime.session.conversation.context_len(), 1);
+        assert_eq!(runtime.session.runtime.conversation.context_len(), 1);
         assert!(
             runtime
                 .session
+                .runtime
                 .pending_prompt
                 .as_ref()
                 .unwrap()
@@ -554,7 +579,7 @@ mod tests {
             .load(&config.session_id)
             .unwrap();
         assert!(contains(&saved.conversation, &event.event_id));
-        runtime.session.pending_prompt = None;
+        runtime.session.runtime.pending_prompt = None;
         adapter.replayed = false;
         adapter.next_poll = Instant::now();
         assert!(
@@ -566,12 +591,13 @@ mod tests {
         assert!(
             runtime
                 .session
+                .runtime
                 .pending_prompt
                 .as_ref()
                 .unwrap()
                 .is_persisted()
         );
-        assert_eq!(runtime.session.conversation.context_len(), 1);
+        assert_eq!(runtime.session.runtime.conversation.context_len(), 1);
         config.session_id = mush_ai::types::SessionId::new();
         assert!(
             adapter

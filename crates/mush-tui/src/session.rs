@@ -1,89 +1,31 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use mush_ai::types::Message;
 use mush_session::ConversationState;
-use tokio::sync::Mutex;
 
 use crate::app::App;
 use crate::input_buffer::PendingImage;
 
-#[derive(Debug, Clone)]
-pub struct PendingPrompt {
-    pub text: String,
-    pub images: Vec<PendingImage>,
-    persisted: bool,
-}
-
-impl PendingPrompt {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            images: Vec::new(),
-            persisted: false,
-        }
-    }
-
-    pub fn with_images(text: impl Into<String>, images: Vec<PendingImage>) -> Self {
-        Self {
-            text: text.into(),
-            images,
-            persisted: false,
-        }
-    }
-
-    pub fn is_persisted(&self) -> bool {
-        self.persisted
-    }
-
-    pub fn mark_persisted(&mut self) {
-        self.persisted = true;
-    }
-}
+pub use mush_runtime::{PendingPrompt, SessionRuntime};
 
 pub struct Session {
-    pub control: Option<mush_agent::ipc::control::Control>,
-    pub control_socket: Option<std::path::PathBuf>,
     pub app: App,
-    pub conversation: ConversationState,
+    pub runtime: SessionRuntime,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
-    pub pending_prompt: Option<PendingPrompt>,
-    pub steering_queue: Arc<Mutex<Vec<Message>>>,
-    pub pending_compaction_inputs: Vec<(String, Vec<PendingImage>)>,
     pub label: Option<String>,
-    pub title_generated: bool,
     pub pending_side_questions: Vec<crate::slash::side_question::PendingSideQuestion>,
 }
 
 impl Session {
     pub fn new(app: App) -> Self {
-        Self {
-            control: None,
-            control_socket: None,
-            app,
-            conversation: ConversationState::new(),
-            image_protos: HashMap::new(),
-            pending_prompt: None,
-            steering_queue: Arc::new(Mutex::new(Vec::new())),
-            pending_compaction_inputs: Vec::new(),
-            label: None,
-            title_generated: false,
-            pending_side_questions: Vec::new(),
-        }
+        Self::with_conversation(app, ConversationState::new())
     }
 
     pub fn with_conversation(app: App, conversation: ConversationState) -> Self {
         Self {
-            control: None,
-            control_socket: None,
             app,
-            conversation,
+            runtime: SessionRuntime::new(conversation),
             image_protos: HashMap::new(),
-            pending_prompt: None,
-            steering_queue: Arc::new(Mutex::new(Vec::new())),
-            pending_compaction_inputs: Vec::new(),
             label: None,
-            title_generated: false,
             pending_side_questions: Vec::new(),
         }
     }
@@ -96,20 +38,17 @@ impl Session {
             self.app
                 .push_queued_message_with_images(text.clone(), image_bytes);
         }
-        self.pending_compaction_inputs.push((text, images));
+        self.runtime.pending_compaction_inputs.push((text, images));
         self.app.input.text.clear();
         self.app.input.cursor = 0;
     }
 
     pub fn control_endpoint(&self) -> Option<mush_agent::exec_context::ControlEndpoint> {
-        Some(mush_agent::exec_context::ControlEndpoint {
-            socket: self.control_socket.clone()?,
-            target: self.control.as_ref()?.target(),
-        })
+        self.runtime.control_endpoint()
     }
 
     pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
-        let drained = std::mem::take(&mut self.pending_compaction_inputs);
+        let drained = self.runtime.drain_compaction_inputs();
         let _ = self.app.take_queued_messages();
         drained
     }
@@ -123,7 +62,7 @@ impl Session {
     ) {
         (
             &mut self.app,
-            &mut self.conversation,
+            &mut self.runtime.conversation,
             &mut self.image_protos,
         )
     }

@@ -222,7 +222,7 @@ pub(super) fn take_pending_prompts(
         prompts.push((PaneId::new(1), PendingPrompt::text(prompt)));
     }
     for pane in std::slice::from_mut(session) {
-        if let Some(prompt) = pane.pending_prompt.take()
+        if let Some(prompt) = pane.runtime.pending_prompt.take()
             && !prompts.iter().any(|(id, _)| *id == PaneId::new(1))
         {
             prompts.push((PaneId::new(1), prompt));
@@ -338,8 +338,8 @@ async fn handle_agent_end(
         .is_some_and(|meta| !meta.cancel.is_cancelled());
     if stopped
         && !automatic_continuation
-        && session.pending_prompt.is_none()
-        && session.pending_compaction_inputs.is_empty()
+        && session.runtime.pending_prompt.is_none()
+        && session.runtime.pending_compaction_inputs.is_empty()
         && !session.app.has_queued_messages()
     {
         (stream_state.notify)(
@@ -350,11 +350,11 @@ async fn handle_agent_end(
         stream_state.completion_signal();
     }
 
-    let title_request = (!session.title_generated
+    let title_request = (!session.runtime.title_generated
         && tui_config.generate_title
         && session.app.session_title.is_none()
-        && session.conversation.context_len() >= 2)
-        .then(|| session.conversation.context_prefix(4));
+        && session.runtime.conversation.context_len() >= 2)
+        .then(|| session.runtime.conversation.context_prefix(4));
 
     if let Some(msgs) = title_request {
         let model = tui_config.model.clone();
@@ -372,7 +372,7 @@ async fn handle_agent_end(
         }
         {
             let pane = &mut *session;
-            pane.title_generated = true;
+            pane.runtime.title_generated = true;
         }
     }
 
@@ -481,7 +481,7 @@ async fn auto_compact(
     let pane = &*session;
 
     let context_tokens = pane.app.stats.context_tokens;
-    let messages = pane.conversation.context();
+    let messages = pane.runtime.conversation.context();
     let target = compaction_target(session, pane_id, tui_config).await;
 
     if !mush_session::compact::needs_compaction_for_messages(
@@ -511,7 +511,11 @@ async fn auto_compact(
     let pane = session;
     match result {
         crate::slash::CompactionTaskResult::Applied(result) => {
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, result);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.runtime.conversation,
+                result,
+            );
         }
         crate::slash::CompactionTaskResult::Failed {
             failure,
@@ -526,15 +530,19 @@ async fn auto_compact(
                 Some(&tui_config.cwd),
             )
             .await;
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.runtime.conversation,
+                applied,
+            );
         }
     }
 }
 
 pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &mut StreamState) {
-    if let Some(control) = &session.control {
+    if let Some(control) = &session.runtime.control {
         control.finish(mush_agent::ipc::control::Outcome::Cancelled);
-        session.pending_prompt = None;
+        session.runtime.pending_prompt = None;
     }
     let focused_id = PaneId::new(1);
     record_cancelled_tools(session);
@@ -544,7 +552,7 @@ pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &m
     let pane = &mut *session;
     pane.app.finish_streaming(None, None);
     let restored = pane.app.take_queued_messages();
-    pane.steering_queue.lock().await.clear();
+    pane.runtime.steering_queue.lock().await.clear();
     if !restored.is_empty() {
         let text = restored.join("\n");
         pane.app.input.text = text.clone();
@@ -570,7 +578,8 @@ fn record_cancelled_tools(pane: &mut crate::session::Session) {
             Some(USER_CANCELLED_TOOL_MESSAGE),
             None,
         );
-        pane.conversation
+        pane.runtime
+            .conversation
             .append_message(Message::ToolResult(ToolResultMessage {
                 tool_call_id,
                 tool_name: tool_name.into(),
@@ -620,7 +629,7 @@ pub(super) async fn submit_streaming_input(
         }
         pane.app.active_tools.clear();
         pane.app.start_streaming();
-        pane.pending_prompt = Some(PendingPrompt::with_images(text, images));
+        pane.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
     }
 }
 
@@ -728,15 +737,15 @@ async fn start_stream_for_prompt<'a>(
     let registry = deps.registry;
     let pane_ref = &*session;
     {};
-    let steering_queue = pane_ref.steering_queue.clone();
+    let steering_queue = pane_ref.runtime.steering_queue.clone();
     let model = pane_model(session, &deps.config.default_model);
     let thinking_level = pane_thinking_level(session);
     let conversation_snapshot = {
         let pane = &mut *session;
-        pane.pending_prompt = Some(prompt);
+        pane.runtime.pending_prompt = Some(prompt);
         save_pane_pending_prompt(pane);
-        let conversation = pane.conversation.context();
-        pane.pending_prompt = None;
+        let conversation = pane.runtime.conversation.context();
+        pane.runtime.pending_prompt = None;
         conversation
     };
 
@@ -1055,7 +1064,7 @@ pub(crate) fn build_session_snapshot(
     super::SessionSnapshot {
         session_id: tui_config.session_id.clone(),
         title: session.app.session_title.clone(),
-        primary: session.conversation.clone(),
+        primary: session.runtime.conversation.clone(),
         model_id: session.app.model_id.to_string(),
         panes: Vec::new(),
         system_prompt: tui_config.system_prompt.clone(),
@@ -1287,7 +1296,7 @@ mod tests {
                 if matches!(event, AgentEvent::ContextCompacted { .. }) {
                     let mut session =
                         Session::new(App::new(model.id.clone(), model.context_window));
-                    session.conversation = conversation.clone();
+                    session.runtime.conversation = conversation.clone();
                     handle_agent_event_side_effects(
                         &mut session,
                         &mut stream_state,
@@ -1409,7 +1418,11 @@ mod tests {
 
         assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
         assert_eq!(
-            session.pending_prompt.as_ref().map(|p| p.text.as_str()),
+            session
+                .runtime
+                .pending_prompt
+                .as_ref()
+                .map(|p| p.text.as_str()),
             Some("Background command finished: `exit 5`")
         );
         assert!(!submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
@@ -1596,14 +1609,14 @@ mod tests {
     fn take_pending_prompts_prefers_the_typed_prompt() {
         let mut session = Session::new(app());
         let mut pending_prompt = Some("focused".to_string());
-        session.pending_prompt = Some(PendingPrompt::text("duplicate"));
+        session.runtime.pending_prompt = Some(PendingPrompt::text("duplicate"));
 
         let prompts = take_pending_prompts(&mut session, &mut pending_prompt);
 
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].1.text, "focused");
         assert!(pending_prompt.is_none());
-        assert!(session.pending_prompt.is_none());
+        assert!(session.runtime.pending_prompt.is_none());
     }
 
     #[tokio::test]
@@ -1911,7 +1924,7 @@ mod tests {
     #[test]
     fn save_dirty_session_flushes_after_debounce() {
         let mut session = Session::new(app());
-        session.conversation.append_message(Message::User(
+        session.runtime.conversation.append_message(Message::User(
             UserMessage::builder()
                 .content(UserContent::Text("persist me".into()))
                 .timestamp_ms(Timestamp::zero())
@@ -2037,7 +2050,7 @@ mod tests {
         stream_state.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.steering_queue.clone(),
+                steering_queue: session.runtime.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -2062,7 +2075,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(session.steering_queue.lock().await.len(), 2);
+        assert_eq!(session.runtime.steering_queue.lock().await.len(), 2);
         assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
 
         abort_focused_stream(&mut session, &mut stream_state).await;
@@ -2072,7 +2085,7 @@ mod tests {
             restored_input, "first steer\nsecond steer",
             "abort must restore each queued message exactly once, got: {restored_input:?}"
         );
-        assert!(session.steering_queue.lock().await.is_empty());
+        assert!(session.runtime.steering_queue.lock().await.is_empty());
         assert!(!session.app.messages.iter().any(|m| m.queued));
     }
 
@@ -2091,7 +2104,7 @@ mod tests {
         stream_state.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.steering_queue.clone(),
+                steering_queue: session.runtime.steering_queue.clone(),
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -2101,31 +2114,34 @@ mod tests {
         );
 
         let tool_call_id = ToolCallId::from("tc_cancelled");
-        session.conversation.append_message(Message::Assistant(
-            AssistantMessage::builder()
-                .content(vec![
-                    AssistantContentPart::Text(TextContent {
-                        text: "i will read that".into(),
-                    }),
-                    AssistantContentPart::ToolCall(ToolCall {
-                        id: tool_call_id.clone(),
-                        name: ToolName::from("read"),
-                        arguments: serde_json::json!({"path": "src/lib.rs"}),
-                    }),
-                ])
-                .model(ModelId::from("test-model"))
-                .provider(Provider::Anthropic)
-                .api(Api::AnthropicMessages)
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
+        session
+            .runtime
+            .conversation
+            .append_message(Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![
+                        AssistantContentPart::Text(TextContent {
+                            text: "i will read that".into(),
+                        }),
+                        AssistantContentPart::ToolCall(ToolCall {
+                            id: tool_call_id.clone(),
+                            name: ToolName::from("read"),
+                            arguments: serde_json::json!({"path": "src/lib.rs"}),
+                        }),
+                    ])
+                    .model(ModelId::from("test-model"))
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ));
         session.app.start_streaming();
         session.app.finish_streaming(None, None);
         session.app.start_tool(&tool_call_id, "read", "src/lib.rs");
 
         abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let ctx = session.conversation.context();
+        let ctx = session.runtime.conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {
             panic!("abort should append a tool result");
         };

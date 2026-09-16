@@ -176,7 +176,11 @@ async fn handle_compaction_recovery_action(
             )
             .await;
             let pane = &mut *session;
-            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.conversation, applied);
+            crate::slash::apply_applied_compaction(
+                &mut pane.app,
+                &mut pane.runtime.conversation,
+                applied,
+            );
             super::runtime::replay_compaction_inputs(pane);
             if let Some(saver) = &deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(
@@ -459,7 +463,7 @@ pub(super) async fn handle_idle_terminal_events(
                             }
                             let expanded = slash::expand_template(&text);
                             let pane = &mut *session;
-                            if pane.label.is_none() && pane.conversation.is_empty() {
+                            if pane.label.is_none() && pane.runtime.conversation.is_empty() {
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
                             let pane = &mut *session;
@@ -485,7 +489,7 @@ pub(super) async fn handle_idle_terminal_events(
                             let pane = &mut *session;
                             pane.app.active_tools.clear();
                             pane.app.start_streaming();
-                            pane.pending_prompt =
+                            pane.runtime.pending_prompt =
                                 Some(crate::session::PendingPrompt::with_images(expanded, images));
                             super::runtime::save_pane_pending_prompt(pane);
                             if let Some(ref saver) = deps.tui_config.save_session {

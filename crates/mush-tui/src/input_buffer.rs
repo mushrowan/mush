@@ -1,16 +1,10 @@
 use std::cell::{Cell, RefCell};
 
-use mush_ai::types::ImageMimeType;
 use ratatui::layout::Rect;
 
 use crate::clipboard::ClipboardImage;
 
-#[derive(Debug, Clone)]
-pub struct PendingImage {
-    pub data: Vec<u8>,
-    pub mime_type: ImageMimeType,
-    pub dimensions: Option<(u32, u32)>,
-}
+pub use mush_runtime::PendingImage;
 
 #[derive(Debug)]
 pub struct InputBuffer {
