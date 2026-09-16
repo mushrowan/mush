@@ -7,17 +7,19 @@ use mush_session::ConversationState;
 use crate::TuiConfig;
 use crate::app::App;
 use crate::runner::ThinkingPrefs;
+use crate::session::SessionRuntime;
 use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
 
 pub fn handle(
     app: &mut App,
-    conversation: &mut ConversationState,
+    runtime: &mut SessionRuntime,
     tui_config: &mut TuiConfig,
     thinking_prefs: &ThinkingPrefs,
     action: &SlashAction,
 ) -> Option<String> {
+    let conversation = &runtime.conversation;
     match action {
         SlashAction::Subagents { .. } => None,
         SlashAction::Help => {
@@ -193,6 +195,7 @@ pub fn handle(
             show_all: _,
         } => {
             handle_model_switch(app, tui_config, thinking_prefs, model_id);
+            runtime.model_id = app.model_id.to_string();
             None
         }
         SlashAction::Search { query } => {
@@ -1131,10 +1134,10 @@ mod tests {
 
     fn name_session(app: &mut App, title: Option<&str>) {
         let mut config = test_tui_config(None);
-        let mut conversation = ConversationState::new();
+        let mut runtime = SessionRuntime::default();
         handle(
             app,
-            &mut conversation,
+            &mut runtime,
             &mut config,
             &ThinkingPrefs::default(),
             &SlashAction::Name {

@@ -436,6 +436,7 @@ mod tests {
             )),
             super::super::ThinkingPrefs::default(),
         );
+        runtime.session.runtime.session_id = config.session_id.clone();
         let mut state = StreamState::new();
         let (_, rx) = tokio::sync::mpsc::channel(1);
         let pane = PaneId::new(1);

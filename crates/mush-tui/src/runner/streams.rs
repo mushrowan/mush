@@ -340,29 +340,17 @@ async fn handle_agent_end(
         stream_state.completion_signal();
     }
 
-    let title_request = (!session.runtime.title_generated
-        && tui_config.generate_title
-        && session.app.session_title.is_none()
-        && session.runtime.conversation.context_len() >= 2)
-        .then(|| session.runtime.conversation.context_prefix(4));
-
-    if let Some(msgs) = title_request {
-        let model = tui_config.model.clone();
+    if tui_config.generate_title && session.runtime.title_due() {
         let opts = StreamOptions {
             api_key: tui_config.options.api_key.clone(),
             ..Default::default()
         };
-        if let Ok(Some(title)) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            mush_session::title::generate_title(msgs, registry, &model, &opts),
-        )
-        .await
+        if let Some(title) = session
+            .runtime
+            .generate_title(registry, &tui_config.model, &opts)
+            .await
         {
             session.app.session_title = Some(title);
-        }
-        {
-            let pane = &mut *session;
-            pane.runtime.title_generated = true;
         }
     }
 
@@ -1050,25 +1038,11 @@ fn build_system_prompt(base_system_prompt: &Option<String>) -> Option<String> {
     base_system_prompt.clone()
 }
 
-pub(crate) fn sync_runtime_from_tui(session: &mut Session, tui_config: &super::TuiConfig) {
-    session.runtime.session_id = tui_config.session_id.clone();
-    session.runtime.title = session.app.session_title.clone();
-    session.runtime.model_id = session.app.model_id.to_string();
-    session.runtime.system_prompt = tui_config.system_prompt.clone();
-}
-
 pub(crate) fn build_session_snapshot(
     session: &Session,
-    tui_config: &super::TuiConfig,
+    _tui_config: &super::TuiConfig,
 ) -> super::SessionSnapshot {
-    super::SessionSnapshot {
-        session_id: tui_config.session_id.clone(),
-        title: session.app.session_title.clone(),
-        primary: session.runtime.conversation.clone(),
-        model_id: session.app.model_id.to_string(),
-        panes: Vec::new(),
-        system_prompt: tui_config.system_prompt.clone(),
-    }
+    session.runtime.snapshot()
 }
 
 pub(crate) fn apply_session_events(
@@ -2199,9 +2173,10 @@ mod tests {
 
     #[test]
     fn build_session_snapshot_carries_system_prompt() {
-        let session = Session::new(app());
-        let mut config = test_tui_config();
-        config.system_prompt = Some("you are running inside mush\nproject context: foo".into());
+        let mut session = Session::new(app());
+        let config = test_tui_config();
+        session.runtime.system_prompt =
+            Some("you are running inside mush\nproject context: foo".into());
 
         let snapshot = build_session_snapshot(&session, &config);
 

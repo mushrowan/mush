@@ -115,7 +115,10 @@ impl RunnerRuntime {
         let mut session = Session::with_conversation(app, conversation);
         session.runtime.saver = tui_config.save_session.clone();
         session.runtime.kernel_state = tui_config.kernel_state.clone();
-        super::streams::sync_runtime_from_tui(&mut session, tui_config);
+        session.runtime.session_id = tui_config.session_id.clone();
+        session.runtime.title = tui_config.initial_title.clone();
+        session.runtime.model_id = tui_config.model.id.to_string();
+        session.runtime.system_prompt = tui_config.system_prompt.clone();
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 

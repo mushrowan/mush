@@ -173,6 +173,36 @@ impl SessionRuntime {
     }
 
     #[must_use]
+    pub fn title_due(&self) -> bool {
+        !self.title_generated && self.title.is_none() && self.conversation.context_len() >= 2
+    }
+
+    pub async fn generate_title(
+        &mut self,
+        registry: &ApiRegistry,
+        model: &mush_ai::types::Model,
+        options: &mush_ai::types::StreamOptions,
+    ) -> Option<String> {
+        if !self.title_due() {
+            return None;
+        }
+        let messages = self.conversation.context_prefix(4);
+        let generated = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            mush_session::title::generate_title(messages, registry, model, options),
+        )
+        .await
+        .ok()
+        .flatten();
+        self.title_generated = true;
+        if let Some(title) = generated {
+            self.title = Some(title.clone());
+            return Some(title);
+        }
+        None
+    }
+
+    #[must_use]
     pub fn control_endpoint(&self) -> Option<mush_agent::exec_context::ControlEndpoint> {
         Some(mush_agent::exec_context::ControlEndpoint {
             socket: self.control_socket.clone()?,

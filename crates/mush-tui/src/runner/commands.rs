@@ -25,7 +25,6 @@ async fn run_session_command(
     tui_config: &mut TuiConfig,
     command: mush_runtime::SessionCommand,
 ) -> bool {
-    super::streams::sync_runtime_from_tui(session, tui_config);
     let events = session.runtime.handle(command).await;
     let changed = events.iter().any(|event| {
         matches!(
@@ -251,7 +250,8 @@ pub(super) async fn handle_slash_action(
                 return false;
             };
             let reloaded = reload(cwd);
-            tui_config.system_prompt = Some(reloaded.system_prompt);
+            tui_config.system_prompt = Some(reloaded.system_prompt.clone());
+            session.runtime.system_prompt = Some(reloaded.system_prompt);
             apply_reloaded_templates(session, &reloaded.templates);
             let warnings = reloaded.skills.diagnostics.len();
             tui_config.skills = reloaded.skills;
@@ -294,10 +294,14 @@ pub(super) async fn handle_slash_action(
         }
         other_action => {
             let pane = &mut *session;
-            let (app, conversation, _) = pane.fields_mut();
-            if let Some(prompt) =
-                slash::handle(app, conversation, tui_config, thinking_prefs, &other_action)
-            {
+            if let Some(prompt) = slash::handle(
+                &mut pane.app,
+                &mut pane.runtime,
+                tui_config,
+                thinking_prefs,
+                &other_action,
+            ) {
+                let app = &mut pane.app;
                 app.start_streaming();
                 *pending_prompt = Some(prompt);
             }
