@@ -459,18 +459,18 @@ fn read_file(
     }
 }
 
-const DEFAULT_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 const MIN_IMAGE_DIM: u32 = 64;
 
-struct ResizedImage {
-    bytes: Vec<u8>,
-    mime: mush_ai::types::ImageMimeType,
-    orig_dimensions: (u32, u32),
-    new_dimensions: (u32, u32),
+pub(crate) struct ResizedImage {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mime: mush_ai::types::ImageMimeType,
+    pub(crate) orig_dimensions: (u32, u32),
+    pub(crate) new_dimensions: (u32, u32),
 }
 
-fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, String> {
+pub(crate) fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, String> {
     use image::ImageEncoder;
 
     const QUALITY: u8 = 85;

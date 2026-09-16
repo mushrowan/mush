@@ -56,7 +56,9 @@ pub(super) fn render_cell(
     if output.blocks.is_empty() {
         let placeholder = match tc.status {
             ToolCallStatus::Running => Some("waiting for output..."),
-            _ if cell.is_none_or(|cell| cell.diffs.is_empty()) => Some("no output"),
+            _ if cell.is_none_or(|cell| cell.diffs.is_empty() && cell.images == 0) => {
+                Some("no output")
+            }
             _ => None,
         };
         if let Some(placeholder) = placeholder {
@@ -73,6 +75,20 @@ pub(super) fn render_cell(
 
     if let Some(cell) = cell {
         render_diffs(cell, width, lines, style, &mut gutter);
+        if cell.images > 0 {
+            let plural = if cell.images == 1 { "" } else { "s" };
+            let gutter_text = gutter.next(lines);
+            push_gutter(
+                lines,
+                gutter_text,
+                theme.dim,
+                vec![Span::styled(
+                    format!("{} image{plural} sent to the model", cell.images),
+                    theme.dim,
+                )],
+                width,
+            );
+        }
     }
 
     if let Some(done) = &tc.bash_done {

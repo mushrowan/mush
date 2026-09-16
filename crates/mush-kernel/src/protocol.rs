@@ -56,6 +56,10 @@ pub enum Event {
         id: String,
         text: String,
     },
+    Display {
+        id: Option<String>,
+        data: serde_json::Map<String, Value>,
+    },
     HostRequest {
         id: String,
         cell: Option<String>,
@@ -82,9 +86,10 @@ impl Event {
     pub fn cell_id(&self) -> Option<&str> {
         match self {
             Self::Ready { .. } => None,
-            Self::Stdout { id, .. } | Self::Stderr { id, .. } | Self::Error { id, .. } => {
-                id.as_deref()
-            }
+            Self::Stdout { id, .. }
+            | Self::Stderr { id, .. }
+            | Self::Error { id, .. }
+            | Self::Display { id, .. } => id.as_deref(),
             Self::Result { id, .. } | Self::Done { id, .. } => Some(id),
             Self::HostRequest { cell, .. } => cell.as_deref(),
         }

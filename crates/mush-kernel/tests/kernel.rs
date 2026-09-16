@@ -377,3 +377,43 @@ async fn a_managed_venv_is_bootstrapped_with_uv_and_hosts_a_kernel() {
     assert_eq!(seen.lock().unwrap().len(), 2, "{:?}", seen.lock().unwrap());
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn attach_image_ships_the_bytes_as_an_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dot.png");
+    let png = [
+        0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+    ];
+    std::fs::write(&path, png).unwrap();
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute(&format!("attach_image({:?})", path.display().to_string()))
+        .await
+        .unwrap();
+
+    assert_eq!(output.attachments.len(), 1, "{output:?}");
+    assert_eq!(output.attachments[0].mime_type, "image/png");
+    assert_eq!(
+        output.attachments[0].path.as_deref(),
+        Some(path.to_str().unwrap())
+    );
+    assert_eq!(
+        output.result.as_deref(),
+        Some(format!("'attached {}'", path.display()).as_str())
+    );
+
+    let refused = kernel
+        .execute(&format!(
+            "attach_image({:?})",
+            dir.path().join("missing.png").display().to_string()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.error.as_ref().map(|e| e.ename.as_str()),
+        Some("FileNotFoundError")
+    );
+    kernel.shutdown().await.unwrap();
+}

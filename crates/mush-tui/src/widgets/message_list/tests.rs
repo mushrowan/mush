@@ -1722,6 +1722,7 @@ fn cell_details() -> mush_tools::ipython::CellDetails {
             path: "/repo/a.txt".into(),
             diff: "- hello world\n+ hello there".into(),
         }],
+        images: 2,
         kernel_restarted: false,
     }
 }
@@ -1763,6 +1764,7 @@ fn a_structured_cell_shows_duration_output_and_the_edit_summary_by_detail_level(
     assert!(!details.contains("edited /repo/a.txt"), "{details}");
     assert!(details.contains("/repo/a.txt +1 -1"), "{details}");
     assert!(!details.contains("+ hello there"), "{details}");
+    assert!(details.contains("2 images sent to the model"), "{details}");
 
     app.detail = ChatDetail::All;
     let all = rendered_text(&all_lines(&app, 90));
@@ -1787,6 +1789,7 @@ fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
             ],
         }),
         diffs: vec![],
+        images: 0,
         kernel_restarted: false,
     };
     app.messages.push(cell_message(cell, ToolCallStatus::Error));

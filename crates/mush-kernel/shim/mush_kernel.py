@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import base64
 import contextvars
 import inspect
 import io
@@ -197,6 +198,53 @@ async def edit(path: str, old: str, new: str) -> str:
     return str(reply.get("summary", ""))
 
 
+_ATTACHMENT_MIME = "application/vnd.mush.attachment+json"
+_MAX_ATTACHMENT_BYTES = 20_000_000
+_IMAGE_SIGNATURES = (
+    ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ("image/jpeg", b"\xff\xd8\xff"),
+    ("image/gif", b"GIF87a"),
+    ("image/gif", b"GIF89a"),
+)
+
+
+def _image_mime(data: bytes) -> str | None:
+    for mime, prefix in _IMAGE_SIGNATURES:
+        if data.startswith(prefix):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def display(data: dict) -> None:
+    if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
+        raise TypeError("display() takes a non-empty dict keyed by mime type")
+    json.dumps(data, allow_nan=False)
+    emit({"type": "display", "id": _current_cell.get(), "data": data})
+
+
+def attach_image(*paths: str) -> str:
+    if not paths:
+        raise TypeError("attach_image() needs at least one path")
+    attached = []
+    for path in paths:
+        resolved = os.path.expanduser(str(path))
+        if not os.path.isfile(resolved):
+            raise FileNotFoundError(f"{path} is not an existing file")
+        size = os.path.getsize(resolved)
+        if size > _MAX_ATTACHMENT_BYTES:
+            raise ValueError(f"{path} is {size // 1_000_000}MB, images must be under {_MAX_ATTACHMENT_BYTES // 1_000_000}MB")
+        with open(resolved, "rb") as handle:
+            data = handle.read()
+        mime = _image_mime(data)
+        if mime is None:
+            raise ValueError(f"{path} is not a png, jpeg, gif or webp image")
+        display({_ATTACHMENT_MIME: {"mime_type": mime, "data": base64.b64encode(data).decode("ascii"), "path": resolved}})
+        attached.append(resolved)
+    return "attached " + ", ".join(attached)
+
+
 def _install_preload() -> None:
     _namespace.update(
         {
@@ -205,6 +253,8 @@ def _install_preload() -> None:
             "asyncio": asyncio,
             "bash": bash,
             "edit": edit,
+            "display": display,
+            "attach_image": attach_image,
             "host_request": host_request,
             "BashResult": BashResult,
             "BashHandle": BashHandle,

@@ -4,8 +4,8 @@ pub mod python;
 pub mod venv;
 
 pub use kernel::{
-    CellError, CellOutput, HostError, HostRequestHandler, Kernel, KernelConfig, NoHost,
-    RestoreReport, SnapshotReport,
+    ATTACHMENT_MIME, Attachment, CellError, CellOutput, HostError, HostRequestHandler, Kernel,
+    KernelConfig, NoHost, RestoreReport, SnapshotReport,
 };
 pub use protocol::{Event, PROTOCOL_VERSION, Request};
 pub use python::PythonPlan;

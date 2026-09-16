@@ -83,8 +83,20 @@ pub struct CellOutput {
     pub stderr: String,
     pub result: Option<String>,
     pub error: Option<CellError>,
+    pub attachments: Vec<Attachment>,
     pub ok: bool,
     pub duration: Duration,
+}
+
+pub const ATTACHMENT_MIME: &str = "application/vnd.mush.attachment+json";
+const MAX_ATTACHMENT_CHARS: usize = 30_000_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Attachment {
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 impl CellOutput {
@@ -274,6 +286,19 @@ impl Kernel {
                 Event::Stdout { text, .. } => output.stdout.push_str(&text),
                 Event::Stderr { text, .. } => output.stderr.push_str(&text),
                 Event::Result { text, .. } => output.result = Some(text),
+                Event::Display { data, .. } => {
+                    if let Some(payload) = data.get(ATTACHMENT_MIME) {
+                        match serde_json::from_value::<Attachment>(payload.clone()) {
+                            Ok(attachment) if attachment.data.len() > MAX_ATTACHMENT_CHARS => {
+                                output
+                                    .stderr
+                                    .push_str("attachment dropped: larger than the host accepts\n");
+                            }
+                            Ok(attachment) => output.attachments.push(attachment),
+                            Err(error) => tracing::debug!(%error, "malformed attachment display"),
+                        }
+                    }
+                }
                 Event::Error {
                     ename,
                     evalue,

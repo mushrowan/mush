@@ -539,6 +539,9 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          small as it can be while still unique.\n\
          - Read files with `pathlib.Path(p).read_text()`, search with `re` or \
          `await bash('rg ...')`, create files with `Path.write_text`.\n\
+         - `attach_image(path, ...)` puts a png, jpeg, gif or webp in front of you as pixels. \
+         Use it to look at a screenshot, chart or diagram; use a library when you need to \
+         compute over the image.\n\
          - Use Python for loops, conditionals and parsing. Use `bash()` to run programs, not \
          to write shell programs.\n\
          - Run a project's own commands through its own environment (`cargo test`, `npm run \

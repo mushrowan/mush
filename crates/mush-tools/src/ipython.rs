@@ -14,8 +14,8 @@ expression is returned. Preloaded: `bash(command, timeout=None)` starts a shell 
 background and returns a handle; `await bash(...)` or `await h` waits for the result with \
 `.exit_code`, `.ok` and `.output`, and `await h.poll()`, `await h.output()`, `await h.tail(n)`, \
 `await h.kill()` inspect a running one. `await edit(path, old, new)` replaces exactly one \
-occurrence of `old` in the file at `path`. Use Python itself for reading, searching and \
-transforming files.";
+occurrence of `old` in the file at `path`. `attach_image(path)` shows you an image file. Use \
+Python itself for reading, searching and transforming files.";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +45,7 @@ pub struct CellDetails {
     pub result: Option<String>,
     pub error: Option<CellErrorDetails>,
     pub diffs: Vec<CellDiff>,
+    pub images: usize,
     pub kernel_restarted: bool,
 }
 
@@ -439,6 +440,46 @@ impl mush_kernel::KernelState for IpythonTool {
     }
 }
 
+fn attached_images(
+    attachments: &[mush_kernel::Attachment],
+    text: &mut String,
+) -> Vec<mush_ai::types::ToolResultContentPart> {
+    use base64::Engine;
+    use mush_ai::types::{ImageContent, ImageMimeType, ToolResultContentPart};
+    let mut parts = Vec::new();
+    for attachment in attachments {
+        let Some(mime_type) = ImageMimeType::from_mime_type(&attachment.mime_type) else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&attachment.data) else {
+            continue;
+        };
+        if bytes.len() <= crate::read::DEFAULT_MAX_IMAGE_BYTES {
+            parts.push(ToolResultContentPart::Image(ImageContent {
+                data: attachment.data.clone(),
+                mime_type,
+            }));
+            continue;
+        }
+        match crate::read::resize_image_to_fit(&bytes, crate::read::DEFAULT_MAX_IMAGE_BYTES) {
+            Ok(resized) => {
+                let (ow, oh) = resized.orig_dimensions;
+                let (nw, nh) = resized.new_dimensions;
+                text.push_str(&format!(
+                    "\n[image {} downscaled from {ow}x{oh} to {nw}x{nh}]",
+                    attachment.path.as_deref().unwrap_or("attachment")
+                ));
+                parts.push(ToolResultContentPart::Image(ImageContent {
+                    data: base64::engine::general_purpose::STANDARD.encode(&resized.bytes),
+                    mime_type: resized.mime,
+                }));
+            }
+            Err(error) => text.push_str(&format!("\n[image dropped: {error}]")),
+        }
+    }
+    parts
+}
+
 #[must_use]
 pub fn format_cell_output(output: &CellOutput) -> String {
     let mut text = String::new();
@@ -532,13 +573,18 @@ impl AgentTool for IpythonTool {
                         .as_ref()
                         .map(|host| host.take_diffs(&exec_id))
                         .unwrap_or_default(),
+                    images: 0,
                     kernel_restarted: run.kernel_restarted,
                 };
-                let result = if run.output.ok {
+                let images = attached_images(&run.output.attachments, &mut text);
+                let mut details = details;
+                details.images = images.len();
+                let mut result = if run.output.ok {
                     ToolResult::text(text)
                 } else {
                     ToolResult::error(text)
                 };
+                result.content.extend(images);
                 result.with_details(details.to_value())
             }
             Err(error) => ToolResult::error(format!("kernel: {error}")),
@@ -549,6 +595,7 @@ impl AgentTool for IpythonTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::ImageEncoder;
     use mush_kernel::CellError;
 
     fn tool(dir: &Path) -> IpythonTool {
@@ -757,6 +804,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_attached_image_reaches_the_result_as_an_image_part() {
+        use mush_ai::types::ToolResultContentPart;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dot.png");
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        std::fs::write(&path, &png).unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": format!("attach_image({:?})", path.display().to_string())
+            }))
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        let images: Vec<_> = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ToolResultContentPart::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, mush_ai::types::ImageMimeType::Png);
+        let details = CellDetails::from_value(result.details.as_ref().unwrap()).unwrap();
+        assert_eq!(details.images, 1);
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn a_failed_edit_raises_in_the_cell() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
@@ -840,6 +921,7 @@ mod tests {
     fn output_formatting_orders_stdout_stderr_result_error() {
         let output = CellOutput {
             stdout: "out".into(),
+            attachments: Vec::new(),
             stderr: "warn".into(),
             result: Some("7".into()),
             error: Some(CellError {
