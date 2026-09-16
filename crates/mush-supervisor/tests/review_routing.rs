@@ -1692,6 +1692,12 @@ fn surviving_correction_retains_workspace_lock_after_router_crash() {
         .next()
         .unwrap()
         .clone();
+    let release_with_receipt = fixture.command(&[
+        "admission-release",
+        fixture.root.path().join("pool").to_str().unwrap(),
+        &claim,
+        "--confirm-processes-exited",
+    ]);
     ledger["claims"][&claim]["processes"] = json!({});
     ledger["claims"][&claim]["state"] = json!("reserved");
     write(&ledger_path, &ledger);
@@ -1705,6 +1711,7 @@ fn surviving_correction_retains_workspace_lock_after_router_crash() {
         libc::kill(-pid, libc::SIGKILL);
     }
     assert!(alive);
+    assert!(!release_with_receipt.status.success());
     assert!(
         run_held && session_held,
         "surviving correction lost run or session ownership"
@@ -1987,4 +1994,81 @@ fn disable_during_final_validation_prevents_spawn() {
     assert!(router.wait().unwrap().success());
     assert!(fixture.route.join("DISABLED").exists());
     assert!(!fixture.root.path().join("calls").exists());
+}
+
+#[test]
+fn completed_action_reaches_parent_after_acknowledged_history_fills() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    fixture.route();
+    for event in inbox.pending().unwrap() {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    for _ in 0..31 {
+        fs::write(fixture.cwd.join("manual"), "temporary operator edit").unwrap();
+        fixture.route();
+        assert_eq!(fixture.state()["producer"], "needs_input");
+        for event in inbox.pending().unwrap() {
+            inbox.acknowledge(&event.event_id).unwrap();
+        }
+        fs::remove_file(fixture.cwd.join("manual")).unwrap();
+        fixture.route();
+        assert_eq!(fixture.state()["producer"], "queued_capacity");
+        for event in inbox.pending().unwrap() {
+            inbox.acknowledge(&event.event_id).unwrap();
+        }
+    }
+    assert!(inbox.pending().unwrap().is_empty());
+    fs::write(&policy, original).unwrap();
+    fixture.route();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let pending = inbox.pending().unwrap();
+    assert!(
+        pending.iter().any(|event| event
+            .review
+            .as_ref()
+            .is_some_and(|notice| notice.producer_action.starts_with("attempt_finished"))),
+        "{}",
+        fixture.state()
+    );
+}
+
+#[test]
+fn another_tasks_verdict_cannot_launch_or_reach_parent() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let source = fixture
+        .root
+        .path()
+        .join("review/reviewer/event-reports/assignment-0001.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+    let raw: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
+    let mut verdict: Value = serde_json::from_slice(&raw).unwrap();
+    verdict["task"] = json!("unrelated-task");
+    let raw = serde_json::to_vec(&verdict).unwrap();
+    journal["review"] = json!({"sha256":digest(&raw),"bytes":raw});
+    write(&source, &journal);
+    fixture.route();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "needs_input_review");
+    assert!(!fixture.root.path().join("calls").exists());
+    assert!(
+        Inbox::open(&fixture.inbox)
+            .unwrap()
+            .pending()
+            .unwrap()
+            .is_empty()
+    );
 }
