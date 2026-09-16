@@ -38,6 +38,9 @@ struct Cli {
     #[arg(short = 'c', long = "continue")]
     resume: Option<String>,
 
+    #[arg(long, conflicts_with = "resume")]
+    fork: Option<String>,
+
     #[arg(short, long)]
     model: Option<String>,
 
@@ -650,6 +653,10 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         let meta = store.resolve(resume_id)?;
         _session_lease = store.lease(&meta.id)?;
         store.load(&meta.id)?
+    } else if let Some(ref fork_id) = cli.fork {
+        let store = SessionStore::new(SessionStore::default_dir());
+        let meta = store.resolve(fork_id)?;
+        fork_session(store.load(&meta.id)?, &cwd_str)
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
@@ -858,6 +865,15 @@ impl SaverThread {
     }
 }
 
+fn fork_session(source: Session, cwd: &str) -> Session {
+    let mut forked = Session::new(source.meta.model_id.as_str(), cwd);
+    forked.conversation = source.conversation;
+    forked.system_prompt = source.system_prompt;
+    forked.panes = source.panes;
+    forked.meta.message_count = forked.conversation.context_len();
+    forked
+}
+
 fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Session {
     let mut session = Session::new(&snapshot.model_id, cwd);
     session.meta.id = snapshot.session_id;
@@ -900,6 +916,19 @@ mod tests {
             panes: Vec::new(),
             system_prompt: None,
         }
+    }
+
+    #[test]
+    fn a_fork_gets_a_fresh_id_and_keeps_the_conversation() {
+        let source = session_from_snapshot(snapshot(Some("port prime")), "/tmp");
+        let source_id = source.meta.id.clone();
+
+        let forked = fork_session(source, "/elsewhere");
+
+        assert_ne!(forked.meta.id, source_id);
+        assert!(forked.meta.title.is_none());
+        assert_eq!(forked.meta.cwd, "/elsewhere");
+        assert_eq!(forked.conversation.context_len(), 1);
     }
 
     #[test]
