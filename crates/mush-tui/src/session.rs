@@ -57,14 +57,9 @@ impl Session {
         &mut self,
     ) -> (
         &mut App,
-        &mut ConversationState,
         &mut HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     ) {
-        (
-            &mut self.app,
-            &mut self.runtime.conversation,
-            &mut self.image_protos,
-        )
+        (&mut self.app, &mut self.image_protos)
     }
 
     pub async fn poll_side_questions(&mut self) -> bool {

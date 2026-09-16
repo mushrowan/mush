@@ -240,6 +240,31 @@ impl SessionRuntime {
         }
     }
 
+    #[must_use]
+    pub fn has_inbox_event(&self, event_id: &str) -> bool {
+        mush_session::inbox::contains(&self.conversation, event_id)
+    }
+
+    pub fn accept_inbox_event(
+        &mut self,
+        event: &mush_session::inbox::Event,
+    ) -> std::io::Result<mush_ai::types::EventMessage> {
+        let message = mush_session::inbox::message(event)?;
+        self.accept_event(message.clone());
+        Ok(message)
+    }
+
+    pub fn accept_event(&mut self, event: mush_ai::types::EventMessage) {
+        let mut prompt = PendingPrompt::text(event.text());
+        prompt.mark_persisted();
+        self.conversation.append_message(Message::Event(event));
+        self.pending_prompt = Some(prompt);
+    }
+
+    pub fn apply_event(&mut self, event: &mush_agent::AgentEvent) -> crate::Applied {
+        crate::apply_agent_event(&mut self.conversation, event)
+    }
+
     pub fn save_debounced(&mut self) {
         self.dirty = true;
         self.save_if_dirty();
@@ -316,6 +341,26 @@ impl Default for SessionRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_event_persists_the_event_and_queues_a_persisted_prompt() {
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        let event = mush_ai::types::EventMessage {
+            content: "worker finished".into(),
+            timestamp_ms: mush_ai::types::Timestamp::zero(),
+            kind: mush_ai::types::EventKind::WorkerCompletion,
+            receipts: Vec::new(),
+        };
+
+        runtime.accept_event(event);
+
+        assert!(matches!(
+            runtime.conversation.context().last(),
+            Some(Message::Event(e)) if e.content == "worker finished"
+        ));
+        let prompt = runtime.pending_prompt.as_ref().expect("a queued prompt");
+        assert!(prompt.is_persisted());
+    }
 
     fn events(n: usize) -> TurnStream<'static> {
         Box::pin(futures::stream::iter((0..n).map(|_| {

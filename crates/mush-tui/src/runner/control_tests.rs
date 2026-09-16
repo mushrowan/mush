@@ -723,14 +723,12 @@ async fn dispatch(
     event: AgentEvent,
 ) {
     complete(runtime.session.runtime.control.as_ref(), &event);
-    let (app, conversation, image_protos) = runtime.session.fields_mut();
+    let applied = runtime.session.runtime.apply_event(&event);
+    let (app, image_protos) = runtime.session.fields_mut();
     crate::event_handler::handle_agent_event(
-        &mut crate::event_handler::EventCtx {
-            app,
-            conversation,
-            image_protos,
-        },
+        &mut crate::event_handler::EventCtx { app, image_protos },
         &event,
+        applied,
         &config.model,
         false,
         &None,

@@ -176,11 +176,7 @@ async fn handle_compaction_recovery_action(
             )
             .await;
             let pane = &mut *session;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.runtime.conversation,
-                applied,
-            );
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
             super::runtime::replay_compaction_inputs(pane);
             if let Some(saver) = &deps.tui_config.save_session {
                 saver(super::streams::build_session_snapshot(

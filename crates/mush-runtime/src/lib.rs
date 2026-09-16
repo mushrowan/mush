@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod compaction;
 pub mod session;
 pub mod snapshot;
 pub mod turn;

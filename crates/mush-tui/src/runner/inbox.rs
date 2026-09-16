@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mush_session::inbox::{Consumer, Event, append, contains};
+#[cfg(test)]
+use mush_session::inbox::contains;
+use mush_session::inbox::{Consumer, Event};
 
 use super::{TuiConfig, runtime::RunnerRuntime, streams::StreamState};
 
@@ -142,20 +144,12 @@ impl OrchestratorInbox {
             .await
             .map_err(io::Error::other)??;
         for event in pending {
-            if contains(&runtime.session.runtime.conversation, &event.event_id) {
+            if runtime.session.runtime.has_inbox_event(&event.event_id) {
                 self.acknowledge_saved(event.event_id.clone()).await?;
                 continue;
             }
-            append(&mut runtime.session.runtime.conversation, &event)?;
-            let context = runtime.session.runtime.conversation.context();
-            let Some(mush_ai::types::Message::Event(message)) = context.last() else {
-                return Err(io::Error::other("inbox event missing from history"));
-            };
-            let text = message.text();
-            runtime.session.app.push_event_message(message);
-            let mut prompt = crate::session::PendingPrompt::text(text);
-            prompt.mark_persisted();
-            runtime.session.runtime.pending_prompt = Some(prompt);
+            let message = runtime.session.runtime.accept_inbox_event(&event)?;
+            runtime.session.app.push_event_message(&message);
             if let Some(save) = &config.save_session {
                 save(super::streams::build_session_snapshot(
                     &runtime.session,

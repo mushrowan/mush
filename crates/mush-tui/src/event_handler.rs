@@ -2,13 +2,11 @@ use mush_agent::{AgentEvent, summarise_tool_args};
 use mush_ai::models;
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
-use mush_session::ConversationState;
 
 use crate::app::App;
 
 pub struct EventCtx<'a> {
     pub app: &'a mut App,
-    pub conversation: &'a mut ConversationState,
     pub image_protos: &'a mut std::collections::HashMap<
         (usize, usize),
         ratatui_image::protocol::StatefulProtocol,
@@ -18,16 +16,12 @@ pub struct EventCtx<'a> {
 pub fn handle_agent_event(
     ctx: &mut EventCtx<'_>,
     event: &AgentEvent,
+    applied: mush_runtime::Applied,
     model: &Model,
     debug_cache: bool,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    let EventCtx {
-        app,
-        conversation,
-        image_protos,
-    } = ctx;
-    let applied = mush_runtime::apply_agent_event(conversation, event);
+    let EventCtx { app, image_protos } = ctx;
     match event {
         AgentEvent::StreamEvent { event } => match event {
             StreamEvent::TextDelta { delta, .. } => app.push_text_delta(delta),
@@ -126,7 +120,7 @@ pub fn handle_agent_event(
                 .reset_live_state(TokenCount::new(tokens_after as u64));
             let after_count = match applied {
                 mush_runtime::Applied::Compacted { after_count } => after_count,
-                _ => conversation.context_len(),
+                _ => compaction.messages.len(),
             };
             app.push_system_message(format!(
                 "━ compacted: {before_count} → {after_count} messages ━"
@@ -224,19 +218,24 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
 
         let event = AgentEvent::Error {
             error: "anthropic returned 400 Bad Request".into(),
         };
-        handle_agent_event(&mut ctx, &event, &model, false, &None);
+        handle_agent_event(
+            &mut ctx,
+            &event,
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
 
         assert!(
             ctx.app.status.is_none(),
@@ -248,89 +247,15 @@ mod tests {
     }
 
     #[test]
-    fn steering_injection_persists_messages_to_conversation_tree() {
-        use crate::app::App;
-        use mush_ai::types::{TokenCount, UserContent, UserMessage};
-
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
-        let mut image_protos = std::collections::HashMap::new();
-        let model = mush_ai::models::all_models().first().unwrap().clone();
-        let mut ctx = EventCtx {
-            app: &mut app,
-            conversation: &mut conversation,
-            image_protos: &mut image_protos,
-        };
-
-        let injected = vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("steered mid-stream".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        )];
-
-        let event = AgentEvent::SteeringInjected {
-            messages: injected.clone(),
-        };
-        handle_agent_event(&mut ctx, &event, &model, false, &None);
-
-        let context = ctx.conversation.context();
-        assert_eq!(context.len(), 1, "steering message should land in tree");
-        assert!(
-            matches!(&context[0], Message::User(u) if u.text() == "steered mid-stream"),
-            "tree should contain the steered text, got: {:?}",
-            context
-        );
-    }
-
-    #[test]
-    fn follow_up_injection_persists_messages_to_conversation_tree() {
-        use crate::app::App;
-        use mush_ai::types::{TokenCount, UserContent, UserMessage};
-
-        let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
-        let mut image_protos = std::collections::HashMap::new();
-        let model = mush_ai::models::all_models().first().unwrap().clone();
-        let mut ctx = EventCtx {
-            app: &mut app,
-            conversation: &mut conversation,
-            image_protos: &mut image_protos,
-        };
-
-        let injected = vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("follow up".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        )];
-
-        let event = AgentEvent::FollowUpInjected {
-            messages: injected.clone(),
-        };
-        handle_agent_event(&mut ctx, &event, &model, false, &None);
-
-        let context = ctx.conversation.context();
-        assert_eq!(context.len(), 1, "follow-up message should land in tree");
-        assert!(
-            matches!(&context[0], Message::User(u) if u.text() == "follow up"),
-            "tree should contain the follow-up text, got: {:?}",
-            context
-        );
-    }
-
-    #[test]
     fn context_transformed_surfaces_in_message_log() {
         use crate::app::{App, MessageRole};
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
 
@@ -338,7 +263,14 @@ mod tests {
             before_count: 42,
             after_count: 7,
         };
-        handle_agent_event(&mut ctx, &event, &model, false, &None);
+        handle_agent_event(
+            &mut ctx,
+            &event,
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
 
         let last = ctx
             .app
@@ -361,17 +293,22 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
 
         let event = AgentEvent::MaxTurnsReached { max_turns: 10 };
-        handle_agent_event(&mut ctx, &event, &model, false, &None);
+        handle_agent_event(
+            &mut ctx,
+            &event,
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
 
         assert!(ctx.app.status.is_none(), "should not be in status bar");
         let last = ctx.app.messages.last().expect("should have a message");
@@ -394,7 +331,6 @@ mod tests {
         };
         app.stats.update(&prev_usage, None);
 
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
 
@@ -408,12 +344,12 @@ mod tests {
             .build();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
         handle_agent_event(
             &mut ctx,
             &AgentEvent::MessageEnd { message: errored },
+            mush_runtime::Applied::Nothing,
             &model,
             false,
             &None,
@@ -446,12 +382,10 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
 
@@ -505,7 +439,14 @@ mod tests {
             tool_start("tc2"),
         ];
         for event in &events {
-            handle_agent_event(&mut ctx, event, &model, false, &None);
+            handle_agent_event(
+                &mut ctx,
+                event,
+                mush_runtime::Applied::Nothing,
+                &model,
+                false,
+                &None,
+            );
         }
 
         let mut terminal =
@@ -591,12 +532,10 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
         let a = bash_call("a", "ls");
@@ -612,7 +551,14 @@ mod tests {
             tool_end(&b, ToolResult::text("/home")),
         ];
         for event in &events {
-            handle_agent_event(&mut ctx, event, &model, false, &None);
+            handle_agent_event(
+                &mut ctx,
+                event,
+                mush_runtime::Applied::Nothing,
+                &model,
+                false,
+                &None,
+            );
         }
 
         assert_eq!(
@@ -631,12 +577,10 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
         let bash = bash_call("bash1", "ls");
@@ -664,7 +608,14 @@ mod tests {
             tool_end(&bash, ToolResult::text("file.rs")),
         ];
         for event in &events {
-            handle_agent_event(&mut ctx, event, &model, false, &None);
+            handle_agent_event(
+                &mut ctx,
+                event,
+                mush_runtime::Applied::Nothing,
+                &model,
+                false,
+                &None,
+            );
         }
 
         assert_eq!(
@@ -684,12 +635,10 @@ mod tests {
         use mush_ai::types::TokenCount;
 
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
         let call = bash_call("a", "rm -rf /");
@@ -701,7 +650,14 @@ mod tests {
             tool_end(&call, ToolResult::error("tool call denied by user")),
         ];
         for event in &events {
-            handle_agent_event(&mut ctx, event, &model, false, &None);
+            handle_agent_event(
+                &mut ctx,
+                event,
+                mush_runtime::Applied::Nothing,
+                &model,
+                false,
+                &None,
+            );
         }
 
         assert_eq!(
@@ -722,12 +678,10 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.push_queued_message("first");
         app.push_queued_message("second");
-        let mut conversation = ConversationState::new();
         let mut image_protos = std::collections::HashMap::new();
         let model = mush_ai::models::all_models().first().unwrap().clone();
         let mut ctx = EventCtx {
             app: &mut app,
-            conversation: &mut conversation,
             image_protos: &mut image_protos,
         };
         let injected = vec![Message::User(
@@ -740,6 +694,7 @@ mod tests {
         handle_agent_event(
             &mut ctx,
             &AgentEvent::SteeringInjected { messages: injected },
+            mush_runtime::Applied::Nothing,
             &model,
             false,
             &None,

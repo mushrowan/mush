@@ -274,15 +274,13 @@ async fn dispatch_agent_event(
             .meta(pane_id)
             .map(|meta| meta.model.clone())
             .unwrap_or_else(|| tui_config.model.clone());
-        let (app, conversation, image_protos) = pane.fields_mut();
-        let mut ctx = event_handler::EventCtx {
-            app,
-            conversation,
-            image_protos,
-        };
+        let applied = pane.runtime.apply_event(&event);
+        let (app, image_protos) = pane.fields_mut();
+        let mut ctx = event_handler::EventCtx { app, image_protos };
         event_handler::handle_agent_event(
             &mut ctx,
             &event,
+            applied,
             &model,
             tui_config.debug_cache,
             image_picker,

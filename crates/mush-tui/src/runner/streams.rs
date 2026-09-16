@@ -391,11 +391,7 @@ async fn auto_compact(
     let pane = session;
     match result {
         crate::slash::CompactionTaskResult::Applied(result) => {
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.runtime.conversation,
-                result,
-            );
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, result);
         }
         crate::slash::CompactionTaskResult::Failed {
             failure,
@@ -410,11 +406,7 @@ async fn auto_compact(
                 Some(&tui_config.cwd),
             )
             .await;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.runtime.conversation,
-                applied,
-            );
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
         }
     }
 }
@@ -851,13 +843,14 @@ mod tests {
             };
             let mut stream = agent_loop(config, messages);
             while let Some(event) = stream.next().await {
+                let applied = mush_runtime::apply_agent_event(&mut conversation, &event);
                 event_handler::handle_agent_event(
                     &mut event_handler::EventCtx {
                         app: &mut app,
-                        conversation: &mut conversation,
                         image_protos: &mut image_protos,
                     },
                     &event,
+                    applied,
                     &model,
                     false,
                     &None,

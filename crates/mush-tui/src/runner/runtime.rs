@@ -268,7 +268,7 @@ impl RunnerRuntime {
                 crate::slash::CompactionTaskResult::Applied(result) => {
                     crate::slash::apply_applied_compaction(
                         &mut pane.app,
-                        &mut pane.runtime.conversation,
+                        &mut pane.runtime,
                         result,
                     );
                     replay_compaction_inputs(pane);
@@ -886,11 +886,7 @@ mod tests {
         };
         {
             let pane = &mut runtime.session;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.runtime.conversation,
-                applied,
-            );
+            crate::slash::apply_applied_compaction(&mut pane.app, &mut pane.runtime, applied);
             replay_compaction_inputs(pane);
         }
 

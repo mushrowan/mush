@@ -11,15 +11,7 @@ use crate::app::{
 };
 use crate::batch_output::parse_batch_output;
 
-pub(crate) fn extract_compaction_summary(text: &str) -> Option<String> {
-    let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
-    let rest = rest.trim_start();
-    let inner = rest
-        .strip_prefix("<summary>")
-        .and_then(|s| s.strip_suffix("</summary>"))
-        .unwrap_or(rest);
-    Some(inner.trim().to_string())
-}
+pub(crate) use mush_runtime::compaction::extract_compaction_summary;
 
 pub(crate) fn format_compaction_banner(summary: &str) -> String {
     format!("━ compacted summary ━\n\n{summary}")
