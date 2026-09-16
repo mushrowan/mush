@@ -112,6 +112,7 @@ struct Inner {
     jobs: Mutex<HashMap<String, Arc<JobCell>>>,
     counter: std::sync::atomic::AtomicU64,
     notice: std::sync::Mutex<Option<NoticeSink>>,
+    orphans: std::sync::Mutex<Option<crate::orphans::OrphanJournal>>,
 }
 
 struct JobCell {
@@ -126,6 +127,27 @@ impl KernelJobs {
             .notice
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
+    pub fn set_orphan_journal(&self, journal: crate::orphans::OrphanJournal) {
+        *self
+            .inner
+            .orphans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+    }
+
+    fn journal(&self, pid: Option<u32>, active: bool) {
+        let Some(pid) = pid else { return };
+        if let Some(journal) = self
+            .inner
+            .orphans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            journal.record(pid, active);
+        }
     }
 
     pub async fn start(
@@ -161,6 +183,7 @@ impl KernelJobs {
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
         let pid = child.id();
+        self.journal(pid, true);
         let cell = Arc::new(JobCell {
             state: Mutex::new(Job {
                 command: command.to_string(),
@@ -244,6 +267,7 @@ impl KernelJobs {
                 })
             };
             cell.done.notify_waiters();
+            jobs.journal(pid, false);
             if let Some(notice) = notice {
                 jobs.emit_notice(&job_id, notice).await;
             }
@@ -486,6 +510,33 @@ mod tests {
         );
         assert_eq!(BashDone::parse(&text), Some(done));
         assert_eq!(BashDone::parse("Background command finished"), None);
+    }
+
+    #[tokio::test]
+    async fn a_job_is_journaled_while_it_runs_and_struck_off_when_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orphans.jsonl");
+        let jobs = KernelJobs::default();
+        jobs.set_orphan_journal(crate::orphans::OrphanJournal::at(&path));
+
+        let (id, pid) = jobs.start(&cwd(), "sleep 0.2", None, None).await.unwrap();
+        let running = std::fs::read_to_string(&path).unwrap();
+        let _ = jobs.wait(&id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let finished = std::fs::read_to_string(&path).unwrap();
+
+        let pid = pid.unwrap();
+        assert!(running.contains(&format!("\"pid\":{pid},")), "{running}");
+        assert!(running.contains("\"active\":true"), "{running}");
+        assert_eq!(finished.lines().count(), 2, "{finished}");
+        assert!(
+            finished
+                .lines()
+                .last()
+                .unwrap()
+                .contains("\"active\":false"),
+            "{finished}"
+        );
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ pub mod kernel_jobs;
 pub mod ls;
 pub mod notification;
 pub mod notify_user;
+pub mod orphans;
 pub mod read;
 pub mod read_ledger;
 pub mod repo_map;

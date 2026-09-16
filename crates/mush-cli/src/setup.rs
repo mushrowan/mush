@@ -92,9 +92,17 @@ impl AppSetup {
         let rlm = args.rlm || cfg.rlm;
         let classic_tools = !args.no_tools && !rlm;
         let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
+        let orphans = mush_tools::orphans::OrphanJournal::at(
+            mush_session::data_dir().join("orphan-processes.jsonl"),
+        );
+        let reaped = orphans.reap_abandoned();
+        if !reaped.killed.is_empty() {
+            tracing::info!(pids = ?reaped.killed, "killed bash jobs left by an earlier mush");
+        }
         let mut tools = if rlm && !args.no_tools {
             let cwd_arc: Arc<std::path::Path> = Arc::from(cwd.as_path());
             let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
+            host.jobs().set_orphan_journal(orphans);
             if let Some(sink) = args.kernel_notice_sink.clone() {
                 host.jobs().set_notice_sink(sink);
             }
