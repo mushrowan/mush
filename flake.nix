@@ -74,6 +74,7 @@
           filter = path: type:
             (builtins.match ".*tests/fixtures/.*" path != null)
             || (builtins.match ".*/snapshots/.*" path != null)
+            || (builtins.match ".*/mush-kernel/shim/.*" path != null)
             || (craneLib.filterCargoSources path type);
         };
 

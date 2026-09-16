@@ -56,7 +56,9 @@ in {
       doCheck = false;
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.makeWrapper];
       postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-        wrapProgram $out/bin/mush --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]}
+        wrapProgram $out/bin/mush \
+          --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]} \
+          --set-default MUSH_KERNEL_PYTHON ${pkgs.lib.getExe pkgs.python3}
       '';
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
