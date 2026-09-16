@@ -7,6 +7,34 @@ pub struct ProjectContext {
     pub agents_md: Vec<AgentsMd>,
     pub skills: Vec<Skill>,
     pub skill_diagnostics: Vec<SkillDiagnostic>,
+    pub system_prompt: Option<PromptFile>,
+    pub append_system_prompt: Option<PromptFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptFile {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+const CONTEXT_FILE_NAMES: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
+
+fn read_context_file(dir: &Path) -> Option<AgentsMd> {
+    CONTEXT_FILE_NAMES.iter().find_map(|name| {
+        let path = dir.join(name);
+        let content = std::fs::read_to_string(&path).ok()?;
+        Some(AgentsMd { path, content })
+    })
+}
+
+fn find_prompt_file(name: &str, cwd: &Path, config_dir: Option<&Path>) -> Option<PromptFile> {
+    std::iter::once(cwd.join(".mush"))
+        .chain(config_dir.map(Path::to_path_buf))
+        .find_map(|dir| {
+            let path = dir.join(name);
+            let content = std::fs::read_to_string(&path).ok()?;
+            Some(PromptFile { path, content })
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -62,15 +90,7 @@ pub fn find_nested_agents_md(cwd: &Path, target: &Path) -> Vec<AgentsMd> {
             continue;
         };
         current.push(name);
-        let agents_path = current.join("AGENTS.md");
-        if agents_path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&agents_path)
-        {
-            results.push(AgentsMd {
-                path: agents_path,
-                content,
-            });
-        }
+        results.extend(read_context_file(&current));
     }
 
     results
@@ -85,15 +105,7 @@ fn find_agents_md_inner(
 
     let mut dir = Some(cwd.to_path_buf());
     while let Some(d) = dir {
-        let agents_path = d.join("AGENTS.md");
-        if agents_path.is_file()
-            && let Ok(content) = std::fs::read_to_string(&agents_path)
-        {
-            results.push(AgentsMd {
-                path: agents_path,
-                content,
-            });
-        }
+        results.extend(read_context_file(&d));
 
         if home.is_some_and(|h| d == h) {
             break;
@@ -241,6 +253,8 @@ fn discover_project_context_inner(
         agents_md,
         skills,
         skill_diagnostics,
+        system_prompt: find_prompt_file("SYSTEM.md", cwd, config_dir),
+        append_system_prompt: find_prompt_file("APPEND_SYSTEM.md", cwd, config_dir),
     }
 }
 
@@ -465,6 +479,39 @@ more content
         assert_eq!(skill.source, SkillSource::Project);
         assert_eq!(ctx.skill_diagnostics.len(), 1);
         assert_eq!(ctx.skill_diagnostics[0].path, user.join("SKILL.md"));
+    }
+
+    #[test]
+    fn claude_md_stands_in_when_there_is_no_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let cwd = home.join("repo/sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(home.join("repo/CLAUDE.md"), "claude rules").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "agents rules").unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "ignored twin").unwrap();
+
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+
+        let contents: Vec<_> = ctx.agents_md.iter().map(|a| a.content.as_str()).collect();
+        assert_eq!(contents, ["claude rules", "agents rules"]);
+    }
+
+    #[test]
+    fn a_project_system_md_beats_the_global_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let cwd = home.join("repo");
+        std::fs::create_dir_all(cwd.join(".mush")).unwrap();
+        std::fs::create_dir_all(home.join(".config/mush")).unwrap();
+        std::fs::write(cwd.join(".mush/SYSTEM.md"), "project prompt").unwrap();
+        std::fs::write(home.join(".config/mush/SYSTEM.md"), "global prompt").unwrap();
+        std::fs::write(home.join(".config/mush/APPEND_SYSTEM.md"), "global extra").unwrap();
+
+        let ctx = discover_project_context_with_home(&cwd, Some(home));
+
+        assert_eq!(ctx.system_prompt.unwrap().content, "project prompt");
+        assert_eq!(ctx.append_system_prompt.unwrap().content, "global extra");
     }
 
     #[test]

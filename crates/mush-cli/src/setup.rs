@@ -381,12 +381,8 @@ fn format_available_skills(skills: &[loader::Skill]) -> String {
     out
 }
 
-pub fn build_system_prompt_from_context(
-    context: &loader::ProjectContext,
-    cwd: &std::path::Path,
-) -> String {
-    let cwd_str = cwd.display();
-    let mut prompt = format!(
+fn default_system_prompt(cwd_str: &str) -> String {
+    format!(
         "You are running inside mush, a minimal coding agent harness. \
          You help users by reading files, executing commands, \
          editing code, and writing new files.\n\n\
@@ -412,7 +408,22 @@ pub fn build_system_prompt_from_context(
          multiple files that don't depend on each other, use the Batch tool to do them \
          all in a single call. This saves round-trips and helps you reason about \
          related changes holistically before making them"
-    );
+    )
+}
+
+pub fn build_system_prompt_from_context(
+    context: &loader::ProjectContext,
+    cwd: &std::path::Path,
+) -> String {
+    let cwd_str = cwd.display().to_string();
+    let mut prompt = match &context.system_prompt {
+        Some(file) => file.content.trim_end().to_string(),
+        None => default_system_prompt(&cwd_str),
+    };
+    if let Some(extra) = &context.append_system_prompt {
+        prompt.push_str("\n\n");
+        prompt.push_str(extra.content.trim_end());
+    }
 
     for agents in &context.agents_md {
         prompt.push_str("\n\n# Project Context\n\n");
@@ -765,6 +776,32 @@ mod tests {
     }
 
     #[test]
+    fn a_system_md_replaces_the_default_and_keeps_context_files() {
+        let context = ProjectContext {
+            agents_md: vec![mush_ext::AgentsMd {
+                path: "/repo/AGENTS.md".into(),
+                content: "project rules".into(),
+            }],
+            skills: vec![],
+            skill_diagnostics: vec![],
+            system_prompt: Some(mush_ext::PromptFile {
+                path: "/repo/.mush/SYSTEM.md".into(),
+                content: "you are a terse reviewer\n".into(),
+            }),
+            append_system_prompt: Some(mush_ext::PromptFile {
+                path: "/home/u/.config/mush/APPEND_SYSTEM.md".into(),
+                content: "always answer in british english".into(),
+            }),
+        };
+
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+
+        assert!(prompt.starts_with("you are a terse reviewer\n\nalways answer in british english"));
+        assert!(!prompt.contains("You are running inside mush"));
+        assert!(prompt.contains("# Project Context\n\nproject rules"));
+    }
+
+    #[test]
     fn hidden_skills_stay_out_of_the_prompt() {
         let context = ProjectContext {
             agents_md: vec![],
@@ -776,6 +813,8 @@ mod tests {
                 disable_model_invocation: true,
             }],
             skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
         };
 
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
@@ -790,6 +829,8 @@ mod tests {
             agents_md: vec![],
             skills: vec![],
             skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(
@@ -808,6 +849,8 @@ mod tests {
             agents_md: vec![],
             skills: vec![],
             skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
@@ -824,6 +867,8 @@ mod tests {
             agents_md: vec![],
             skills: vec![],
             skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
         };
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(prompt.contains("Continue authorised work within the task scope."));
@@ -864,6 +909,8 @@ mod tests {
                 },
             ],
             skill_diagnostics: vec![],
+            system_prompt: None,
+            append_system_prompt: None,
         };
 
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
