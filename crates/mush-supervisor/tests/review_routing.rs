@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -2212,4 +2212,151 @@ fn another_tasks_verdict_cannot_launch_or_reach_parent() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn full_outbox_replays_after_parent_returns_with_completed_correction() {
+    let fixture = Fixture::new(true, true, "rejected");
+    let detached = fixture.root.path().join("detached-parent");
+    fs::rename(&fixture.inbox, &detached).unwrap();
+    let report = fixture.cwd.join("report.json");
+    let original_report = fs::read(&report).unwrap();
+    let policy = fixture.root.path().join("pool/policy.json");
+    let original_policy = fs::read(&policy).unwrap();
+    let mut full: Value = serde_json::from_slice(&original_policy).unwrap();
+    full["capacity"] = json!(2);
+    write(&policy, &full);
+    fixture.route();
+    for index in 0..62 {
+        if index % 2 == 0 {
+            fs::write(&report, "{\"manual\":true}").unwrap();
+        } else {
+            fs::write(&report, &original_report).unwrap();
+        }
+        fixture.route();
+    }
+    let history_path = fixture.route.join("parent-events.json");
+    let history_bytes = fs::read(&history_path).unwrap();
+    let history: Vec<mush_supervisor::inbox::Event> =
+        serde_json::from_slice(&history_bytes).unwrap();
+    assert_eq!(history.len(), 64);
+    fs::write(&policy, original_policy).unwrap();
+    fixture.route();
+    assert_eq!(fixture.state()["producer"], "attempt_finished");
+    assert_eq!(fs::read(&history_path).unwrap(), history_bytes);
+    fs::rename(detached, &fixture.inbox).unwrap();
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    fixture.route();
+    fixture.route();
+    assert_eq!(
+        fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.len(), history.len(), "{}", fixture.state());
+    assert_eq!(pending, history);
+    for event in history.iter().rev() {
+        inbox.acknowledge(&event.event_id).unwrap();
+    }
+    fixture.route();
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].assignment_id, 65);
+    assert!(
+        pending[0]
+            .review
+            .as_ref()
+            .unwrap()
+            .producer_action
+            .starts_with("attempt_finished")
+    );
+}
+
+#[test]
+fn invalid_or_exhausted_parent_sequence_preserves_durable_outbox() {
+    for scenario in ["exhausted", "missing", "oversized"] {
+        let fixture = Fixture::new(false, true, "accepted");
+        fixture.route();
+        let history_path = fixture.route.join("parent-events.json");
+        let mut history: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        history[0]["review"]["producer_action"] = json!("previous");
+        match scenario {
+            "exhausted" => {
+                history[0]["assignment_id"] = json!(u32::MAX);
+                history[0]["round"] = json!(u32::MAX);
+                history[0]["event_id"] =
+                    json!(format!("review-parser-task-1.reviewer.{}", u32::MAX));
+            }
+            "missing" => {
+                history[0].as_object_mut().unwrap().remove("assignment_id");
+            }
+            "oversized" => history = json!(vec![history[0].clone(); 65]),
+            _ => unreachable!(),
+        }
+        write(&history_path, &history);
+        let bytes = fs::read(&history_path).unwrap();
+        let inbox = Inbox::open(&fixture.inbox).unwrap();
+        let pending = inbox.pending().unwrap();
+        fixture.route();
+        fixture.route();
+        assert_eq!(fixture.state()["parent"], "pending", "{scenario}");
+        assert_eq!(fs::read(&history_path).unwrap(), bytes, "{scenario}");
+        assert_eq!(inbox.pending().unwrap(), pending, "{scenario}");
+        assert!(!fixture.root.path().join("calls").exists());
+    }
+}
+
+#[test]
+fn router_killed_after_outbox_write_replays_the_same_parent_event() {
+    let fixture = Fixture::new(false, true, "accepted");
+    let inbox = Inbox::open(&fixture.inbox).unwrap();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(fixture.inbox.join("queue.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        .env("HOME", fixture.root.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let history_path = fixture.route.join("parent-events.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !history_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let history = fs::read(&history_path);
+    let pending = inbox.pending().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(lock);
+    let history = history.unwrap();
+    assert!(pending.is_empty());
+    fixture.route();
+    fixture.route();
+    assert_eq!(fs::read(&history_path).unwrap(), history);
+    let pending = inbox.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].assignment_id, 1);
+    assert_eq!(pending[0].event_id, "review-parser-task-1.reviewer.1");
+    inbox.acknowledge(&pending[0].event_id).unwrap();
+    fixture.route();
+    assert!(inbox.pending().unwrap().is_empty());
+    assert_eq!(inbox.events().unwrap(), pending);
+    assert!(!fixture.root.path().join("calls").exists());
 }
