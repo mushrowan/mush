@@ -65,13 +65,14 @@ pub fn run_id(manifest: &Manifest) -> Result<String> {
 }
 
 pub fn assignment(previous: Option<&Value>, round: u32) -> u32 {
+    let saved = previous
+        .and_then(|v| v["assignment_id"].as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(1);
     if previous.is_some_and(|v| v["state"] == "follow_up_pending") {
-        round.saturating_add(1)
+        saved.max(round.saturating_add(1))
     } else {
-        previous
-            .and_then(|v| v["assignment_id"].as_u64())
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(1)
+        saved
     }
 }
 
