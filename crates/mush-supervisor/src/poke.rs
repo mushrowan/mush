@@ -142,11 +142,7 @@ pub async fn reopen(manifest: &Manifest, job: &Worker, previous: Option<&Value>)
     let mut state = previous.clone();
     state["state"] = json!("follow_up_pending");
     if manifest.journalled() {
-        let last = round.max(previous["assignment_id"].as_u64().unwrap_or(0));
-        let next = u32::try_from(last)?
-            .checked_add(1)
-            .ok_or("worker assignment overflow")?;
-        state["assignment_id"] = json!(next);
+        state["assignment_id"] = json!(crate::events::next_assignment(previous, round)?);
     }
     state["at"] = json!(Utc::now());
     state["detail"] = json!("explicit message queued");

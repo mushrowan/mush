@@ -110,6 +110,10 @@ pub fn queue_locked(directory: &Path, worker: &str, prompt_file: &Path) -> Resul
     if round >= u64::from(manifest.max_rounds) {
         return Err("worker round budget is exhausted".into());
     }
+    let assignment = manifest
+        .journalled()
+        .then(|| crate::events::next_assignment(&state, round))
+        .transpose()?;
     if !manifest.status_file && !directory.join("status-enabled").exists() {
         return Err("follow-up requires checkpointed sessions".into());
     }
@@ -154,8 +158,8 @@ pub fn queue_locked(directory: &Path, worker: &str, prompt_file: &Path) -> Resul
     report["state"] = json!("working");
     report["follow_up"] = json!({"after_round":round,"prompt":archive.join("prompt.txt"),"previous_report":archive.join("report.json"),"queued_at":Utc::now()});
     state["state"] = json!("follow_up_pending");
-    if manifest.journalled() {
-        state["assignment_id"] = json!(round + 1);
+    if let Some(assignment) = assignment {
+        state["assignment_id"] = json!(assignment);
     }
     state["session_id"] = json!(session);
     state["detail"] = json!("explicit follow-up queued");

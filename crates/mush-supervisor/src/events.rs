@@ -64,6 +64,13 @@ pub fn run_id(manifest: &Manifest) -> Result<String> {
         .ok_or_else(|| "invalid event run identity".into())
 }
 
+pub fn next_assignment(previous: &Value, round: u64) -> Result<u32> {
+    let last = round.max(previous["assignment_id"].as_u64().unwrap_or(0));
+    u32::try_from(last)?
+        .checked_add(1)
+        .ok_or_else(|| "worker assignment overflow".into())
+}
+
 pub fn assignment(previous: Option<&Value>, round: u32) -> u32 {
     let saved = previous
         .and_then(|v| v["assignment_id"].as_u64())
