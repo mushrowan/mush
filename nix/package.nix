@@ -40,6 +40,21 @@
 
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
+  kernelPython = pkgs.python3.withPackages (ps: [
+    ps.requests
+    ps.httpx
+    ps.pyyaml
+    ps.tomli
+    ps.python-dotenv
+    ps.pandas
+    ps.numpy
+    ps.scipy
+    ps.beautifulsoup4
+    ps.lxml
+    ps.pydantic
+    ps.tyro
+  ]);
+
   schemaEmitter = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
@@ -58,7 +73,7 @@ in {
       postFixup = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
         wrapProgram $out/bin/mush \
           --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]} \
-          --set-default MUSH_KERNEL_PYTHON ${pkgs.lib.getExe pkgs.python3}
+          --set-default MUSH_KERNEL_PYTHON ${kernelPython}/bin/python3
       '';
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });

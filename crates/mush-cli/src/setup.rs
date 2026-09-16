@@ -30,6 +30,7 @@ pub struct AppSetup {
     pub skills: mush_tui::SkillCatalogue,
     pub rlm: bool,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
+    pub kernel_packages: Vec<String>,
 }
 
 pub struct SetupArgs {
@@ -99,6 +100,7 @@ impl AppSetup {
         if !reaped.killed.is_empty() {
             tracing::info!(pids = ?reaped.killed, "killed bash jobs left by an earlier mush");
         }
+        let mut kernel_packages = Vec::new();
         let mut tools = if rlm && !args.no_tools {
             let cwd_arc: Arc<std::path::Path> = Arc::from(cwd.as_path());
             let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
@@ -107,6 +109,18 @@ impl AppSetup {
                 host.jobs().set_notice_sink(sink);
             }
             let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
+            let managed = cfg.kernel.managed.then(|| {
+                let mut venv =
+                    mush_kernel::ManagedVenv::at(mush_session::data_dir().join("kernel-venv"));
+                venv.packages
+                    .extend(cfg.kernel.extra_packages.iter().cloned());
+                venv
+            });
+            let plan =
+                mush_kernel::PythonPlan::resolve(cfg.kernel.python.as_deref(), managed.as_ref())?;
+            kernel_packages = kernel_package_labels(&plan, &cfg.kernel.extra_packages).await;
+            ipython.kernel_config_mut().python = cfg.kernel.python.clone();
+            ipython.kernel_config_mut().managed_venv = managed;
             if let Some(sink) = args.output_sink.clone() {
                 ipython = ipython.with_output_sink(sink);
             }
@@ -156,7 +170,7 @@ impl AppSetup {
             .or(cfg.system_prompt.clone())
             .unwrap_or_else(|| {
                 if rlm {
-                    build_rlm_system_prompt(&project_context, &cwd)
+                    build_rlm_system_prompt(&project_context, &cwd, &kernel_packages)
                 } else {
                     build_system_prompt_from_context(&project_context, &cwd)
                 }
@@ -238,6 +252,7 @@ impl AppSetup {
                 },
                 rlm,
                 kernel_state,
+                kernel_packages,
             },
             report,
         ))
@@ -461,13 +476,51 @@ fn default_system_prompt(cwd_str: &str) -> String {
     )
 }
 
-fn rlm_base_prompt(cwd_str: &str) -> String {
+async fn kernel_package_labels(plan: &mush_kernel::PythonPlan, extra: &[String]) -> Vec<String> {
+    let mut labels: Vec<String> = match plan.python_if_present() {
+        Some(python) => {
+            let names: Vec<&str> = mush_kernel::DEFAULT_PACKAGES
+                .iter()
+                .map(|package| package.import_name)
+                .collect();
+            let found = mush_kernel::venv::available_imports(&python, &names).await;
+            mush_kernel::DEFAULT_PACKAGES
+                .iter()
+                .filter(|package| found.iter().any(|name| name == package.import_name))
+                .map(|package| package.label.to_string())
+                .collect()
+        }
+        None if plan.managed() => mush_kernel::DEFAULT_PACKAGES
+            .iter()
+            .map(|package| package.label.to_string())
+            .collect(),
+        None => Vec::new(),
+    };
+    if plan.managed() {
+        labels.extend(extra.iter().cloned());
+    }
+    labels
+}
+
+fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
+    let packages = if packages.is_empty() {
+        "Third-party packages: none are guaranteed. Check with `importlib.util.find_spec` \
+         before importing one."
+            .to_string()
+    } else {
+        format!(
+            "Pre-installed Python packages: {}. Install more with `await bash('uv pip install \
+             --python ' + sys.executable + ' <pkg>')`.",
+            packages.join(", ")
+        )
+    };
     format!(
         "You are running inside mush, a coding agent harness. You work by writing and running \
          Python in a persistent REPL: the `ipython` tool is your only tool. Break a task into \
          steps, run code, read what comes back, and iterate. When the task is done, stop \
          calling tools and give your answer.\n\n\
-         Working directory: {cwd_str}\n\n\
+         Working directory: {cwd_str}\n\
+         {packages}\n\n\
          The kernel:\n\
          - State persists across calls: variables, imports, functions and parsed results stay \
          available. Bind anything you will need again to a name instead of recomputing it.\n\
@@ -499,11 +552,15 @@ fn rlm_base_prompt(cwd_str: &str) -> String {
     )
 }
 
-pub fn build_rlm_system_prompt(context: &loader::ProjectContext, cwd: &std::path::Path) -> String {
+pub fn build_rlm_system_prompt(
+    context: &loader::ProjectContext,
+    cwd: &std::path::Path,
+    packages: &[String],
+) -> String {
     let cwd_str = cwd.display().to_string();
     let mut prompt = match &context.system_prompt {
         Some(file) => file.content.trim_end().to_string(),
-        None => rlm_base_prompt(&cwd_str),
+        None => rlm_base_prompt(&cwd_str, packages),
     };
     if let Some(extra) = &context.append_system_prompt {
         prompt.push_str("\n\n");
@@ -912,9 +969,14 @@ mod tests {
             append_system_prompt: None,
         };
 
-        let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &["requests".into(), "numpy".into()],
+        );
 
         assert!(prompt.contains("the `ipython` tool is your only tool"));
+        assert!(prompt.contains("Pre-installed Python packages: requests, numpy."));
         assert!(prompt.contains("`bash(command, timeout=None)` starts a command"));
         assert!(prompt.contains("end your turn"));
         assert!(prompt.contains("await edit(path, old, new)"));

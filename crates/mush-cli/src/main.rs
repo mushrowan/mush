@@ -830,9 +830,15 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         },
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
+            let rlm = setup.rlm;
+            let kernel_packages = setup.kernel_packages.clone();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
                 let project = mush_ext::loader::discover_project_context_with(cwd, &discovery);
-                let system_prompt = build_system_prompt_from_context(&project, cwd);
+                let system_prompt = if rlm {
+                    setup::build_rlm_system_prompt(&project, cwd, &kernel_packages)
+                } else {
+                    build_system_prompt_from_context(&project, cwd)
+                };
                 let templates = mush_ext::discover_templates(cwd);
                 mush_tui::ReloadedContext {
                     system_prompt,

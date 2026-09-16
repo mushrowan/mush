@@ -20,6 +20,7 @@ const BUSY_INTERRUPT_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub python: Option<PathBuf>,
+    pub managed_venv: Option<crate::venv::ManagedVenv>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub ready_timeout: Duration,
@@ -30,6 +31,7 @@ impl Default for KernelConfig {
     fn default() -> Self {
         Self {
             python: None,
+            managed_venv: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
             ready_timeout: Duration::from_secs(20),
@@ -130,7 +132,20 @@ impl Kernel {
         config: KernelConfig,
         handler: Arc<dyn HostRequestHandler>,
     ) -> Result<Self, KernelError> {
-        let python = crate::python::resolve_python(config.python.as_deref())?;
+        Self::start_with_progress(config, handler, &|_| {}).await
+    }
+
+    pub async fn start_with_progress(
+        config: KernelConfig,
+        handler: Arc<dyn HostRequestHandler>,
+        progress: &(dyn Fn(&str) + Sync),
+    ) -> Result<Self, KernelError> {
+        let python = crate::python::PythonPlan::resolve(
+            config.python.as_deref(),
+            config.managed_venv.as_ref(),
+        )?
+        .realise(progress)
+        .await?;
         let shim_dir = tempfile::Builder::new().prefix("mush-kernel-").tempdir()?;
         let shim_path = shim_dir.path().join("mush_kernel.py");
         std::fs::write(&shim_path, SHIM)?;

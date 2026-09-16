@@ -1,12 +1,15 @@
 pub mod kernel;
 pub mod protocol;
 pub mod python;
+pub mod venv;
 
 pub use kernel::{
     CellError, CellOutput, HostError, HostRequestHandler, Kernel, KernelConfig, NoHost,
     RestoreReport, SnapshotReport,
 };
 pub use protocol::{Event, PROTOCOL_VERSION, Request};
+pub use python::PythonPlan;
+pub use venv::{DEFAULT_PACKAGES, ManagedVenv, Package};
 
 #[async_trait::async_trait]
 pub trait KernelState: Send + Sync {
@@ -55,6 +58,13 @@ pub enum KernelError {
     Exited(String),
     #[error("an interrupted cell is still running")]
     Busy,
+    #[error(
+        "uv is needed to set up the kernel's python. install uv, or point {} at a python",
+        python::PYTHON_ENV
+    )]
+    NoUv,
+    #[error("kernel python setup failed: {0}")]
+    Bootstrap(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

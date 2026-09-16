@@ -372,6 +372,29 @@
       ],
       "type": "string"
     },
+    "KernelConfig": {
+      "properties": {
+        "extra_packages": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "managed": {
+          "default": true,
+          "type": "boolean"
+        },
+        "python": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "KeyboardEnhancementMode": {
       "enum": [
         "auto",
@@ -992,6 +1015,14 @@
         "pre_session": [],
         "pre_tool_use": [],
         "stop": []
+      }
+    },
+    "kernel": {
+      "$ref": "#/$defs/KernelConfig",
+      "default": {
+        "extra_packages": [],
+        "managed": true,
+        "python": null
       }
     },
     "keys": {

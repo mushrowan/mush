@@ -248,8 +248,18 @@ impl IpythonTool {
 
     async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
         let mut slot = self.kernel.lock().await;
+        let sink = self.output_sink.clone();
+        let exec_id = mush_agent::exec_context::current_exec_id();
         if slot.is_none() {
-            let kernel = Kernel::start(self.kernel_config(), self.host.clone()).await?;
+            let progress = |message: &str| {
+                tracing::info!("{message}");
+                if let Some(sink) = &sink {
+                    sink(&exec_id, message);
+                }
+            };
+            let kernel =
+                Kernel::start_with_progress(self.kernel_config(), self.host.clone(), &progress)
+                    .await?;
             if let Some(path) = self.pending_restore.lock().await.take()
                 && path.is_file()
             {
@@ -265,8 +275,6 @@ impl IpythonTool {
             *slot = Some(kernel);
         }
         let kernel = slot.as_ref().ok_or(KernelError::Pipes)?;
-        let sink = self.output_sink.clone();
-        let exec_id = mush_agent::exec_context::current_exec_id();
         let mut live = String::new();
         let mut last_emit = std::time::Instant::now() - LIVE_OUTPUT_INTERVAL;
         let mut pending = false;

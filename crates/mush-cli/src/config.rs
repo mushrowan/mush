@@ -31,6 +31,24 @@ pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct KernelConfig {
+    pub python: Option<std::path::PathBuf>,
+    pub managed: bool,
+    pub extra_packages: Vec<String>,
+}
+
+impl Default for KernelConfig {
+    fn default() -> Self {
+        Self {
+            python: None,
+            managed: true,
+            extra_packages: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(extend("x-nixcfg-name" = "mush", "x-nixcfg-config-format" = "toml"))]
 #[serde(default)]
 pub struct Config {
@@ -55,6 +73,8 @@ pub struct Config {
     #[serde(default)]
     pub rlm: bool,
     pub rlm_max_depth: Option<u32>,
+    #[serde(default)]
+    pub kernel: KernelConfig,
     pub confirm_tools: bool,
     pub show_cost: bool,
     pub show_usage_lines: bool,
@@ -122,6 +142,7 @@ impl Default for Config {
             auto_fork_compact: false,
             rlm: false,
             rlm_max_depth: None,
+            kernel: KernelConfig::default(),
             confirm_tools: false,
             show_cost: false,
             show_usage_lines: false,

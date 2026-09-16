@@ -343,3 +343,37 @@ async fn a_kernel_that_dies_mid_cell_reports_exit() {
         "{error}"
     );
 }
+
+#[tokio::test]
+#[ignore = "needs uv and the network"]
+async fn a_managed_venv_is_bootstrapped_with_uv_and_hosts_a_kernel() {
+    let dir = tempfile::tempdir().unwrap();
+    let venv = mush_kernel::ManagedVenv {
+        dir: dir.path().join("kernel-venv"),
+        python_version: mush_kernel::venv::PYTHON_VERSION.into(),
+        packages: vec!["tomli".into()],
+    };
+    let seen = std::sync::Mutex::new(Vec::new());
+    let kernel = Kernel::start_with_progress(
+        KernelConfig {
+            cwd: std::env::temp_dir(),
+            managed_venv: Some(venv.clone()),
+            ..KernelConfig::default()
+        },
+        Arc::new(NoHost),
+        &|message| seen.lock().unwrap().push(message.to_string()),
+    )
+    .await
+    .unwrap();
+
+    let output = kernel
+        .execute("import tomli, sys\n(tomli.__name__, sys.version_info[:2] == (3, 12))")
+        .await
+        .unwrap();
+
+    assert_eq!(output.result.as_deref(), Some("('tomli', True)"));
+    assert_eq!(kernel.python, venv.python_path());
+    assert!(venv.is_current());
+    assert_eq!(seen.lock().unwrap().len(), 2, "{:?}", seen.lock().unwrap());
+    kernel.shutdown().await.unwrap();
+}
