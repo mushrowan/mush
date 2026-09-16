@@ -43,6 +43,7 @@ pub fn handle(
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
             help.push_str("  /name [title]  - show or set the session title\n");
+            help.push_str("  /session       - show the session id, file and message counts\n");
             help.push_str(
                 "  /skills        - list loaded skills, their sources and any warnings\n",
             );
@@ -257,6 +258,25 @@ pub fn handle(
         }
         SlashAction::Skills => {
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
+            None
+        }
+        SlashAction::SessionInfo => {
+            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+            let path = store.session_path(&tui_config.session_id);
+            let saved = if path.exists() {
+                ""
+            } else {
+                " (not saved yet)"
+            };
+            let title = app.session_title.as_deref().unwrap_or("untitled");
+            app.push_system_message(format!(
+                "session: {title}\nid: {}\nfile: {}{saved}\nmessages in context: {}, entries in tree: {}\nmodel: {}",
+                tui_config.session_id,
+                path.display(),
+                conversation.context_len(),
+                conversation.tree().len(),
+                app.model_id,
+            ));
             None
         }
         SlashAction::Name { title: None } => {

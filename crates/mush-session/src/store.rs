@@ -77,7 +77,7 @@ impl SessionStore {
         Ok(())
     }
 
-    fn session_path(&self, id: &SessionId) -> PathBuf {
+    pub fn session_path(&self, id: &SessionId) -> PathBuf {
         self.base_dir.join(format!("{id}.json"))
     }
 

@@ -30,6 +30,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("search", "search conversation"),
     ("cost", "show session cost"),
     ("name", "show or set the session title"),
+    ("session", "show the session id, file and message counts"),
     (
         "skills",
         "list loaded skills, their sources and any warnings",

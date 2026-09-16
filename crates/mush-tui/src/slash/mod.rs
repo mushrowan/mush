@@ -80,6 +80,7 @@ pub enum SlashAction {
         title: Option<String>,
     },
     Skills,
+    SessionInfo,
     Endpoints {
         model_id: Option<String>,
     },
@@ -183,6 +184,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         }),
         "cost" => Ok(SlashAction::Cost),
         "skills" => Ok(SlashAction::Skills),
+        "session" => Ok(SlashAction::SessionInfo),
         "name" | "rename" => Ok(SlashAction::Name {
             title: (!args.is_empty()).then(|| args.to_string()),
         }),
