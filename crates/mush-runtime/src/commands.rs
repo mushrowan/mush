@@ -53,6 +53,17 @@ pub enum SessionEvent {
 
 impl SessionRuntime {
     pub async fn handle(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
+        let events = self.dispatch(command).await;
+        if events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::TranscriptReplaced { .. }))
+        {
+            self.refresh_context_tokens();
+        }
+        events
+    }
+
+    async fn dispatch(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
         match command {
             SessionCommand::New => {
                 self.save_now();
@@ -284,6 +295,11 @@ impl SessionRuntime {
             Ok(None) => {}
             Err(error) => tracing::warn!(%error, "kernel state snapshot failed"),
         }
+    }
+
+    pub fn refresh_context_tokens(&mut self) {
+        let estimate = mush_session::compact::estimate_tokens(&self.conversation.context());
+        self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
     }
 
     pub fn set_kernel_state(&mut self, kernel: Option<Arc<dyn KernelState>>) {

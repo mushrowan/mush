@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod compaction;
+pub mod connection;
 pub mod session;
 pub mod snapshot;
 pub mod turn;
@@ -9,6 +10,10 @@ use mush_ai::types::{Message, Timestamp, ToolResultMessage};
 use mush_session::ConversationState;
 
 pub use commands::{Replaced, SessionCommand, SessionEvent};
+pub use connection::{
+    AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
+    InProcessConnection, PRIMARY_PANE,
+};
 pub use session::{
     ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,
     StreamGeneration, StreamMeta, TurnEvent, TurnEvents, TurnStream,

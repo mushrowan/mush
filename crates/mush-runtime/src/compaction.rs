@@ -28,6 +28,7 @@ pub fn extract_fresh_summary(messages: &[Message]) -> Option<String> {
 
 pub const MIN_MESSAGES_FOR_COMPACTION: usize = 4;
 
+#[derive(Debug)]
 pub enum CompactionTaskResult {
     Applied(AppliedCompaction),
     Failed {
@@ -37,6 +38,7 @@ pub enum CompactionTaskResult {
     },
 }
 
+#[derive(Debug)]
 pub struct AppliedCompaction {
     pub messages: Vec<Message>,
     pub summary: String,
@@ -215,6 +217,7 @@ impl SessionRuntime {
     ) -> usize {
         self.conversation
             .apply_compaction(summary, summarised_count, messages);
+        self.refresh_context_tokens();
         self.conversation.context_len()
     }
 }

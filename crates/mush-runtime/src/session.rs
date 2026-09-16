@@ -213,6 +213,8 @@ pub struct SessionRuntime {
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub rlm_depth: u32,
     pub rlm_max_depth: u32,
+    pub thinking_level: mush_ai::types::ThinkingLevel,
+    pub context_tokens: mush_ai::types::TokenCount,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -240,6 +242,8 @@ impl SessionRuntime {
             kernel_state: None,
             rlm_depth: 0,
             rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
+            thinking_level: mush_ai::types::ThinkingLevel::Off,
+            context_tokens: mush_ai::types::TokenCount::ZERO,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }
@@ -267,7 +271,18 @@ impl SessionRuntime {
     }
 
     pub fn apply_event(&mut self, event: &mush_agent::AgentEvent) -> crate::Applied {
-        crate::apply_agent_event(&mut self.conversation, event)
+        let applied = crate::apply_agent_event(&mut self.conversation, event);
+        match event {
+            mush_agent::AgentEvent::MessageEnd { message } => {
+                self.context_tokens = message.usage.total_input_tokens();
+            }
+            mush_agent::AgentEvent::ContextCompacted { compaction, .. } => {
+                let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
+                self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
+            }
+            _ => {}
+        }
+        applied
     }
 
     pub fn save_debounced(&mut self) {

@@ -653,12 +653,9 @@ pub(super) async fn start_pending_streams<'a>(
         return;
     }
     for (pane_id, prompt) in take_pending_prompts(session, pending_prompt) {
-        let request = mush_runtime::TurnRequest {
-            pane_id,
-            prompt,
-            thinking_level: session.app.thinking_level.clone(),
-            context_tokens: session.app.stats.context_tokens,
-        };
+        session.runtime.thinking_level = session.app.thinking_level.clone();
+        session.runtime.context_tokens = session.app.stats.context_tokens;
+        let request = mush_runtime::TurnRequest { pane_id, prompt };
         session.runtime.start_turn(request, &deps).await;
     }
 }

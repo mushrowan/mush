@@ -6,8 +6,8 @@ use mush_agent::{AgentConfig, AgentInjections, agent_loop};
 use mush_ai::ApiKey;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
-    ImageContent, Message, Model, PaneId, StreamOptions, TextContent, ThinkingLevel, Timestamp,
-    TokenCount, ToolCallId, UserContent, UserContentPart, UserMessage,
+    ImageContent, Message, Model, PaneId, StreamOptions, TextContent, Timestamp, TokenCount,
+    ToolCallId, UserContent, UserContentPart, UserMessage,
 };
 use tokio::sync::Mutex;
 
@@ -36,8 +36,6 @@ pub struct TurnDeps<'a> {
 pub struct TurnRequest {
     pub pane_id: PaneId,
     pub prompt: PendingPrompt,
-    pub thinking_level: ThinkingLevel,
-    pub context_tokens: TokenCount,
 }
 
 pub struct CompactionTarget {
@@ -132,12 +130,9 @@ impl SessionRuntime {
     }
 
     pub async fn start_turn(&mut self, request: TurnRequest, deps: &TurnDeps<'_>) {
-        let TurnRequest {
-            pane_id,
-            prompt,
-            thinking_level,
-            context_tokens,
-        } = request;
+        let TurnRequest { pane_id, prompt } = request;
+        let thinking_level = self.thinking_level.clone();
+        let context_tokens = self.context_tokens;
         let TurnDeps {
             config,
             injections,
