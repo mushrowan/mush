@@ -247,7 +247,12 @@ impl Registry {
                 || prepared.identity.worker != config.reviewer.worker
                 || prepared.identity.session != config.reviewer.session
                 || prepared.identity.round.checked_add(1) != Some(config.reviewer.round)
-                || prepared.identity.assignment.checked_add(1) != Some(config.reviewer.assignment))
+                || prepared
+                    .identity
+                    .assignment
+                    .max(prepared.identity.round)
+                    .checked_add(1)
+                    != Some(config.reviewer.assignment))
         {
             return Err("review preparation changed the stored pair or counters".into());
         }
