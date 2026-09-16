@@ -95,7 +95,14 @@ impl HostRequestHandler for Echo {
         match kind {
             "echo" => Ok(json!({ "echoed": payload })),
             "bash.start" => Ok(json!({
-                "job_id": format!("job:{}", payload["command"].as_str().unwrap_or("")),
+                "job_id": format!(
+                    "job:{}{}",
+                    payload["command"].as_str().unwrap_or(""),
+                    payload["origin"]
+                        .as_str()
+                        .map(|origin| format!("@{origin}"))
+                        .unwrap_or_default()
+                ),
                 "pid": 42
             })),
             "bash.wait" => Ok(json!({
@@ -134,6 +141,20 @@ async fn bash_is_a_typed_host_request() {
         output.result.as_deref(),
         Some("(3, False, 'ran \"job:ls\"', 42)")
     );
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_handle_started_in_a_cell_carries_the_cell_origin() {
+    let kernel = kernel_with(Arc::new(Echo)).await;
+
+    kernel
+        .execute_from("h = bash('ls')", Some("call_7"), |_| {})
+        .await
+        .unwrap();
+    let output = kernel.execute("(await h).output").await.unwrap();
+
+    assert_eq!(output.result.as_deref(), Some("'ran \"job:ls@call_7\"'"));
     kernel.shutdown().await.unwrap();
 }
 

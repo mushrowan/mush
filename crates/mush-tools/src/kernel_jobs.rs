@@ -7,7 +7,53 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify};
 
-pub type NoticeSink = Arc<dyn Fn(String) + Send + Sync>;
+pub type NoticeSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
+
+const NOTICE_COMMAND_CAP: usize = 2000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashDone {
+    pub pid: Option<u32>,
+    pub exit_code: i32,
+    pub command: String,
+}
+
+impl BashDone {
+    #[must_use]
+    pub fn text(&self) -> String {
+        let pid = self
+            .pid
+            .map_or_else(|| "?".to_string(), |pid| pid.to_string());
+        let command = serde_json::to_string(&self.command).unwrap_or_default();
+        format!(
+            "[bash-done pid:{pid} exit:{}]\n\nCommand: {command}",
+            self.exit_code
+        )
+    }
+
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix("[bash-done pid:")?;
+        let (pid, rest) = rest.split_once(" exit:")?;
+        let (exit_code, rest) = rest.split_once("]\n\nCommand: ")?;
+        Some(Self {
+            pid: pid.parse().ok(),
+            exit_code: exit_code.parse().ok()?,
+            command: serde_json::from_str(rest.trim_end()).ok()?,
+        })
+    }
+
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.exit_code != 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobNotice {
+    pub done: BashDone,
+    pub origin: Option<String>,
+}
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -34,6 +80,7 @@ impl JobEnd {
 #[derive(Debug)]
 struct Job {
     command: String,
+    origin: Option<String>,
     pid: Option<u32>,
     output: String,
     end: Option<JobEnd>,
@@ -86,6 +133,7 @@ impl KernelJobs {
         cwd: &Path,
         command: &str,
         timeout: Option<Duration>,
+        origin: Option<&str>,
     ) -> Result<(String, Option<u32>), String> {
         let id = format!(
             "job-{}",
@@ -116,6 +164,7 @@ impl KernelJobs {
         let cell = Arc::new(JobCell {
             state: Mutex::new(Job {
                 command: command.to_string(),
+                origin: origin.map(str::to_owned),
                 pid,
                 output: String::new(),
                 end: None,
@@ -185,25 +234,25 @@ impl KernelJobs {
                 if job.waiting > 0 {
                     job.read = true;
                 }
-                (!job.read).then(|| {
-                    format!(
-                        "Background command finished: `{}` (pid {}, exit {}). Read the saved handle with `await h.output()` or `await h` and continue.",
-                        command_preview(&job.command),
-                        job.pid.map_or("?".to_string(), |p| p.to_string()),
-                        end.exit_code()
-                    )
+                (!job.read).then(|| JobNotice {
+                    done: BashDone {
+                        pid: job.pid,
+                        exit_code: end.exit_code(),
+                        command: capped_command(&job.command),
+                    },
+                    origin: job.origin.clone(),
                 })
             };
             cell.done.notify_waiters();
-            if let Some(text) = notice {
-                jobs.emit_notice(&job_id, text).await;
+            if let Some(notice) = notice {
+                jobs.emit_notice(&job_id, notice).await;
             }
         });
 
         Ok((id, pid))
     }
 
-    async fn emit_notice(&self, job_id: &str, text: String) {
+    async fn emit_notice(&self, job_id: &str, notice: JobNotice) {
         let already_read = match self.inner.jobs.lock().await.get(job_id) {
             Some(cell) => cell.state.lock().await.read,
             None => true,
@@ -218,7 +267,7 @@ impl KernelJobs {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(sink) = sink {
-            sink(text);
+            sink(notice);
         }
     }
 
@@ -279,12 +328,11 @@ impl KernelJobs {
     }
 }
 
-fn command_preview(command: &str) -> String {
-    let flat = command.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = flat.chars();
-    let head: String = chars.by_ref().take(80).collect();
+fn capped_command(command: &str) -> String {
+    let mut chars = command.chars();
+    let head: String = chars.by_ref().take(NOTICE_COMMAND_CAP).collect();
     if chars.next().is_some() {
-        format!("{head}...")
+        format!("{head}\n... [command truncated]")
     } else {
         head
     }
@@ -341,7 +389,7 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, pid) = jobs
-            .start(&cwd(), "echo one; echo two >&2; exit 4", None)
+            .start(&cwd(), "echo one; echo two >&2; exit 4", None, None)
             .await
             .unwrap();
         let done = jobs.wait(&id).await.unwrap();
@@ -357,7 +405,7 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, _) = jobs
-            .start(&cwd(), "echo started; sleep 30; echo never", None)
+            .start(&cwd(), "echo started; sleep 30; echo never", None, None)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -379,7 +427,7 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, _) = jobs
-            .start(&cwd(), "sleep 30", Some(Duration::from_millis(200)))
+            .start(&cwd(), "sleep 30", Some(Duration::from_millis(200)), None)
             .await
             .unwrap();
         let done = tokio::time::timeout(Duration::from_secs(5), jobs.wait(&id))
@@ -394,22 +442,50 @@ mod tests {
     #[tokio::test]
     async fn an_unread_finish_sends_a_notice_and_a_read_one_does_not() {
         let jobs = KernelJobs::default();
-        let notices = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let notices = Arc::new(std::sync::Mutex::new(Vec::<JobNotice>::new()));
         jobs.set_notice_sink({
             let notices = notices.clone();
-            Arc::new(move |text| notices.lock().unwrap().push(text))
+            Arc::new(move |notice| notices.lock().unwrap().push(notice))
         });
 
-        let (unread, _) = jobs.start(&cwd(), "exit 2", None).await.unwrap();
-        let (read, _) = jobs.start(&cwd(), "sleep 0.3", None).await.unwrap();
+        let (_, pid) = jobs
+            .start(&cwd(), "exit 2", None, Some("call_7"))
+            .await
+            .unwrap();
+        let (read, _) = jobs.start(&cwd(), "sleep 0.3", None, None).await.unwrap();
         let _ = jobs.wait(&read).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let notices = notices.lock().unwrap().clone();
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains("exit 2"), "{notices:?}");
-        assert!(notices[0].contains("`exit 2`"), "{notices:?}");
-        let _ = unread;
+        assert_eq!(
+            notices,
+            vec![JobNotice {
+                done: BashDone {
+                    pid,
+                    exit_code: 2,
+                    command: "exit 2".into(),
+                },
+                origin: Some("call_7".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bash_done_notice_round_trips_through_its_text() {
+        let done = BashDone {
+            pid: Some(4242),
+            exit_code: 3,
+            command: "echo \"hi\"\nsleep 1".into(),
+        };
+
+        let text = done.text();
+
+        assert_eq!(
+            text,
+            "[bash-done pid:4242 exit:3]\n\nCommand: \"echo \\\"hi\\\"\\nsleep 1\""
+        );
+        assert_eq!(BashDone::parse(&text), Some(done));
+        assert_eq!(BashDone::parse("Background command finished"), None);
     }
 
     #[tokio::test]

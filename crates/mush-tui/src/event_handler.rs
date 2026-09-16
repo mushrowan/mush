@@ -92,12 +92,16 @@ pub fn handle_agent_event(
             }
         }
         AgentEvent::SteeringInjected { messages } => {
-            for mut msg in app
-                .messages
-                .iter_mut()
-                .filter(|m| m.queued)
-                .take(messages.len())
-            {
+            let typed = messages
+                .iter()
+                .filter(|m| match m {
+                    Message::User(user) => {
+                        mush_tools::kernel_jobs::BashDone::parse(&user.text()).is_none()
+                    }
+                    _ => true,
+                })
+                .count();
+            for mut msg in app.messages.iter_mut().filter(|m| m.queued).take(typed) {
                 msg.queued = false;
             }
         }
@@ -707,5 +711,43 @@ mod tests {
             .map(|m| (m.content.as_str(), m.queued))
             .collect();
         assert_eq!(queued, vec![("first", false), ("second", true)]);
+    }
+
+    #[test]
+    fn an_injected_bash_done_notice_does_not_dequeue_a_typed_message() {
+        use crate::app::App;
+        use mush_ai::types::{TokenCount, UserContent, UserMessage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let done = mush_tools::kernel_jobs::BashDone {
+            pid: Some(1),
+            exit_code: 0,
+            command: "sleep 1".into(),
+        };
+        app.push_bash_done(&done, None);
+        app.push_queued_message("typed");
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            image_protos: &mut image_protos,
+        };
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(done.text()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::SteeringInjected { messages: injected },
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
+
+        assert!(ctx.app.messages[1].queued);
     }
 }

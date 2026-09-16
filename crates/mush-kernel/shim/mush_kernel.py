@@ -20,6 +20,7 @@ _proto = os.fdopen(_proto_fd, "w", encoding="utf-8", buffering=1)
 _proto_lock = threading.Lock()
 
 _current_cell: contextvars.ContextVar = contextvars.ContextVar("mush_cell", default=None)
+_current_origin: contextvars.ContextVar = contextvars.ContextVar("mush_origin", default=None)
 _loop: asyncio.AbstractEventLoop | None = None
 _pending_replies: dict = {}
 _running: dict = {"id": None, "task": None}
@@ -141,6 +142,8 @@ class BashHandle:
         payload = {"command": command}
         if timeout is not None:
             payload["timeout"] = timeout
+        if _current_origin.get() is not None:
+            payload["origin"] = _current_origin.get()
         self._started = asyncio.ensure_future(self._start(payload))
 
     async def _start(self, payload: dict) -> None:
@@ -215,7 +218,7 @@ def _format_traceback(exc: BaseException) -> list[str]:
     return [line.rstrip("\n") for line in lines]
 
 
-async def _run_cell(cell_id: str, code: str) -> None:
+async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
     global _cell_count
     _cell_count += 1
     filename = f"<cell-{_cell_count}>"
@@ -223,6 +226,7 @@ async def _run_cell(cell_id: str, code: str) -> None:
 
     linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
     token = _current_cell.set(cell_id)
+    origin_token = _current_origin.set(origin)
     ok = True
     try:
         tree = ast.parse(code, filename)
@@ -272,6 +276,7 @@ async def _run_cell(cell_id: str, code: str) -> None:
         sys.stdout.flush()
         sys.stderr.flush()
         _current_cell.reset(token)
+        _current_origin.reset(origin_token)
         _running["id"] = None
         _running["task"] = None
         emit({"type": "done", "id": cell_id, "ok": ok})
@@ -403,7 +408,9 @@ async def _serve() -> None:
                 _reject(future, HostError("kernel shutting down"))
             return
         if kind == "execute":
-            task = asyncio.ensure_future(_run_cell(request["id"], request.get("code", "")))
+            task = asyncio.ensure_future(
+                _run_cell(request["id"], request.get("code", ""), request.get("origin"))
+            )
             _running["id"] = request["id"]
             _running["task"] = task
             try:

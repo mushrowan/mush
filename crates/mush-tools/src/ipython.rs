@@ -82,9 +82,10 @@ impl HostRequestHandler for MushHost {
                     .get("timeout")
                     .and_then(Value::as_u64)
                     .map(std::time::Duration::from_secs);
+                let origin = payload.get("origin").and_then(Value::as_str);
                 let (job_id, pid) = self
                     .jobs
-                    .start(&self.cwd, command, timeout)
+                    .start(&self.cwd, command, timeout, origin)
                     .await
                     .map_err(HostError)?;
                 Ok(json!({ "job_id": job_id, "pid": pid }))
@@ -190,8 +191,9 @@ impl IpythonTool {
         let mut live = String::new();
         let mut last_emit = std::time::Instant::now() - LIVE_OUTPUT_INTERVAL;
         let mut pending = false;
+        let origin = (!exec_id.is_empty()).then_some(exec_id.as_str());
         let outcome = kernel
-            .execute_streaming(code, |event| {
+            .execute_from(code, origin, |event| {
                 let Some(sink) = &sink else { return };
                 match event {
                     mush_kernel::Event::Stdout { text, .. }
@@ -429,16 +431,21 @@ mod tests {
     async fn an_unawaited_finish_reaches_the_notice_sink() {
         let dir = tempfile::tempdir().unwrap();
         let host = MushHost::new(dir.path().into());
-        let notices = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let notices = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::kernel_jobs::JobNotice>::new(),
+        ));
         host.jobs().set_notice_sink({
             let notices = notices.clone();
-            Arc::new(move |text| notices.lock().unwrap().push(text))
+            Arc::new(move |notice| notices.lock().unwrap().push(notice))
         });
         let tool = IpythonTool::with_mush_host(host, dir.path().into());
 
-        let result = tool
-            .execute(
-                json!({ "code": "h = bash('exit 5')\nawait asyncio.sleep(0.3)\n'left running'" }),
+        let result = mush_agent::exec_context::TOOL_EXEC_ID
+            .scope(
+                "call_9".into(),
+                tool.execute(
+                    json!({ "code": "h = bash('exit 5')\nawait asyncio.sleep(0.3)\n'left running'" }),
+                ),
             )
             .await;
 
@@ -446,7 +453,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let notices = notices.lock().unwrap().clone();
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].contains("exit 5"), "{notices:?}");
+        assert_eq!(notices[0].done.command, "exit 5");
+        assert_eq!(notices[0].done.exit_code, 5);
+        assert_eq!(notices[0].origin.as_deref(), Some("call_9"));
         tool.shutdown().await;
     }
 

@@ -310,6 +310,8 @@ fn build_message_lines(
 
     if msg.queued {
         push_queued_lines(msg, style.theme, width, &mut lines);
+    } else if matches!(msg.role, MessageRole::BashDone) {
+        push_bash_done_lines(msg, style.theme, width, &mut lines);
     } else if matches!(msg.role, MessageRole::User) {
         render_user_message_box(style.theme, msg, width, &mut lines);
     } else {
@@ -702,10 +704,84 @@ fn render_tool_panel(
         push_box_content_line(&tc.summary, inner, bg, theme.dim, lines);
     }
 
-    let Some(output) = visible_tool_output(tc, style.detail) else {
+    if let Some(output) = visible_tool_output(tc, style.detail) {
+        render_tool_output(tc, &output, width, lines, style);
+    }
+    if style.detail.shows_thinking()
+        && let Some(done) = &tc.bash_done
+    {
+        let (label, colour) = bash_done_label(done, theme);
+        push_panel_line(
+            vec![Span::styled(
+                format!(
+                    "{label}{HEADER_SEPARATOR}pid {}",
+                    done.pid
+                        .map_or_else(|| "?".to_string(), |pid| pid.to_string())
+                ),
+                Style::default().fg(colour),
+            )],
+            width,
+            bg,
+            lines,
+        );
+    }
+}
+
+fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (String, Color) {
+    if done.failed() {
+        (
+            format!(
+                "background shell command failed{HEADER_SEPARATOR}exit {}",
+                done.exit_code
+            ),
+            theme.tool_error.fg.unwrap_or(Color::Red),
+        )
+    } else {
+        (
+            "background shell command finished".to_string(),
+            theme.dim.fg.unwrap_or(Color::DarkGray),
+        )
+    }
+}
+
+fn push_bash_done_lines(
+    msg: &DisplayMessage,
+    theme: &Theme,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let cw = message_content_width(width as usize);
+    let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&msg.content) else {
+        for text_line in msg.content.lines() {
+            lines.extend(indent_line(
+                Line::styled(text_line.to_string(), theme.dim),
+                cw,
+            ));
+        }
         return;
     };
-    let output = output.as_str();
+    let (label, colour) = bash_done_label(&done, theme);
+    let mark = if done.failed() { "x" } else { "ok" };
+    let command = done.command.lines().next().unwrap_or_default();
+    lines.extend(indent_line(
+        Line::styled(
+            format!("{mark} {label}{HEADER_SEPARATOR}{command}"),
+            Style::default().fg(colour),
+        ),
+        cw,
+    ));
+}
+
+fn render_tool_output(
+    tc: &DisplayToolCall,
+    output: &str,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+    style: &MessageStyle<'_>,
+) {
+    let theme = style.theme;
+    let bg = theme.tool_panel_bg;
+    let inner = panel_content_width(width);
     if tc.name == "edit" {
         let lang = crate::syntax::lang_from_path(&tc.summary);
         for row in super::diff::render_diff_with_lang_mode(

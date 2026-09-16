@@ -313,6 +313,7 @@ fn usage_line_deferred_while_tool_running() {
             output: None,
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         usage: Some(Usage {
             input_tokens: TokenCount::new(100),
@@ -354,6 +355,7 @@ fn tool_calls_render() {
                 output: Some("file1.txt\nfile2.txt".into()),
                 image_data: None,
                 batch: 1,
+                bash_done: None,
             },
             crate::app::DisplayToolCall {
                 tool_call_id: "tc".into(),
@@ -363,6 +365,7 @@ fn tool_calls_render() {
                 output: None,
                 image_data: None,
                 batch: 2,
+                bash_done: None,
             },
         ],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
@@ -385,6 +388,7 @@ fn edit_tool_renders_inline_diff_when_wide() {
             output: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "patching")
     });
@@ -413,6 +417,7 @@ fn edit_tool_renders_inline_diff_when_narrow() {
             output: Some("- println!(\"hello\")\n+ println!(\"world\")".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "patching")
     });
@@ -509,6 +514,7 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
             output: None,
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "checking")
     });
@@ -548,6 +554,7 @@ fn batched_tools_stack_one_panel_per_call() {
         output: None,
         image_data: None,
         batch: 1,
+        bash_done: None,
     };
     app.messages.push(DisplayMessage {
         tool_calls: vec![tool("read"), tool("grep"), tool("bash"), tool("edit")],
@@ -578,6 +585,7 @@ fn a_failed_tool_says_error_in_red() {
             output: Some("error[E0063]: missing field".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "checking")
     });
@@ -636,6 +644,7 @@ fn tool_box_wraps_long_summary() {
             output: None,
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "reading")
     });
@@ -661,6 +670,7 @@ fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
             output: Some(output.clone()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -685,6 +695,7 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
             output: Some(format!("L1: {}", "abcｶﾞ".repeat(4))),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -792,6 +803,7 @@ fn read_tool_box_trims_shared_leading_indent() {
             ),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -822,6 +834,7 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
             output: Some("L1: fn main() {\nL2:     println!(\"hi\");\nL3: }".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -861,6 +874,7 @@ fn bash_tool_summary_is_syntax_highlighted() {
             output: Some("done".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -900,6 +914,7 @@ fn bash_tool_output_is_syntax_highlighted_when_plain() {
             output: Some("for file in *.rs; do echo $file; done".into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -940,6 +955,7 @@ fn bash_tool_output_wraps_long_highlighted_lines() {
             output: Some(long_json.into()),
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -1315,6 +1331,7 @@ fn a_running_tool_defers_the_usage_line() {
         output: None,
         image_data: None,
         batch: 1,
+        bash_done: None,
     });
 
     let lines = message_lines(
@@ -1553,6 +1570,7 @@ fn a_tool_result_rebuilds_only_the_message_that_owns_it() {
             output: Some("compiled in 4.2s".into()),
             image_data: None,
             batch: 0,
+            bash_done: None,
         });
     screen.render(&app, buf.area, &mut buf);
 
@@ -1589,6 +1607,7 @@ fn a_running_tool_call_renders_its_header() {
             output: None,
             image_data: None,
             batch: 1,
+            bash_done: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
     });
@@ -1665,4 +1684,63 @@ fn an_ipython_cell_collapses_to_a_preview_and_expands_with_detail() {
     assert!(details.contains("import re"), "{details}");
     assert!(details.contains("len(matches)"), "{details}");
     assert!(!details.contains("+2 lines"), "{details}");
+}
+
+fn bash_done(exit_code: i32) -> mush_tools::kernel_jobs::BashDone {
+    mush_tools::kernel_jobs::BashDone {
+        pid: Some(4242),
+        exit_code,
+        command: "sleep 20".into(),
+    }
+}
+
+#[test]
+fn an_attached_bash_done_shows_only_when_the_cell_is_expanded() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages.push(DisplayMessage {
+        tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "call_9".into(),
+            name: "ipython".into(),
+            summary: "h = bash('sleep 20')".into(),
+            status: ToolCallStatus::Done,
+            output: None,
+            image_data: None,
+            batch: 1,
+            bash_done: Some(bash_done(0)),
+        }],
+        ..DisplayMessage::new(MessageRole::Assistant, "")
+    });
+
+    let overview = buffer_to_string(&render_app(&app, 70, 8));
+    assert!(!overview.contains("background shell command"), "{overview}");
+
+    app.detail = ChatDetail::Details;
+    let details = buffer_to_string(&render_app(&app, 70, 8));
+    assert!(
+        details.contains("background shell command finished · pid 4242"),
+        "{details}"
+    );
+}
+
+#[test]
+fn a_detached_bash_done_is_one_line_and_names_the_exit_code_on_failure() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_bash_done(&bash_done(0), None);
+    app.push_bash_done(&bash_done(5), None);
+
+    let text = buffer_to_string(&render_app(&app, 80, 8));
+
+    assert!(
+        text.contains("ok background shell command finished · sleep 20"),
+        "{text}"
+    );
+    assert!(
+        text.contains("x background shell command failed · exit 5 · sleep 20"),
+        "{text}"
+    );
+    assert!(!text.contains("bash-done"), "{text}");
+    assert_eq!(
+        message_lines(&app.messages[0], &MessageStyle::for_app(&app), 80).len(),
+        1
+    );
 }

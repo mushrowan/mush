@@ -178,20 +178,41 @@ pub(super) async fn answer_confirmation(
 
 pub(super) async fn submit_kernel_notices(
     session: &mut Session,
-    stream_state: &StreamState,
+    _stream_state: &StreamState,
     notices: &Option<crate::runner::config::KernelNotices>,
 ) -> bool {
     let Some(notices) = notices else {
         return false;
     };
-    let pending: Vec<String> = match notices.lock() {
+    let pending: Vec<mush_tools::kernel_jobs::JobNotice> = match notices.lock() {
         Ok(mut guard) if !guard.is_empty() => guard.drain(..).collect(),
         _ => return false,
     };
-    for text in pending {
-        submit_streaming_input(session, stream_state, text, Vec::new()).await;
+    for notice in pending {
+        submit_notice(session, notice).await;
     }
     true
+}
+
+async fn submit_notice(session: &mut Session, notice: mush_tools::kernel_jobs::JobNotice) {
+    let focused_id = PaneId::new(1);
+    let text = notice.done.text();
+    session
+        .app
+        .push_bash_done(&notice.done, notice.origin.as_deref());
+    if let Some(meta) = session.runtime.turns.meta(focused_id) {
+        meta.steering_queue.lock().await.push(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text))
+                .timestamp_ms(Timestamp::now())
+                .prompt_id(mush_ai::types::PromptId::new())
+                .build(),
+        ));
+    } else {
+        session.app.active_tools.clear();
+        session.app.start_streaming();
+        session.runtime.pending_prompt = Some(PendingPrompt::text(text));
+    }
 }
 
 pub(super) fn poll_live_tool_output(
@@ -905,14 +926,24 @@ mod tests {
         ));
     }
 
+    fn bash_done(command: &str, exit_code: i32) -> mush_tools::kernel_jobs::JobNotice {
+        mush_tools::kernel_jobs::JobNotice {
+            done: mush_tools::kernel_jobs::BashDone {
+                pid: Some(77),
+                exit_code,
+                command: command.into(),
+            },
+            origin: None,
+        }
+    }
+
     #[tokio::test]
     async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let stream_state = StreamState::new();
-        let notices: crate::runner::config::KernelNotices = Arc::new(std::sync::Mutex::new(vec![
-            "Background command finished: `exit 5`".to_string(),
-        ]));
+        let notices: crate::runner::config::KernelNotices =
+            Arc::new(std::sync::Mutex::new(vec![bash_done("exit 5", 5)]));
 
         assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
         assert_eq!(
@@ -921,7 +952,11 @@ mod tests {
                 .pending_prompt
                 .as_ref()
                 .map(|p| p.text.as_str()),
-            Some("Background command finished: `exit 5`")
+            Some("[bash-done pid:77 exit:5]\n\nCommand: \"exit 5\"")
+        );
+        assert_eq!(
+            session.app.messages.last().map(|m| m.role.clone()),
+            Some(crate::app::MessageRole::BashDone)
         );
         assert!(!submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
 
@@ -938,10 +973,41 @@ mod tests {
                 cancel: tokio_util::sync::CancellationToken::new(),
             },
         );
-        notices.lock().unwrap().push("second".into());
+        notices.lock().unwrap().push(bash_done("second", 0));
 
         assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices)).await);
         assert_eq!(steering_queue.lock().await.len(), 1);
+        assert!(!session.app.messages.iter().any(|m| m.queued));
+    }
+
+    #[tokio::test]
+    async fn a_notice_with_a_known_origin_attaches_to_its_cell() {
+        let mut session = Session::new(app());
+        let stream_state = StreamState::new();
+        let mut cell = crate::app::DisplayMessage::new(crate::app::MessageRole::Assistant, "");
+        cell.tool_calls.push(crate::app::DisplayToolCall {
+            tool_call_id: "call_9".into(),
+            name: "ipython".into(),
+            summary: "h = bash('exit 5')".into(),
+            status: crate::app::ToolCallStatus::Done,
+            output: None,
+            image_data: None,
+            batch: 1,
+            bash_done: None,
+        });
+        session.app.messages.push(cell);
+        let before = session.app.messages.len();
+        let mut notice = bash_done("exit 5", 5);
+        notice.origin = Some("call_9".into());
+        let notices: crate::runner::config::KernelNotices =
+            Arc::new(std::sync::Mutex::new(vec![notice]));
+
+        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices)).await);
+
+        assert_eq!(session.app.messages.len(), before);
+        let attached = &session.app.messages.last().unwrap().tool_calls[0].bash_done;
+        assert_eq!(attached.as_ref().map(|d| d.exit_code), Some(5));
+        assert!(session.runtime.pending_prompt.is_some());
     }
 
     #[tokio::test]

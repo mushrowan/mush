@@ -219,6 +219,7 @@ pub enum MessageRole {
     Assistant,
     System,
     Event(mush_ai::types::EventKind),
+    BashDone,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +231,7 @@ pub struct DisplayToolCall {
     pub output: Option<String>,
     pub image_data: Option<Vec<u8>>,
     pub batch: u32,
+    pub bash_done: Option<mush_tools::kernel_jobs::BashDone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

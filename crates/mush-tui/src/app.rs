@@ -278,6 +278,29 @@ impl App {
             .push(DisplayMessage::new(MessageRole::User, text));
     }
 
+    pub fn push_bash_done(
+        &mut self,
+        done: &mush_tools::kernel_jobs::BashDone,
+        origin: Option<&str>,
+    ) {
+        if let Some(origin) = origin
+            && let Some(mut msg) = self.messages.iter_mut().rev().find(|m| {
+                m.tool_calls
+                    .iter()
+                    .any(|tc| tc.tool_call_id.as_str() == origin)
+            })
+        {
+            for tc in &mut msg.tool_calls {
+                if tc.tool_call_id.as_str() == origin {
+                    tc.bash_done = Some(done.clone());
+                }
+            }
+            return;
+        }
+        self.messages
+            .push(DisplayMessage::new(MessageRole::BashDone, done.text()));
+    }
+
     pub fn push_event_message(&mut self, event: &mush_ai::types::EventMessage) {
         self.messages.push(DisplayMessage::new(
             MessageRole::Event(event.kind),

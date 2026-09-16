@@ -67,6 +67,7 @@ fn tool_heavy_app(message_count: usize) -> App {
                 output: Some(output.clone()),
                 image_data: None,
                 batch: 0,
+                bash_done: None,
             });
         }
     }

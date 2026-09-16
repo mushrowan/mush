@@ -629,9 +629,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let kernel_notice_sink: mush_tools::kernel_jobs::NoticeSink = {
         let notices = kernel_notices.clone();
-        std::sync::Arc::new(move |text: String| {
+        std::sync::Arc::new(move |notice: mush_tools::kernel_jobs::JobNotice| {
             if let Ok(mut guard) = notices.lock() {
-                guard.push(text);
+                guard.push(notice);
             }
         })
     };

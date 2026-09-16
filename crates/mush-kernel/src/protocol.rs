@@ -9,6 +9,8 @@ pub enum Request {
     Execute {
         id: String,
         code: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     Interrupt,
     HostReply {
@@ -98,9 +100,20 @@ mod tests {
         let json = serde_json::to_string(&Request::Execute {
             id: "c1".into(),
             code: "x = 1".into(),
+            origin: None,
         })
         .unwrap();
         assert_eq!(json, r#"{"type":"execute","id":"c1","code":"x = 1"}"#);
+        let json = serde_json::to_string(&Request::Execute {
+            id: "c1".into(),
+            code: "x = 1".into(),
+            origin: Some("call_7".into()),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"execute","id":"c1","code":"x = 1","origin":"call_7"}"#
+        );
         assert_eq!(
             serde_json::to_string(&Request::Interrupt).unwrap(),
             r#"{"type":"interrupt"}"#

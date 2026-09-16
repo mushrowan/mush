@@ -47,6 +47,8 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 let text = user.text();
                 if let Some(body) = extract_compaction_summary(&text) {
                     app.push_system_message(format_compaction_banner(&body));
+                } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
+                    app.push_bash_done(&done, None);
                 } else {
                     let images = extract_user_images(user);
                     if images.is_empty() {
@@ -92,6 +94,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     output: None,
                                     image_data: None,
                                     batch: batch_counter,
+                                    bash_done: None,
                                 });
                             }
                             batch_tool_ids.push((
@@ -113,6 +116,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                 output: None,
                                 image_data: None,
                                 batch: batch_counter,
+                                bash_done: None,
                             });
                             tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
                         }
@@ -772,5 +776,27 @@ mod tests {
             vec![raw],
             "image bytes should be recovered from the Parts payload"
         );
+    }
+
+    #[test]
+    fn a_saved_bash_done_notice_comes_back_as_a_notice_not_a_user_message() {
+        let done = mush_tools::kernel_jobs::BashDone {
+            pid: Some(9),
+            exit_code: 1,
+            command: "cargo test".into(),
+        };
+        let conversation = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(done.text()))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )];
+
+        let mut app = app();
+        rebuild_display(&mut app, &conversation);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, MessageRole::BashDone);
+        assert_eq!(app.messages[0].content, done.text());
     }
 }

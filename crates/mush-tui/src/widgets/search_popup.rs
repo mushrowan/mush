@@ -80,6 +80,7 @@ impl Widget for SearchPopup<'_> {
                     crate::app::MessageRole::Assistant => "assistant",
                     crate::app::MessageRole::System => "system",
                     crate::app::MessageRole::Event(_) => "event",
+                    crate::app::MessageRole::BashDone => "bash",
                 };
                 let preview = msg
                     .content

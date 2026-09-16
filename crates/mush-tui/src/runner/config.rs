@@ -10,7 +10,7 @@ pub type LiveToolOutput =
 
 pub use mush_runtime::{PaneSnapshot, SessionSaver, SessionSnapshot};
 
-pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<mush_tools::kernel_jobs::JobNotice>>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct SkillCatalogue {

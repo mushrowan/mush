@@ -208,6 +208,15 @@ impl Kernel {
     pub async fn execute_streaming(
         &self,
         code: &str,
+        on_event: impl FnMut(&Event) + Send,
+    ) -> Result<CellOutput, KernelError> {
+        self.execute_from(code, None, on_event).await
+    }
+
+    pub async fn execute_from(
+        &self,
+        code: &str,
+        origin: Option<&str>,
         mut on_event: impl FnMut(&Event) + Send,
     ) -> Result<CellOutput, KernelError> {
         let _guard = self.exec_lock.lock().await;
@@ -219,6 +228,7 @@ impl Kernel {
             .send(&Request::Execute {
                 id: id.clone(),
                 code: code.to_string(),
+                origin: origin.map(str::to_owned),
             })
             .await;
         if let Err(error) = sent {
