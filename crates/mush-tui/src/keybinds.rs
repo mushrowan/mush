@@ -136,6 +136,7 @@ pub enum Action {
     NextItem,
     PreviousItem,
     SessionPickerToggleScope,
+    SessionPickerDelete,
     ModelPickerDeleteAllStale,
     ModelPickerDeleteSelectedStale,
     ModelPickerToggleFavourite,
@@ -193,6 +194,7 @@ impl Action {
             Self::NextItem => "next_item",
             Self::PreviousItem => "previous_item",
             Self::SessionPickerToggleScope => "session_picker_toggle_scope",
+            Self::SessionPickerDelete => "session_picker_delete",
             Self::ModelPickerDeleteAllStale => "model_picker_delete_all_stale",
             Self::ModelPickerDeleteSelectedStale => "model_picker_delete_selected_stale",
             Self::ModelPickerToggleFavourite => "model_picker_toggle_favourite",
@@ -254,6 +256,7 @@ impl Action {
         Self::NextItem,
         Self::PreviousItem,
         Self::SessionPickerToggleScope,
+        Self::SessionPickerDelete,
         Self::ModelPickerDeleteAllStale,
         Self::ModelPickerDeleteSelectedStale,
         Self::ModelPickerToggleFavourite,
@@ -437,7 +440,7 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::StartBlockSelection
         | Action::Yank
         | Action::YankRaw => KeyScope::Normal,
-        Action::SessionPickerToggleScope => KeyScope::SessionPicker,
+        Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
         | Action::ModelPickerToggleFavourite => KeyScope::ModelPicker,
@@ -585,6 +588,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::SessionPicker,
         Action::SessionPickerToggleScope,
         &[(KeyCode::Tab, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::SessionPicker,
+        Action::SessionPickerDelete,
+        &[(KeyCode::Char('d'), KeyModifiers::CONTROL)],
     ),
     (
         KeyScope::ModelPicker,

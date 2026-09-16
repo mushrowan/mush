@@ -47,6 +47,7 @@ normal::yank = y
 normal::yank_raw = Shift-y
 session_picker::next_item = Down | Ctrl-j
 session_picker::previous_item = Up | Ctrl-k
+session_picker::session_picker_delete = Ctrl-d
 session_picker::session_picker_toggle_scope = Tab
 shared::cancel = Esc | Ctrl-[
 shared::confirm = Enter

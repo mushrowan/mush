@@ -18,6 +18,8 @@ pub struct SessionPickerState {
     pub scope: SessionScope,
     pub cwd: String,
     pub loading: bool,
+    pub confirm_delete: Option<SessionMeta>,
+    pub toast: Option<String>,
     incoming: Option<mpsc::Receiver<SessionMeta>>,
     matcher: RefCell<FuzzyFilter>,
 }
@@ -32,6 +34,8 @@ impl SessionPickerState {
             scope: SessionScope::ThisDir,
             cwd,
             loading: false,
+            confirm_delete: None,
+            toast: None,
             incoming: None,
             matcher: RefCell::new(FuzzyFilter::new()),
         }
@@ -46,9 +50,29 @@ impl SessionPickerState {
             scope: SessionScope::ThisDir,
             cwd,
             loading: true,
+            confirm_delete: None,
+            toast: None,
             incoming: Some(incoming),
             matcher: RefCell::new(FuzzyFilter::new()),
         }
+    }
+
+    pub fn arm_delete(&mut self) -> bool {
+        let selected = filtered_sessions(self)
+            .get(self.selected)
+            .map(|meta| (*meta).clone());
+        self.confirm_delete = selected;
+        self.confirm_delete.is_some()
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.confirm_delete = None;
+    }
+
+    pub fn remove(&mut self, id: &mush_ai::types::SessionId) {
+        self.sessions.retain(|meta| &meta.id != id);
+        let visible = filtered_sessions(self).len();
+        self.selected = self.selected.min(visible.saturating_sub(1));
     }
 
     pub fn drain_incoming(&mut self) -> bool {

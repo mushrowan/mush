@@ -84,3 +84,52 @@ fn drain_incoming_appends_and_flips_loading() {
     );
     assert!(!picker.loading, "loader done after sender dropped");
 }
+
+fn meta(id: &str, cwd: &str) -> SessionMeta {
+    SessionMeta {
+        id: SessionId::from(id),
+        title: Some(id.to_string()),
+        model_id: "m".into(),
+        created_at: Timestamp::now(),
+        updated_at: Timestamp::now(),
+        message_count: 1,
+        cwd: cwd.into(),
+    }
+}
+
+#[test]
+fn arming_a_delete_picks_the_highlighted_visible_session() {
+    let mut picker = SessionPickerState::new(
+        vec![meta("a", "/p"), meta("b", "/elsewhere"), meta("c", "/p")],
+        "/p".into(),
+    );
+    picker.selected = 1;
+
+    assert!(picker.arm_delete());
+
+    assert_eq!(
+        picker.confirm_delete.as_ref().map(|m| m.id.as_str()),
+        Some("c")
+    );
+    picker.cancel_delete();
+    assert!(picker.confirm_delete.is_none());
+}
+
+#[test]
+fn removing_the_last_row_moves_the_selection_up() {
+    let mut picker = SessionPickerState::new(vec![meta("a", "/p"), meta("b", "/p")], "/p".into());
+    picker.selected = 1;
+
+    picker.remove(&SessionId::from("b"));
+
+    assert_eq!(picker.selected, 0);
+    assert_eq!(filtered_sessions(&picker).len(), 1);
+}
+
+#[test]
+fn arming_with_nothing_visible_does_nothing() {
+    let mut picker = SessionPickerState::new(vec![], "/p".into());
+
+    assert!(!picker.arm_delete());
+    assert!(picker.confirm_delete.is_none());
+}

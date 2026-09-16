@@ -59,16 +59,33 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         SessionScope::ThisDir => "all dirs",
         SessionScope::AllDirs => "this dir",
     };
-    let hint = Line::from(vec![
-        Span::styled("tab", theme.selection_marker),
-        Span::styled(format!(" {scope_label}  "), theme.dim),
-        Span::styled("↑↓", theme.selection_marker),
-        Span::styled(" navigate  ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(" resume  ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    let hint = if let Some(meta) = &picker.confirm_delete {
+        Line::from(vec![
+            Span::styled(
+                format!("delete {}? ", meta.title.as_deref().unwrap_or("(untitled)")),
+                theme.tool_error,
+            ),
+            Span::styled("y", theme.selection_marker),
+            Span::styled(" yes  ", theme.dim),
+            Span::styled("any other key", theme.selection_marker),
+            Span::styled(" keep", theme.dim),
+        ])
+    } else if let Some(toast) = &picker.toast {
+        Line::styled(toast.as_str(), theme.dim)
+    } else {
+        Line::from(vec![
+            Span::styled("tab", theme.selection_marker),
+            Span::styled(format!(" {scope_label}  "), theme.dim),
+            Span::styled("↑↓", theme.selection_marker),
+            Span::styled(" navigate  ", theme.dim),
+            Span::styled("enter", theme.selection_marker),
+            Span::styled(" resume  ", theme.dim),
+            Span::styled("ctrl+d", theme.selection_marker),
+            Span::styled(" delete  ", theme.dim),
+            Span::styled("esc", theme.selection_marker),
+            Span::styled(" close", theme.dim),
+        ])
+    };
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let sessions = filtered_sessions(picker);

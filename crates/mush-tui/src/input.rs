@@ -1113,6 +1113,14 @@ fn is_cancel_key(app: &App, key: KeyEvent) -> bool {
 }
 
 fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    if let Some(meta) = app
+        .interaction
+        .session_picker
+        .as_ref()
+        .and_then(|picker| picker.confirm_delete.clone())
+    {
+        return handle_session_picker_delete_confirm_key(app, key, &meta);
+    }
     match (key.modifiers, key.code) {
         _ if app
             .keymap
@@ -1120,6 +1128,16 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             || app.keymap.matches(crate::keybinds::Action::Cancel, key) =>
         {
             app.close_session_picker();
+            None
+        }
+        _ if app
+            .keymap
+            .matches(crate::keybinds::Action::SessionPickerDelete, key) =>
+        {
+            if let Some(ref mut picker) = app.interaction.session_picker {
+                picker.toast = None;
+                picker.arm_delete();
+            }
             None
         }
         _ if app
@@ -1189,6 +1207,34 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ => None,
     }
+}
+
+fn handle_session_picker_delete_confirm_key(
+    app: &mut App,
+    key: KeyEvent,
+    meta: &mush_session::SessionMeta,
+) -> Option<AppEvent> {
+    let picker = app.interaction.session_picker.as_mut()?;
+    picker.cancel_delete();
+    if !matches!(crate::keybinds::any_char(key), Some('y' | 'Y')) {
+        return None;
+    }
+    let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+    if store.is_leased(&meta.id) {
+        picker.toast = Some("that session is open elsewhere".into());
+        return None;
+    }
+    match store.delete(&meta.id) {
+        Ok(()) => {
+            picker.remove(&meta.id);
+            picker.toast = Some(format!(
+                "deleted {}",
+                meta.title.as_deref().unwrap_or("(untitled)")
+            ));
+        }
+        Err(error) => picker.toast = Some(format!("delete failed: {error}")),
+    }
+    None
 }
 
 fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
