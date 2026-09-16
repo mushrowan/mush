@@ -204,6 +204,33 @@ async fn an_awaiting_cell_can_be_interrupted() {
 }
 
 #[tokio::test]
+async fn dropping_an_execute_future_interrupts_the_cell() {
+    let kernel = Arc::new(kernel().await);
+
+    let runner = {
+        let kernel = kernel.clone();
+        tokio::spawn(async move {
+            let _ = kernel.execute("n = 0\nwhile True:\n    n += 1").await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    runner.abort();
+    let _ = runner.await;
+
+    let after = tokio::time::timeout(Duration::from_secs(5), kernel.execute("n > 0"))
+        .await
+        .expect("the abandoned cell was interrupted")
+        .unwrap();
+    assert_eq!(after.result.as_deref(), Some("True"));
+    Arc::try_unwrap(kernel)
+        .ok()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_snapshot_survives_a_fresh_kernel() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("state.pickle");

@@ -228,6 +228,9 @@ impl Kernel {
 
         let mut output = CellOutput::default();
         let mut finished = false;
+        let mut abandon = InterruptOnDrop {
+            shared: Some((self.shared.clone(), id.clone())),
+        };
         while let Some(event) = rx.recv().await {
             on_event(&event);
             match event {
@@ -254,6 +257,7 @@ impl Kernel {
                 Event::Ready { .. } | Event::HostRequest { .. } => {}
             }
         }
+        abandon.shared.take();
         self.shared.unregister(&id);
         output.duration = started.elapsed();
         if finished {
@@ -379,6 +383,21 @@ impl Kernel {
 
     async fn send(&self, request: &Request) -> Result<(), KernelError> {
         write_request(&self.shared.stdin, request).await
+    }
+}
+
+struct InterruptOnDrop {
+    shared: Option<(Arc<Shared>, String)>,
+}
+
+impl Drop for InterruptOnDrop {
+    fn drop(&mut self) {
+        if let Some((shared, id)) = self.shared.take() {
+            shared.unregister(&id);
+            tokio::spawn(async move {
+                let _ = write_request(&shared.stdin, &Request::Interrupt).await;
+            });
+        }
     }
 }
 
