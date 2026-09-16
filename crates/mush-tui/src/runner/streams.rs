@@ -20,31 +20,7 @@ const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
-pub(super) use mush_runtime::StreamGeneration;
-
-pub(super) type ConfirmReply = tokio::sync::oneshot::Sender<bool>;
-
-pub(super) struct ConfirmRequest {
-    pub tool_call_id: ToolCallId,
-    pub prompt: String,
-    pub reply: ConfirmReply,
-}
-
-pub(super) struct PendingConfirmation {
-    pub tool_call_id: ToolCallId,
-    pub reply: ConfirmReply,
-}
-
-pub(super) struct StreamMeta {
-    pub steering_queue: Arc<Mutex<Vec<Message>>>,
-    pub confirm_req_rx: tokio::sync::mpsc::Receiver<ConfirmRequest>,
-    pub confirm_reply: Arc<Mutex<Option<PendingConfirmation>>>,
-    pub model: Model,
-    pub context_tokens: Arc<std::sync::atomic::AtomicU64>,
-    pub cancel: tokio_util::sync::CancellationToken,
-}
-
-const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+pub(super) use mush_runtime::{ConfirmRequest, PendingConfirmation, StreamGeneration, StreamMeta};
 
 #[cfg(not(test))]
 fn default_notification_sink(summary: &str, body: &str, sound: Option<crate::notify::Sound>) {
@@ -58,11 +34,6 @@ pub(super) type NotificationSink =
     Arc<dyn Fn(&str, &str, Option<crate::notify::Sound>) + Send + Sync>;
 
 pub(super) struct StreamState {
-    metas: HashMap<PaneId, StreamMeta>,
-    generations: HashMap<PaneId, StreamGeneration>,
-    next_gen: u64,
-    last_session_save: std::time::Instant,
-    session_dirty: bool,
     pub(super) notify: NotificationSink,
     #[cfg(feature = "signal")]
     pub(super) signal: Option<mush_notify::Dispatcher>,
@@ -93,25 +64,12 @@ pub(super) struct StreamDeps<'a> {
 impl StreamState {
     pub(super) fn new() -> Self {
         Self {
-            metas: HashMap::new(),
-            generations: HashMap::new(),
-            next_gen: 0,
-            last_session_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
-            session_dirty: false,
             notify: Arc::new(default_notification_sink),
             #[cfg(feature = "signal")]
             signal: None,
             #[cfg(feature = "signal")]
             completion_sequence: 0,
         }
-    }
-
-    fn advance_generation(&mut self, pane_id: PaneId) -> StreamGeneration {
-        self.cancel_signal();
-        let stream_gen = StreamGeneration(self.next_gen);
-        self.next_gen += 1;
-        self.generations.insert(pane_id, stream_gen);
-        stream_gen
     }
 
     pub(super) fn cancel_signal(&mut self) {
@@ -140,66 +98,28 @@ impl StreamState {
         }
     }
 
-    pub(super) fn register_active(
-        &mut self,
-        pane_id: PaneId,
-        meta: StreamMeta,
-    ) -> StreamGeneration {
-        let stream_gen = self.advance_generation(pane_id);
-        self.metas.insert(pane_id, meta);
-        stream_gen
-    }
-
-    pub(super) fn meta(&self, pane_id: PaneId) -> Option<&StreamMeta> {
-        self.metas.get(&pane_id)
-    }
-
-    pub(super) fn meta_mut(&mut self, pane_id: PaneId) -> Option<&mut StreamMeta> {
-        self.metas.get_mut(&pane_id)
-    }
-
-    pub(super) fn remove(&mut self, pane_id: PaneId) -> Option<StreamMeta> {
-        self.metas.remove(&pane_id)
-    }
-
-    pub(super) fn abort(&mut self, pane_id: PaneId) {
-        if let Some(meta) = self.metas.get(&pane_id) {
-            meta.cancel.cancel();
-        }
-        self.advance_generation(pane_id);
-        self.metas.remove(&pane_id);
-    }
-
-    pub(super) fn is_current(&self, pane_id: PaneId, stream_gen: StreamGeneration) -> bool {
-        self.generations.get(&pane_id) == Some(&stream_gen)
-    }
-
     pub(super) fn save_session_debounced(
         &mut self,
-        session: &Session,
-        tui_config: &super::TuiConfig,
+        session: &mut Session,
+        _tui_config: &super::TuiConfig,
     ) {
-        self.session_dirty = true;
-        self.save_dirty_session(session, tui_config);
+        session.runtime.save_debounced();
     }
 
-    pub(super) fn save_dirty_session(&mut self, session: &Session, tui_config: &super::TuiConfig) {
-        if !self.session_dirty || self.last_session_save.elapsed() < SESSION_SAVE_DEBOUNCE {
-            return;
-        }
-        if let Some(ref saver) = tui_config.save_session {
-            saver(build_session_snapshot(session, tui_config));
-            self.last_session_save = std::time::Instant::now();
-            self.session_dirty = false;
-        }
+    pub(super) fn save_dirty_session(
+        &mut self,
+        session: &mut Session,
+        _tui_config: &super::TuiConfig,
+    ) {
+        session.runtime.save_if_dirty();
     }
 
-    pub(super) fn save_session_now(&mut self, session: &Session, tui_config: &super::TuiConfig) {
-        if let Some(ref saver) = tui_config.save_session {
-            saver(build_session_snapshot(session, tui_config));
-            self.last_session_save = std::time::Instant::now();
-            self.session_dirty = false;
-        }
+    pub(super) fn save_session_now(
+        &mut self,
+        session: &mut Session,
+        _tui_config: &super::TuiConfig,
+    ) {
+        session.runtime.save_now_and_settle();
     }
 }
 
@@ -226,7 +146,7 @@ pub(super) async fn poll_confirmation_prompt(
     stream_state: &mut StreamState,
 ) -> bool {
     let focused_id = PaneId::new(1);
-    if let Some(meta) = stream_state.meta_mut(focused_id)
+    if let Some(meta) = session.runtime.turns.meta_mut(focused_id)
         && !meta.cancel.is_cancelled()
         && meta.confirm_reply.lock().await.is_none()
         && let Ok(confirm) = meta.confirm_req_rx.try_recv()
@@ -252,11 +172,11 @@ pub(super) async fn poll_confirmation_prompt(
 
 pub(super) async fn answer_confirmation(
     session: &mut Session,
-    stream_state: &mut StreamState,
+    _stream_state: &mut StreamState,
     allowed: bool,
 ) {
     let focused_id = PaneId::new(1);
-    let pending_tool_call_id = if let Some(meta) = stream_state.meta_mut(focused_id)
+    let pending_tool_call_id = if let Some(meta) = session.runtime.turns.meta_mut(focused_id)
         && let Some(pending) = meta.confirm_reply.lock().await.take()
     {
         let tool_call_id = pending.tool_call_id.clone();
@@ -323,7 +243,9 @@ async fn handle_agent_end(
     registry: &ApiRegistry,
     automatic_continuation: bool,
 ) {
-    let stopped = stream_state
+    let stopped = session
+        .runtime
+        .turns
         .remove(pane_id)
         .is_some_and(|meta| !meta.cancel.is_cancelled());
     if stopped
@@ -371,7 +293,7 @@ pub(super) async fn handle_agent_event_side_effects(
     automatic_continuation: bool,
 ) {
     if let AgentEvent::MessageEnd { message } = event
-        && let Some(meta) = stream_state.meta(pane_id)
+        && let Some(meta) = session.runtime.turns.meta(pane_id)
     {
         meta.context_tokens.store(
             message.usage.total_input_tokens().get(),
@@ -383,7 +305,9 @@ pub(super) async fn handle_agent_event_side_effects(
         && message.provider == Provider::OpenRouter
         && let Some(gen_id) = message.generation_id.clone()
     {
-        let model = stream_state
+        let model = session
+            .runtime
+            .turns
             .meta(pane_id)
             .map(|m| m.model.clone())
             .unwrap_or_else(|| tui_config.model.clone());
@@ -517,7 +441,7 @@ async fn auto_compact(
     }
 }
 
-pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &mut StreamState) {
+pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
     if let Some(control) = &session.runtime.control {
         control.finish(mush_agent::ipc::control::Outcome::Cancelled);
         session.runtime.pending_prompt = None;
@@ -525,7 +449,7 @@ pub(super) async fn abort_focused_stream(session: &mut Session, stream_state: &m
     let focused_id = PaneId::new(1);
     record_cancelled_tools(session);
 
-    stream_state.abort(focused_id);
+    session.runtime.turns.abort(focused_id);
 
     let pane = &mut *session;
     pane.app.finish_streaming(None, None);
@@ -574,12 +498,12 @@ fn record_cancelled_tools(pane: &mut crate::session::Session) {
 
 pub(super) async fn submit_streaming_input(
     session: &mut Session,
-    stream_state: &StreamState,
+    _stream_state: &StreamState,
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
     let focused_id = PaneId::new(1);
-    if let Some(meta) = stream_state.meta(focused_id) {
+    if let Some(meta) = session.runtime.turns.meta(focused_id) {
         let content = build_user_content(&text, &images);
         meta.steering_queue.lock().await.push(Message::User(
             UserMessage::builder()
@@ -631,7 +555,7 @@ pub(crate) fn build_user_content(
     UserContent::Parts(parts)
 }
 
-pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_state: &StreamState) {
+pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_state: &StreamState) {
     let focused_id = PaneId::new(1);
     let app = &mut session.app;
 
@@ -639,7 +563,7 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
         let current_input = app.input.take_text();
         if !current_input.trim().is_empty() {
             app.push_queued_message(&current_input);
-            if let Some(meta) = stream_state.meta(focused_id) {
+            if let Some(meta) = session.runtime.turns.meta(focused_id) {
                 meta.steering_queue.lock().await.push(Message::User(
                     UserMessage::builder()
                         .content(UserContent::Text(current_input))
@@ -654,7 +578,7 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, stream_stat
         app.input.cursor = app.input.text.len();
         app.input.ensure_cursor_visible();
 
-        if let Some(meta) = stream_state.meta(focused_id) {
+        if let Some(meta) = session.runtime.turns.meta(focused_id) {
             let mut steering_queue = meta.steering_queue.lock().await;
             let target = queued_text.trim();
             let pos = steering_queue.iter().rposition(|message| {
@@ -703,7 +627,7 @@ pub(super) async fn start_pending_streams<'a>(
 }
 
 async fn start_stream_for_prompt<'a>(
-    stream_state: &mut StreamState,
+    _stream_state: &mut StreamState,
     session: &mut Session,
     pane_id: PaneId,
     prompt: PendingPrompt,
@@ -787,7 +711,7 @@ async fn start_stream_for_prompt<'a>(
 
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let stream_gen = stream_state.register_active(
+    let stream_gen = session.runtime.turns.register_active(
         pane_id,
         StreamMeta {
             steering_queue,
@@ -1310,6 +1234,7 @@ mod tests {
                     let mut session =
                         Session::new(App::new(model.id.clone(), model.context_window));
                     session.runtime.conversation = conversation.clone();
+                    session.runtime.saver = tui_config.save_session.clone();
                     handle_agent_event_side_effects(
                         &mut session,
                         &mut stream_state,
@@ -1424,7 +1349,7 @@ mod tests {
     async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
+        let stream_state = StreamState::new();
         let notices: crate::runner::config::KernelNotices = Arc::new(std::sync::Mutex::new(vec![
             "Background command finished: `exit 5`".to_string(),
         ]));
@@ -1442,7 +1367,7 @@ mod tests {
 
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1466,11 +1391,11 @@ mod tests {
 
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
+        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1522,11 +1447,11 @@ mod tests {
     async fn submit_streaming_input_uses_text_only_when_no_images() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
+        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1554,11 +1479,11 @@ mod tests {
     async fn edit_last_queued_steering_replaces_queue_entry_not_duplicates() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
+        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -1634,11 +1559,11 @@ mod tests {
 
     #[tokio::test]
     async fn register_active_supersedes_previous_generation() {
-        let mut stream_state = StreamState::new();
+        let mut session = Session::new(app());
         let pane_id = PaneId::new(7);
 
         let (_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-        let gen1 = stream_state.register_active(
+        let gen1 = session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1650,8 +1575,8 @@ mod tests {
             },
         );
 
-        assert!(stream_state.is_current(pane_id, gen1));
-        assert!(stream_state.meta(pane_id).is_some());
+        assert!(session.runtime.turns.is_current(pane_id, gen1));
+        assert!(session.runtime.turns.meta(pane_id).is_some());
         let _ = ToolCallId::from("unused");
     }
 
@@ -1670,7 +1595,7 @@ mod tests {
         });
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1715,7 +1640,9 @@ mod tests {
             Some(&tool_call_id)
         );
 
-        let pending = stream_state
+        let pending = session
+            .runtime
+            .turns
             .meta(pane_id)
             .unwrap()
             .confirm_reply
@@ -1734,7 +1661,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1766,7 +1693,9 @@ mod tests {
         assert!(app.interaction.confirm_prompt.is_none());
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert!(
-            stream_state
+            session
+                .runtime
+                .turns
                 .meta(pane_id)
                 .unwrap()
                 .confirm_reply
@@ -1783,7 +1712,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1935,31 +1864,6 @@ mod tests {
     }
 
     #[test]
-    fn save_dirty_session_flushes_after_debounce() {
-        let mut session = Session::new(app());
-        session.runtime.conversation.append_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("persist me".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
-        let mut config = test_tui_config();
-        let saves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let saves_for_callback = saves.clone();
-        config.save_session = Some(Arc::new(move |_| {
-            saves_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }));
-
-        let mut stream_state = StreamState::new();
-        stream_state.save_session_debounced(&session, &config);
-        stream_state.save_session_debounced(&session, &config);
-        stream_state.last_session_save = std::time::Instant::now() - SESSION_SAVE_DEBOUNCE;
-        stream_state.save_dirty_session(&session, &config);
-
-        assert_eq!(saves.load(std::sync::atomic::Ordering::SeqCst), 2);
-    }
-
-    #[test]
     fn build_user_content_persists_pending_prompt_text() {
         let content = build_user_content("hello from pending", &[]);
 
@@ -1986,11 +1890,11 @@ mod tests {
 
     #[tokio::test]
     async fn generation_rejects_stale_stream_events() {
-        let mut stream_state = StreamState::new();
+        let mut session = Session::new(app());
         let pane_id = PaneId::new(1);
 
         let (_tx1, rx1) = tokio::sync::mpsc::channel(1);
-        let gen1 = stream_state.register_active(
+        let gen1 = session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -2002,10 +1906,10 @@ mod tests {
             },
         );
 
-        stream_state.abort(pane_id);
+        session.runtime.turns.abort(pane_id);
 
         let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
-        let gen2 = stream_state.register_active(
+        let gen2 = session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -2020,23 +1924,23 @@ mod tests {
         assert_ne!(gen1, gen2, "generations must differ");
 
         assert!(
-            !stream_state.is_current(pane_id, gen1),
+            !session.runtime.turns.is_current(pane_id, gen1),
             "stale generation must be rejected"
         );
 
         assert!(
-            stream_state.is_current(pane_id, gen2),
+            session.runtime.turns.is_current(pane_id, gen2),
             "current generation must be accepted"
         );
     }
 
     #[tokio::test]
     async fn abort_without_reregister_rejects_all() {
-        let mut stream_state = StreamState::new();
+        let mut session = Session::new(app());
         let pane_id = PaneId::new(1);
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        let stream_gen = stream_state.register_active(
+        let stream_gen = session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -2048,9 +1952,9 @@ mod tests {
             },
         );
 
-        stream_state.abort(pane_id);
+        session.runtime.turns.abort(pane_id);
 
-        assert!(!stream_state.is_current(pane_id, stream_gen));
+        assert!(!session.runtime.turns.is_current(pane_id, stream_gen));
     }
 
     #[tokio::test]
@@ -2060,7 +1964,7 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: session.runtime.steering_queue.clone(),
@@ -2114,7 +2018,7 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: session.runtime.steering_queue.clone(),
@@ -2192,21 +2096,20 @@ mod tests {
 
         let save_count = std::sync::Arc::new(AtomicU32::new(0));
         let count_clone = save_count.clone();
-        let mut config = test_tui_config();
-        config.save_session = Some(std::sync::Arc::new(move |_| {
+        let config = test_tui_config();
+        let mut session = Session::new(app());
+        session.runtime.saver = Some(std::sync::Arc::new(move |_| {
             count_clone.fetch_add(1, Ordering::Relaxed);
         }));
-
-        let session = Session::new(app());
         let mut stream_state = StreamState::new();
 
-        stream_state.save_session_debounced(&session, &config);
+        stream_state.save_session_debounced(&mut session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
-        stream_state.save_session_debounced(&session, &config);
+        stream_state.save_session_debounced(&mut session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 1);
 
-        stream_state.save_session_now(&session, &config);
+        stream_state.save_session_now(&mut session, &config);
         assert_eq!(save_count.load(Ordering::Relaxed), 2);
     }
 

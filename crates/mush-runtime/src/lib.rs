@@ -8,8 +8,8 @@ use mush_session::ConversationState;
 
 pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use session::{
-    PendingImage, PendingPrompt, SessionRuntime, StreamGeneration, TurnEvent, TurnEvents,
-    TurnStream,
+    ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,
+    StreamGeneration, StreamMeta, TurnEvent, TurnEvents, TurnStream,
 };
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
 

@@ -176,7 +176,7 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("browser_login");
             }
-            stream_state.save_dirty_session(&runtime.session, tui_config);
+            stream_state.save_dirty_session(&mut runtime.session, tui_config);
 
             let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
             let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
@@ -256,17 +256,24 @@ async fn dispatch_agent_event(
     registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    if !stream_state.is_current(pane_id, stream_gen) {
+    if !runtime
+        .session
+        .runtime
+        .turns
+        .is_current(pane_id, stream_gen)
+    {
         return;
     }
     super::control::complete(runtime.session.runtime.control.as_ref(), &event);
 
     {
         let pane = &mut runtime.session;
-        let model = stream_state
+        let model = pane
+            .runtime
+            .turns
             .meta(pane_id)
-            .map(|meta| &meta.model)
-            .unwrap_or(&tui_config.model);
+            .map(|meta| meta.model.clone())
+            .unwrap_or_else(|| tui_config.model.clone());
         let (app, conversation, image_protos) = pane.fields_mut();
         let mut ctx = event_handler::EventCtx {
             app,
@@ -276,7 +283,7 @@ async fn dispatch_agent_event(
         event_handler::handle_agent_event(
             &mut ctx,
             &event,
-            model,
+            &model,
             tui_config.debug_cache,
             image_picker,
         );
@@ -338,7 +345,7 @@ async fn handle_idle_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
-    stream_state.save_dirty_session(&runtime.session, tui_config);
+    stream_state.save_dirty_session(&mut runtime.session, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.session);
     let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 
@@ -475,7 +482,7 @@ mod tests {
             let pane = PaneId::new(1);
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             let cancel = tokio_util::sync::CancellationToken::new();
-            let generation = state.register_active(
+            let generation = runtime.session.runtime.turns.register_active(
                 pane,
                 StreamMeta {
                     steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -487,11 +494,11 @@ mod tests {
                 },
             );
             if case == "abort" {
-                state.abort(pane);
+                runtime.session.runtime.turns.abort(pane);
             }
             if case == "replaced" {
                 let (_tx, rx) = tokio::sync::mpsc::channel(1);
-                state.register_active(
+                runtime.session.runtime.turns.register_active(
                     pane,
                     StreamMeta {
                         steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),

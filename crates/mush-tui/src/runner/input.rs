@@ -890,7 +890,7 @@ mod tests {
         );
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut stream_state = StreamState::new();
-        stream_state.register_active(
+        session.runtime.turns.register_active(
             PaneId::new(1),
             super::super::streams::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),

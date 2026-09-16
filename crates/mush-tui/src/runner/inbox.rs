@@ -177,9 +177,14 @@ impl OrchestratorInbox {
     }
 }
 
-pub(super) async fn safe_to_consume(state: &StreamState, runtime: &RunnerRuntime) -> bool {
+pub(super) async fn safe_to_consume(_state: &StreamState, runtime: &RunnerRuntime) -> bool {
     !runtime.session.runtime.turn_active()
-        && state.meta(mush_ai::types::PaneId::new(1)).is_none()
+        && runtime
+            .session
+            .runtime
+            .turns
+            .meta(mush_ai::types::PaneId::new(1))
+            .is_none()
         && !runtime.session.app.stream.active
         && runtime.session.app.input.text.is_empty()
         && runtime.session.app.input.images.is_empty()
@@ -437,10 +442,10 @@ mod tests {
             super::super::ThinkingPrefs::default(),
         );
         runtime.session.runtime.session_id = config.session_id.clone();
-        let mut state = StreamState::new();
+        let state = StreamState::new();
         let (_, rx) = tokio::sync::mpsc::channel(1);
         let pane = PaneId::new(1);
-        let generation = state.register_active(
+        let generation = runtime.session.runtime.turns.register_active(
             pane,
             StreamMeta {
                 steering_queue: runtime.session.runtime.steering_queue.clone(),
@@ -476,7 +481,7 @@ mod tests {
             });
         while let Some((_, _, event)) = runtime.session.runtime.turns.next().await {
             if matches!(event, AgentEvent::AgentEnd) {
-                state.remove(pane);
+                runtime.session.runtime.turns.remove(pane);
             }
             if !runtime.session.runtime.turn_active() {
                 break;

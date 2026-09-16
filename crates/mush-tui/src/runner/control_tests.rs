@@ -176,7 +176,10 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     .await;
     let confirmation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if let Ok(request) = state
+            if let Ok(request) = runtime
+                .session
+                .runtime
+                .turns
                 .meta_mut(mush_ai::types::PaneId::new(1))
                 .unwrap()
                 .confirm_req_rx
@@ -962,7 +965,7 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Queued);
     while let Some((pane, generation, event)) = runtime.session.runtime.turns.next().await {
-        if state.is_current(pane, generation) {
+        if runtime.session.runtime.turns.is_current(pane, generation) {
             dispatch(&mut runtime, &mut state, &config, &registry, pane, event).await;
         }
     }

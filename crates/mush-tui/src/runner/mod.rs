@@ -289,7 +289,11 @@ pub async fn run_tui(
         }
     }
 
-    stream_state.abort(mush_ai::types::PaneId::new(1));
+    runtime
+        .session
+        .runtime
+        .turns
+        .abort(mush_ai::types::PaneId::new(1));
     let session_id = runtime.session.runtime.session_id.clone();
     runtime.session.runtime.snapshot_kernel(&session_id).await;
     if let Some(listener) = ipc_listener {

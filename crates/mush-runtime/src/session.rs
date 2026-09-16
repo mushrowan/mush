@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::StreamExt;
 use mush_agent::AgentEvent;
 use mush_ai::registry::ApiRegistry;
-use mush_ai::types::{ImageMimeType, Message, PaneId, SessionId};
+use mush_ai::types::{ImageMimeType, Message, Model, PaneId, SessionId, ToolCallId};
 use mush_session::ConversationState;
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -19,12 +19,37 @@ pub type TurnStream<'a> = Pin<Box<dyn futures::Stream<Item = TurnEvent> + Send +
 
 const TURN_EVENT_BUFFER: usize = 1024;
 
+pub type ConfirmReply = tokio::sync::oneshot::Sender<bool>;
+
+pub struct ConfirmRequest {
+    pub tool_call_id: ToolCallId,
+    pub prompt: String,
+    pub reply: ConfirmReply,
+}
+
+pub struct PendingConfirmation {
+    pub tool_call_id: ToolCallId,
+    pub reply: ConfirmReply,
+}
+
+pub struct StreamMeta {
+    pub steering_queue: Arc<Mutex<Vec<Message>>>,
+    pub confirm_req_rx: mpsc::Receiver<ConfirmRequest>,
+    pub confirm_reply: Arc<Mutex<Option<PendingConfirmation>>>,
+    pub model: Model,
+    pub context_tokens: Arc<std::sync::atomic::AtomicU64>,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
 pub struct TurnEvents {
     tx: mpsc::Sender<TurnEvent>,
     rx: mpsc::Receiver<TurnEvent>,
     active: Arc<AtomicUsize>,
     active_tx: watch::Sender<usize>,
     active_rx: watch::Receiver<usize>,
+    metas: std::collections::HashMap<PaneId, StreamMeta>,
+    generations: std::collections::HashMap<PaneId, StreamGeneration>,
+    next_generation: u64,
 }
 
 impl Default for TurnEvents {
@@ -37,11 +62,53 @@ impl Default for TurnEvents {
             active: Arc::new(AtomicUsize::new(0)),
             active_tx,
             active_rx,
+            metas: std::collections::HashMap::new(),
+            generations: std::collections::HashMap::new(),
+            next_generation: 0,
         }
     }
 }
 
 impl TurnEvents {
+    fn advance_generation(&mut self, pane_id: PaneId) -> StreamGeneration {
+        let generation = StreamGeneration(self.next_generation);
+        self.next_generation += 1;
+        self.generations.insert(pane_id, generation);
+        generation
+    }
+
+    pub fn register_active(&mut self, pane_id: PaneId, meta: StreamMeta) -> StreamGeneration {
+        let generation = self.advance_generation(pane_id);
+        self.metas.insert(pane_id, meta);
+        generation
+    }
+
+    #[must_use]
+    pub fn meta(&self, pane_id: PaneId) -> Option<&StreamMeta> {
+        self.metas.get(&pane_id)
+    }
+
+    pub fn meta_mut(&mut self, pane_id: PaneId) -> Option<&mut StreamMeta> {
+        self.metas.get_mut(&pane_id)
+    }
+
+    pub fn remove(&mut self, pane_id: PaneId) -> Option<StreamMeta> {
+        self.metas.remove(&pane_id)
+    }
+
+    pub fn abort(&mut self, pane_id: PaneId) {
+        if let Some(meta) = self.metas.get(&pane_id) {
+            meta.cancel.cancel();
+        }
+        self.advance_generation(pane_id);
+        self.metas.remove(&pane_id);
+    }
+
+    #[must_use]
+    pub fn is_current(&self, pane_id: PaneId, generation: StreamGeneration) -> bool {
+        self.generations.get(&pane_id) == Some(&generation)
+    }
+
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst) > 0 || !self.rx.is_empty()
@@ -144,7 +211,11 @@ pub struct SessionRuntime {
     pub turns: TurnEvents,
     pub saver: Option<crate::snapshot::SessionSaver>,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
+    last_save: std::time::Instant,
+    dirty: bool,
 }
+
+pub const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl SessionRuntime {
     #[must_use]
@@ -164,7 +235,28 @@ impl SessionRuntime {
             turns: TurnEvents::default(),
             saver: None,
             kernel_state: None,
+            last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
+            dirty: false,
         }
+    }
+
+    pub fn save_debounced(&mut self) {
+        self.dirty = true;
+        self.save_if_dirty();
+    }
+
+    pub fn save_if_dirty(&mut self) {
+        if !self.dirty || self.last_save.elapsed() < SESSION_SAVE_DEBOUNCE {
+            return;
+        }
+        self.save_now();
+        self.last_save = std::time::Instant::now();
+        self.dirty = false;
+    }
+
+    pub fn saved_just_now(&mut self) {
+        self.last_save = std::time::Instant::now();
+        self.dirty = false;
     }
 
     #[must_use]
@@ -245,6 +337,27 @@ mod tests {
         }
         assert_eq!(seen, 3);
         assert!(!turns.is_active());
+    }
+
+    #[test]
+    fn a_dirty_session_is_saved_once_the_debounce_window_passes() {
+        let mut runtime = SessionRuntime::default();
+        let saves = Arc::new(AtomicUsize::new(0));
+        runtime.saver = Some({
+            let saves = saves.clone();
+            Arc::new(move |_| {
+                saves.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+
+        runtime.save_debounced();
+        runtime.save_debounced();
+        runtime.last_save = std::time::Instant::now() - SESSION_SAVE_DEBOUNCE;
+        runtime.save_if_dirty();
+
+        assert_eq!(saves.load(Ordering::SeqCst), 2);
+        runtime.save_if_dirty();
+        assert_eq!(saves.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

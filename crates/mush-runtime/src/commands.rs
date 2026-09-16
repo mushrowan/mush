@@ -265,6 +265,11 @@ impl SessionRuntime {
         }
     }
 
+    pub fn save_now_and_settle(&mut self) {
+        self.save_now();
+        self.saved_just_now();
+    }
+
     pub async fn snapshot_kernel(&self, session_id: &SessionId) {
         let Some(kernel) = &self.kernel_state else {
             return;
