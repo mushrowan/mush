@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -92,7 +93,7 @@ pub async fn deliver(directory: &Path, message: &Path) -> Result<()> {
     while message.try_exists()? {
         match file.try_lock() {
             Ok(()) => {
-                let lock = Lock(file);
+                let lock = Lock(Arc::new(file));
                 if !message.try_exists()? {
                     return Ok(());
                 }
@@ -140,6 +141,9 @@ pub async fn reopen(manifest: &Manifest, job: &Worker, previous: Option<&Value>)
     }
     let mut state = previous.clone();
     state["state"] = json!("follow_up_pending");
+    if manifest.journalled() {
+        state["assignment_id"] = json!(round.checked_add(1).ok_or("worker round overflow")?);
+    }
     state["at"] = json!(Utc::now());
     state["detail"] = json!("explicit message queued");
     if let Some(object) = state.as_object_mut() {
