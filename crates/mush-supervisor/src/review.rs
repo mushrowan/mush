@@ -102,7 +102,7 @@ impl Identity {
             && crate::status::worker_name(&self.worker)
             && crate::inbox::identifier(&self.session)
             && self.assignment > 0
-            && self.round >= self.assignment
+            && self.round > 0
     }
 }
 

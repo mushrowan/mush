@@ -56,7 +56,7 @@ impl Event {
         if !identifier(&self.run_id)
             || !identifier(&self.worker_id)
             || self.assignment_id == 0
-            || self.round < self.assignment_id
+            || self.round == 0 && self.reason == TerminalReason::Completed
             || self.event_id != format!("{}.{}.{}", self.run_id, self.worker_id, self.assignment_id)
             || self.session_id.as_ref().is_some_and(|s| !identifier(s))
             || !self.report_path.is_absolute()

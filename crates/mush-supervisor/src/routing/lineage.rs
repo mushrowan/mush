@@ -632,16 +632,17 @@ pub(super) fn continuation(directory: &Path, path: &Path) -> Result<Config> {
     next.producer = request.producer.bind(&pair.producer);
     let reviewer = request.reviewer.bind(&pair.reviewer);
     next.reviewer = reviewer.identity.clone();
+    next.reviewer.assignment = next
+        .reviewer
+        .assignment
+        .max(next.reviewer.round)
+        .checked_add(1)
+        .ok_or("review assignments exhausted")?;
     next.reviewer.round = next
         .reviewer
         .round
         .checked_add(1)
         .ok_or("review rounds exhausted")?;
-    next.reviewer.assignment = next
-        .reviewer
-        .assignment
-        .checked_add(1)
-        .ok_or("review assignments exhausted")?;
     next.reviewer_directory = pair.reviewer.directory;
     next.reviewer_cwd = pair.reviewer.workspace;
     next.rereview = Some(reviewer);

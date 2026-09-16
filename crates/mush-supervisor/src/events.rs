@@ -150,7 +150,7 @@ pub fn save(
                 run_id,
                 worker_id: job.name.clone(),
                 assignment_id: assignment,
-                round: state.round.max(assignment),
+                round: state.round,
                 session_id: state
                     .session_id
                     .filter(|s| mush_supervisor::inbox::identifier(s))
