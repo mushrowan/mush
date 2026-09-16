@@ -78,18 +78,22 @@ impl AgentTool for WriteTool {
         let content = args.content;
         let ledger = self.ledger.clone();
 
-        tokio::task::spawn_blocking(move || {
-            if let Err(stale) = ledger.check(&path) {
-                return ToolResult::error(stale.to_string());
-            }
-            let result = write_file(&path, &content);
-            if result.outcome.is_success() {
-                ledger.record(&path);
-            }
-            result
+        crate::file_mutation_queue::with_file_mutation_queue(&path, async {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(stale) = ledger.check(&path) {
+                    return ToolResult::error(stale.to_string());
+                }
+                let result = write_file(&path, &content);
+                if result.outcome.is_success() {
+                    ledger.record(&path);
+                }
+                result
+            })
+            .await
+            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
         .await
-        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 
