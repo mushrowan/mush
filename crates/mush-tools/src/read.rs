@@ -526,6 +526,7 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
                 mime_type: mush_ai::types::ImageMimeType::from_extension(&ext),
             })],
             outcome: mush_ai::types::ToolOutcome::Success,
+            details: None,
         };
     }
 
@@ -553,6 +554,7 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
                     }),
                 ],
                 outcome: mush_ai::types::ToolOutcome::Success,
+                details: None,
             }
         }
         Err(e) => ToolResult::error(format!(

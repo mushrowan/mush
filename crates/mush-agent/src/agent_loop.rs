@@ -395,6 +395,7 @@ pub fn agent_loop(
                                             content: result.content,
                                             outcome: result.outcome,
                                             timestamp_ms: Timestamp::now(),
+                                            details: result.details,
                                         }));
                                     }
                                 }
@@ -486,6 +487,7 @@ pub fn agent_loop(
                                 content: result.content,
                                 outcome: ToolOutcome::Error,
                                 timestamp_ms: Timestamp::now(),
+                                details: result.details,
                             }));
                             continue;
                         }
@@ -529,6 +531,7 @@ pub fn agent_loop(
                                     content: result.content,
                                     outcome: ToolOutcome::Error,
                                     timestamp_ms: Timestamp::now(),
+                                    details: result.details,
                                 }));
                                 continue;
                             }
@@ -559,6 +562,7 @@ pub fn agent_loop(
                                 content: result.content,
                                 outcome: result.outcome,
                                 timestamp_ms: Timestamp::now(),
+                                details: result.details,
                             }));
                         }
                         break 'outer;
@@ -598,6 +602,7 @@ pub fn agent_loop(
                                         content: result.content,
                                         outcome: result.outcome,
                                         timestamp_ms: Timestamp::now(),
+                                        details: result.details,
                                     }));
                                 }
                                 break 'outer;
@@ -663,6 +668,7 @@ pub fn agent_loop(
                             content: result.content,
                             outcome: result.outcome,
                             timestamp_ms: Timestamp::now(),
+                            details: result.details,
                         }));
                     }
 

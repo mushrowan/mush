@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult, parse_tool_args};
 use mush_kernel::{CellOutput, HostError, HostRequestHandler, Kernel, KernelConfig, KernelError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::util::extract_text;
@@ -23,10 +23,66 @@ struct IpythonArgs {
     code: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellDiff {
+    pub path: String,
+    pub diff: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellErrorDetails {
+    pub ename: String,
+    pub evalue: String,
+    pub traceback: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CellDetails {
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub result: Option<String>,
+    pub error: Option<CellErrorDetails>,
+    pub diffs: Vec<CellDiff>,
+    pub kernel_restarted: bool,
+}
+
+impl CellDetails {
+    #[must_use]
+    pub fn from_value(value: &Value) -> Option<Self> {
+        serde_json::from_value(value.clone()).ok()
+    }
+
+    #[must_use]
+    pub fn to_value(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    #[must_use]
+    pub fn output_text(&self) -> String {
+        let mut text = String::new();
+        for part in [self.stdout.as_str(), self.stderr.as_str()]
+            .into_iter()
+            .chain(self.result.as_deref())
+        {
+            if part.trim().is_empty() {
+                continue;
+            }
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(part);
+        }
+        text
+    }
+}
+
 pub struct MushHost {
     cwd: Arc<Path>,
     jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
+    diffs: std::sync::Mutex<std::collections::HashMap<String, Vec<CellDiff>>>,
 }
 
 impl MushHost {
@@ -35,7 +91,26 @@ impl MushHost {
             edit: Arc::new(crate::edit::EditTool::new(cwd.clone())),
             jobs: crate::kernel_jobs::KernelJobs::default(),
             cwd,
+            diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    pub fn take_diffs(&self, origin: &str) -> Vec<CellDiff> {
+        self.diffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(origin)
+            .unwrap_or_default()
+    }
+
+    fn record_diff(&self, origin: Option<&str>, path: String, diff: String) {
+        let Some(origin) = origin else { return };
+        self.diffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(origin.to_string())
+            .or_default()
+            .push(CellDiff { path, diff });
     }
 
     #[must_use]
@@ -112,11 +187,21 @@ impl HostRequestHandler for MushHost {
                 });
                 let result = self.edit.execute(args).await;
                 let text = extract_text(&result);
-                if result.outcome.is_success() {
-                    Ok(json!({ "summary": text }))
-                } else {
-                    Err(HostError(text))
+                if !result.outcome.is_success() {
+                    return Err(HostError(text));
                 }
+                let (summary, diff) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+                let path = payload
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.record_diff(
+                    payload.get("origin").and_then(Value::as_str),
+                    path,
+                    diff.to_string(),
+                );
+                Ok(json!({ "summary": summary }))
             }
             other => Err(HostError(format!("unknown host request {other}"))),
         }
@@ -149,6 +234,7 @@ pub struct IpythonTool {
     config: KernelConfig,
     session: std::sync::Mutex<Option<mush_kernel::KernelSession>>,
     host: Arc<dyn HostRequestHandler>,
+    mush_host: Option<Arc<MushHost>>,
     kernel: tokio::sync::Mutex<Option<Kernel>>,
     output_sink: Option<crate::bash::OutputSink>,
     busy_prompt: Option<BusyKernelPrompt>,
@@ -163,7 +249,10 @@ impl IpythonTool {
     }
 
     pub fn with_mush_host(host: MushHost, cwd: Arc<Path>) -> Self {
-        Self::with_host(cwd, Arc::new(host))
+        let host = Arc::new(host);
+        let mut tool = Self::with_host(cwd, host.clone());
+        tool.mush_host = Some(host);
+        tool
     }
 
     pub fn with_host(cwd: Arc<Path>, host: Arc<dyn HostRequestHandler>) -> Self {
@@ -174,6 +263,7 @@ impl IpythonTool {
             },
             session: std::sync::Mutex::new(None),
             host,
+            mush_host: None,
             kernel: tokio::sync::Mutex::new(None),
             output_sink: None,
             busy_prompt: None,
@@ -420,17 +510,36 @@ impl AgentTool for IpythonTool {
             Ok(args) => args,
             Err(error) => return error,
         };
+        let exec_id = mush_agent::exec_context::current_exec_id();
         match self.run(&args.code).await {
             Ok(run) => {
                 let mut text = format_cell_output(&run.output);
                 if run.kernel_restarted {
                     text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
                 }
-                if run.output.ok {
+                let details = CellDetails {
+                    duration_ms: u64::try_from(run.output.duration.as_millis()).unwrap_or(u64::MAX),
+                    stdout: run.output.stdout.clone(),
+                    stderr: run.output.stderr.clone(),
+                    result: run.output.result.clone(),
+                    error: run.output.error.as_ref().map(|error| CellErrorDetails {
+                        ename: error.ename.clone(),
+                        evalue: error.evalue.clone(),
+                        traceback: error.traceback.clone(),
+                    }),
+                    diffs: self
+                        .mush_host
+                        .as_ref()
+                        .map(|host| host.take_diffs(&exec_id))
+                        .unwrap_or_default(),
+                    kernel_restarted: run.kernel_restarted,
+                };
+                let result = if run.output.ok {
                     ToolResult::text(text)
                 } else {
                     ToolResult::error(text)
-                }
+                };
+                result.with_details(details.to_value())
             }
             Err(error) => ToolResult::error(format!("kernel: {error}")),
         }
@@ -619,14 +728,31 @@ mod tests {
         std::fs::write(&path, "hello world\n").unwrap();
         let tool = tool(dir.path());
 
-        let result = tool
-            .execute(json!({
-                "code": format!("summary = await edit({:?}, 'world', 'there')\nsummary.splitlines()[0]", path.display().to_string())
-            }))
+        let result = mush_agent::exec_context::TOOL_EXEC_ID
+            .scope(
+                "call_3".into(),
+                tool.execute(json!({
+                    "code": format!("await edit({:?}, 'world', 'there')", path.display().to_string())
+                })),
+            )
             .await;
 
         assert!(result.outcome.is_success(), "{}", extract_text(&result));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello there\n");
+        assert_eq!(
+            extract_text(&result),
+            format!("'edited {}'", path.display())
+        );
+        let details = CellDetails::from_value(result.details.as_ref().unwrap()).unwrap();
+        assert_eq!(details.diffs.len(), 1);
+        assert_eq!(details.diffs[0].path, path.display().to_string());
+        assert!(
+            details.diffs[0].diff.contains("there"),
+            "{}",
+            details.diffs[0].diff
+        );
+        assert!(details.error.is_none());
+        assert!(details.duration_ms > 0);
         tool.shutdown().await;
     }
 

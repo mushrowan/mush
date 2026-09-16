@@ -210,6 +210,7 @@ fn resume_appends_to_saved_context_without_rewriting_the_prefix() {
         tool_call_id: "saved-call".into(),
         tool_name: "read".into(),
         timestamp_ms: Timestamp::zero(),
+        details: None,
         outcome: ToolOutcome::Success,
         content: vec![ToolResultContentPart::Text(TextContent {
             text: "full output ".repeat(1000),
@@ -564,6 +565,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         tool_call_id: "saved".into(),
         tool_name: "read".into(),
         timestamp_ms: Timestamp::zero(),
+        details: None,
         outcome: ToolOutcome::Success,
         content: vec![ToolResultContentPart::Text(TextContent {
             text: "preserved tool output ".repeat(400),

@@ -242,6 +242,7 @@ pub struct MessageStyle<'a> {
     pub theme: &'a Theme,
     pub show_usage: bool,
     pub detail: ChatDetail,
+    pub pulse: usize,
 }
 
 impl<'a> MessageStyle<'a> {
@@ -250,6 +251,7 @@ impl<'a> MessageStyle<'a> {
             theme: &app.theme,
             show_usage: app.interaction.show_usage_lines,
             detail: app.detail,
+            pulse: app.shimmer_phase() / crate::widgets::working_icon::WORKING_ICON_TICKS,
         }
     }
 }
@@ -268,7 +270,10 @@ pub(crate) fn cached_message_lines<'a>(
     width: u16,
 ) -> Ref<'a, [Line<'static>]> {
     let fresh = msg.line_cache.borrow().as_ref().is_some_and(|cache| {
-        cache.width == width && cache.show_usage == style.show_usage && cache.detail == style.detail
+        cache.width == width
+            && cache.show_usage == style.show_usage
+            && cache.detail == style.detail
+            && (cache.pulse == style.pulse || !msg.is_live())
     });
     if !fresh {
         let lines = build_message_lines(msg, style, width);
@@ -277,6 +282,7 @@ pub(crate) fn cached_message_lines<'a>(
                 width,
                 show_usage: style.show_usage,
                 detail: style.detail,
+                pulse: style.pulse,
                 lines,
             }));
     }
@@ -605,7 +611,11 @@ fn render_tool_box_group(
         return;
     }
     for tc in tools {
-        render_tool_panel(tc, total_width as usize, lines, style);
+        if tc.name == "ipython" {
+            cell::render_cell(tc, total_width as usize, lines, style);
+        } else {
+            render_tool_panel(tc, total_width as usize, lines, style);
+        }
     }
 }
 
@@ -664,31 +674,7 @@ fn render_tool_panel(
         lines,
     );
 
-    if tc.name == "ipython" {
-        let ctx = ToolHighlightCtx {
-            bg,
-            fallback_style: theme.dim,
-            lang: "py",
-            theme,
-        };
-        if style.detail.shows_thinking() {
-            for code_line in tc.summary.lines() {
-                push_highlighted_box_line(code_line, inner, &ctx, lines);
-            }
-        } else {
-            let (preview, hidden) = code_preview(&tc.summary);
-            push_highlighted_box_line(preview, inner, &ctx, lines);
-            if hidden > 0 {
-                push_box_content_line(
-                    &format!("... (+{hidden} lines, ctrl+r to expand)"),
-                    inner,
-                    bg,
-                    theme.dim,
-                    lines,
-                );
-            }
-        }
-    } else if let Some(lang) = tool_summary_language(tc) {
+    if let Some(lang) = tool_summary_language(tc) {
         push_highlighted_box_line(
             &tc.summary,
             inner,
@@ -1276,5 +1262,6 @@ fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y:
     written
 }
 
+mod cell;
 #[cfg(test)]
 mod tests;

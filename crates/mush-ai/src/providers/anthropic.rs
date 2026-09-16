@@ -2097,6 +2097,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -2140,6 +2141,7 @@ mod tests {
                 ],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -2217,6 +2219,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -2343,6 +2346,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -2424,6 +2428,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_A".into(),
@@ -2433,6 +2438,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -2467,6 +2473,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
             Message::User(
                 UserMessage::builder()
@@ -3673,6 +3680,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -3743,6 +3751,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }));
         }
 
@@ -3834,6 +3843,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
         let tools = vec![ToolDefinition {
@@ -4202,6 +4212,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
             Message::User(
                 UserMessage::builder()

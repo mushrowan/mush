@@ -153,6 +153,8 @@ pub struct ToolResultMessage {
     #[serde(alias = "is_error", deserialize_with = "deserialise_outcome")]
     pub outcome: ToolOutcome,
     pub timestamp_ms: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -361,6 +363,7 @@ mod tests {
             content: vec![],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })
     }
 

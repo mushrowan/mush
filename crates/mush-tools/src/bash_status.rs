@@ -169,6 +169,7 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
                 },
             )],
             outcome: mush_ai::types::ToolOutcome::Error,
+            details: None,
         }
     } else {
         ToolResult::text(format!("{preamble}{output}"))

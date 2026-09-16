@@ -1397,6 +1397,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
             user("second task"),
             user("third task"),
@@ -1931,6 +1932,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
         ];
 
@@ -1957,6 +1959,7 @@ mod tests {
             })],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })];
 
         let input =

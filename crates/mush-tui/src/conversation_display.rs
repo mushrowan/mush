@@ -95,6 +95,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     image_data: None,
                                     batch: batch_counter,
                                     bash_done: None,
+                                    cell: None,
                                 });
                             }
                             batch_tool_ids.push((
@@ -117,6 +118,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                 image_data: None,
                                 batch: batch_counter,
                                 bash_done: None,
+                                cell: None,
                             });
                             tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
                         }
@@ -195,6 +197,11 @@ fn apply_tool_result(
 
     tool_call.status = display_tool_status(result.outcome);
     tool_call.output = tool_result_text(&result.content);
+    if tool_call.name == "ipython"
+        && let Some(details) = &result.details
+    {
+        tool_call.cell = mush_tools::ipython::CellDetails::from_value(details);
+    }
 }
 
 fn apply_batch_result(
@@ -348,6 +355,7 @@ mod tests {
             })],
             outcome,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })
     }
 
@@ -654,6 +662,7 @@ mod tests {
             })],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })];
 
         rebuild_display(&mut app, &conversation);
@@ -705,6 +714,7 @@ mod tests {
             })],
             outcome: ToolOutcome::Error,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })];
 
         rebuild_display(&mut app, &conversation);

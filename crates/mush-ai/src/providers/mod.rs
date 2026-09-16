@@ -96,6 +96,7 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
                         })],
                         outcome: ToolOutcome::Success,
                         timestamp_ms: event.timestamp_ms,
+                        details: None,
                     },
                     false,
                 );
@@ -360,6 +361,7 @@ mod tests {
             content: vec![],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         });
         let mut calls = Calls(Vec::new());
         walk_messages(&[real, result, event_fixture()], &mut calls);
@@ -508,6 +510,7 @@ mod tests {
                 content: vec![],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::now(),
+                details: None,
             })
         }
 

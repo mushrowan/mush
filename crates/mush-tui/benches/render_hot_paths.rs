@@ -68,6 +68,7 @@ fn tool_heavy_app(message_count: usize) -> App {
                 image_data: None,
                 batch: 0,
                 bash_done: None,
+                cell: None,
             });
         }
     }

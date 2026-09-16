@@ -536,6 +536,7 @@ fn record_cancelled_tools(pane: &mut crate::session::Session) {
                 content: result.content,
                 outcome: result.outcome,
                 timestamp_ms: Timestamp::now(),
+                details: None,
             }));
     }
 
@@ -1108,6 +1109,7 @@ mod tests {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         });
         session.app.messages.push(cell);
         let before = session.app.messages.len();

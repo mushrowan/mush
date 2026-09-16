@@ -190,7 +190,10 @@ def bash(command: str, timeout: int | None = None) -> BashHandle:
 
 
 async def edit(path: str, old: str, new: str) -> str:
-    reply = await host_request("edit", {"path": path, "old": old, "new": new})
+    payload = {"path": path, "old": old, "new": new}
+    if _current_origin.get() is not None:
+        payload["origin"] = _current_origin.get()
+    reply = await host_request("edit", payload)
     return str(reply.get("summary", ""))
 
 

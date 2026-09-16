@@ -97,6 +97,7 @@ impl App {
                 image_data: None,
                 batch: batch_idx,
                 bash_done: None,
+                cell: None,
             });
         }
     }
@@ -137,6 +138,7 @@ impl App {
                     image_data: None,
                     batch: batch_idx,
                     bash_done: None,
+                    cell: None,
                 });
             }
         }

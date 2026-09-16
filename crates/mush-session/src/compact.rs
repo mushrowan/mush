@@ -1463,6 +1463,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }),
             user_msg("second"),
             assistant_msg("response"),
@@ -1486,6 +1487,7 @@ mod tests {
                 })],
                 outcome: ToolOutcome::Success,
                 timestamp_ms: Timestamp::zero(),
+                details: None,
             }));
         }
         assert_eq!(msgs.len(), 22);
@@ -1961,6 +1963,7 @@ mod tests {
             })],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })
     }
 

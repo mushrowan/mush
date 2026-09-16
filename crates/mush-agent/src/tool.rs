@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 pub struct ToolResult {
     pub content: Vec<ToolResultContentPart>,
     pub outcome: ToolOutcome,
+    pub details: Option<serde_json::Value>,
 }
 
 impl ToolResult {
@@ -21,6 +22,7 @@ impl ToolResult {
                 text: text.into(),
             })],
             outcome: ToolOutcome::Success,
+            details: None,
         }
     }
 
@@ -30,6 +32,7 @@ impl ToolResult {
                 text: text.into(),
             })],
             outcome: ToolOutcome::Error,
+            details: None,
         }
     }
 
@@ -40,7 +43,13 @@ impl ToolResult {
                 mime_type,
             })],
             outcome: ToolOutcome::Success,
+            details: None,
         }
+    }
+
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 

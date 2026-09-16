@@ -657,6 +657,7 @@ mod tests {
             })],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),
+            details: None,
         })
     }
 

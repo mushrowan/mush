@@ -40,6 +40,7 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
                 content: result.content.clone(),
                 outcome: result.outcome,
                 timestamp_ms: Timestamp::now(),
+                details: result.details.clone(),
             }));
             Applied::Appended
         }
@@ -110,6 +111,7 @@ mod tests {
                 text: "ok".into(),
             })],
             outcome: ToolOutcome::Success,
+            details: None,
         };
 
         apply_agent_event(

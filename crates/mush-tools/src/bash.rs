@@ -845,6 +845,7 @@ fn format_result(
                     },
                 )],
                 outcome: mush_ai::types::ToolOutcome::Error,
+                details: None,
             }
         } else {
             ToolResult::text(json.to_string())
@@ -879,6 +880,7 @@ fn format_result(
                     mush_ai::types::TextContent { text },
                 )],
                 outcome: mush_ai::types::ToolOutcome::Error,
+                details: None,
             }
         } else {
             ToolResult::text(format!("{preamble}{output}"))

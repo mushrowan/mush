@@ -314,6 +314,7 @@ fn usage_line_deferred_while_tool_running() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         usage: Some(Usage {
             input_tokens: TokenCount::new(100),
@@ -356,6 +357,7 @@ fn tool_calls_render() {
                 image_data: None,
                 batch: 1,
                 bash_done: None,
+                cell: None,
             },
             crate::app::DisplayToolCall {
                 tool_call_id: "tc".into(),
@@ -366,6 +368,7 @@ fn tool_calls_render() {
                 image_data: None,
                 batch: 2,
                 bash_done: None,
+                cell: None,
             },
         ],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
@@ -389,6 +392,7 @@ fn edit_tool_renders_inline_diff_when_wide() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "patching")
     });
@@ -418,6 +422,7 @@ fn edit_tool_renders_inline_diff_when_narrow() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "patching")
     });
@@ -515,6 +520,7 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "checking")
     });
@@ -555,6 +561,7 @@ fn batched_tools_stack_one_panel_per_call() {
         image_data: None,
         batch: 1,
         bash_done: None,
+        cell: None,
     };
     app.messages.push(DisplayMessage {
         tool_calls: vec![tool("read"), tool("grep"), tool("bash"), tool("edit")],
@@ -586,6 +593,7 @@ fn a_failed_tool_says_error_in_red() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "checking")
     });
@@ -645,6 +653,7 @@ fn tool_box_wraps_long_summary() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "reading")
     });
@@ -671,6 +680,7 @@ fn completed_tool_box_sizes_output_with_halfwidth_dakuten_by_cells() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -696,6 +706,7 @@ fn read_tool_box_pads_halfwidth_dakuten_by_cells() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -804,6 +815,7 @@ fn read_tool_box_trims_shared_leading_indent() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -835,6 +847,7 @@ fn read_tool_box_renders_dim_line_numbers_with_highlighted_content() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -875,6 +888,7 @@ fn bash_tool_summary_is_syntax_highlighted() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -915,6 +929,7 @@ fn bash_tool_output_is_syntax_highlighted_when_plain() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -956,6 +971,7 @@ fn bash_tool_output_wraps_long_highlighted_lines() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
@@ -1215,6 +1231,7 @@ fn plain_style(theme: &crate::theme::Theme) -> MessageStyle<'_> {
         theme,
         show_usage: false,
         detail: ChatDetail::Overview,
+        pulse: 0,
     }
 }
 
@@ -1308,6 +1325,7 @@ fn the_usage_line_is_gated_on_the_setting() {
             theme: &theme,
             show_usage: true,
             detail: ChatDetail::Overview,
+            pulse: 0,
         },
         60,
     );
@@ -1332,6 +1350,7 @@ fn a_running_tool_defers_the_usage_line() {
         image_data: None,
         batch: 1,
         bash_done: None,
+        cell: None,
     });
 
     let lines = message_lines(
@@ -1340,6 +1359,7 @@ fn a_running_tool_defers_the_usage_line() {
             theme: &theme,
             show_usage: true,
             detail: ChatDetail::Overview,
+            pulse: 0,
         },
         60,
     );
@@ -1571,6 +1591,7 @@ fn a_tool_result_rebuilds_only_the_message_that_owns_it() {
             image_data: None,
             batch: 0,
             bash_done: None,
+            cell: None,
         });
     screen.render(&app, buf.area, &mut buf);
 
@@ -1608,6 +1629,7 @@ fn a_running_tool_call_renders_its_header() {
             image_data: None,
             batch: 1,
             bash_done: None,
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
     });
@@ -1675,15 +1697,141 @@ fn an_ipython_cell_collapses_to_a_preview_and_expands_with_detail() {
     );
 
     let overview = rendered_text(&all_lines(&app, 80));
-    assert!(overview.contains("matches = re.findall"), "{overview}");
-    assert!(overview.contains("+2 lines"), "{overview}");
+    assert!(
+        overview.contains("\u{2713} python \u{b7} matches = re.findall('x', text) \u{b7} \u{2191} 3 \u{2193} 1 lines"),
+        "{overview}"
+    );
     assert!(!overview.contains("import re"), "{overview}");
+    assert_eq!(overview.lines().filter(|l| l.contains("python")).count(), 1);
 
     app.cycle_detail();
     let details = rendered_text(&all_lines(&app, 80));
-    assert!(details.contains("import re"), "{details}");
-    assert!(details.contains("len(matches)"), "{details}");
-    assert!(!details.contains("+2 lines"), "{details}");
+    assert!(details.contains(" \u{2570}\u{2500} import re"), "{details}");
+    assert!(details.contains("    len(matches)"), "{details}");
+    assert!(details.contains("  \u{203a} 3"), "{details}");
+}
+
+fn cell_details() -> mush_tools::ipython::CellDetails {
+    mush_tools::ipython::CellDetails {
+        duration_ms: 1_234,
+        stdout: "one\ntwo\n".into(),
+        stderr: String::new(),
+        result: Some("'edited /repo/a.txt'".into()),
+        error: None,
+        diffs: vec![mush_tools::ipython::CellDiff {
+            path: "/repo/a.txt".into(),
+            diff: "- hello world\n+ hello there".into(),
+        }],
+        kernel_restarted: false,
+    }
+}
+
+fn cell_message(cell: mush_tools::ipython::CellDetails, status: ToolCallStatus) -> DisplayMessage {
+    DisplayMessage {
+        tool_calls: vec![crate::app::DisplayToolCall {
+            tool_call_id: "call_1".into(),
+            name: "ipython".into(),
+            summary: "print('one')\nawait edit('/repo/a.txt', 'world', 'there')".into(),
+            status,
+            output: Some("one\ntwo\n'edited /repo/a.txt'".into()),
+            image_data: None,
+            batch: 1,
+            bash_done: None,
+            cell: Some(cell),
+        }],
+        ..DisplayMessage::new(MessageRole::Assistant, "")
+    }
+}
+
+#[test]
+fn a_structured_cell_shows_duration_output_and_the_edit_summary_by_detail_level() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages
+        .push(cell_message(cell_details(), ToolCallStatus::Done));
+
+    let overview = rendered_text(&all_lines(&app, 90));
+    assert!(
+        overview.contains("\u{2191} 2 \u{2193} 2 lines \u{b7} 1.2s"),
+        "{overview}"
+    );
+    assert!(!overview.contains("hello there"), "{overview}");
+
+    app.detail = ChatDetail::Details;
+    let details = rendered_text(&all_lines(&app, 90));
+    assert!(details.contains("  \u{203a} one"), "{details}");
+    assert!(details.contains("    two"), "{details}");
+    assert!(!details.contains("edited /repo/a.txt"), "{details}");
+    assert!(details.contains("/repo/a.txt +1 -1"), "{details}");
+    assert!(!details.contains("+ hello there"), "{details}");
+
+    app.detail = ChatDetail::All;
+    let all = rendered_text(&all_lines(&app, 90));
+    assert!(all.contains("hello there"), "{all}");
+}
+
+#[test]
+fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let cell = mush_tools::ipython::CellDetails {
+        duration_ms: 12,
+        stdout: String::new(),
+        stderr: String::new(),
+        result: None,
+        error: Some(mush_tools::ipython::CellErrorDetails {
+            ename: "ZeroDivisionError".into(),
+            evalue: "division by zero".into(),
+            traceback: vec![
+                "Traceback (most recent call last):".into(),
+                "  File \"<cell-1>\", line 1".into(),
+                "ZeroDivisionError: division by zero".into(),
+            ],
+        }),
+        diffs: vec![],
+        kernel_restarted: false,
+    };
+    app.messages.push(cell_message(cell, ToolCallStatus::Error));
+
+    let overview = rendered_text(&all_lines(&app, 90));
+    assert!(overview.contains("\u{2717} python"), "{overview}");
+    assert!(
+        overview.contains("12ms \u{b7} ZeroDivisionError"),
+        "{overview}"
+    );
+    assert!(!overview.contains("Traceback"), "{overview}");
+
+    app.detail = ChatDetail::Details;
+    let details = rendered_text(&all_lines(&app, 90));
+    assert!(
+        details.contains("  \u{203a} Traceback (most recent call last):"),
+        "{details}"
+    );
+}
+
+#[test]
+fn a_running_cell_pulses_and_waits_for_output() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut cell = cell_message(cell_details(), ToolCallStatus::Running);
+    cell.tool_calls[0].cell = None;
+    cell.tool_calls[0].output = None;
+    app.messages.push(cell);
+    app.detail = ChatDetail::Details;
+
+    let first = rendered_text(&all_lines(&app, 90));
+    assert!(first.contains("waiting for output..."), "{first}");
+    for _ in 0..crate::widgets::working_icon::WORKING_ICON_TICKS {
+        app.tick();
+    }
+    let second = rendered_text(&all_lines(&app, 90));
+
+    let marker = |text: &str| {
+        text.lines()
+            .find(|l| l.contains("python"))
+            .unwrap()
+            .chars()
+            .nth(1)
+            .unwrap()
+    };
+    assert_ne!(marker(&first), marker(&second), "{first}\n{second}");
 }
 
 fn bash_done(exit_code: i32) -> mush_tools::kernel_jobs::BashDone {
@@ -1707,6 +1855,7 @@ fn an_attached_bash_done_shows_only_when_the_cell_is_expanded() {
             image_data: None,
             batch: 1,
             bash_done: Some(bash_done(0)),
+            cell: None,
         }],
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });

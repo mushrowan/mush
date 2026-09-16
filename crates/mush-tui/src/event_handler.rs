@@ -83,6 +83,9 @@ pub fn handle_agent_event(
                     output_text,
                     image_data,
                 );
+                if let Some(details) = &result.details {
+                    app.set_tool_details(tool_call_id, details);
+                }
             }
         }
         AgentEvent::TurnStart { .. } => {

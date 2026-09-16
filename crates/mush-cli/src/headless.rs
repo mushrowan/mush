@@ -118,6 +118,7 @@ impl Transcript {
                     content: result.content.clone(),
                     outcome: result.outcome,
                     timestamp_ms: Timestamp::now(),
+                    details: result.details.clone(),
                 }));
             }
             AgentEvent::FollowUpInjected { messages } => {

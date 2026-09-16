@@ -278,6 +278,21 @@ impl App {
             .push(DisplayMessage::new(MessageRole::User, text));
     }
 
+    pub fn set_tool_details(&mut self, tool_call_id: &ToolCallId, details: &serde_json::Value) {
+        let Some(mut msg) = self.messages.iter_mut().rev().find(|m| {
+            m.tool_calls
+                .iter()
+                .any(|tc| &tc.tool_call_id == tool_call_id)
+        }) else {
+            return;
+        };
+        for tc in &mut msg.tool_calls {
+            if &tc.tool_call_id == tool_call_id && tc.name == "ipython" {
+                tc.cell = mush_tools::ipython::CellDetails::from_value(details);
+            }
+        }
+    }
+
     pub fn push_bash_done(
         &mut self,
         done: &mush_tools::kernel_jobs::BashDone,

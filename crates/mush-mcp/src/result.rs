@@ -54,7 +54,11 @@ pub fn convert_call_result(result: CallToolResult) -> ToolResult {
         ToolOutcome::Success
     };
 
-    ToolResult { content, outcome }
+    ToolResult {
+        content,
+        outcome,
+        details: None,
+    }
 }
 
 fn push_text(content: &mut Vec<ToolResultContentPart>, text: &str) {

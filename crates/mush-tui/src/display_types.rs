@@ -145,6 +145,7 @@ pub struct LineCache {
     pub width: u16,
     pub show_usage: bool,
     pub detail: ChatDetail,
+    pub pulse: usize,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -232,6 +233,7 @@ pub struct DisplayToolCall {
     pub image_data: Option<Vec<u8>>,
     pub batch: u32,
     pub bash_done: Option<mush_tools::kernel_jobs::BashDone>,
+    pub cell: Option<mush_tools::ipython::CellDetails>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
