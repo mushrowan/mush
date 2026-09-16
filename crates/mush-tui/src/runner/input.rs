@@ -161,7 +161,7 @@ async fn handle_compaction_recovery_action(
                 deps.registry.clone(),
                 Some(deps.lifecycle_hooks.clone()),
                 Some(deps.cwd.to_path_buf()),
-                recovery.failure.context_budget(),
+                recovery.failure.focus().clone(),
             );
             deps.pending_compactions
                 .insert(pane_id, crate::slash::PendingCompaction { task });

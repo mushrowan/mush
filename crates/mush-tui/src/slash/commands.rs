@@ -36,7 +36,7 @@ pub fn handle(
             help.push_str("  /branch [n]    - branch from nth user message\n");
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str(
-                "  /compact [--context-budget <n>] - summarise old messages to free context\n",
+                "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
             );
             help.push_str("  /export [file] - save conversation as markdown\n");
             help.push_str("  /undo          - revert last turn\n");

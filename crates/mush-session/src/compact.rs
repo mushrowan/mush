@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use mush_ai::registry::{ApiRegistry, LlmContext, is_retryable_stream_error_message};
 use mush_ai::types::*;
 
@@ -34,11 +36,27 @@ pub struct CompactionDiagnostics {
     pub fallback_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompactionFocus {
+    pub context_budget: Option<TokenCount>,
+    pub instructions: Option<String>,
+}
+
+impl CompactionFocus {
+    #[must_use]
+    pub fn budget(context_budget: Option<TokenCount>) -> Self {
+        Self {
+            context_budget,
+            instructions: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionFailureReport {
     messages: Vec<Message>,
     keep_recent: Option<usize>,
-    context_budget: Option<TokenCount>,
+    focus: CompactionFocus,
     reason: String,
     diagnostics: CompactionDiagnostics,
 }
@@ -57,15 +75,15 @@ impl CompactionFailureReport {
         Self {
             messages,
             keep_recent,
-            context_budget: None,
+            focus: CompactionFocus::default(),
             reason,
             diagnostics,
         }
     }
 
     #[must_use]
-    pub fn with_context_budget(mut self, context_budget: Option<TokenCount>) -> Self {
-        self.context_budget = context_budget;
+    pub fn with_focus(mut self, focus: CompactionFocus) -> Self {
+        self.focus = focus;
         self
     }
 
@@ -85,8 +103,8 @@ impl CompactionFailureReport {
     }
 
     #[must_use]
-    pub fn context_budget(&self) -> Option<TokenCount> {
-        self.context_budget
+    pub fn focus(&self) -> &CompactionFocus {
+        &self.focus
     }
 
     #[must_use]
@@ -456,6 +474,37 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.";
 
+#[cfg(test)]
+mod focus_tests {
+    use super::*;
+
+    #[test]
+    fn instructions_land_in_the_system_prompt_after_the_budget() {
+        let focus = CompactionFocus {
+            context_budget: Some(TokenCount::new(5_000)),
+            instructions: Some("keep the exact migration command".into()),
+        };
+
+        let prompt = compaction_system_prompt(&focus);
+
+        let budget_at = prompt.find("approximately 5000 tokens").unwrap();
+        let focus_at = prompt
+            .find("<focus>\nkeep the exact migration command\n</focus>")
+            .unwrap();
+        assert!(budget_at < focus_at);
+    }
+
+    #[test]
+    fn blank_instructions_add_nothing() {
+        let focus = CompactionFocus {
+            context_budget: None,
+            instructions: Some("   ".into()),
+        };
+
+        assert_eq!(compaction_system_prompt(&focus), COMPACTION_PROMPT);
+    }
+}
+
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
 const COMPACTION_THRESHOLD: u64 = 95;
 
@@ -556,7 +605,7 @@ pub async fn auto_compact(
         model,
         options,
         Some(DEFAULT_KEEP_RECENT),
-        None,
+        CompactionFocus::default(),
     )
     .await;
 
@@ -575,18 +624,9 @@ pub async fn llm_compact(
     model: &Model,
     options: &StreamOptions,
     keep_recent: Option<usize>,
-    context_budget: Option<TokenCount>,
+    focus: CompactionFocus,
 ) -> CompactionResult {
-    match try_llm_compact(
-        messages,
-        registry,
-        model,
-        options,
-        keep_recent,
-        context_budget,
-    )
-    .await
-    {
+    match try_llm_compact(messages, registry, model, options, keep_recent, focus).await {
         Ok(result) => result,
         Err(failure) => failure.into_fallback_result(),
     }
@@ -599,7 +639,7 @@ pub async fn try_llm_compact(
     model: &Model,
     options: &StreamOptions,
     keep_recent: Option<usize>,
-    context_budget: Option<TokenCount>,
+    focus: CompactionFocus,
 ) -> Result<CompactionResult, CompactionFailureReport> {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
@@ -625,7 +665,7 @@ pub async fn try_llm_compact(
     };
     let summary = loop {
         let old_slice = &messages[..split_at][old_start..];
-        let context = compaction_context(old_slice, &messages[split_at..], context_budget);
+        let context = compaction_context(old_slice, &messages[split_at..], &focus);
 
         match call_for_text(registry, model, &context, &compact_options).await {
             Ok(outcome) => {
@@ -654,7 +694,7 @@ pub async fn try_llm_compact(
                     error.failure.to_string(),
                     diagnostics,
                 )
-                .with_context_budget(context_budget));
+                .with_focus(focus));
             }
         }
     };
@@ -664,22 +704,40 @@ pub async fn try_llm_compact(
     Ok(result)
 }
 
-fn compaction_context(
-    old_messages: &[Message],
-    recent_messages: &[Message],
-    context_budget: Option<TokenCount>,
-) -> LlmContext {
-    let request_body = build_compaction_request(old_messages, recent_messages);
-    let system_prompt = match context_budget {
-        Some(budget) => format!(
-            "{COMPACTION_PROMPT}\n\n\
-             Target a summary length of approximately {} tokens. Trim lower-priority \
+pub fn compaction_system_prompt(focus: &CompactionFocus) -> String {
+    let mut prompt = COMPACTION_PROMPT.to_string();
+    if let Some(budget) = focus.context_budget {
+        let _ = write!(
+            prompt,
+            "\n\nTarget a summary length of approximately {} tokens. Trim lower-priority \
              detail before higher-priority detail to fit within this budget. Keep the \
              section structure intact even if individual sections become terser.",
             budget.get()
-        ),
-        None => COMPACTION_PROMPT.to_string(),
-    };
+        );
+    }
+    if let Some(instructions) = focus
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let _ = write!(
+            prompt,
+            "\n\nThe user asked for this summary to focus on the following. Treat it as the \
+             highest priority: keep every detail it asks for verbatim, ahead of the default \
+             emphasis.\n\n<focus>\n{instructions}\n</focus>"
+        );
+    }
+    prompt
+}
+
+fn compaction_context(
+    old_messages: &[Message],
+    recent_messages: &[Message],
+    focus: &CompactionFocus,
+) -> LlmContext {
+    let request_body = build_compaction_request(old_messages, recent_messages);
+    let system_prompt = compaction_system_prompt(focus);
 
     LlmContext {
         system_prompt: Some(system_prompt),
@@ -1051,7 +1109,7 @@ mod tests {
             "prompt_id":"orchestrator-event-run.worker.1"
         }))
         .unwrap();
-        let context = compaction_context(&[human, event], &[], None);
+        let context = compaction_context(&[human, event], &[], &CompactionFocus::default());
         assert_eq!(context.messages.len(), 1);
         let Message::Event(input) = &context.messages[0] else {
             panic!()
@@ -1072,7 +1130,7 @@ mod tests {
             "prompt_id":"orchestrator-event-run.worker.1"
         }))
         .unwrap();
-        let context = compaction_context(&[legacy], &[], None);
+        let context = compaction_context(&[legacy], &[], &CompactionFocus::default());
         let Message::Event(event) = &context.messages[0] else {
             panic!()
         };
@@ -1462,7 +1520,15 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(5),
+            CompactionFocus::default(),
+        )
+        .await;
         assert_eq!(result.summarised_count, 15);
         assert_eq!(result.messages.len(), 6);
         assert!(result.summary.contains("Summary of earlier conversation"));
@@ -1483,7 +1549,15 @@ mod tests {
             })
             .collect();
 
-        let outcome = try_llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let outcome = try_llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(5),
+            CompactionFocus::default(),
+        )
+        .await;
         let Err(failure) = outcome else {
             panic!("expected recoverable compaction failure")
         };
@@ -1509,7 +1583,15 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(5),
+            CompactionFocus::default(),
+        )
+        .await;
 
         assert!(
             result.summary.contains("Compaction fallback reason"),
@@ -1540,7 +1622,15 @@ mod tests {
         msgs.push(user_msg("important recent task: preserve this"));
         msgs.push(assistant_msg("recent decision: keep the new parser"));
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(2), None).await;
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(2),
+            CompactionFocus::default(),
+        )
+        .await;
 
         assert!(result.summary.contains("## Recent user requests"));
         assert!(
@@ -1628,7 +1718,15 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(5),
+            CompactionFocus::default(),
+        )
+        .await;
 
         assert_eq!(result.summary, "real summary");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1694,7 +1792,15 @@ mod tests {
             })
             .collect();
 
-        let result = llm_compact(msgs, &registry, &model, &options, Some(5), None).await;
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &model,
+            &options,
+            Some(5),
+            CompactionFocus::default(),
+        )
+        .await;
 
         assert_eq!(result.summary, "summary after trim");
         assert_eq!(calls.load(Ordering::SeqCst), 2);

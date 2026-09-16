@@ -23,7 +23,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("resume", "resume last session in cwd (or by id)"),
     ("branch", "branch from nth user message"),
     ("tree", "show conversation tree"),
-    ("compact", "summarise old messages (--context-budget <n>)"),
+    (
+        "compact",
+        "summarise old messages ([--context-budget <n>] [focus instructions])",
+    ),
     ("compaction-model", "view or set the compaction model"),
     ("export", "save conversation as markdown"),
     ("undo", "revert last turn"),
@@ -774,6 +777,7 @@ mod tests {
             before_count: 24,
             model_id: "test".into(),
             diagnostics: mush_session::compact::CompactionDiagnostics::default(),
+            instructions: None,
         };
         let result = crate::slash::CompactionTaskResult::Applied(applied);
 
@@ -885,6 +889,7 @@ mod tests {
             before_count: 3,
             model_id: recovery.model_id,
             diagnostics: result.diagnostics,
+            instructions: None,
         };
         {
             let pane = &mut runtime.session;

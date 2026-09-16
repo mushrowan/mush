@@ -34,7 +34,9 @@ pub enum SlashParseError {
     LoginCodeUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
     CompactionModelUsage,
-    #[error("usage: /compact [--context-budget <count>] (e.g. 10k, 1024, 1.5k, 1m)")]
+    #[error(
+        "usage: /compact [--context-budget <count>] [instructions] (budget e.g. 10k, 1024, 1.5k, 1m)"
+    )]
     CompactUsage,
     #[error("invalid context budget: {0}")]
     InvalidContextBudget(#[from] TokenCountParseError),
@@ -62,7 +64,7 @@ pub enum SlashAction {
     },
     Tree,
     Compact {
-        context_budget: Option<TokenCount>,
+        focus: mush_session::compact::CompactionFocus,
     },
     CompactionModel {
         model_id: Option<String>,
@@ -170,8 +172,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map(|index| SlashAction::Branch { index: Some(index) })
             .map_err(|_| SlashParseError::BranchUsage),
         "tree" => Ok(SlashAction::Tree),
-        "compact" => parse_context_budget(args, SlashParseError::CompactUsage)
-            .map(|context_budget| SlashAction::Compact { context_budget }),
+        "compact" => parse_compact_focus(args).map(|focus| SlashAction::Compact { focus }),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -229,26 +230,33 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
     }
 }
 
-fn parse_context_budget(
+fn parse_compact_focus(
     args: &str,
-    usage: SlashParseError,
-) -> Result<Option<TokenCount>, SlashParseError> {
-    let trimmed = args.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
+) -> Result<mush_session::compact::CompactionFocus, SlashParseError> {
+    let mut rest = args.trim();
+    let mut context_budget = None;
+    while let Some(flag_rest) = rest
+        .strip_prefix("--context-budget")
+        .or_else(|| rest.strip_prefix("-b"))
+    {
+        if !flag_rest.is_empty() && !flag_rest.starts_with(char::is_whitespace) {
+            break;
+        }
+        let mut tokens = flag_rest.trim_start().splitn(2, char::is_whitespace);
+        let value = tokens
+            .next()
+            .filter(|value| !value.is_empty())
+            .ok_or(SlashParseError::CompactUsage)?;
+        context_budget = Some(value.parse::<TokenCount>()?);
+        rest = tokens.next().unwrap_or("").trim();
     }
-
-    let mut tokens = trimmed.split_whitespace();
-    let flag = tokens.next().ok_or_else(|| usage.clone())?;
-    if !matches!(flag, "--context-budget" | "-b") {
-        return Err(usage);
+    if rest.starts_with("--") {
+        return Err(SlashParseError::CompactUsage);
     }
-    let value = tokens.next().ok_or_else(|| usage.clone())?;
-    if tokens.next().is_some() {
-        return Err(usage);
-    }
-    let budget: TokenCount = value.parse()?;
-    Ok(Some(budget))
+    Ok(mush_session::compact::CompactionFocus {
+        context_budget,
+        instructions: (!rest.is_empty()).then(|| rest.to_string()),
+    })
 }
 
 fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
@@ -333,42 +341,61 @@ mod tests {
         );
     }
 
+    fn compact(context_budget: Option<u64>, instructions: Option<&str>) -> SlashAction {
+        SlashAction::Compact {
+            focus: mush_session::compact::CompactionFocus {
+                context_budget: context_budget.map(TokenCount::new),
+                instructions: instructions.map(str::to_string),
+            },
+        }
+    }
+
     #[test]
     fn parse_compact_bare() {
-        assert_eq!(
-            parse("/compact").unwrap(),
-            SlashAction::Compact {
-                context_budget: None
-            }
-        );
+        assert_eq!(parse("/compact").unwrap(), compact(None, None));
     }
 
     #[test]
     fn parse_compact_with_context_budget() {
-        use mush_ai::types::TokenCount;
-
         assert_eq!(
             parse("/compact --context-budget 10k").unwrap(),
-            SlashAction::Compact {
-                context_budget: Some(TokenCount::new(10_000))
-            }
+            compact(Some(10_000), None)
         );
         assert_eq!(
             parse("/compact --context-budget 1024").unwrap(),
-            SlashAction::Compact {
-                context_budget: Some(TokenCount::new(1024))
-            }
+            compact(Some(1024), None)
         );
     }
 
     #[test]
     fn parse_compact_with_short_budget_flag() {
-        use mush_ai::types::TokenCount;
+        assert_eq!(parse("/compact -b 5k").unwrap(), compact(Some(5_000), None));
+    }
+
+    #[test]
+    fn parse_compact_with_instructions() {
         assert_eq!(
-            parse("/compact -b 5k").unwrap(),
-            SlashAction::Compact {
-                context_budget: Some(TokenCount::new(5_000))
-            }
+            parse("/compact focus on the auth refactor, keep the migration command").unwrap(),
+            compact(
+                None,
+                Some("focus on the auth refactor, keep the migration command")
+            )
+        );
+    }
+
+    #[test]
+    fn parse_compact_with_budget_and_instructions() {
+        assert_eq!(
+            parse("/compact -b 5k keep the failing tests").unwrap(),
+            compact(Some(5_000), Some("keep the failing tests"))
+        );
+    }
+
+    #[test]
+    fn parse_compact_instructions_may_start_with_a_dash_word() {
+        assert_eq!(
+            parse("/compact -bare metal notes").unwrap(),
+            compact(None, Some("-bare metal notes"))
         );
     }
 

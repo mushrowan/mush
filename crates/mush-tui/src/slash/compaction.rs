@@ -33,6 +33,7 @@ pub struct AppliedCompaction {
     pub before_count: usize,
     pub model_id: String,
     pub diagnostics: mush_session::compact::CompactionDiagnostics,
+    pub instructions: Option<String>,
 }
 
 pub struct PendingCompaction {
@@ -47,7 +48,7 @@ pub fn start_compaction(
     registry: ApiRegistry,
     lifecycle_hooks: Option<mush_agent::LifecycleHooks>,
     cwd: Option<PathBuf>,
-    context_budget: Option<TokenCount>,
+    focus: mush_session::compact::CompactionFocus,
 ) -> tokio::task::JoinHandle<CompactionTaskResult> {
     let before_count = messages.len();
     let model_id = model.id.to_string();
@@ -59,7 +60,7 @@ pub fn start_compaction(
             &registry,
             lifecycle_hooks.as_ref(),
             cwd.as_deref(),
-            context_budget,
+            focus,
         )
         .await;
         match run {
@@ -113,7 +114,11 @@ pub fn apply_applied_compaction(
         .reset_live_state(TokenCount::new(result.tokens_after as u64));
 
     if let Some(body) = summary_body {
-        app.push_system_message(crate::conversation_display::format_compaction_banner(&body));
+        let banner = crate::conversation_display::format_compaction_banner(&body);
+        app.push_system_message(match result.instructions.as_deref() {
+            Some(instructions) => format!("{banner}\n\nfocus: {instructions}"),
+            None => banner,
+        });
     }
     if let Some(note) = result.diagnostics.status_note() {
         app.push_system_message(note);
@@ -142,7 +147,7 @@ pub async fn handle_compact(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
-    context_budget: Option<TokenCount>,
+    focus: mush_session::compact::CompactionFocus,
 ) {
     let messages = conversation.context();
     let before = messages.len();
@@ -159,7 +164,7 @@ pub async fn handle_compact(
         registry.clone(),
         lifecycle_hooks.cloned(),
         cwd.map(std::path::Path::to_path_buf),
-        context_budget,
+        focus,
     );
     let Ok(result) = task.await else {
         app.push_system_message("compaction task failed");
@@ -218,41 +223,34 @@ pub async fn run_compaction(
     registry: &ApiRegistry,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
-    context_budget: Option<TokenCount>,
+    focus: mush_session::compact::CompactionFocus,
 ) -> RunCompactionResult {
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
-    let result = match compact::try_llm_compact(
-        messages,
-        registry,
-        model,
-        options,
-        Some(10),
-        context_budget,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(failure) => {
-            return RunCompactionResult::Failed {
-                failure,
-                tokens_before,
-            };
-        }
-    };
+    let instructions = focus.instructions.clone();
+    let result =
+        match compact::try_llm_compact(messages, registry, model, options, Some(10), focus).await {
+            Ok(result) => result,
+            Err(failure) => {
+                return RunCompactionResult::Failed {
+                    failure,
+                    tokens_before,
+                };
+            }
+        };
 
-    RunCompactionResult::Applied(
-        build_applied_compaction(
-            result,
-            tokens_before,
-            0,
-            String::new(),
-            lifecycle_hooks,
-            cwd,
-        )
-        .await,
+    let mut applied = build_applied_compaction(
+        result,
+        tokens_before,
+        0,
+        String::new(),
+        lifecycle_hooks,
+        cwd,
     )
+    .await;
+    applied.instructions = instructions;
+    RunCompactionResult::Applied(applied)
 }
 
 async fn build_applied_compaction(
@@ -295,6 +293,7 @@ async fn build_applied_compaction(
         before_count,
         model_id,
         diagnostics,
+        instructions: None,
     }
 }
 
@@ -401,7 +400,7 @@ mod tests {
             &registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         )
         .await;
 
@@ -442,7 +441,7 @@ mod tests {
             &registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         )
         .await;
 
@@ -486,7 +485,7 @@ mod tests {
             registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         );
         let result = task.await.expect("compaction task panicked");
 
@@ -524,6 +523,7 @@ mod tests {
                 trimmed_messages: 0,
                 fallback_reason: None,
             },
+            instructions: None,
         });
 
         apply_compaction_result(&mut app, &mut conversation, result);
@@ -575,7 +575,7 @@ mod tests {
             &registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         )
         .await;
 
@@ -627,7 +627,7 @@ mod tests {
             &registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         )
         .await;
 
@@ -696,7 +696,7 @@ mod tests {
             &registry,
             None,
             None,
-            None,
+            mush_session::compact::CompactionFocus::default(),
         )
         .await;
 

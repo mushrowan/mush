@@ -482,7 +482,7 @@ async fn auto_compact(
         registry.clone(),
         Some(tui_config.lifecycle_hooks.clone()),
         Some(tui_config.cwd.clone()),
-        None,
+        mush_session::compact::CompactionFocus::default(),
     );
     let Ok(result) = task.await else {
         pane.app.push_system_message("auto-compaction task failed");

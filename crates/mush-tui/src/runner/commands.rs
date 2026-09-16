@@ -57,7 +57,7 @@ pub(super) async fn handle_slash_action(
         SlashAction::Subagents { args } => {
             super::subagents::command(&mut session.app, tui_config, &args).await;
         }
-        SlashAction::Compact { context_budget } => {
+        SlashAction::Compact { focus } => {
             let pane_id = PaneId::new(1);
             let messages = session.conversation.context();
             if messages.len() <= slash::MIN_MESSAGES_FOR_COMPACTION {
@@ -85,7 +85,7 @@ pub(super) async fn handle_slash_action(
                             registry.clone(),
                             Some(lifecycle_hooks.clone()),
                             Some(cwd.to_path_buf()),
-                            context_budget,
+                            focus,
                         );
                         slot.insert(slash::PendingCompaction { task });
                         state_changed = true;
