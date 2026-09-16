@@ -181,6 +181,12 @@ pub(super) fn set_cursor_shape(caret: crate::app::Caret) {
     let _ = io::stdout().queue(shape).and_then(Write::flush);
 }
 
+pub(super) fn set_title(title: &str) {
+    let _ = io::stdout()
+        .queue(crossterm::terminal::SetTitle(title))
+        .and_then(Write::flush);
+}
+
 pub(super) fn restore_terminal_state() {
     restore_tty_modes(&mut io::stdout());
     let _ = disable_raw_mode();

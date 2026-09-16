@@ -432,3 +432,28 @@ fn subagents_overlay_preserves_log_and_modal_across_live_frames() {
     assert!(app.stream.active);
     assert_eq!(app.input.text, "draft 界");
 }
+
+#[test]
+fn the_terminal_title_names_the_cwd() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.cwd = "~/dev/mush".into();
+
+    assert_eq!(terminal_title(&app), "mush - mush");
+}
+
+#[test]
+fn the_terminal_title_carries_the_session_title() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.cwd = "~/dev/mush".into();
+    app.session_title = Some("port\nprime".into());
+
+    assert_eq!(terminal_title(&app), "mush - port prime - mush");
+}
+
+#[test]
+fn a_trailing_slash_does_not_blank_the_cwd() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.cwd = "/tmp/work/".into();
+
+    assert_eq!(terminal_title(&app), "mush - work");
+}

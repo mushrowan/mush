@@ -20,6 +20,11 @@ pub(super) fn draw_panes(
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     terminal.backend_mut().flush()?;
+    let title = terminal_title(&session.app);
+    if screen.title.as_deref() != Some(title.as_str()) {
+        super::terminal::set_title(&title);
+        screen.title = Some(title);
+    }
     super::terminal::set_cursor_shape(
         session
             .app
@@ -32,6 +37,23 @@ pub(super) fn draw_panes(
         draw_frame(frame, screen, &mut session.app, settings);
     })?;
     Ok(())
+}
+
+pub(crate) fn terminal_title(app: &App) -> String {
+    let cwd = app
+        .cwd
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(&app.cwd);
+    match app
+        .session_title
+        .as_deref()
+        .map(widgets::top_bar::sanitise_title)
+        .filter(|title| !title.is_empty())
+    {
+        Some(title) => format!("mush - {title} - {cwd}"),
+        None => format!("mush - {cwd}"),
+    }
 }
 
 fn draw_frame(

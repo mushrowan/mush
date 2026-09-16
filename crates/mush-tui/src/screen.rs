@@ -321,7 +321,9 @@ fn redraw_stitched_row(row: Rect, buf: &mut Buffer) {
 }
 
 #[derive(Debug, Default)]
-pub struct Screen {}
+pub struct Screen {
+    pub(crate) title: Option<String>,
+}
 
 impl Screen {
     #[must_use]
