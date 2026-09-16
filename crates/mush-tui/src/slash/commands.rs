@@ -45,6 +45,9 @@ pub fn handle(
             help.push_str("  /name [title]  - show or set the session title\n");
             help.push_str("  /session       - show the session id, file and message counts\n");
             help.push_str(
+                "  /btw <q>       - ask a side question without adding it to the session\n",
+            );
+            help.push_str(
                 "  /skills        - list loaded skills, their sources and any warnings\n",
             );
             help.push_str("  /credits       - show openrouter credit balance\n");
@@ -260,6 +263,7 @@ pub fn handle(
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
             None
         }
+        SlashAction::Side { .. } => None,
         SlashAction::SessionInfo => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
             let path = store.session_path(&tui_config.session_id);

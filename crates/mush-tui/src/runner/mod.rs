@@ -247,6 +247,7 @@ pub async fn run_tui(
         stream_state.poll_signal().await;
 
         let compaction_finished = runtime.poll_pending_compactions(&tui_config).await;
+        let side_question_finished = runtime.session.poll_side_questions().await;
 
         let maintenance_tick = last_draw.elapsed() >= std::time::Duration::from_secs(1)
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
@@ -255,6 +256,7 @@ pub async fn run_tui(
             || inbox_disabled
             || discovery_updated
             || compaction_finished
+            || side_question_finished
             || maintenance_tick;
         if should_draw {
             if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL

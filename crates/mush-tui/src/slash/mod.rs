@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod compaction;
+pub mod side_question;
 
 use mush_ai::types::{SessionId, TokenCount, TokenCountParseError};
 use thiserror::Error;
@@ -32,6 +33,8 @@ pub enum SlashParseError {
     McpUsage,
     #[error("usage: /login-complete <code>")]
     LoginCodeUsage,
+    #[error("usage: /btw <question>")]
+    SideUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
     CompactionModelUsage,
     #[error(
@@ -83,6 +86,9 @@ pub enum SlashAction {
     },
     Skills,
     SessionInfo,
+    Side {
+        question: String,
+    },
     Endpoints {
         model_id: Option<String>,
     },
@@ -186,6 +192,10 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "cost" => Ok(SlashAction::Cost),
         "skills" => Ok(SlashAction::Skills),
         "session" => Ok(SlashAction::SessionInfo),
+        "btw" | "side" if args.is_empty() => Err(SlashParseError::SideUsage),
+        "btw" | "side" => Ok(SlashAction::Side {
+            question: args.to_string(),
+        }),
         "name" | "rename" => Ok(SlashAction::Name {
             title: (!args.is_empty()).then(|| args.to_string()),
         }),

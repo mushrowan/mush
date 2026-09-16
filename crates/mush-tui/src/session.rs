@@ -52,6 +52,7 @@ pub struct Session {
     pub pending_compaction_inputs: Vec<(String, Vec<PendingImage>)>,
     pub label: Option<String>,
     pub title_generated: bool,
+    pub pending_side_questions: Vec<crate::slash::side_question::PendingSideQuestion>,
 }
 
 impl Session {
@@ -67,6 +68,7 @@ impl Session {
             pending_compaction_inputs: Vec::new(),
             label: None,
             title_generated: false,
+            pending_side_questions: Vec::new(),
         }
     }
 
@@ -82,6 +84,7 @@ impl Session {
             pending_compaction_inputs: Vec::new(),
             label: None,
             title_generated: false,
+            pending_side_questions: Vec::new(),
         }
     }
 
@@ -123,6 +126,28 @@ impl Session {
             &mut self.conversation,
             &mut self.image_protos,
         )
+    }
+
+    pub async fn poll_side_questions(&mut self) -> bool {
+        let finished: Vec<usize> = self
+            .pending_side_questions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| pending.task.is_finished().then_some(index))
+            .collect();
+        if finished.is_empty() {
+            return false;
+        }
+        for index in finished.into_iter().rev() {
+            let pending = self.pending_side_questions.remove(index);
+            let outcome = pending.task.await;
+            crate::slash::side_question::finish_side_question(
+                &mut self.app,
+                &pending.question,
+                outcome,
+            );
+        }
+        true
     }
 
     pub fn ensure_image_protocols(

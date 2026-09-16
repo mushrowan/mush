@@ -93,6 +93,22 @@ pub(super) async fn handle_slash_action(
                 }
             }
         }
+        SlashAction::Side { question } => {
+            let context = slash::side_question::side_question_context(
+                tui_config.system_prompt.as_deref(),
+                session.conversation.context(),
+                &question,
+            );
+            let pending = slash::side_question::start_side_question(
+                &mut session.app,
+                registry.clone(),
+                tui_config.model.clone(),
+                tui_config.stream_options(),
+                context,
+                question,
+            );
+            session.pending_side_questions.push(pending);
+        }
         SlashAction::Export { path } => {
             let pane = &mut *session;
             slash::handle_export(

@@ -35,6 +35,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("name", "show or set the session title"),
     ("session", "show the session id, file and message counts"),
     (
+        "btw",
+        "ask a side question without adding it to the session",
+    ),
+    (
         "skills",
         "list loaded skills, their sources and any warnings",
     ),
