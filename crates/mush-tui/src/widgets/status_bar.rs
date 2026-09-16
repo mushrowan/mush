@@ -41,6 +41,11 @@ fn confirm_text(app: &App) -> Option<String> {
     if app.interaction.mode != crate::app::AppMode::ToolConfirm {
         return None;
     }
+    if app.interaction.kernel_busy_reply.is_some() {
+        return Some(
+            "interrupted python cell still running. y wait, n kill and restart, esc cancel".into(),
+        );
+    }
     Some(if let Some(ref prompt) = app.interaction.confirm_prompt {
         format!("run {prompt}? (y/n)")
     } else {

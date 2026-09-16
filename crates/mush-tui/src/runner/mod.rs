@@ -27,8 +27,8 @@ use mush_ai::registry::ApiRegistry;
 use crate::screen::Screen;
 
 pub use self::config::{
-    KernelNotices, LiveToolOutput, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig,
+    KernelBusyRequest, KernelNotices, KernelPrompts, LiveToolOutput, ModelResolver, PaneSnapshot,
+    ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};

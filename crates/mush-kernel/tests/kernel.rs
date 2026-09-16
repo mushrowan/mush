@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mush_kernel::{HostError, HostRequestHandler, Kernel, KernelConfig, NoHost};
+use mush_kernel::{HostError, HostRequestHandler, Kernel, KernelConfig, KernelError, NoHost};
 use serde_json::{Value, json};
 
 async fn kernel() -> Kernel {
@@ -156,6 +156,41 @@ async fn a_handle_started_in_a_cell_carries_the_cell_origin() {
 
     assert_eq!(output.result.as_deref(), Some("'ran \"job:ls@call_7\"'"));
     kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cell_that_swallows_the_interrupt_leaves_the_kernel_busy_until_killed() {
+    let kernel = Arc::new(
+        Kernel::start(
+            KernelConfig {
+                cwd: std::env::temp_dir(),
+                busy_wait: Duration::from_millis(600),
+                ..KernelConfig::default()
+            },
+            Arc::new(Echo),
+        )
+        .await
+        .unwrap(),
+    );
+    let stubborn = {
+        let kernel = kernel.clone();
+        tokio::spawn(async move {
+            kernel
+                .execute(
+                    "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n    except KeyboardInterrupt:\n        pass",
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    stubborn.abort();
+    let _ = stubborn.await;
+
+    let outcome = kernel.execute("1 + 1").await;
+
+    assert!(matches!(outcome, Err(KernelError::Busy)), "{outcome:?}");
+    assert!(kernel.busy());
+    Arc::try_unwrap(kernel).ok().unwrap().kill().await;
 }
 
 #[tokio::test]

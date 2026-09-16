@@ -15,6 +15,7 @@ use crate::protocol::{Event, PROTOCOL_VERSION, Request};
 
 const SHIM: &str = include_str!("../shim/mush_kernel.py");
 const STDERR_TAIL_LINES: usize = 200;
+const BUSY_INTERRUPT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
@@ -22,6 +23,7 @@ pub struct KernelConfig {
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
     pub ready_timeout: Duration,
+    pub busy_wait: Duration,
 }
 
 impl Default for KernelConfig {
@@ -31,6 +33,7 @@ impl Default for KernelConfig {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
             ready_timeout: Duration::from_secs(20),
+            busy_wait: Duration::from_secs(5),
         }
     }
 }
@@ -94,6 +97,8 @@ impl CellOutput {
 struct Shared {
     cells: Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
     current: Mutex<Option<String>>,
+    running: Mutex<Option<String>>,
+    idle: tokio::sync::Notify,
     stderr_tail: Mutex<VecDeque<String>>,
     handler: Arc<dyn HostRequestHandler>,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
@@ -106,6 +111,7 @@ pub struct Kernel {
     next_id: AtomicU64,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     _shim_dir: tempfile::TempDir,
+    busy_wait: Duration,
     pub python: PathBuf,
     pub python_version: String,
 }
@@ -147,6 +153,8 @@ impl Kernel {
         let shared = Arc::new(Shared {
             cells: Mutex::new(HashMap::new()),
             current: Mutex::new(None),
+            running: Mutex::new(None),
+            idle: tokio::sync::Notify::new(),
             stderr_tail: Mutex::new(VecDeque::new()),
             handler,
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
@@ -191,6 +199,7 @@ impl Kernel {
             next_id: AtomicU64::new(1),
             reader: Mutex::new(Some(reader)),
             _shim_dir: shim_dir,
+            busy_wait: config.busy_wait,
             python,
             python_version,
         })
@@ -220,9 +229,11 @@ impl Kernel {
         mut on_event: impl FnMut(&Event) + Send,
     ) -> Result<CellOutput, KernelError> {
         let _guard = self.exec_lock.lock().await;
+        self.wait_until_idle().await?;
         let id = self.fresh_id("cell");
         let mut rx = self.shared.register(&id);
         self.shared.set_current(Some(id.clone()));
+        self.shared.set_running(Some(id.clone()));
         let started = Instant::now();
         let sent = self
             .send(&Request::Execute {
@@ -233,6 +244,7 @@ impl Kernel {
             .await;
         if let Err(error) = sent {
             self.shared.unregister(&id);
+            self.shared.set_running(None);
             return Err(error);
         }
 
@@ -279,6 +291,43 @@ impl Kernel {
 
     pub async fn interrupt(&self) -> Result<(), KernelError> {
         self.send(&Request::Interrupt).await
+    }
+
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        self.shared.running().is_some()
+    }
+
+    async fn wait_until_idle(&self) -> Result<(), KernelError> {
+        let started = Instant::now();
+        while self.busy() {
+            if started.elapsed() >= self.busy_wait {
+                return Err(KernelError::Busy);
+            }
+            let _ = self.interrupt().await;
+            let _ =
+                tokio::time::timeout(BUSY_INTERRUPT_INTERVAL, self.shared.idle.notified()).await;
+        }
+        Ok(())
+    }
+
+    pub async fn kill(self) {
+        let child = self
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(mut child) = child {
+            let _ = child.kill().await;
+        }
+        if let Some(reader) = self
+            .reader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            reader.abort();
+        }
     }
 
     pub async fn snapshot(
@@ -474,7 +523,29 @@ impl Shared {
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = id;
     }
 
+    fn running(&self) -> Option<String> {
+        self.running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_running(&self, id: Option<String>) {
+        *self.running.lock().unwrap_or_else(PoisonError::into_inner) = id;
+    }
+
+    fn finish_running(&self, id: &str) {
+        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.as_deref() == Some(id) {
+            *running = None;
+            self.idle.notify_waiters();
+        }
+    }
+
     fn route(&self, event: Event) {
+        if let Event::Done { id, .. } = &event {
+            self.finish_running(id);
+        }
         let target = event.cell_id().map(str::to_string).or_else(|| {
             self.current
                 .lock()
@@ -555,6 +626,8 @@ async fn read_events(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clear();
+    shared.set_running(None);
+    shared.idle.notify_waiters();
 }
 
 async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {

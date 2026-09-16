@@ -123,11 +123,34 @@ impl HostRequestHandler for MushHost {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyKernelChoice {
+    Wait,
+    Kill,
+    Cancel,
+}
+
+pub type BusyKernelPrompt = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = BusyKernelChoice> + Send>>
+        + Send
+        + Sync,
+>;
+
+pub const KERNEL_RESTART_NOTICE: &str = "<ipython_kernel_reset>\nThe Python kernel was restarted \
+after an interrupted cell kept running. Variables, imports, tasks and open resources from before \
+the restart are gone; recreate them before using them.\n</ipython_kernel_reset>";
+
+struct CellRun {
+    output: CellOutput,
+    kernel_restarted: bool,
+}
+
 pub struct IpythonTool {
     config: KernelConfig,
     host: Arc<dyn HostRequestHandler>,
     kernel: tokio::sync::Mutex<Option<Kernel>>,
     output_sink: Option<crate::bash::OutputSink>,
+    busy_prompt: Option<BusyKernelPrompt>,
     pending_restore: tokio::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
@@ -151,6 +174,7 @@ impl IpythonTool {
             host,
             kernel: tokio::sync::Mutex::new(None),
             output_sink: None,
+            busy_prompt: None,
             pending_restore: tokio::sync::Mutex::new(None),
         }
     }
@@ -161,13 +185,53 @@ impl IpythonTool {
         self
     }
 
+    #[must_use]
+    pub fn with_busy_prompt(mut self, prompt: BusyKernelPrompt) -> Self {
+        self.busy_prompt = Some(prompt);
+        self
+    }
+
+    pub fn kernel_config_mut(&mut self) -> &mut KernelConfig {
+        &mut self.config
+    }
+
     pub async fn shutdown(&self) {
         if let Some(kernel) = self.kernel.lock().await.take() {
             let _ = kernel.shutdown().await;
         }
     }
 
-    async fn run(&self, code: &str) -> Result<CellOutput, KernelError> {
+    async fn run(&self, code: &str) -> Result<CellRun, KernelError> {
+        let mut kernel_restarted = false;
+        loop {
+            match self.run_once(code).await {
+                Err(KernelError::Busy) => {}
+                Err(error) => return Err(error),
+                Ok(output) => {
+                    return Ok(CellRun {
+                        output,
+                        kernel_restarted,
+                    });
+                }
+            }
+            let choice = match &self.busy_prompt {
+                Some(prompt) => prompt().await,
+                None => BusyKernelChoice::Cancel,
+            };
+            match choice {
+                BusyKernelChoice::Wait => {}
+                BusyKernelChoice::Kill => {
+                    if let Some(kernel) = self.kernel.lock().await.take() {
+                        kernel.kill().await;
+                    }
+                    kernel_restarted = true;
+                }
+                BusyKernelChoice::Cancel => return Err(KernelError::Busy),
+            }
+        }
+    }
+
+    async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
         let mut slot = self.kernel.lock().await;
         if slot.is_none() {
             let kernel = Kernel::start(self.config.clone(), self.host.clone()).await?;
@@ -327,9 +391,12 @@ impl AgentTool for IpythonTool {
             Err(error) => return error,
         };
         match self.run(&args.code).await {
-            Ok(output) => {
-                let text = format_cell_output(&output);
-                if output.ok {
+            Ok(run) => {
+                let mut text = format_cell_output(&run.output);
+                if run.kernel_restarted {
+                    text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
+                }
+                if run.output.ok {
                     ToolResult::text(text)
                 } else {
                     ToolResult::error(text)
@@ -456,6 +523,62 @@ mod tests {
         assert_eq!(notices[0].done.command, "exit 5");
         assert_eq!(notices[0].done.exit_code, 5);
         assert_eq!(notices[0].origin.as_deref(), Some("call_9"));
+        tool.shutdown().await;
+    }
+
+    const STUBBORN: &str = "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n    except KeyboardInterrupt:\n        pass";
+
+    async fn leave_a_stubborn_cell_running(tool: &Arc<IpythonTool>) {
+        let stubborn = {
+            let tool = tool.clone();
+            tokio::spawn(async move { tool.execute(json!({ "code": STUBBORN })).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        stubborn.abort();
+        let _ = stubborn.await;
+    }
+
+    #[tokio::test]
+    async fn a_busy_kernel_with_no_prompt_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tool = tool(dir.path());
+        tool.kernel_config_mut().busy_wait = std::time::Duration::from_millis(400);
+        let tool = Arc::new(tool);
+        leave_a_stubborn_cell_running(&tool).await;
+
+        let result = tool.execute(json!({ "code": "1 + 1" })).await;
+
+        assert!(result.outcome.is_error());
+        assert_eq!(
+            extract_text(&result),
+            "kernel: an interrupted cell is still running"
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn choosing_kill_restarts_the_kernel_and_tells_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tool = tool(dir.path());
+        tool.kernel_config_mut().busy_wait = std::time::Duration::from_millis(400);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool = Arc::new(tool.with_busy_prompt({
+            let asked = asked.clone();
+            Arc::new(move || {
+                asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Box::pin(async { BusyKernelChoice::Kill })
+            })
+        }));
+        leave_a_stubborn_cell_running(&tool).await;
+
+        let result = tool.execute(json!({ "code": "1 + 1" })).await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            extract_text(&result),
+            format!("{KERNEL_RESTART_NOTICE}\n\n2")
+        );
         tool.shutdown().await;
     }
 

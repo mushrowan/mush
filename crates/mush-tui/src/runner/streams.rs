@@ -148,6 +148,63 @@ pub(super) async fn poll_confirmation_prompt(
     false
 }
 
+pub(super) fn poll_kernel_busy_prompt(
+    session: &mut Session,
+    stream_state: &StreamState,
+    prompts: &Option<crate::runner::config::KernelPrompts>,
+) -> bool {
+    let app = &mut session.app;
+    if let Some(reply) = &app.interaction.kernel_busy_reply
+        && reply.is_closed()
+    {
+        app.interaction.kernel_busy_reply = None;
+        if app.interaction.mode == crate::app::AppMode::ToolConfirm {
+            app.interaction.mode = crate::app::AppMode::Insert;
+        }
+        return true;
+    }
+    if app.interaction.mode != crate::app::AppMode::Insert {
+        return false;
+    }
+    let Some(prompts) = prompts else {
+        return false;
+    };
+    let Some(request) = prompts
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.drain(..).rfind(|request| !request.reply.is_closed()))
+    else {
+        return false;
+    };
+    app.interaction.mode = crate::app::AppMode::ToolConfirm;
+    app.interaction.kernel_busy_reply = Some(request.reply);
+    (stream_state.notify)(
+        "python kernel is busy",
+        "an interrupted cell is still running",
+        Some(crate::notify::Sound::Attention),
+    );
+    true
+}
+
+pub(super) fn answer_kernel_busy(
+    session: &mut Session,
+    choice: mush_tools::ipython::BusyKernelChoice,
+) {
+    let app = &mut session.app;
+    if let Some(reply) = app.interaction.kernel_busy_reply.take() {
+        let _ = reply.send(choice);
+    }
+    app.interaction.mode = crate::app::AppMode::Insert;
+    app.status = Some(
+        match choice {
+            mush_tools::ipython::BusyKernelChoice::Wait => "waiting for the python kernel",
+            mush_tools::ipython::BusyKernelChoice::Kill => "restarting the python kernel",
+            mush_tools::ipython::BusyKernelChoice::Cancel => "cell cancelled",
+        }
+        .into(),
+    );
+}
+
 pub(super) async fn answer_confirmation(
     session: &mut Session,
     _stream_state: &mut StreamState,
@@ -981,6 +1038,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_busy_kernel_request_becomes_a_prompt_and_the_answer_reaches_the_tool() {
+        use mush_tools::ipython::BusyKernelChoice;
+        let mut session = Session::new(app());
+        let stream_state = StreamState::new();
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let prompts: crate::runner::config::KernelPrompts = Arc::new(std::sync::Mutex::new(vec![
+            crate::runner::config::KernelBusyRequest { reply },
+        ]));
+
+        assert!(poll_kernel_busy_prompt(
+            &mut session,
+            &stream_state,
+            &Some(prompts.clone())
+        ));
+        assert_eq!(
+            session.app.interaction.mode,
+            crate::app::AppMode::ToolConfirm
+        );
+        assert!(!poll_kernel_busy_prompt(
+            &mut session,
+            &stream_state,
+            &Some(prompts.clone())
+        ));
+
+        answer_kernel_busy(&mut session, BusyKernelChoice::Kill);
+
+        assert_eq!(answer.await, Ok(BusyKernelChoice::Kill));
+        assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+    }
+
+    #[tokio::test]
+    async fn an_aborted_cell_takes_its_busy_prompt_away() {
+        let mut session = Session::new(app());
+        let stream_state = StreamState::new();
+        let (reply, answer) =
+            tokio::sync::oneshot::channel::<mush_tools::ipython::BusyKernelChoice>();
+        let prompts: crate::runner::config::KernelPrompts = Arc::new(std::sync::Mutex::new(vec![
+            crate::runner::config::KernelBusyRequest { reply },
+        ]));
+        assert!(poll_kernel_busy_prompt(
+            &mut session,
+            &stream_state,
+            &Some(prompts.clone())
+        ));
+
+        drop(answer);
+
+        assert!(poll_kernel_busy_prompt(
+            &mut session,
+            &stream_state,
+            &Some(prompts)
+        ));
+        assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+        assert!(session.app.interaction.kernel_busy_reply.is_none());
+    }
+
+    #[tokio::test]
     async fn a_notice_with_a_known_origin_attaches_to_its_cell() {
         let mut session = Session::new(app());
         let stream_state = StreamState::new();
@@ -1484,6 +1598,7 @@ mod tests {
             skills: Default::default(),
             tool_allowlist: None,
             kernel_notices: None,
+            kernel_prompts: None,
             kernel_state: None,
             forbidden_chars: Default::default(),
         }

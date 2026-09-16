@@ -31,6 +31,8 @@ pub enum KernelError {
     Request(String),
     #[error("kernel exited{}", if .0.is_empty() { String::new() } else { format!(":\n{}", .0) })]
     Exited(String),
+    #[error("an interrupted cell is still running")]
+    Busy,
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

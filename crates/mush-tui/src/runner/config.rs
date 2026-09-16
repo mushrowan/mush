@@ -12,6 +12,12 @@ pub use mush_runtime::{PaneSnapshot, SessionSaver, SessionSnapshot};
 
 pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<mush_tools::kernel_jobs::JobNotice>>>;
 
+pub struct KernelBusyRequest {
+    pub reply: tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>,
+}
+
+pub type KernelPrompts = std::sync::Arc<std::sync::Mutex<Vec<KernelBusyRequest>>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct SkillCatalogue {
     pub skills: Vec<mush_ext::Skill>,
@@ -82,6 +88,7 @@ pub struct TuiConfig {
     pub skills: SkillCatalogue,
     pub tool_allowlist: Option<Vec<String>>,
     pub kernel_notices: Option<KernelNotices>,
+    pub kernel_prompts: Option<KernelPrompts>,
     pub kernel_state: Option<std::sync::Arc<dyn mush_kernel::KernelState>>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
@@ -200,6 +207,7 @@ impl TuiConfig {
             skills: SkillCatalogue::default(),
             tool_allowlist: None,
             kernel_notices: None,
+            kernel_prompts: None,
             kernel_state: None,
             forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }

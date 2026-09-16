@@ -164,6 +164,14 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("confirmation_prompt");
             }
+            if super::streams::poll_kernel_busy_prompt(
+                &mut runtime.session,
+                stream_state,
+                &tui_config.kernel_prompts,
+            ) {
+                tick_changed = true;
+                trace_draw_reason("kernel_busy_prompt");
+            }
             if poll_live_tool_output(&mut runtime.session, &tui_config.tool_output_live) {
                 tick_changed = true;
                 trace_draw_reason("live_tool_output");

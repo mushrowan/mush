@@ -55,6 +55,16 @@ fn confirmation_answer(code: KeyCode) -> Option<bool> {
     }
 }
 
+fn kernel_busy_answer(code: KeyCode) -> Option<mush_tools::ipython::BusyKernelChoice> {
+    use mush_tools::ipython::BusyKernelChoice;
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(BusyKernelChoice::Wait),
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(BusyKernelChoice::Kill),
+        KeyCode::Esc => Some(BusyKernelChoice::Cancel),
+        _ => None,
+    }
+}
+
 fn trace_dropped_event(event: Event, phase: &str) {
     match event {
         Event::Key(key) => {
@@ -348,6 +358,13 @@ async fn handle_streaming_key_event(
         return Ok(LoopAction::Redraw);
     }
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
+        if session.app.interaction.kernel_busy_reply.is_some() {
+            if let Some(choice) = kernel_busy_answer(key.code) {
+                super::streams::answer_kernel_busy(session, choice);
+                return Ok(LoopAction::Redraw);
+            }
+            return Ok(LoopAction::Continue);
+        }
         if let Some(allowed) = confirmation_answer(key.code) {
             answer_confirmation(session, stream_state, allowed).await;
             return Ok(LoopAction::Redraw);

@@ -272,6 +272,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         debug_cache: cli.debug_cache,
         output_sink: None,
         kernel_notice_sink: None,
+        kernel_busy_prompt: None,
         timer,
     });
     let (mut setup, startup_report) = tokio::select! {
@@ -636,6 +637,23 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         })
     };
 
+    let kernel_prompts: mush_tui::runner::KernelPrompts =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kernel_busy_prompt: mush_tools::ipython::BusyKernelPrompt = {
+        let prompts = kernel_prompts.clone();
+        std::sync::Arc::new(move || {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            if let Ok(mut guard) = prompts.lock() {
+                guard.push(mush_tui::runner::KernelBusyRequest { reply });
+            }
+            Box::pin(async move {
+                answer
+                    .await
+                    .unwrap_or(mush_tools::ipython::BusyKernelChoice::Cancel)
+            })
+        })
+    };
+
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())
     } else {
@@ -655,6 +673,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         debug_cache: cli.debug_cache,
         output_sink: Some(output_sink),
         kernel_notice_sink: Some(kernel_notice_sink),
+        kernel_busy_prompt: Some(kernel_busy_prompt),
         timer,
     })
     .await?;
@@ -758,6 +777,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         thinking_display: setup.cfg.thinking_display,
         tool_output_live: Some(tool_output_live),
         kernel_notices: Some(kernel_notices),
+        kernel_prompts: Some(kernel_prompts),
         kernel_state: setup.kernel_state.clone(),
         log_buffer: Some({
             let buf = log_buffer.clone();

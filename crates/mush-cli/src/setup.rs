@@ -46,6 +46,7 @@ pub struct SetupArgs {
     pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
     pub kernel_notice_sink: Option<mush_tools::kernel_jobs::NoticeSink>,
+    pub kernel_busy_prompt: Option<mush_tools::ipython::BusyKernelPrompt>,
     pub timer: Option<crate::timing::PhaseTimer>,
 }
 
@@ -100,6 +101,9 @@ impl AppSetup {
             let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
             if let Some(sink) = args.output_sink.clone() {
                 ipython = ipython.with_output_sink(sink);
+            }
+            if let Some(prompt) = args.kernel_busy_prompt.clone() {
+                ipython = ipython.with_busy_prompt(prompt);
             }
             let ipython = Arc::new(ipython);
             kernel_state = Some(ipython.clone());
