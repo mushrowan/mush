@@ -2,7 +2,9 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
-use mush_runtime::{AgentConnection, ConnectionError, ConnectionState, InProcessConnection};
+use mush_runtime::{
+    AgentConnection, Applied, ClientEvent, ConnectionError, ConnectionState, InProcessConnection,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
@@ -58,6 +60,30 @@ impl Descriptor {
     }
 }
 
+#[derive(Default)]
+struct TurnLog {
+    events: Vec<ClientEvent>,
+}
+
+impl TurnLog {
+    fn record(&mut self, event: &ClientEvent) {
+        match event {
+            ClientEvent::TurnStarted => {
+                self.events.clear();
+                self.events.push(event.clone());
+            }
+            ClientEvent::TurnEnded { .. } => self.events.clear(),
+            ClientEvent::Agent {
+                applied: Applied::Appended | Applied::Compacted { .. },
+                ..
+            }
+            | ClientEvent::Compacted(_) => self.events.truncate(1),
+            _ if !self.events.is_empty() => self.events.push(event.clone()),
+            _ => {}
+        }
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -90,7 +116,9 @@ pub async fn serve(
     listener: UnixListener,
     mut descriptor: Option<Descriptor>,
 ) -> io::Result<()> {
-    let served = serve_until_closed(&mut connection, &listener, descriptor.as_mut()).await;
+    let mut log = TurnLog::default();
+    let served =
+        serve_until_closed(&mut connection, &listener, descriptor.as_mut(), &mut log).await;
     if let Some(descriptor) = &descriptor {
         descriptor.remove();
     }
@@ -101,6 +129,7 @@ async fn serve_until_closed(
     connection: &mut InProcessConnection,
     listener: &UnixListener,
     mut descriptor: Option<&mut Descriptor>,
+    log: &mut TurnLog,
 ) -> io::Result<()> {
     loop {
         connection.start_pending().await;
@@ -110,14 +139,15 @@ async fn serve_until_closed(
         let stream = tokio::select! {
             accepted = listener.accept() => accepted?.0,
             event = connection.next_event() => {
-                if event.is_none() {
+                let Some(event) = event else {
                     return Ok(());
-                }
+                };
+                log.record(&event);
                 continue;
             }
             () = tokio::time::sleep(TICK) => continue,
         };
-        if let Attached::Closed = attach(connection, stream, descriptor.as_deref_mut()).await {
+        if let Attached::Closed = attach(connection, stream, descriptor.as_deref_mut(), log).await {
             return Ok(());
         }
     }
@@ -154,6 +184,7 @@ async fn attach(
     connection: &mut InProcessConnection,
     stream: UnixStream,
     mut descriptor: Option<&mut Descriptor>,
+    log: &mut TurnLog,
 ) -> Attached {
     let (reader, writer) = stream.into_split();
     let mut client = Client {
@@ -166,6 +197,15 @@ async fn attach(
     };
     if client.write(&hello).await.is_err() {
         return Attached::Detached;
+    }
+    for event in &log.events {
+        let frame = Frame::Event {
+            event: event.clone(),
+            state: None,
+        };
+        if client.write(&frame).await.is_err() {
+            return Attached::Detached;
+        }
     }
     loop {
         connection.start_pending().await;
@@ -183,6 +223,11 @@ async fn attach(
                 };
                 let id = request.id();
                 let result = handle(connection, request).await;
+                if let Ok(Reply::Events { events }) = &result {
+                    for event in events {
+                        log.record(event);
+                    }
+                }
                 let state = client.state_delta(connection);
                 if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
                     descriptor.refresh(state);
@@ -198,6 +243,7 @@ async fn attach(
                     let _ = client.write(&Frame::Closed).await;
                     return Attached::Closed;
                 };
+                log.record(&event);
                 let state = client.state_delta(connection);
                 if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
                     descriptor.refresh(state);

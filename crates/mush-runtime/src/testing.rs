@@ -103,3 +103,68 @@ pub fn echo_connection() -> (InProcessConnection, Requests) {
     );
     (connection, requests)
 }
+
+pub struct Stall {
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for Stall {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &Model,
+        _context: &mush_ai::registry::LlmContext,
+        _options: &StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        use futures::StreamExt;
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: "partial answer".into(),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Stop)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let release = Arc::clone(&self.release);
+        let rest = futures::stream::once(async move {
+            release.notified().await;
+            mush_ai::stream::StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            }
+        });
+        Ok(Box::pin(
+            futures::stream::iter([mush_ai::stream::StreamEvent::TextDelta {
+                content_index: 0,
+                delta: "partial".into(),
+            }])
+            .chain(rest),
+        ))
+    }
+}
+
+#[must_use]
+pub fn stalled_connection() -> (InProcessConnection, Arc<tokio::sync::Notify>) {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(Stall {
+        release: Arc::clone(&release),
+    }));
+    let model = echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    (connection, release)
+}

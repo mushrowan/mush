@@ -165,3 +165,71 @@ async fn shutdown_closes_the_client_and_ends_the_worker() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_client_attaching_mid_turn_replays_the_turn_so_far() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let (connection, release) = mush_runtime::testing::stalled_connection();
+    let _task = tokio::spawn(serve(connection, listener, None));
+
+    let mut first = DaemonConnection::connect(&socket).await.unwrap();
+    first.send(prompt("hello")).await.unwrap();
+    let mut seen_delta = false;
+    while !seen_delta {
+        let event = tokio::time::timeout(Duration::from_secs(5), first.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        seen_delta = matches!(
+            event,
+            ClientEvent::Agent {
+                event: mush_agent::AgentEvent::StreamEvent { .. },
+                ..
+            }
+        );
+    }
+    drop(first);
+
+    let mut second = DaemonConnection::connect(&socket).await.unwrap();
+    assert!(second.state().turn_active);
+    let mut replayed = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(500), second.next_event()).await
+    {
+        replayed.push(event);
+    }
+    assert!(
+        matches!(replayed[0], ClientEvent::TurnStarted),
+        "{replayed:?}"
+    );
+    assert!(
+        replayed.iter().any(|event| matches!(
+            event,
+            ClientEvent::Agent {
+                event: mush_agent::AgentEvent::StreamEvent {
+                    event: mush_ai::stream::StreamEvent::TextDelta { delta, .. },
+                },
+                ..
+            } if delta == "partial"
+        )),
+        "{replayed:?}"
+    );
+
+    release.notify_one();
+    let events = drain_turn(&mut second).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Agent {
+            event: mush_agent::AgentEvent::MessageEnd { .. },
+            ..
+        }
+    )));
+
+    drop(second);
+
+    let mut third = DaemonConnection::connect(&socket).await.unwrap();
+    assert!(!third.state().turn_active);
+    assert_eq!(third.history().await.len(), 2);
+}
