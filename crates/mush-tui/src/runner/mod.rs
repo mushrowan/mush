@@ -59,7 +59,6 @@ pub async fn run_tui(
     run_tui_with(
         tui_config,
         Box::new(connection),
-        registry,
         ipc_listener,
         ExitPolicy::Shutdown,
         startup_discovery,
@@ -70,13 +69,11 @@ pub async fn run_tui(
 pub async fn run_tui_attached(
     tui_config: TuiConfig,
     connection: Box<dyn AgentConnection>,
-    registry: &ApiRegistry,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<()> {
     run_tui_with(
         tui_config,
         connection,
-        registry,
         None,
         ExitPolicy::Detach,
         startup_discovery,
@@ -92,7 +89,6 @@ pub enum ExitPolicy {
 async fn run_tui_with(
     mut tui_config: TuiConfig,
     connection: Box<dyn AgentConnection>,
-    registry: &ApiRegistry,
     ipc_listener: Option<mush_agent::IpcListener>,
     exit: ExitPolicy,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
@@ -217,7 +213,6 @@ async fn run_tui_with(
             &mut stream_state,
             &mut runtime,
             &mut tui_config,
-            registry,
             &image_picker,
             &size_cache,
             last_draw,
@@ -244,15 +239,11 @@ async fn run_tui_with(
         runtime.notify_cache_state(tui_config.cache_timer);
         stream_state.poll_signal().await;
 
-        let side_question_finished = runtime.session.poll_side_questions().await;
-
         let maintenance_tick = last_draw.elapsed() >= std::time::Duration::from_secs(1)
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
 
-        let should_draw = matches!(action, LoopAction::Redraw)
-            || discovery_updated
-            || side_question_finished
-            || maintenance_tick;
+        let should_draw =
+            matches!(action, LoopAction::Redraw) || discovery_updated || maintenance_tick;
         if should_draw {
             if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL
                 && runtime.tick_animation_panes()

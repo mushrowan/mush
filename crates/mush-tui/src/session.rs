@@ -12,7 +12,6 @@ pub struct Session {
     pub connection: Box<dyn AgentConnection>,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub label: Option<String>,
-    pub pending_side_questions: Vec<crate::slash::side_question::PendingSideQuestion>,
 }
 
 impl Session {
@@ -35,7 +34,6 @@ impl Session {
             connection,
             image_protos: HashMap::new(),
             label: None,
-            pending_side_questions: Vec::new(),
         }
     }
 
@@ -78,28 +76,6 @@ impl Session {
         &mut HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     ) {
         (&mut self.app, &mut self.image_protos)
-    }
-
-    pub async fn poll_side_questions(&mut self) -> bool {
-        let finished: Vec<usize> = self
-            .pending_side_questions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, pending)| pending.task.is_finished().then_some(index))
-            .collect();
-        if finished.is_empty() {
-            return false;
-        }
-        for index in finished.into_iter().rev() {
-            let pending = self.pending_side_questions.remove(index);
-            let outcome = pending.task.await;
-            crate::slash::side_question::finish_side_question(
-                &mut self.app,
-                &pending.question,
-                outcome,
-            );
-        }
-        true
     }
 
     pub fn ensure_image_protocols(

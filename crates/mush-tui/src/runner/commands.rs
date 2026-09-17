@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use mush_ai::registry::ApiRegistry;
 use mush_ai::types::ThinkingLevel;
 
 use crate::session::Session;
@@ -11,7 +10,6 @@ use super::{ThinkingPrefs, TuiConfig};
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
     pub thinking_prefs: &'a ThinkingPrefs,
-    pub registry: &'a ApiRegistry,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
 }
@@ -58,7 +56,6 @@ pub(super) async fn handle_slash_action(
     let SlashEnv {
         tui_config,
         thinking_prefs,
-        registry,
         cwd,
         pending_prompt,
     } = env;
@@ -103,20 +100,11 @@ pub(super) async fn handle_slash_action(
             }
         }
         SlashAction::Side { question } => {
-            let context = slash::side_question::side_question_context(
-                tui_config.system_prompt.as_deref(),
-                session.connection.transcript().await,
-                &question,
-            );
-            let pending = slash::side_question::start_side_question(
-                &mut session.app,
-                registry.clone(),
-                tui_config.model.clone(),
-                tui_config.stream_options(),
-                context,
-                question,
-            );
-            session.pending_side_questions.push(pending);
+            slash::side_question::ask_side_question(&mut session.app, &question);
+            let _ = session
+                .connection
+                .send(mush_runtime::ClientCommand::SideQuestion(question))
+                .await;
         }
         SlashAction::Export { path } => {
             let pane = &mut *session;
@@ -590,7 +578,6 @@ mod tests {
     }
 
     fn run(session: &mut Session, config: &mut TuiConfig, action: SlashAction) {
-        let registry = mush_ai::registry::ApiRegistry::new();
         let mut pending_prompt = None;
         futures::executor::block_on(handle_slash_action(
             session,
@@ -598,7 +585,6 @@ mod tests {
             SlashEnv {
                 tui_config: config,
                 thinking_prefs: &ThinkingPrefs::default(),
-                registry: &registry,
                 cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
             },

@@ -273,7 +273,6 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
         super::commands::SlashEnv {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
-            registry: &registry,
             cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
         },
@@ -303,7 +302,6 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
         super::commands::SlashEnv {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
-            registry: &registry,
             cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
         },
@@ -1073,7 +1071,6 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
 #[tokio::test]
 async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
     let (mut runtime, mut config, control) = fixture();
-    let registry = ApiRegistry::new();
     let old = control.target();
     request(
         &control,
@@ -1094,7 +1091,6 @@ async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
             super::commands::SlashEnv {
                 tui_config: &mut config,
                 thinking_prefs: &runtime.thinking_prefs,
-                registry: &registry,
                 cwd: &runtime.cwd,
                 pending_prompt: &mut runtime.pending_prompt,
             },

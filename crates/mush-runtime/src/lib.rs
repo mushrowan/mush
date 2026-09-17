@@ -4,6 +4,7 @@ pub mod connection;
 pub mod inbox;
 pub mod kernel_channels;
 pub mod session;
+pub mod side_question;
 pub mod snapshot;
 #[doc(hidden)]
 pub mod testing;

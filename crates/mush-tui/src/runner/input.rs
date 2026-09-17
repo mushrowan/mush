@@ -2,7 +2,6 @@ use std::io;
 use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use mush_ai::registry::ApiRegistry;
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
@@ -36,7 +35,6 @@ pub(super) struct InputDeps<'a> {
     pub tui_config: &'a mut TuiConfig,
     pub thinking_prefs: &'a mut ThinkingPrefs,
     pub thinking_saver: &'a Option<ThinkingPrefsSaver>,
-    pub registry: &'a ApiRegistry,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
@@ -369,7 +367,6 @@ async fn handle_streaming_key_event(
                 SlashEnv {
                     tui_config: deps.tui_config,
                     thinking_prefs: deps.thinking_prefs,
-                    registry: deps.registry,
                     cwd: deps.cwd,
                     pending_prompt: deps.pending_prompt,
                 },
@@ -483,7 +480,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 SlashEnv {
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
-                                    registry: deps.registry,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
@@ -503,7 +499,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 SlashEnv {
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
-                                    registry: deps.registry,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
@@ -786,7 +781,6 @@ mod tests {
                 .unwrap()
                 .completion(mush_notify::Completion(1));
             let mut tui_config = streaming_test_config();
-            let registry = mush_ai::registry::ApiRegistry::new();
             let mut pending_prompt = None;
             let image_picker = None;
             let size_cache = Rc::new(CachedSizeState::default());
@@ -794,7 +788,6 @@ mod tests {
                 tui_config: &mut tui_config,
                 thinking_prefs: &mut ThinkingPrefs::default(),
                 thinking_saver: &None,
-                registry: &registry,
                 cwd: std::path::Path::new(""),
                 pending_prompt: &mut pending_prompt,
                 image_picker: &image_picker,
@@ -861,7 +854,6 @@ mod tests {
             },
         );
         let mut tui_config = streaming_test_config();
-        let registry = mush_ai::registry::ApiRegistry::new();
         let mut pending_prompt = None;
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
@@ -869,7 +861,6 @@ mod tests {
             tui_config: &mut tui_config,
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
-            registry: &registry,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
@@ -899,7 +890,6 @@ mod tests {
 
         let mut stream_state = StreamState::new();
         let mut tui_config = streaming_test_config();
-        let registry = mush_ai::registry::ApiRegistry::new();
         let mut pending_prompt = None;
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
@@ -907,7 +897,6 @@ mod tests {
             tui_config: &mut tui_config,
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
-            registry: &registry,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,

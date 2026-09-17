@@ -815,14 +815,9 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                     &descriptor.session_id[..8.min(descriptor.session_id.len())]
                 ));
             }
-            mush_tui::run_tui_attached(
-                tui_config,
-                Box::new(connection),
-                &setup.registry,
-                Some(discovery_rx),
-            )
-            .await
-            .map_err(|e| eyre!("TUI error: {e}"))?;
+            mush_tui::run_tui_attached(tui_config, Box::new(connection), Some(discovery_rx))
+                .await
+                .map_err(|e| eyre!("TUI error: {e}"))?;
             eprintln!(
                 "{}",
                 Style::Dim.stderr(format_args!(

@@ -14,7 +14,10 @@ use crate::compaction::{AppliedCompaction, CompactionTaskResult};
 use crate::session::{
     PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime, StreamGeneration,
 };
-use crate::turn::{TurnConfig, TurnDeps, TurnRequest, build_user_content, resolve_auth_for_model};
+use crate::turn::{
+    TurnConfig, TurnDeps, TurnRequest, build_user_content, resolve_auth_for_model,
+    resolve_auth_into_options,
+};
 
 pub const PRIMARY_PANE: PaneId = PaneId::new(1);
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
@@ -55,6 +58,7 @@ pub enum ClientCommand {
     CompactionRetry,
     CompactionFallback,
     AnswerKernelBusy(mush_tools::ipython::BusyKernelChoice),
+    SideQuestion(String),
     Shutdown,
 }
 
@@ -91,6 +95,10 @@ pub enum ClientEvent {
     BashDone(mush_tools::kernel_jobs::JobNotice),
     KernelBusy,
     KernelBusyWithdrawn,
+    SideAnswer {
+        question: String,
+        answer: Result<String, String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +164,7 @@ pub struct InProcessConnection {
     inbox: Option<crate::inbox::OrchestratorInbox>,
     kernel: Option<crate::kernel_channels::KernelSignals>,
     busy_reply: Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
+    side_questions: Vec<(String, tokio::task::JoinHandle<Result<String, String>>)>,
     closed: bool,
 }
 
@@ -189,6 +198,7 @@ impl InProcessConnection {
             inbox: None,
             kernel: None,
             busy_reply: None,
+            side_questions: Vec::new(),
             closed: false,
         }
     }
@@ -404,7 +414,43 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_kernel() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_side_questions() {
+            return Some(event);
+        }
         self.try_poll_compaction()
+    }
+
+    fn try_poll_side_questions(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        let index = self
+            .side_questions
+            .iter()
+            .position(|(_, task)| task.is_finished())?;
+        let (question, task) = self.side_questions.remove(index);
+        let answer = match task.now_or_never()? {
+            Ok(answer) => answer,
+            Err(error) => Err(format!("side question task failed: {error}")),
+        };
+        Some(ClientEvent::SideAnswer { question, answer })
+    }
+
+    fn ask_side_question(&mut self, question: String) {
+        let context = crate::side_question::side_question_context(
+            self.runtime.system_prompt.as_deref(),
+            self.runtime.conversation.context(),
+            &question,
+        );
+        let registry = self.registry.clone();
+        let model = self.runtime.model(&self.config.default_model);
+        let options = self.config.options.clone();
+        let keys = self.config.provider_api_keys.clone();
+        let task = tokio::spawn(async move {
+            let options = resolve_auth_into_options(&model, options, &keys).await;
+            mush_ai::oneshot::collect_text(&registry, &model, &context, &options)
+                .await
+                .map_err(|error| error.to_string())
+        });
+        self.side_questions.push((question, task));
     }
 
     fn try_poll_kernel(&mut self) -> Option<ClientEvent> {
@@ -832,6 +878,7 @@ impl AgentConnection for InProcessConnection {
                     let _ = reply.send(choice);
                 }
             }
+            ClientCommand::SideQuestion(question) => self.ask_side_question(question),
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
@@ -1286,5 +1333,43 @@ mod tests {
             ),
             "{events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_side_question_is_answered_without_touching_the_conversation() {
+        let (mut connection, requests) = connection();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        let before = connection.state().context_len;
+
+        connection
+            .send(ClientCommand::SideQuestion("why slow?".into()))
+            .await
+            .unwrap();
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match connection.next_event().await {
+                    Some(ClientEvent::SideAnswer { question, answer }) => break (question, answer),
+                    Some(_) => {}
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(answer.0, "why slow?");
+        assert_eq!(answer.1, Ok("hi back".into()));
+        assert_eq!(connection.state().context_len, before);
+        let asked = requests.lock().unwrap();
+        let last = asked.last().unwrap();
+        assert!(matches!(last.last(), Some(Message::User(user)) if user.text() == "why slow?"));
+        assert_eq!(last.len(), before + 1);
     }
 }
