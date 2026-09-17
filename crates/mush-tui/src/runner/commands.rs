@@ -239,7 +239,12 @@ pub(super) async fn handle_slash_action(
             };
             let reloaded = reload(cwd);
             tui_config.system_prompt = Some(reloaded.system_prompt.clone());
-            session.connection.runtime.system_prompt = Some(reloaded.system_prompt);
+            let _ = session
+                .connection
+                .send(mush_runtime::ClientCommand::SetSystemPrompt(Some(
+                    reloaded.system_prompt,
+                )))
+                .await;
             apply_reloaded_templates(session, &reloaded.templates);
             let warnings = reloaded.skills.diagnostics.len();
             tui_config.skills = reloaded.skills;

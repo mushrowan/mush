@@ -280,18 +280,10 @@ pub async fn run_tui(
         }
     }
 
-    runtime
+    let _ = runtime
         .session
         .connection
-        .runtime
-        .turns
-        .abort(mush_ai::types::PaneId::new(1));
-    let session_id = runtime.session.connection.runtime.session_id.clone();
-    runtime
-        .session
-        .connection
-        .runtime
-        .snapshot_kernel(&session_id)
+        .send(mush_runtime::ClientCommand::Shutdown)
         .await;
     if let Some(listener) = ipc_listener {
         listener.shutdown().await.map_err(io::Error::other)?;
@@ -317,7 +309,7 @@ fn report_loop_progress(
         diag::LoopSnapshot {
             loop_iteration,
             draw_count,
-            active_streams: runtime.session.connection.runtime.turns.active_turns(),
+            active_streams: runtime.session.connection.state().active_turns,
             active_tools: runtime.active_tool_labels(),
         },
     );

@@ -43,6 +43,7 @@ pub enum ClientCommand {
     SetModel(String),
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
+    SetSystemPrompt(Option<String>),
     Session(SessionCommand),
     Compact {
         focus: CompactionFocus,
@@ -79,7 +80,7 @@ pub enum ClientEvent {
     ToolsCancelled(Vec<ToolCallId>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConnectionState {
     pub session_id: mush_ai::types::SessionId,
     pub title: Option<String>,
@@ -91,6 +92,8 @@ pub struct ConnectionState {
     pub rlm_depth: u32,
     pub rlm_max_depth: u32,
     pub turn_active: bool,
+    pub turn_model: Option<mush_ai::types::Model>,
+    pub active_turns: usize,
     pub compacting: bool,
 }
 
@@ -205,7 +208,9 @@ impl InProcessConnection {
     }
 
     pub async fn start_pending(&mut self) -> bool {
-        self.start_pending_prompt().await
+        let started = self.start_pending_prompt().await;
+        self.runtime.save_if_dirty();
+        started
     }
 
     pub fn try_next_event(&mut self) -> Option<ClientEvent> {
@@ -384,6 +389,7 @@ impl InProcessConnection {
             prompt,
         };
         self.runtime.start_prepared_turn(request, prep, &deps);
+        self.runtime.save_now_and_settle();
         self.queued.push_back(ClientEvent::TurnStarted);
         true
     }
@@ -573,6 +579,7 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
+            ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::Session(command) => {
                 let events = self.runtime.handle(command).await;
                 self.queued
@@ -635,6 +642,12 @@ impl AgentConnection for InProcessConnection {
             rlm_depth: self.runtime.rlm_depth,
             rlm_max_depth: self.runtime.rlm_max_depth,
             turn_active: self.turn_active(),
+            turn_model: self
+                .runtime
+                .turns
+                .meta(PRIMARY_PANE)
+                .map(|meta| meta.model.clone()),
+            active_turns: self.runtime.turns.active_turns(),
             compacting: self.compaction.is_some(),
         }
     }

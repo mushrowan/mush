@@ -464,15 +464,24 @@ pub(super) async fn handle_idle_terminal_events(
                             let pane = &mut *session;
                             pane.app.active_tools.clear();
                             pane.app.start_streaming();
-                            let _ = pane
+                            match pane
                                 .connection
-                                .send(mush_runtime::ClientCommand::QueuePrompt {
+                                .send(mush_runtime::ClientCommand::Prompt {
                                     text: expanded,
                                     images,
                                 })
-                                .await;
-                            pane.connection.runtime.persist_pending_prompt();
-                            pane.connection.runtime.save_now_and_settle();
+                                .await
+                            {
+                                Ok(events) => {
+                                    super::looping::apply_command_events(
+                                        pane,
+                                        deps.tui_config,
+                                        events,
+                                    )
+                                    .await
+                                }
+                                Err(error) => pane.app.push_system_message(error.to_string()),
+                            }
                         }
                         AppEvent::SlashCommand { action } => {
                             let state_changed = handle_slash_action(

@@ -182,7 +182,6 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("browser_login");
             }
-            stream_state.save_dirty_session(&mut runtime.session, tui_config);
 
             let (session, mut deps) = input_parts(runtime, tui_config, registry, image_picker, size_cache);
             let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
@@ -362,10 +361,8 @@ async fn dispatch_agent_event(
         let pane = &mut runtime.session;
         let model = pane
             .connection
-            .runtime
-            .turns
-            .meta(pane_id)
-            .map(|meta| meta.model.clone())
+            .state()
+            .turn_model
             .unwrap_or_else(|| tui_config.model.clone());
         let (app, image_protos) = pane.fields_mut();
         let mut ctx = event_handler::EventCtx { app, image_protos };
@@ -437,7 +434,6 @@ async fn handle_idle_iteration(
         events_seen = true;
         dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
     }
-    stream_state.save_dirty_session(&mut runtime.session, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.session);
     let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 

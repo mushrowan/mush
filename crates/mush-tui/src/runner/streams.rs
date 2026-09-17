@@ -66,14 +66,6 @@ impl StreamState {
             tracing::debug!(?outcome, "signal notification decision");
         }
     }
-
-    pub(super) fn save_dirty_session(
-        &mut self,
-        session: &mut Session,
-        _tui_config: &super::TuiConfig,
-    ) {
-        session.connection.runtime.save_if_dirty();
-    }
 }
 
 pub(super) fn show_confirm_request(
@@ -277,10 +269,8 @@ pub(super) async fn handle_agent_event_side_effects(
     {
         let model = session
             .connection
-            .runtime
-            .turns
-            .meta(pane_id)
-            .map(|m| m.model.clone())
+            .state()
+            .turn_model
             .unwrap_or_else(|| tui_config.model.clone());
         reconcile_openrouter_generation(session, pane_id, gen_id, &model, tui_config).await;
     }
