@@ -341,7 +341,6 @@ impl SessionRuntime {
         self.title = title;
         self.title_generated = false;
         self.pending_prompt = None;
-        self.pending_compaction_inputs.clear();
         self.attach_kernel_session();
     }
 

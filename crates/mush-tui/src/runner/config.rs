@@ -115,6 +115,18 @@ impl TuiConfig {
     }
 
     #[must_use]
+    pub fn injections(&self) -> mush_agent::AgentInjections {
+        mush_agent::AgentInjections {
+            lifecycle_hooks: self.lifecycle_hooks.clone(),
+            cwd: Some(self.cwd.clone()),
+            dynamic_system_context: self.dynamic_system_context.clone(),
+            file_rules: self.file_rules.clone(),
+            lsp_diagnostics: self.lsp_diagnostics.clone(),
+            control_endpoint: None,
+        }
+    }
+
+    #[must_use]
     pub fn turn_config(&self) -> mush_runtime::TurnConfig {
         mush_runtime::TurnConfig {
             default_model: self.model.clone(),

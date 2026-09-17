@@ -8,7 +8,6 @@ mod config;
 #[cfg(test)]
 mod control_tests;
 mod diag;
-mod inbox;
 mod input;
 mod last_model;
 mod looping;
@@ -131,10 +130,11 @@ pub async fn run_tui(
     diag::write_startup_diagnostics(startup_phases, Vec::new());
 
     let mut stream_state = StreamState::new();
-    let mut orchestrator_inbox = inbox::attach(
-        inbox::OrchestratorInbox::from_env(&tui_config),
-        &mut runtime,
-    );
+    runtime
+        .session
+        .connection
+        .set_injections(tui_config.injections());
+    runtime.session.connection.attach_inbox_from_env();
     #[cfg(all(feature = "signal", not(test)))]
     {
         stream_state.signal = tokio::task::spawn_blocking(mush_notify::user_dispatcher)
@@ -158,34 +158,18 @@ pub async fn run_tui(
             "start_pending_streams",
             "before start_pending_streams",
         );
-        let inbox_connected = orchestrator_inbox.is_some();
-        let inbox_ready = inbox::poll(
-            &mut orchestrator_inbox,
-            &stream_state,
-            &mut runtime,
-            &tui_config,
-        )
-        .await;
-        let inbox_disabled = inbox_connected && orchestrator_inbox.is_none();
         let notice_submitted = streams::submit_kernel_notices(
             &mut runtime.session,
             &stream_state,
             &tui_config.kernel_notices,
         )
         .await;
-        if inbox_ready {
+        {
             let thinking_level = runtime.session.app.thinking_level.clone();
             let context_tokens = runtime.session.app.stats.context_tokens;
             let connection = &mut runtime.session.connection;
             connection.set_config(tui_config.turn_config());
-            connection.set_injections(mush_agent::AgentInjections {
-                lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
-                cwd: Some(tui_config.cwd.clone()),
-                dynamic_system_context: tui_config.dynamic_system_context.clone(),
-                file_rules: tui_config.file_rules.clone(),
-                lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                control_endpoint: None,
-            });
+            connection.set_injections(tui_config.injections());
             if let Some(prompt) = runtime.pending_prompt.take() {
                 let _ = connection
                     .send(mush_runtime::ClientCommand::QueuePrompt {
@@ -244,7 +228,6 @@ pub async fn run_tui(
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
 
         let should_draw = matches!(action, LoopAction::Redraw)
-            || inbox_disabled
             || notice_submitted
             || discovery_updated
             || side_question_finished

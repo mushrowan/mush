@@ -139,6 +139,7 @@ pub struct InProcessConnection {
     compaction_auto: bool,
     failed_compaction: Option<FailedCompaction>,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
+    inbox: Option<crate::inbox::OrchestratorInbox>,
     closed: bool,
 }
 
@@ -168,6 +169,7 @@ impl InProcessConnection {
             compaction_auto: false,
             failed_compaction: None,
             title: None,
+            inbox: None,
             closed: false,
         }
     }
@@ -225,7 +227,71 @@ impl InProcessConnection {
         self.runtime.control_socket = Some(socket);
     }
 
+    pub fn attach_inbox(&mut self, inbox: crate::inbox::OrchestratorInbox) {
+        self.inbox = Some(inbox);
+    }
+
+    pub fn attach_inbox_from_env(&mut self) {
+        let cwd = self
+            .injections
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        match crate::inbox::OrchestratorInbox::from_env(&self.runtime, &cwd) {
+            Ok(Some(inbox)) => self.inbox = Some(inbox),
+            Ok(None) => {}
+            Err(error) => self.report_inbox_disabled(&error),
+        }
+    }
+
+    #[must_use]
+    pub fn inbox(&self) -> Option<&crate::inbox::OrchestratorInbox> {
+        self.inbox.as_ref()
+    }
+
+    pub fn inbox_mut(&mut self) -> Option<&mut crate::inbox::OrchestratorInbox> {
+        self.inbox.as_mut()
+    }
+
+    fn report_inbox_disabled(&mut self, error: &std::io::Error) {
+        tracing::warn!(%error, "orchestrator inbox disabled");
+        self.queued
+            .push_back(ClientEvent::Session(SessionEvent::Status(format!(
+                "orchestrator inbox disabled: {error}. restart to reconnect"
+            ))));
+    }
+
+    pub async fn poll_inbox(&mut self) -> bool {
+        if self.inbox.is_none() {
+            return true;
+        }
+        let idle = self.idle().await;
+        let Some(inbox) = self.inbox.as_mut() else {
+            return true;
+        };
+        match inbox.poll(&mut self.runtime, idle).await {
+            Ok(crate::inbox::Delivered::Ready) => true,
+            Ok(crate::inbox::Delivered::Staged) => false,
+            Ok(crate::inbox::Delivered::Injected(message)) => {
+                self.queued.push_back(ClientEvent::MessageInjected(message));
+                false
+            }
+            Err(error) => {
+                if let Some(inbox) = self.inbox.take() {
+                    inbox.disconnect(&mut self.runtime);
+                }
+                self.report_inbox_disabled(&error);
+                true
+            }
+        }
+    }
+
     pub async fn start_pending(&mut self) -> bool {
+        if !self.poll_inbox().await {
+            self.runtime.save_if_dirty();
+            return false;
+        }
         self.poll_control().await;
         let started = self.start_pending_prompt().await;
         self.runtime.save_if_dirty();
@@ -236,7 +302,6 @@ impl InProcessConnection {
         !self.turn_active()
             && self.compaction.is_none()
             && self.runtime.pending_prompt.is_none()
-            && self.runtime.pending_compaction_inputs.is_empty()
             && self.runtime.steering_queue.lock().await.is_empty()
             && self.runtime.conversation.leaf_id().is_none_or(|leaf| {
                 self.runtime
@@ -468,6 +533,13 @@ impl InProcessConnection {
         true
     }
 
+    fn queue_prompt(&mut self, text: &str, images: Vec<PendingImage>) {
+        match &mut self.runtime.pending_prompt {
+            Some(pending) => pending.merge(text, images),
+            None => self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images)),
+        }
+    }
+
     async fn steer(&mut self, text: String, images: Vec<PendingImage>) {
         let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) else {
             self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
@@ -643,13 +715,11 @@ impl AgentConnection for InProcessConnection {
                 if self.turn_active() {
                     self.steer(text, images).await;
                 } else {
-                    self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
+                    self.queue_prompt(&text, images);
                     self.start_pending_prompt().await;
                 }
             }
-            ClientCommand::QueuePrompt { text, images } => {
-                self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
-            }
+            ClientCommand::QueuePrompt { text, images } => self.queue_prompt(&text, images),
             ClientCommand::Steer { text, images } => self.steer(text, images).await,
             ClientCommand::RetractSteer { text } => {
                 if !self.retract_steer(&text).await {

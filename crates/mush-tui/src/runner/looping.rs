@@ -326,7 +326,7 @@ pub(super) async fn apply_command_events(
             ClientEvent::Compacted(applied) => {
                 let after_count = session.connection.state().context_len;
                 crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
-                super::runtime::replay_compaction_inputs(session).await;
+                super::runtime::promote_queued_inputs(session);
             }
             ClientEvent::CompactionFailed {
                 failure,

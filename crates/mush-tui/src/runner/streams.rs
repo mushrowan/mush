@@ -236,12 +236,7 @@ pub(super) async fn handle_turn_ended(
 ) {
     if !cancelled
         && !automatic_continuation
-        && session.connection.runtime.pending_prompt.is_none()
-        && session
-            .connection
-            .runtime
-            .pending_compaction_inputs
-            .is_empty()
+        && !session.connection.state().pending_prompt
         && !session.app.has_queued_messages()
     {
         (stream_state.notify)(

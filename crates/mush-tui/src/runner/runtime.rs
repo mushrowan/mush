@@ -7,7 +7,7 @@ use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
 use crate::app::App;
-use crate::session::{AgentConnection, Session};
+use crate::session::Session;
 use crate::slash_menu::SlashCommand;
 
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -295,34 +295,12 @@ fn spawn_usage_poller(
     rx
 }
 
-pub(super) async fn replay_compaction_inputs(pane: &mut Session) {
-    let drained = pane.drain_compaction_inputs();
-    if drained.is_empty() {
+pub(super) fn promote_queued_inputs(pane: &mut Session) {
+    if pane.app.promote_queued_messages() == 0 {
         return;
-    }
-    let mut texts: Vec<String> = Vec::with_capacity(drained.len());
-    let mut images = Vec::new();
-    for (text, imgs) in drained {
-        texts.push(text);
-        images.extend(imgs);
-    }
-    let combined = texts.join("\n\n");
-    let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
-    if image_bytes.is_empty() {
-        pane.app.push_user_message(combined.clone());
-    } else {
-        pane.app
-            .push_user_message_with_images(combined.clone(), image_bytes);
     }
     pane.app.active_tools.clear();
     pane.app.start_streaming();
-    let _ = pane
-        .connection
-        .send(mush_runtime::ClientCommand::QueuePrompt {
-            text: combined,
-            images,
-        })
-        .await;
 }
 
 fn watch_config(
@@ -585,12 +563,13 @@ mod tests {
     async fn replay_compaction_inputs_collapses_into_single_streaming_turn() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.queue_input_during_compaction("first thought".into(), vec![]);
-        pane.queue_input_during_compaction("second thought".into(), vec![]);
+        pane.queue_input_during_compaction("first thought".into(), vec![])
+            .await;
+        pane.queue_input_during_compaction("second thought".into(), vec![])
+            .await;
 
-        replay_compaction_inputs(&mut pane).await;
+        promote_queued_inputs(&mut pane);
 
-        assert!(pane.connection.runtime.pending_compaction_inputs.is_empty());
         assert!(!pane.app.has_queued_messages());
         assert!(pane.app.stream.active, "should kick off a new stream");
         assert_eq!(
@@ -614,7 +593,7 @@ mod tests {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
 
-        replay_compaction_inputs(&mut pane).await;
+        promote_queued_inputs(&mut pane);
 
         assert!(pane.connection.runtime.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
@@ -635,9 +614,10 @@ mod tests {
                 mime_type: ImageMimeType::Png,
                 dimensions: Some((10, 10)),
             }],
-        );
+        )
+        .await;
 
-        replay_compaction_inputs(&mut pane).await;
+        promote_queued_inputs(&mut pane);
 
         pane.connection.runtime.persist_pending_prompt();
         assert!(pane.connection.runtime.pending_prompt.is_some());
@@ -682,7 +662,8 @@ mod tests {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.connection.runtime.conversation = ConversationState::from_messages(msgs);
-        pane.queue_input_during_compaction("while you were away".into(), Vec::new());
+        pane.queue_input_during_compaction("while you were away".into(), Vec::new())
+            .await;
         let mut config = test_config();
 
         let context = pane.connection.runtime.conversation.context();
@@ -803,7 +784,8 @@ mod tests {
     async fn fallback_recovery_applies_summary_and_replays_queued_input() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.queue_input_during_compaction("queued thought".into(), vec![]);
+        pane.queue_input_during_compaction("queued thought".into(), vec![])
+            .await;
         pane.app.open_compaction_recovery(
             failure_report(vec![
                 user_message("old question"),
@@ -841,7 +823,7 @@ mod tests {
                 &mut pane.connection.runtime,
                 applied,
             );
-            replay_compaction_inputs(pane).await;
+            promote_queued_inputs(pane);
         }
 
         let pane = &mut runtime.session;
@@ -865,7 +847,8 @@ mod tests {
             user_message("old question"),
             assistant_message("old answer"),
         ]);
-        pane.queue_input_during_compaction("queued thought".into(), vec![]);
+        pane.queue_input_during_compaction("queued thought".into(), vec![])
+            .await;
         pane.app.open_compaction_recovery(
             failure_report(pane.connection.runtime.conversation.context()),
             100,
@@ -877,7 +860,7 @@ mod tests {
         {
             let pane = &mut runtime.session;
             pane.app.compacting = false;
-            replay_compaction_inputs(pane).await;
+            promote_queued_inputs(pane);
         }
 
         let pane = &mut runtime.session;

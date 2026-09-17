@@ -389,6 +389,15 @@ impl App {
         self.messages.iter().any(|m| m.queued)
     }
 
+    pub fn promote_queued_messages(&mut self) -> usize {
+        let mut promoted = 0;
+        for mut message in self.messages.iter_mut().filter(|m| m.queued) {
+            message.queued = false;
+            promoted += 1;
+        }
+        promoted
+    }
+
     pub fn input_char(&mut self, c: char) {
         self.completion.tab_state = None;
         self.input.insert_char(c);

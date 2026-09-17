@@ -159,7 +159,7 @@ async fn handle_compaction_recovery_action(
         crate::app_state::CompactionRecoveryAction::Cancel => {
             session.app.compacting = false;
             session.app.status = Some("compaction cancelled".into());
-            super::runtime::replay_compaction_inputs(session).await;
+            super::runtime::promote_queued_inputs(session);
             return;
         }
     };
@@ -432,8 +432,7 @@ pub(super) async fn handle_idle_terminal_events(
                     match app_event {
                         AppEvent::UserSubmit { text, images } => {
                             if session.connection.state().compacting {
-                                let pane = &mut *session;
-                                pane.queue_input_during_compaction(text, images);
+                                session.queue_input_during_compaction(text, images).await;
                                 continue;
                             }
                             let expanded = slash::expand_template(&text);

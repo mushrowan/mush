@@ -194,6 +194,18 @@ impl PendingPrompt {
     pub fn mark_persisted(&mut self) {
         self.persisted = true;
     }
+
+    pub fn merge(&mut self, text: &str, images: Vec<PendingImage>) {
+        if self.persisted {
+            *self = Self::with_images(text, images);
+            return;
+        }
+        if !self.text.is_empty() && !text.is_empty() {
+            self.text.push_str("\n\n");
+        }
+        self.text.push_str(text);
+        self.images.extend(images);
+    }
 }
 
 pub struct SessionRuntime {
@@ -204,7 +216,6 @@ pub struct SessionRuntime {
     pub conversation: ConversationState,
     pub pending_prompt: Option<PendingPrompt>,
     pub steering_queue: Arc<Mutex<Vec<Message>>>,
-    pub pending_compaction_inputs: Vec<(String, Vec<PendingImage>)>,
     pub title_generated: bool,
     pub control: Option<mush_agent::ipc::control::Control>,
     pub control_socket: Option<PathBuf>,
@@ -234,7 +245,6 @@ impl SessionRuntime {
             conversation,
             pending_prompt: None,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
-            pending_compaction_inputs: Vec::new(),
             title_generated: false,
             control: None,
             control_socket: None,
@@ -362,10 +372,6 @@ impl SessionRuntime {
             socket: self.control_socket.clone()?,
             target: self.control.as_ref()?.target(),
         })
-    }
-
-    pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
-        std::mem::take(&mut self.pending_compaction_inputs)
     }
 }
 

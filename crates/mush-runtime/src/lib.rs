@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod compaction;
 pub mod connection;
+pub mod inbox;
 pub mod session;
 pub mod snapshot;
 #[doc(hidden)]

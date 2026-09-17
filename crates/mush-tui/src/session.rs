@@ -37,7 +37,7 @@ impl Session {
         }
     }
 
-    pub fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {
+    pub async fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
         if image_bytes.is_empty() {
             self.app.push_queued_message(text.clone());
@@ -45,18 +45,12 @@ impl Session {
             self.app
                 .push_queued_message_with_images(text.clone(), image_bytes);
         }
-        self.connection
-            .runtime
-            .pending_compaction_inputs
-            .push((text, images));
         self.app.input.text.clear();
         self.app.input.cursor = 0;
-    }
-
-    pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
-        let drained = self.connection.runtime.drain_compaction_inputs();
-        let _ = self.app.take_queued_messages();
-        drained
+        let _ = self
+            .connection
+            .send(mush_runtime::ClientCommand::QueuePrompt { text, images })
+            .await;
     }
 
     pub fn fields_mut(
