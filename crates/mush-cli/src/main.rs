@@ -115,6 +115,12 @@ enum Command {
     Worker {
         #[arg(long, value_name = "SOCKET")]
         socket: std::path::PathBuf,
+        #[arg(long, value_name = "FILE")]
+        descriptor: Option<std::path::PathBuf>,
+    },
+    Daemon {
+        #[arg(long, value_name = "SOCKET")]
+        socket: Option<std::path::PathBuf>,
     },
     Login {
         provider: Option<String>,
@@ -159,12 +165,21 @@ async fn main() -> Result<()> {
 
     mush_agent::truncation::cleanup();
 
-    if let Some(Command::Worker { socket }) = &cli.command {
+    if let Some(Command::Worker { socket, descriptor }) = &cli.command {
         let socket = socket.clone();
-        return worker_mode(cli, socket).await;
+        let descriptor = descriptor.clone();
+        return worker_mode(cli, socket, descriptor).await;
+    }
+    if let Some(Command::Daemon { socket }) = &cli.command {
+        let socket = socket
+            .clone()
+            .unwrap_or_else(mush_daemon::daemon_socket_path);
+        return daemon_mode(&socket).await;
     }
     match cli.command {
-        Some(Command::Control(_) | Command::Worker { .. }) => unreachable!(),
+        Some(Command::Control(_) | Command::Worker { .. } | Command::Daemon { .. }) => {
+            unreachable!()
+        }
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
@@ -622,8 +637,34 @@ struct OpenedSession {
     saver: Option<SaverThread>,
 }
 
-async fn worker_mode(cli: Cli, socket: std::path::PathBuf) -> Result<()> {
+async fn daemon_mode(socket: &std::path::Path) -> Result<()> {
+    let program = std::env::current_exe()?;
+    let supervisor = mush_daemon::Supervisor::new(
+        program,
+        mush_daemon::workers_dir(),
+        mush_session::data_dir().join("workers"),
+    );
+    eprintln!(
+        "{}",
+        Style::Dim.stderr(format_args!("daemon listening on {}", socket.display()))
+    );
+    mush_daemon::supervisor::run(socket, supervisor).await?;
+    Ok(())
+}
+
+async fn worker_mode(
+    cli: Cli,
+    socket: std::path::PathBuf,
+    descriptor: Option<std::path::PathBuf>,
+) -> Result<()> {
     let listener = mush_daemon::bind(&socket)?;
+    let descriptor = descriptor.map(|path| {
+        mush_daemon::Descriptor::new(
+            path,
+            socket.clone(),
+            std::env::current_dir().unwrap_or_default(),
+        )
+    });
     let Prepared {
         setup,
         kernel_signals,
@@ -638,7 +679,7 @@ async fn worker_mode(cli: Cli, socket: std::path::PathBuf) -> Result<()> {
         connection,
         ipc_listener,
     } = mush_runtime::host_worker(worker, &setup.tools, &setup.registry)?;
-    let served = mush_daemon::serve(connection, listener).await;
+    let served = mush_daemon::serve(connection, listener, descriptor).await;
     let _ = std::fs::remove_file(&socket);
     served?;
     if let Some(listener) = ipc_listener {

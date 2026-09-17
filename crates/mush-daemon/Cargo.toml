@@ -8,9 +8,12 @@ publish = false
 
 [dependencies]
 mush-ai.workspace = true
+mush-agent.workspace = true
 mush-session.workspace = true
 mush-runtime.workspace = true
+mush-tools.workspace = true
 tokio.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,7 +21,6 @@ async-trait.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-mush-agent.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -44,17 +44,17 @@ pub enum IpcMessageKind {
 }
 
 pub fn socket_path(session_id: &str) -> PathBuf {
-    mush_runtime_dir().join(format!("{session_id}.sock"))
+    runtime_dir().join(format!("{session_id}.sock"))
 }
 
 pub fn control_socket_path(instance: &str) -> PathBuf {
-    mush_runtime_dir()
+    runtime_dir()
         .join("control")
         .join(format!("{instance}.sock"))
 }
 
 pub fn discover_sockets() -> Vec<PathBuf> {
-    let dir = mush_runtime_dir();
+    let dir = runtime_dir();
     [dir.clone(), dir.join("control")]
         .into_iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
@@ -65,7 +65,7 @@ pub fn discover_sockets() -> Vec<PathBuf> {
         .collect()
 }
 
-fn mush_runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
         let user = rustix::process::geteuid().as_raw();
         format!("/tmp/mush-{user}")
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_ends_with_mush() {
-        let dir = mush_runtime_dir();
+        let dir = runtime_dir();
         assert_eq!(dir.file_name().unwrap(), "mush");
     }
 

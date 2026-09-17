@@ -2839,6 +2839,8 @@ dependencies = [
  "mush-ai",
  "mush-runtime",
  "mush-session",
+ "mush-tools",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",

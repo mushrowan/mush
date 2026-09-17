@@ -17,7 +17,7 @@ fn spawn_worker() -> Worker {
     let socket = dir.path().join("worker.sock");
     let listener = bind(&socket).unwrap();
     let (connection, _requests) = mush_runtime::testing::echo_connection();
-    let task = tokio::spawn(serve(connection, listener));
+    let task = tokio::spawn(serve(connection, listener, None));
     Worker {
         _dir: dir,
         socket,
