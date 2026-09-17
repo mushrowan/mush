@@ -2,12 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
-use mush_ai::types::ThinkingLevel;
-use mush_session::ConversationState;
+use mush_ai::types::{Message, ThinkingLevel};
 use notify::RecommendedWatcher;
 
 use crate::app::App;
-use crate::session::Session;
+use crate::session::{AgentConnection, InProcessConnection, Session, SessionRuntime};
 use crate::slash_menu::SlashCommand;
 
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -99,25 +98,16 @@ impl RunnerRuntime {
         }
     }
 
-    pub(super) async fn new(tui_config: &mut TuiConfig) -> Self {
+    pub(super) async fn new(
+        tui_config: &mut TuiConfig,
+        mut connection: Box<dyn AgentConnection>,
+    ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut app = build_initial_app(tui_config, &cwd);
-        let conversation = replay_conversation(
-            &mut app,
-            std::mem::take(&mut tui_config.initial_conversation),
-        );
-        let mut session = Session::with_conversation(app, conversation);
-        session.connection.runtime.saver = tui_config.save_session.clone();
-        session.connection.runtime.session_id = tui_config.session_id.clone();
-        session.connection.runtime.title = tui_config.initial_title.clone();
-        session.connection.runtime.model_id = tui_config.model.id.to_string();
-        session.connection.runtime.system_prompt = tui_config.system_prompt.clone();
-        session.connection.runtime.rlm_depth = tui_config.rlm_depth;
-        session.connection.runtime.rlm_max_depth = tui_config.rlm_max_depth;
-        session
-            .connection
-            .runtime
-            .set_kernel_state(tui_config.kernel_state.clone());
+        let history = connection.history().await;
+        let context = connection.transcript().await;
+        replay_history(&mut app, &history, &context);
+        let session = Session::with_connection(app, connection);
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
 
@@ -322,12 +312,7 @@ fn watch_config(
 fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
     tui_config.seed_app(&mut app);
-    app.thinking_level = tui_config
-        .options
-        .thinking
-        .clone()
-        .unwrap_or(ThinkingLevel::Off)
-        .normalize_visible();
+    app.thinking_level = initial_thinking_level(tui_config);
     app.supported_thinking_levels = tui_config.model.supported_thinking_levels.clone();
     app.cache.seed_for_model(
         &tui_config.model,
@@ -368,16 +353,46 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     app
 }
 
-fn replay_conversation(app: &mut App, conversation: ConversationState) -> ConversationState {
-    if conversation.is_empty() {
-        return conversation;
-    }
+pub(super) fn in_process_connection(
+    tui_config: &mut TuiConfig,
+    tools: &mush_agent::tool::ToolRegistry,
+    registry: &mush_ai::registry::ApiRegistry,
+) -> InProcessConnection {
+    let mut runtime = SessionRuntime::new(std::mem::take(&mut tui_config.initial_conversation));
+    runtime.saver = tui_config.save_session.clone();
+    runtime.session_id = tui_config.session_id.clone();
+    runtime.title = tui_config.initial_title.clone();
+    runtime.model_id = tui_config.model.id.to_string();
+    runtime.system_prompt = tui_config.system_prompt.clone();
+    runtime.rlm_depth = tui_config.rlm_depth;
+    runtime.rlm_max_depth = tui_config.rlm_max_depth;
+    runtime.thinking_level = initial_thinking_level(tui_config);
+    runtime.set_kernel_state(tui_config.kernel_state.clone());
+    InProcessConnection::new(
+        runtime,
+        tools.clone(),
+        registry.clone(),
+        tui_config.turn_config(),
+        tui_config.injections(),
+    )
+}
 
-    let history = conversation.display_history();
-    crate::conversation_display::rebuild_display(app, &history);
-    crate::conversation_display::accumulate_session_stats(app, &conversation.context());
+fn initial_thinking_level(tui_config: &TuiConfig) -> ThinkingLevel {
+    tui_config
+        .options
+        .thinking
+        .clone()
+        .unwrap_or(ThinkingLevel::Off)
+        .normalize_visible()
+}
+
+fn replay_history(app: &mut App, history: &[Message], context: &[Message]) {
+    if context.is_empty() {
+        return;
+    }
+    crate::conversation_display::rebuild_display(app, history);
+    crate::conversation_display::accumulate_session_stats(app, context);
     app.status = Some(format!("resumed session ({} messages)", history.len()).into());
-    conversation
 }
 
 #[cfg(test)]
@@ -386,6 +401,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use mush_session::ConversationState;
 
     use mush_ai::types::{
         Api, AssistantContentPart, AssistantMessage, Message, Provider, TextContent, Timestamp,
@@ -507,9 +523,8 @@ mod tests {
         let messages = vec![user_message("hello"), assistant_message("hi there")];
         let source = ConversationState::from_messages(messages.clone());
 
-        let conversation = replay_conversation(&mut app, source);
+        replay_history(&mut app, &source.display_history(), &source.context());
 
-        assert_eq!(conversation.context(), messages);
         assert_eq!(app.messages.len(), 2);
         assert!(app.stats.total_tokens > TokenCount::ZERO);
         assert_eq!(
@@ -534,9 +549,8 @@ mod tests {
 
         let config = test_config();
         let mut app = build_initial_app(&config, Path::new("."));
-        let resumed = replay_conversation(&mut app, source);
+        replay_history(&mut app, &source.display_history(), &source.context());
 
-        assert_eq!(resumed.context().len(), collapsed_len);
         assert!(
             app.messages.len() > collapsed_len,
             "resume must restore the full scrollback, got {} display rows vs {collapsed_len} collapsed",
@@ -548,14 +562,6 @@ mod tests {
                 .any(|m| m.role == crate::app::MessageRole::System
                     && m.content.contains("compacted summary")),
             "the compaction banner should be shown"
-        );
-        assert!(
-            resumed
-                .tree()
-                .entries()
-                .iter()
-                .any(|e| matches!(e.kind, mush_session::tree::EntryKind::Compaction { .. })),
-            "the compaction node must survive resume"
         );
     }
 
@@ -573,7 +579,7 @@ mod tests {
         assert!(!pane.app.has_queued_messages());
         assert!(pane.app.stream.active, "should kick off a new stream");
         assert_eq!(
-            pane.connection
+            pane.in_process()
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -595,7 +601,7 @@ mod tests {
 
         promote_queued_inputs(&mut pane);
 
-        assert!(pane.connection.runtime.pending_prompt.is_none());
+        assert!(pane.in_process().runtime.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
     }
@@ -619,9 +625,9 @@ mod tests {
 
         promote_queued_inputs(&mut pane);
 
-        pane.connection.runtime.persist_pending_prompt();
-        assert!(pane.connection.runtime.pending_prompt.is_some());
-        let snapshot = pane.connection.runtime.snapshot();
+        pane.in_process().runtime.persist_pending_prompt();
+        assert!(pane.in_process().runtime.pending_prompt.is_some());
+        let snapshot = pane.in_process().runtime.snapshot();
         let Message::User(user) = &snapshot.primary.context()[0] else {
             panic!("expected user message");
         };
@@ -661,12 +667,12 @@ mod tests {
         }
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.connection.runtime.conversation = ConversationState::from_messages(msgs);
+        pane.in_process().runtime.conversation = ConversationState::from_messages(msgs);
         pane.queue_input_during_compaction("while you were away".into(), Vec::new())
             .await;
         let mut config = test_config();
 
-        let context = pane.connection.runtime.conversation.context();
+        let context = pane.in_process().runtime.conversation.context();
         let applied = crate::slash::AppliedCompaction {
             messages: context,
             summary: "summary of earlier turns".into(),
@@ -696,7 +702,7 @@ mod tests {
             pane.app.status
         );
         assert_eq!(
-            pane.connection
+            pane.in_process()
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -818,19 +824,16 @@ mod tests {
         };
         {
             let pane = &mut runtime.session;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.connection.runtime,
-                applied,
-            );
+            let (app, runtime) = pane.app_and_runtime();
+            crate::slash::apply_applied_compaction(app, runtime, applied);
             promote_queued_inputs(pane);
         }
 
         let pane = &mut runtime.session;
-        assert!(pane.connection.runtime.conversation.context_len() < 3);
+        assert!(pane.in_process().runtime.conversation.context_len() < 3);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
-            pane.connection
+            pane.in_process()
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -843,17 +846,15 @@ mod tests {
     async fn cancel_recovery_replays_queued_input_without_compacting() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
-        pane.connection.runtime.conversation = ConversationState::from_messages(vec![
+        pane.in_process().runtime.conversation = ConversationState::from_messages(vec![
             user_message("old question"),
             assistant_message("old answer"),
         ]);
         pane.queue_input_during_compaction("queued thought".into(), vec![])
             .await;
-        pane.app.open_compaction_recovery(
-            failure_report(pane.connection.runtime.conversation.context()),
-            100,
-            "test".into(),
-        );
+        let report = failure_report(pane.in_process().runtime.conversation.context());
+        pane.app
+            .open_compaction_recovery(report, 100, "test".into());
         let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
 
         runtime.session.app.close_compaction_recovery();
@@ -864,10 +865,10 @@ mod tests {
         }
 
         let pane = &mut runtime.session;
-        assert_eq!(pane.connection.runtime.conversation.context_len(), 2);
+        assert_eq!(pane.in_process().runtime.conversation.context_len(), 2);
         assert!(pane.app.stream.active, "queued input should replay");
         assert_eq!(
-            pane.connection
+            pane.in_process()
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -943,7 +944,14 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(RunnerRuntime::new(&mut config));
+            .block_on(async {
+                let connection = in_process_connection(
+                    &mut config,
+                    &mush_agent::tool::ToolRegistry::new(),
+                    &mush_ai::registry::ApiRegistry::new(),
+                );
+                RunnerRuntime::new(&mut config, Box::new(connection)).await
+            });
         let (tx, rx) = mpsc::channel();
         runtime.install_discovery_updates(rx);
 

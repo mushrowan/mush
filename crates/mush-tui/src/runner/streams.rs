@@ -3,7 +3,7 @@ use std::sync::Arc;
 use mush_agent::AgentEvent;
 use mush_ai::types::{Model, Provider, TokenCount, ToolOutcome};
 
-use crate::session::{AgentConnection, Session};
+use crate::session::Session;
 use mush_ai::types::PaneId;
 
 use super::TuiConfig;
@@ -609,9 +609,9 @@ mod tests {
                 if matches!(event, AgentEvent::ContextCompacted { .. }) {
                     let mut session =
                         Session::new(App::new(model.id.clone(), model.context_window));
-                    session.connection.runtime.saver = tui_config.save_session.clone();
+                    session.in_process().runtime.saver = tui_config.save_session.clone();
                     let (_confirm_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-                    let generation = session.connection.runtime.turns.register_active(
+                    let generation = session.in_process().runtime.turns.register_active(
                         PaneId::new(1),
                         StreamMeta {
                             steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -622,8 +622,8 @@ mod tests {
                             cancel: tokio_util::sync::CancellationToken::new(),
                         },
                     );
-                    session.connection.runtime.conversation = conversation.clone();
-                    session.connection.ingest_agent_event(
+                    session.in_process().runtime.conversation = conversation.clone();
+                    session.in_process().ingest_agent_event(
                         PaneId::new(1),
                         generation,
                         event.clone(),
@@ -685,7 +685,7 @@ mod tests {
         assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
         assert_eq!(
             session
-                .connection
+                .in_process()
                 .runtime
                 .pending_prompt
                 .as_ref()
@@ -700,7 +700,7 @@ mod tests {
 
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -803,7 +803,7 @@ mod tests {
         assert_eq!(session.app.messages.len(), before);
         let attached = &session.app.messages.last().unwrap().tool_calls[0].bash_done;
         assert_eq!(attached.as_ref().map(|d| d.exit_code), Some(5));
-        assert!(session.connection.runtime.pending_prompt.is_some());
+        assert!(session.in_process().runtime.pending_prompt.is_some());
     }
 
     #[tokio::test]
@@ -817,7 +817,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -873,7 +873,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -905,7 +905,7 @@ mod tests {
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: steering_queue.clone(),
@@ -971,7 +971,7 @@ mod tests {
         let pane_id = PaneId::new(7);
 
         let (_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-        let gen1 = session.connection.runtime.turns.register_active(
+        let gen1 = session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -983,8 +983,8 @@ mod tests {
             },
         );
 
-        assert!(session.connection.runtime.turns.is_current(pane_id, gen1));
-        assert!(session.connection.runtime.turns.meta(pane_id).is_some());
+        assert!(session.in_process().runtime.turns.is_current(pane_id, gen1));
+        assert!(session.in_process().runtime.turns.meta(pane_id).is_some());
         let _ = ToolCallId::from("unused");
     }
 
@@ -1019,7 +1019,7 @@ mod tests {
         });
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1065,7 +1065,7 @@ mod tests {
         );
 
         let pending = session
-            .connection
+            .in_process()
             .runtime
             .turns
             .meta(pane_id)
@@ -1086,7 +1086,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1119,7 +1119,7 @@ mod tests {
         assert!(app.interaction.confirm_tool_call_id.is_none());
         assert!(
             session
-                .connection
+                .in_process()
                 .runtime
                 .turns
                 .meta(pane_id)
@@ -1138,7 +1138,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let (confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
 
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1323,7 +1323,7 @@ mod tests {
         let pane_id = PaneId::new(1);
 
         let (_tx1, rx1) = tokio::sync::mpsc::channel(1);
-        let gen1 = session.connection.runtime.turns.register_active(
+        let gen1 = session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1335,10 +1335,10 @@ mod tests {
             },
         );
 
-        session.connection.runtime.turns.abort(pane_id);
+        session.in_process().runtime.turns.abort(pane_id);
 
         let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
-        let gen2 = session.connection.runtime.turns.register_active(
+        let gen2 = session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1353,12 +1353,12 @@ mod tests {
         assert_ne!(gen1, gen2, "generations must differ");
 
         assert!(
-            !session.connection.runtime.turns.is_current(pane_id, gen1),
+            !session.in_process().runtime.turns.is_current(pane_id, gen1),
             "stale generation must be rejected"
         );
 
         assert!(
-            session.connection.runtime.turns.is_current(pane_id, gen2),
+            session.in_process().runtime.turns.is_current(pane_id, gen2),
             "current generation must be accepted"
         );
     }
@@ -1369,7 +1369,7 @@ mod tests {
         let pane_id = PaneId::new(1);
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        let stream_gen = session.connection.runtime.turns.register_active(
+        let stream_gen = session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
                 steering_queue: Arc::new(Mutex::new(Vec::new())),
@@ -1381,11 +1381,11 @@ mod tests {
             },
         );
 
-        session.connection.runtime.turns.abort(pane_id);
+        session.in_process().runtime.turns.abort(pane_id);
 
         assert!(
             !session
-                .connection
+                .in_process()
                 .runtime
                 .turns
                 .is_current(pane_id, stream_gen)
@@ -1399,10 +1399,11 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        session.connection.runtime.turns.register_active(
+        let steering_queue = session.in_process().runtime.steering_queue.clone();
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.connection.runtime.steering_queue.clone(),
+                steering_queue,
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -1428,7 +1429,13 @@ mod tests {
         .await;
 
         assert_eq!(
-            session.connection.runtime.steering_queue.lock().await.len(),
+            session
+                .in_process()
+                .runtime
+                .steering_queue
+                .lock()
+                .await
+                .len(),
             2
         );
         assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
@@ -1442,7 +1449,7 @@ mod tests {
         );
         assert!(
             session
-                .connection
+                .in_process()
                 .runtime
                 .steering_queue
                 .lock()
@@ -1464,10 +1471,11 @@ mod tests {
         let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        session.connection.runtime.turns.register_active(
+        let steering_queue = session.in_process().runtime.steering_queue.clone();
+        session.in_process().runtime.turns.register_active(
             pane_id,
             StreamMeta {
-                steering_queue: session.connection.runtime.steering_queue.clone(),
+                steering_queue,
                 confirm_req_rx: rx,
                 confirm_reply: Arc::new(Mutex::new(None)),
                 model: models::all_models_with_user().into_iter().next().unwrap(),
@@ -1478,7 +1486,7 @@ mod tests {
 
         let tool_call_id = ToolCallId::from("tc_cancelled");
         session
-            .connection
+            .in_process()
             .runtime
             .conversation
             .append_message(Message::Assistant(
@@ -1505,7 +1513,7 @@ mod tests {
 
         abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let ctx = session.connection.runtime.conversation.context();
+        let ctx = session.in_process().runtime.conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {
             panic!("abort should append a tool result");
         };
@@ -1525,10 +1533,10 @@ mod tests {
     #[test]
     fn build_session_snapshot_carries_system_prompt() {
         let mut session = Session::new(app());
-        session.connection.runtime.system_prompt =
+        session.in_process().runtime.system_prompt =
             Some("you are running inside mush\nproject context: foo".into());
 
-        let snapshot = session.connection.runtime.snapshot();
+        let snapshot = session.in_process().runtime.snapshot();
 
         assert_eq!(
             snapshot.system_prompt.as_deref(),
@@ -1577,7 +1585,7 @@ mod tests {
         cache.save(&cache_path()).unwrap();
 
         let mut session = Session::new(app());
-        session.connection.runtime.model_id = glm_id.to_string();
+        session.in_process().runtime.model_id = glm_id.to_string();
 
         let default = Model {
             id: ModelId::from("claude-opus-4-7"),
@@ -1601,7 +1609,7 @@ mod tests {
             default_thinking_level: None,
         };
 
-        let resolved = session.connection.runtime.model(&default);
+        let resolved = session.in_process().runtime.model(&default);
 
         unsafe {
             match saved {

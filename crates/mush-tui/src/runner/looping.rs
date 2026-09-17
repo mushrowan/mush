@@ -12,7 +12,7 @@ use super::input::{
 };
 use super::runtime::RunnerRuntime;
 use super::streams::{StreamState, poll_live_tool_output};
-use mush_runtime::{AgentConnection, ClientEvent};
+use mush_runtime::ClientEvent;
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     crate::app::ANIMATION_FRAME_INTERVAL;
@@ -571,7 +571,7 @@ mod tests {
             let pane = PaneId::new(1);
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             let cancel = tokio_util::sync::CancellationToken::new();
-            let generation = runtime.session.connection.runtime.turns.register_active(
+            let generation = runtime.session.in_process().runtime.turns.register_active(
                 pane,
                 StreamMeta {
                     steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -583,11 +583,11 @@ mod tests {
                 },
             );
             if case == "abort" {
-                runtime.session.connection.runtime.turns.abort(pane);
+                runtime.session.in_process().runtime.turns.abort(pane);
             }
             if case == "replaced" {
                 let (_tx, rx) = tokio::sync::mpsc::channel(1);
-                runtime.session.connection.runtime.turns.register_active(
+                runtime.session.in_process().runtime.turns.register_active(
                     pane,
                     StreamMeta {
                         steering_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -608,7 +608,7 @@ mod tests {
                               event: AgentEvent| {
                 let Some(event) = runtime
                     .session
-                    .connection
+                    .in_process()
                     .ingest_agent_event(pane, generation, event)
                 else {
                     return;

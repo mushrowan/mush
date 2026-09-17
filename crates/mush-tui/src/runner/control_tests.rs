@@ -1,6 +1,5 @@
 use super::streams::StreamState;
 use super::{TuiConfig, runtime::RunnerRuntime};
-use crate::session::AgentConnection;
 use mush_agent::AgentEvent;
 use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
 use mush_agent::tool::{AgentTool, ToolRegistry, ToolResult};
@@ -72,7 +71,7 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
             assert_eq!(outcome(&control, "second"), Outcome::Queued);
         }
         while let Some((pane, generation, event)) =
-            runtime.session.connection.runtime.turns.next().await
+            runtime.session.in_process().runtime.turns.next().await
         {
             dispatch(
                 &mut runtime,
@@ -89,7 +88,14 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
         assert_eq!(requests.lock().unwrap().len(), index + 1);
     }
     poll(&state, &mut runtime, &config).await.unwrap();
-    assert!(runtime.session.connection.runtime.pending_prompt.is_none());
+    assert!(
+        runtime
+            .session
+            .in_process()
+            .runtime
+            .pending_prompt
+            .is_none()
+    );
     assert_eq!(control.target(), target);
     let result = tokio::process::Command::new(&binary)
         .env_clear()
@@ -120,7 +126,7 @@ async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authorit
     poll(&state, &mut runtime, &config).await.unwrap();
     start_pending(&mut runtime, &config, &tools, &registry, false).await;
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -190,7 +196,7 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
                 break;
             }
             tokio::select! {
-                event = runtime.session.connection.runtime.turns.next() => {
+                event = runtime.session.in_process().runtime.turns.next() => {
                     let (pane, generation, event) = event.unwrap();
                     dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
                 }
@@ -206,7 +212,7 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     assert_eq!(outcome(&control, "during-confirm"), Outcome::Queued);
     super::streams::answer_confirmation(&mut runtime.session, &mut state, false).await;
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -254,7 +260,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = runtime.session.connection.runtime.turns.next() => {
+            event = runtime.session.in_process().runtime.turns.next() => {
                 let (pane, generation, event) = event.unwrap();
                 dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
             }
@@ -277,7 +283,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     assert_eq!(outcome(&control, "previous-session"), Outcome::Running);
     release.notify_one();
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -305,7 +311,7 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     .await;
     assert_ne!(control.target().session, old_session);
     assert!(
-        runtime.session.connection.runtime.conversation.is_empty(),
+        runtime.session.in_process().runtime.conversation.is_empty(),
         "previous control turn entered the new session"
     );
 }
@@ -474,9 +480,9 @@ fn fixture() -> (RunnerRuntime, TuiConfig, Control) {
         config.model.context_window,
     ));
     let control = Control::new(config.session_id.to_string());
-    session.connection.runtime.session_id = config.session_id.clone();
+    session.in_process().runtime.session_id = config.session_id.clone();
     session
-        .connection
+        .in_process()
         .attach_control(control.clone(), "/fixture/control.sock".into());
     (
         RunnerRuntime::from_pane(session, Default::default()),
@@ -709,7 +715,7 @@ async fn start_pending(
     registry: &ApiRegistry,
     confirm_tools: bool,
 ) {
-    let connection = &mut runtime.session.connection;
+    let connection = runtime.session.in_process();
     connection.set_deps(tools.clone(), registry.clone());
     connection.set_config(mush_runtime::TurnConfig {
         default_model: config.model.clone(),
@@ -736,7 +742,7 @@ async fn poll(
     runtime: &mut RunnerRuntime,
     _config: &TuiConfig,
 ) -> std::io::Result<()> {
-    runtime.session.connection.poll_control().await;
+    runtime.session.in_process().poll_control().await;
     while let Some(event) = runtime.session.connection.try_next_event() {
         super::looping::apply_command_events(
             &mut runtime.session,
@@ -759,7 +765,7 @@ async fn dispatch(
 ) {
     if let Some(event) = runtime
         .session
-        .connection
+        .in_process()
         .ingest_agent_event(pane, generation, event)
     {
         super::looping::dispatch_client_event(event, state, runtime, config, &None).await;
@@ -820,7 +826,7 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
         poll(&state, &mut runtime, &config).await.unwrap();
         start_pending(&mut runtime, &config, &tools, &registry, false).await;
         while let Some((pane, generation, event)) =
-            runtime.session.connection.runtime.turns.next().await
+            runtime.session.in_process().runtime.turns.next().await
         {
             dispatch(
                 &mut runtime,
@@ -843,14 +849,21 @@ async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
                 Outcome::Completed
             }
         );
-        assert!(runtime.session.connection.runtime.pending_prompt.is_none());
+        assert!(
+            runtime
+                .session
+                .in_process()
+                .runtime
+                .pending_prompt
+                .is_none()
+        );
         assert_eq!(
             runtime.session.app.messages[0].role,
             crate::app::MessageRole::Event(EventKind::Message)
         );
         let replay = runtime
             .session
-            .connection
+            .in_process()
             .runtime
             .conversation
             .display_history();
@@ -890,13 +903,13 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
         endpoint: endpoint.clone(),
     }));
     let mut state = StreamState::new();
-    runtime.session.connection.runtime.pending_prompt =
+    runtime.session.in_process().runtime.pending_prompt =
         Some(crate::session::PendingPrompt::text("ordinary user"));
     start_pending(&mut runtime, &config, &tools, &registry, false).await;
     loop {
         let (pane, generation, event) = runtime
             .session
-            .connection
+            .in_process()
             .runtime
             .turns
             .next()
@@ -919,7 +932,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     }
     tokio::select! {
         _ = entered.notified() => {},
-        _ = runtime.session.connection.runtime.turns.next() => panic!("tool returned before release"),
+        _ = runtime.session.in_process().runtime.turns.next() => panic!("tool returned before release"),
     }
     enqueue(&control, "during-tool");
     super::streams::submit_streaming_input(
@@ -938,7 +951,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     );
     release.notify_one();
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -955,7 +968,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     poll(&state, &mut runtime, &config).await.unwrap();
     start_pending(&mut runtime, &config, &tools, &registry, false).await;
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -1000,7 +1013,7 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     loop {
         let (pane, generation, event) = runtime
             .session
-            .connection
+            .in_process()
             .runtime
             .turns
             .next()
@@ -1021,18 +1034,18 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
             break;
         }
     }
-    tokio::select! { _ = entered.notified() => {}, _ = runtime.session.connection.runtime.turns.next() => panic!() }
+    tokio::select! { _ = entered.notified() => {}, _ = runtime.session.in_process().runtime.turns.next() => panic!() }
     enqueue(&control, "after-cancel");
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
     assert_eq!(outcome(&control, "after-cancel"), Outcome::Queued);
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         if runtime
             .session
-            .connection
+            .in_process()
             .runtime
             .turns
             .is_current(pane, generation)
@@ -1053,7 +1066,7 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     poll(&state, &mut runtime, &config).await.unwrap();
     start_pending(&mut runtime, &config, &tools, &registry, false).await;
     while let Some((pane, generation, event)) =
-        runtime.session.connection.runtime.turns.next().await
+        runtime.session.in_process().runtime.turns.next().await
     {
         dispatch(
             &mut runtime,
@@ -1124,7 +1137,7 @@ async fn cancellation_drops_pending_provider_connection() {
     loop {
         tokio::select! {
             _ = entered.notified() => break,
-            event = runtime.session.connection.runtime.turns.next() => {
+            event = runtime.session.in_process().runtime.turns.next() => {
                 let (pane, generation, event) = event.unwrap();
                 dispatch(&mut runtime, &mut state, &mut config, &registry, pane, generation, event).await;
             }
@@ -1134,7 +1147,7 @@ async fn cancellation_drops_pending_provider_connection() {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while runtime
             .session
-            .connection
+            .in_process()
             .runtime
             .turns
             .next()
@@ -1171,12 +1184,19 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
             },
         );
         poll(&state, &mut runtime, &config).await.unwrap();
-        assert!(runtime.session.connection.runtime.pending_prompt.is_none());
+        assert!(
+            runtime
+                .session
+                .in_process()
+                .runtime
+                .pending_prompt
+                .is_none()
+        );
         tokio::time::advance(std::time::Duration::from_millis(100)).await;
         poll(&state, &mut runtime, &config).await.unwrap();
         start_pending(&mut runtime, &config, &tools, &registry, false).await;
         while let Some((pane, generation, event)) =
-            runtime.session.connection.runtime.turns.next().await
+            runtime.session.in_process().runtime.turns.next().await
         {
             dispatch(
                 &mut runtime,
@@ -1199,13 +1219,13 @@ async fn pending_user_inputs_and_session_switch_block_old_events() {
     let (mut runtime, mut config, control) = fixture();
     let mut state = StreamState::new();
     enqueue(&control, "old");
-    runtime.session.connection.runtime.pending_prompt =
+    runtime.session.in_process().runtime.pending_prompt =
         Some(crate::session::PendingPrompt::text("ordinary"));
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Queued);
-    runtime.session.connection.runtime.pending_prompt = None;
+    runtime.session.in_process().runtime.pending_prompt = None;
     config.session_id = SessionId::new();
-    runtime.session.connection.runtime.session_id = config.session_id.clone();
+    runtime.session.in_process().runtime.session_id = config.session_id.clone();
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Unavailable);
     enqueue(&control, "cancel");
@@ -1220,10 +1240,11 @@ async fn failed_event_remains_running_until_agent_end() {
     enqueue(&control, "retry");
     control.take_next(&control.target()).unwrap();
     let pane = PaneId::new(1);
-    let generation = runtime.session.connection.runtime.turns.register_active(
+    let steering_queue = runtime.session.in_process().runtime.steering_queue.clone();
+    let generation = runtime.session.in_process().runtime.turns.register_active(
         pane,
         mush_runtime::StreamMeta {
-            steering_queue: runtime.session.connection.runtime.steering_queue.clone(),
+            steering_queue,
             confirm_req_rx: tokio::sync::mpsc::channel(1).1,
             confirm_reply: Arc::new(tokio::sync::Mutex::new(None)),
             model: config.model.clone(),
@@ -1231,7 +1252,7 @@ async fn failed_event_remains_running_until_agent_end() {
             cancel: Default::default(),
         },
     );
-    runtime.session.connection.ingest_agent_event(
+    runtime.session.in_process().ingest_agent_event(
         pane,
         generation,
         AgentEvent::Error {
@@ -1241,7 +1262,7 @@ async fn failed_event_remains_running_until_agent_end() {
     assert_eq!(outcome(&control, "retry"), Outcome::Running);
     runtime
         .session
-        .connection
+        .in_process()
         .ingest_agent_event(pane, generation, AgentEvent::AgentEnd);
     assert_eq!(outcome(&control, "retry"), Outcome::Failed);
 }
@@ -1259,13 +1280,13 @@ async fn pending_prompts_start_one_agent_at_a_time() {
     let tools = ToolRegistry::new();
     let mut state = StreamState::new();
     for expected in 1..=2 {
-        runtime.session.connection.runtime.pending_prompt = Some(
+        runtime.session.in_process().runtime.pending_prompt = Some(
             crate::session::PendingPrompt::text(format!("prompt-{expected}")),
         );
         start_pending(&mut runtime, &config, &tools, &registry, false).await;
         start_pending(&mut runtime, &config, &tools, &registry, false).await;
         while let Some((pane, generation, event)) =
-            runtime.session.connection.runtime.turns.next().await
+            runtime.session.in_process().runtime.turns.next().await
         {
             dispatch(
                 &mut runtime,

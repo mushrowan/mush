@@ -3,7 +3,7 @@ use std::path::Path;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::ThinkingLevel;
 
-use crate::session::{AgentConnection, Session};
+use crate::session::Session;
 use crate::slash::{self, SlashAction};
 
 use super::{ThinkingPrefs, TuiConfig};
@@ -290,7 +290,7 @@ pub(super) async fn handle_slash_action(
             let pane = &mut *session;
             if let Some(prompt) = slash::handle(
                 &mut pane.app,
-                &mut pane.connection,
+                pane.connection.as_mut(),
                 tui_config,
                 thinking_prefs,
                 &other_action,
@@ -643,7 +643,7 @@ mod tests {
 
         assert_ne!(config.session_id, old_id);
         assert_eq!(
-            session.connection.runtime.conversation.context(),
+            session.in_process().runtime.conversation.context(),
             vec![user("first")]
         );
         assert_eq!(session.app.input.text, "second");
@@ -663,7 +663,7 @@ mod tests {
         );
 
         assert_eq!(config.session_id, old_id);
-        assert_eq!(session.connection.runtime.conversation.context_len(), 1);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
     }
 
     #[test]
@@ -696,14 +696,14 @@ mod tests {
         let mut config = TuiConfig::for_test();
 
         run(&mut session, &mut config, SlashAction::Undo);
-        assert_eq!(session.connection.runtime.conversation.context_len(), 2);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
 
         run(
             &mut session,
             &mut config,
             SlashAction::Branch { index: Some(1) },
         );
-        assert_eq!(session.connection.runtime.conversation.context_len(), 0);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 0);
         assert!(session.app.messages.is_empty());
     }
 
@@ -717,7 +717,7 @@ mod tests {
 
         assert_ne!(config.session_id, old_id);
         assert_eq!(
-            session.connection.runtime.conversation.context(),
+            session.in_process().runtime.conversation.context(),
             vec![user("first"), user("second")]
         );
     }

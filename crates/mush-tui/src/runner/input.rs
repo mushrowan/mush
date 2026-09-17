@@ -6,7 +6,7 @@ use mush_ai::registry::ApiRegistry;
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
-use crate::session::{AgentConnection, Session};
+use crate::session::Session;
 
 use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
 use super::streams::{
@@ -846,7 +846,7 @@ mod tests {
         );
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut stream_state = StreamState::new();
-        session.connection.runtime.turns.register_active(
+        session.in_process().runtime.turns.register_active(
             mush_ai::types::PaneId::new(1),
             mush_runtime::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),

@@ -9,7 +9,7 @@ pub use mush_runtime::{AgentConnection, InProcessConnection, PendingPrompt, Sess
 
 pub struct Session {
     pub app: App,
-    pub connection: InProcessConnection,
+    pub connection: Box<dyn AgentConnection>,
     pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
     pub label: Option<String>,
     pub pending_side_questions: Vec<crate::slash::side_question::PendingSideQuestion>,
@@ -23,11 +23,13 @@ impl Session {
     pub fn with_conversation(app: App, conversation: ConversationState) -> Self {
         Self::with_connection(
             app,
-            InProcessConnection::detached(SessionRuntime::new(conversation)),
+            Box::new(InProcessConnection::detached(SessionRuntime::new(
+                conversation,
+            ))),
         )
     }
 
-    pub fn with_connection(app: App, connection: InProcessConnection) -> Self {
+    pub fn with_connection(app: App, connection: Box<dyn AgentConnection>) -> Self {
         Self {
             app,
             connection,
@@ -35,6 +37,22 @@ impl Session {
             label: None,
             pending_side_questions: Vec::new(),
         }
+    }
+
+    pub fn app_and_runtime(&mut self) -> (&mut App, &mut SessionRuntime) {
+        let connection = self
+            .connection
+            .as_any_mut()
+            .downcast_mut::<InProcessConnection>()
+            .unwrap_or_else(|| unreachable!("this session is attached to a remote worker"));
+        (&mut self.app, &mut connection.runtime)
+    }
+
+    pub fn in_process(&mut self) -> &mut InProcessConnection {
+        self.connection
+            .as_any_mut()
+            .downcast_mut()
+            .unwrap_or_else(|| unreachable!("this session is attached to a remote worker"))
     }
 
     pub async fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {

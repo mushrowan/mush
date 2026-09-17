@@ -120,7 +120,8 @@ pub enum ConnectionError {
 }
 
 #[async_trait::async_trait]
-pub trait AgentConnection: Send {
+pub trait AgentConnection: Send + std::any::Any {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError>;
     async fn next_event(&mut self) -> Option<ClientEvent>;
     fn try_next_event(&mut self) -> Option<ClientEvent>;
@@ -732,6 +733,10 @@ impl InProcessConnection {
 
 #[async_trait::async_trait]
 impl AgentConnection for InProcessConnection {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError> {
         if self.closed {
             return Err(ConnectionError::Closed);

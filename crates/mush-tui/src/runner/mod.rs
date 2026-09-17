@@ -23,7 +23,6 @@ use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
 use crate::screen::Screen;
-use crate::session::AgentConnection;
 
 pub use self::config::{
     KernelBusyRequest, KernelNotices, KernelPrompts, LiveToolOutput, ModelResolver, PaneSnapshot,
@@ -93,18 +92,7 @@ pub async fn run_tui(
         "after_terminal_new",
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
-    let mut runtime = RunnerRuntime::new(&mut tui_config).await;
-    {
-        let connection = &mut runtime.session.connection;
-        connection.set_deps(tools.clone(), registry.clone());
-        connection.set_config(tui_config.turn_config());
-        connection.set_injections(tui_config.injections());
-        connection.runtime.thinking_level = runtime.session.app.thinking_level.clone();
-    }
-    if let Some(rx) = startup_discovery {
-        runtime.install_discovery_updates(rx);
-    }
-
+    let mut connection = runtime::in_process_connection(&mut tui_config, tools, registry);
     let ipc_listener = if tui_config.control {
         let card = tui_config
             .agent_card
@@ -114,11 +102,16 @@ pub async fn run_tui(
         let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
         let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
         let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        runtime.session.connection.attach_control(control, sock);
+        connection.attach_control(control, sock);
         Some(listener)
     } else {
         None
     };
+    connection.attach_inbox_from_env();
+    let mut runtime = RunnerRuntime::new(&mut tui_config, Box::new(connection)).await;
+    if let Some(rx) = startup_discovery {
+        runtime.install_discovery_updates(rx);
+    }
 
     draw_panes(
         &mut terminal,
@@ -133,7 +126,6 @@ pub async fn run_tui(
     diag::write_startup_diagnostics(startup_phases, Vec::new());
 
     let mut stream_state = StreamState::new();
-    runtime.session.connection.attach_inbox_from_env();
     #[cfg(all(feature = "signal", not(test)))]
     {
         stream_state.signal = tokio::task::spawn_blocking(mush_notify::user_dispatcher)

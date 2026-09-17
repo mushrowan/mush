@@ -149,6 +149,10 @@ async fn read_frames(
 
 #[async_trait::async_trait]
 impl AgentConnection for DaemonConnection {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError> {
         let id = self.next_request_id();
         match self.request(Request::Command { id, command }).await? {
