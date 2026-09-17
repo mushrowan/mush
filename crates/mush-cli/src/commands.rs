@@ -49,7 +49,7 @@ pub fn list_sessions() -> Result<()> {
             )),
         );
     }
-    println!("\nresume with: mush -c <id>");
+    println!("\nresume with: mush --resume <id>");
     Ok(())
 }
 

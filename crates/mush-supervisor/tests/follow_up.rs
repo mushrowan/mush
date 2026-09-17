@@ -56,7 +56,7 @@ impl Fixture {
 set -eu
 while [ "$#" -gt 0 ]; do
  case "$1" in
-  --continue) printf '%s' "$2" >resumed; shift 2 ;;
+  --resume) printf '%s' "$2" >resumed; shift 2 ;;
   --status-file) status=$2; shift 2 ;;
   -p) printf '%s' "$2" >received; shift 2 ;;
   *) shift ;;

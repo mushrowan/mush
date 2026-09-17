@@ -65,7 +65,7 @@ pub enum SlashAction {
     },
     Sessions,
     Resume {
-        session_id: Option<SessionId>,
+        session_id: SessionId,
     },
     Branch {
         index: Option<usize>,
@@ -182,9 +182,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             }
         }
         "sessions" => Ok(SlashAction::Sessions),
-        "resume" if args.is_empty() => Ok(SlashAction::Resume { session_id: None }),
+        "resume" if args.is_empty() => Ok(SlashAction::Sessions),
         "resume" => Ok(SlashAction::Resume {
-            session_id: Some(SessionId::from(args)),
+            session_id: SessionId::from(args),
         }),
         "branch" if args.is_empty() => Ok(SlashAction::Branch { index: None }),
         "branch" => args
@@ -547,11 +547,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_resume_no_arg_means_most_recent_in_cwd() {
-        assert_eq!(
-            parse("/resume").unwrap(),
-            SlashAction::Resume { session_id: None }
-        );
+    fn parse_resume_no_arg_opens_the_picker() {
+        assert_eq!(parse("/resume").unwrap(), SlashAction::Sessions);
     }
 
     #[test]
@@ -559,7 +556,7 @@ mod tests {
         assert_eq!(
             parse("/resume abc123").unwrap(),
             SlashAction::Resume {
-                session_id: Some(SessionId::from("abc123")),
+                session_id: SessionId::from("abc123"),
             }
         );
     }

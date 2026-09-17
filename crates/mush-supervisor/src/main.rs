@@ -687,7 +687,7 @@ async fn worker(
             cmd.arg("--status-file").arg(&headless_status);
         }
         if status_enabled && let Some(id) = &session {
-            cmd.arg("--continue").arg(id);
+            cmd.arg("--resume").arg(id);
         }
         let session_lease = if let Some(lease) = &manifest.session_lease {
             Some(lease.clone())

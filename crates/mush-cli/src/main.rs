@@ -32,10 +32,13 @@ struct Cli {
     #[arg(short, long, alias = "print", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
 
-    #[arg(short = 'c', long = "continue")]
-    resume: Option<String>,
+    #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "fork"])]
+    continue_recent: bool,
 
-    #[arg(long, conflicts_with = "resume")]
+    #[arg(long, value_name = "ID", conflicts_with = "fork")]
+    resume: Option<Option<String>>,
+
+    #[arg(long, value_name = "ID")]
     fork: Option<String>,
 
     #[arg(short, long)]
@@ -96,7 +99,37 @@ struct Cli {
     tui_image_probe: Option<mush_tui::ImageProbeMode>,
 }
 
+enum SessionTarget {
+    New,
+    Resume(String),
+    Fork(String),
+    Pick,
+}
+
 impl Cli {
+    fn session_target(&self) -> Result<SessionTarget> {
+        if self.continue_recent {
+            let cwd = std::env::current_dir()?.display().to_string();
+            let store = SessionStore::new(SessionStore::default_dir());
+            return store
+                .list()?
+                .into_iter()
+                .find(|meta| meta.cwd == cwd)
+                .map(|meta| SessionTarget::Resume(meta.id.to_string()))
+                .ok_or_else(|| eyre!("no session for this directory yet, run mush to start one"));
+        }
+        Ok(match (&self.resume, &self.fork) {
+            (Some(Some(id)), _) => SessionTarget::Resume(id.clone()),
+            (Some(None), _) => SessionTarget::Pick,
+            (None, Some(id)) => SessionTarget::Fork(id.clone()),
+            (None, None) => SessionTarget::New,
+        })
+    }
+
+    fn resumes_a_session(&self) -> bool {
+        self.continue_recent || self.resume.is_some()
+    }
+
     fn worker_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         let mut flag = |name: &str, on: bool| {
@@ -225,7 +258,7 @@ async fn main() -> Result<()> {
     }
 
     let stdin_prompt = if cli.prompt.is_empty()
-        && cli.resume.is_none()
+        && !cli.resumes_a_session()
         && cli.status_file.is_none()
         && !atty::is(atty::Stream::Stdin)
     {
@@ -284,16 +317,24 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
     let mut _session_lease = None;
-    let mut session = if let Some(ref id) = cli.resume {
-        let meta = store.resolve(id)?;
-        _session_lease = store.lease(&meta.id)?;
-        store.load(&meta.id)?
-    } else {
-        let model_id = match cli.model.clone() {
-            Some(model) => model,
-            None => setup::default_model_id(&config::load_config_with(&cli.option)?, &cwd),
-        };
-        Session::new(&model_id, &cwd.display().to_string())
+    let mut session = match cli.session_target()? {
+        SessionTarget::Resume(id) => {
+            let meta = store.resolve(&id)?;
+            _session_lease = store.lease(&meta.id)?;
+            store.load(&meta.id)?
+        }
+        SessionTarget::Fork(id) => {
+            let meta = store.resolve(&id)?;
+            fork_session(store.load(&meta.id)?, &cwd.display().to_string())
+        }
+        SessionTarget::Pick => return Err(eyre!("--resume without an id needs the tui")),
+        SessionTarget::New => {
+            let model_id = match cli.model.clone() {
+                Some(model) => model,
+                None => setup::default_model_id(&config::load_config_with(&cli.option)?, &cwd),
+            };
+            Session::new(&model_id, &cwd.display().to_string())
+        }
     };
     if let Some(model) = &cli.model {
         session.meta.model_id = model.clone().into();
@@ -703,7 +744,7 @@ async fn worker_mode(
         setup,
         kernel_signals,
     } = prepare(&cli).await?;
-    let opened = open_session(&cli, &setup).await?;
+    let opened = open_session(&cli.session_target()?, &setup, cli.no_session).await?;
     let worker = worker_config(&cli, &setup, &opened, kernel_signals);
     eprintln!(
         "{}",
@@ -744,16 +785,18 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
     });
 
+    let target = cli.session_target()?;
     match cli.no_session {
         false => {
-            let target = match (&cli.resume, &cli.fork) {
-                (Some(id), _) => mush_daemon::OpenTarget::Resume(id.clone()),
-                (None, Some(id)) => mush_daemon::OpenTarget::Fork(id.clone()),
-                (None, None) => mush_daemon::OpenTarget::New,
+            let open = match &target {
+                SessionTarget::Resume(id) => mush_daemon::OpenTarget::Resume(id.clone()),
+                SessionTarget::Fork(id) => mush_daemon::OpenTarget::Fork(id.clone()),
+                SessionTarget::New | SessionTarget::Pick => mush_daemon::OpenTarget::New,
             };
-            let descriptor = daemon::open(target, cli.worker_args()).await?;
+            let descriptor = daemon::open(open, cli.worker_args()).await?;
             let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
-            let tui_config = client_config(&cli, &setup, &log_buffer, None);
+            let mut tui_config = client_config(&cli, &setup, &log_buffer, None);
+            tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             mush_tui::run_tui_attached(
                 tui_config,
                 Box::new(connection),
@@ -765,15 +808,16 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             eprintln!(
                 "{}",
                 Style::Dim.stderr(format_args!(
-                    "detached, mush -c {} reattaches",
+                    "detached, mush --resume {} reattaches",
                     &descriptor.session_id[..8.min(descriptor.session_id.len())]
                 ))
             );
         }
         true => {
-            let opened = open_session(&cli, &setup).await?;
+            let opened = open_session(&target, &setup, cli.no_session).await?;
             let worker = worker_config(&cli, &setup, &opened, kernel_signals);
-            let tui_config = client_config(&cli, &setup, &log_buffer, Some(&opened.session));
+            let mut tui_config = client_config(&cli, &setup, &log_buffer, Some(&opened.session));
+            tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             mush_tui::run_tui(
                 tui_config,
                 worker,
@@ -827,27 +871,33 @@ async fn prepare(cli: &Cli) -> Result<Prepared> {
     })
 }
 
-async fn open_session(cli: &Cli, setup: &AppSetup) -> Result<OpenedSession> {
+async fn open_session(
+    target: &SessionTarget,
+    setup: &AppSetup,
+    no_session: bool,
+) -> Result<OpenedSession> {
     let cwd_str = setup.cwd.display().to_string();
     let mut lease = None;
-    let session = if let Some(ref resume_id) = cli.resume {
-        let store = SessionStore::new(SessionStore::default_dir());
-        let meta = store.resolve(resume_id)?;
-        lease = store.lease(&meta.id)?;
-        if let Some(kernel) = &setup.kernel_state {
-            kernel
-                .restore_from(&SessionStore::kernel_state_path(&meta.id))
-                .await;
+    let session = match target {
+        SessionTarget::Resume(id) => {
+            let store = SessionStore::new(SessionStore::default_dir());
+            let meta = store.resolve(id)?;
+            lease = store.lease(&meta.id)?;
+            if let Some(kernel) = &setup.kernel_state {
+                kernel
+                    .restore_from(&SessionStore::kernel_state_path(&meta.id))
+                    .await;
+            }
+            store.load(&meta.id)?
         }
-        store.load(&meta.id)?
-    } else if let Some(ref fork_id) = cli.fork {
-        let store = SessionStore::new(SessionStore::default_dir());
-        let meta = store.resolve(fork_id)?;
-        fork_session(store.load(&meta.id)?, &cwd_str)
-    } else {
-        Session::new(setup.model.id.as_str(), &cwd_str)
+        SessionTarget::Fork(id) => {
+            let store = SessionStore::new(SessionStore::default_dir());
+            let meta = store.resolve(id)?;
+            fork_session(store.load(&meta.id)?, &cwd_str)
+        }
+        SessionTarget::New | SessionTarget::Pick => Session::new(setup.model.id.as_str(), &cwd_str),
     };
-    let saver = (!cli.no_session)
+    let saver = (!no_session)
         .then(|| SaverThread::spawn(cwd_str))
         .transpose()?;
     Ok(OpenedSession {
@@ -1023,6 +1073,7 @@ fn client_config(
             }
             km
         },
+        open_session_picker: false,
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
             let rlm = setup.rlm;
@@ -1124,6 +1175,21 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use super::*;
+
+    #[test]
+    fn resume_takes_an_optional_id_and_continue_takes_none() {
+        let bare = Cli::try_parse_from(["mush", "--resume"]).unwrap();
+        assert!(matches!(bare.resume, Some(None)));
+        let targeted = Cli::try_parse_from(["mush", "--resume", "abc123"]).unwrap();
+        assert!(matches!(targeted.resume, Some(Some(id)) if id == "abc123"));
+        let with_prompt = Cli::try_parse_from(["mush", "--resume", "-p", "hello"]).unwrap();
+        assert!(matches!(with_prompt.resume, Some(None)));
+        assert_eq!(with_prompt.prompt, ["hello"]);
+        assert!(Cli::try_parse_from(["mush", "-c"]).unwrap().continue_recent);
+        assert!(Cli::try_parse_from(["mush", "-c", "abc123"]).is_err());
+        assert!(Cli::try_parse_from(["mush", "-c", "--resume", "abc"]).is_err());
+        assert!(Cli::try_parse_from(["mush", "--resume", "a", "--fork", "b"]).is_err());
+    }
 
     fn snapshot(title: Option<&str>) -> mush_tui::SessionSnapshot {
         let conversation = mush_session::ConversationState::from_messages(vec![Message::User(

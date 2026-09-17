@@ -143,6 +143,9 @@ async fn run_tui_with(
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
     }
+    if tui_config.open_session_picker {
+        crate::slash::commands::open_sessions_picker(&mut runtime.session.app);
+    }
 
     draw_panes(
         &mut terminal,

@@ -210,7 +210,7 @@ impl Supervisor {
         match target {
             OpenTarget::New => {}
             OpenTarget::Resume(id) => {
-                command.arg("--continue").arg(id);
+                command.arg("--resume").arg(id);
             }
             OpenTarget::Fork(id) => {
                 command.arg("--fork").arg(id);

@@ -77,7 +77,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --model) model=$2; shift 2 ;;
     --status-file) status=$2; shift 2 ;;
-    --continue) resume=$2; shift 2 ;;
+    --resume) resume=$2; shift 2 ;;
     *) shift ;;
   esac
 done

@@ -14,7 +14,7 @@ status= resume=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --status-file) status=$2; shift 2 ;;
-    --continue) resume=$2; shift 2 ;;
+    --resume) resume=$2; shift 2 ;;
     *) shift ;;
   esac
 done

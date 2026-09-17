@@ -16,7 +16,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
-    ("resume", "resume last session in cwd (or by id)"),
+    ("resume", "browse sessions, or resume one by id"),
     ("branch", "branch from nth user message"),
     ("fork", "new session from before the nth user message"),
     ("clone", "copy the current branch into a new session"),

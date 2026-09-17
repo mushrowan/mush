@@ -1160,6 +1160,7 @@ mod tests {
             recent_models: Vec::new(),
             save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
+            open_session_picker: false,
             reload_context: None,
             mcp: None,
             skills: Default::default(),

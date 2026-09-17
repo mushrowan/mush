@@ -201,35 +201,12 @@ pub(super) async fn handle_slash_action(
             }
         }
         SlashAction::Resume { session_id } => {
-            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            let target = match session_id {
-                Some(id) => Some(id),
-                None => {
-                    let cwd_str = tui_config.cwd.display().to_string();
-                    match store.list() {
-                        Ok(metas) => metas.into_iter().find(|m| m.cwd == cwd_str).map(|m| m.id),
-                        Err(error) => {
-                            session
-                                .app
-                                .push_system_message(format!("failed to list sessions: {error}"));
-                            None
-                        }
-                    }
-                }
-            };
-            match target {
-                Some(id) => {
-                    state_changed = run_session_command(
-                        session,
-                        tui_config,
-                        mush_runtime::SessionCommand::Resume { id },
-                    )
-                    .await;
-                }
-                None => session.app.push_system_message(
-                    "no recent session for this directory. start one with /new",
-                ),
-            }
+            state_changed = run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::Resume { id: session_id },
+            )
+            .await;
         }
         SlashAction::Reload => {
             let Some(reload) = tui_config.reload_context.clone() else {

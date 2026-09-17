@@ -1159,7 +1159,7 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 app.close_session_picker();
                 Some(AppEvent::SlashCommand {
                     action: crate::slash::SlashAction::Resume {
-                        session_id: Some(id.into()),
+                        session_id: id.into(),
                     },
                 })
             } else {

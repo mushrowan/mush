@@ -153,27 +153,7 @@ pub async fn handle(
             None
         }
         SlashAction::Sessions => {
-            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            match store.list_paths() {
-                Ok(paths) => {
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    app.open_session_picker_streaming(rx, cwd);
-                    std::thread::spawn(move || {
-                        for path in paths {
-                            if let Ok(meta) = mush_session::load_meta(&path)
-                                && tx.send(meta).is_err()
-                            {
-                                break;
-                            }
-                        }
-                    });
-                }
-                Err(e) => app.push_system_message(format!("failed to list sessions: {e}")),
-            }
+            open_sessions_picker(app);
             None
         }
         SlashAction::Model {
@@ -320,6 +300,30 @@ pub async fn handle(
         }
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
+    }
+}
+
+pub fn open_sessions_picker(app: &mut App) {
+    let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+    match store.list_paths() {
+        Ok(paths) => {
+            let cwd = std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.open_session_picker_streaming(rx, cwd);
+            std::thread::spawn(move || {
+                for path in paths {
+                    if let Ok(meta) = mush_session::load_meta(&path)
+                        && tx.send(meta).is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+        Err(e) => app.push_system_message(format!("failed to list sessions: {e}")),
     }
 }
 

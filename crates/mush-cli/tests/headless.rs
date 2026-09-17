@@ -112,7 +112,7 @@ fn explicit_prompt_checkpoints_before_setup_error_with_stdin_open() {
     let mut child = command(dir.path())
         .args(["--status-file"])
         .arg(&path)
-        .args(["-c", id, "-p", "again"])
+        .args(["--resume", id, "-p", "again"])
         .spawn()
         .unwrap();
     assert!(!wait(&mut child).unwrap().success());
@@ -133,7 +133,7 @@ fn status_file_resume_does_not_read_stdin_or_append_empty_prompt() {
     let mut child = command(dir.path())
         .arg("--status-file")
         .arg(&path)
-        .args(["-c", session.meta.id.as_str()])
+        .args(["--resume", session.meta.id.as_str()])
         .spawn()
         .unwrap();
     assert!(!wait(&mut child).unwrap().success());
@@ -222,7 +222,7 @@ fn resume_appends_to_saved_context_without_rewriting_the_prefix() {
     let mut child = command(dir.path())
         .args(["--status-file"])
         .arg(dir.path().join("status.json"))
-        .args(["-c", session.meta.id.as_str(), "-p", "new follow-up"])
+        .args(["--resume", session.meta.id.as_str(), "-p", "new follow-up"])
         .spawn()
         .unwrap();
     assert!(!wait(&mut child).unwrap().success());
@@ -317,7 +317,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
         .env("MUSH_ORCHESTRATOR_INBOX", &inbox_path).env("TERM", "xterm-256color")
         .env("MUSH_FIXTURE_BINARY", env!("CARGO_BIN_EXE_mush")).env("MUSH_FIXTURE_SESSION", session.meta.id.as_str())
         .current_dir(dir.path()).args(["-q", "-e"]).arg(dir.path().join("terminal.log"))
-        .args(["-c", "stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --continue \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
+        .args(["-c", "stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --resume \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
         .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     while inbox.consumer(session.meta.id.as_str(), dir.path()).is_ok() {
@@ -630,7 +630,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
             .args([
                 "--max-turns",
                 if with_control { "4" } else { "1" },
-                "-c",
+                "--resume",
                 session.meta.id.as_str(),
                 "-p",
                 text,

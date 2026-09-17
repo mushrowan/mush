@@ -98,7 +98,7 @@ pub async fn ps() -> Result<()> {
             )),
         );
     }
-    println!("\nattach with: mush -c <id>");
+    println!("\nattach with: mush --resume <id>");
     Ok(())
 }
 
