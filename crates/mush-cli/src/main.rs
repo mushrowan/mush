@@ -65,6 +65,9 @@ struct Cli {
     #[arg(long)]
     rlm: bool,
 
+    #[arg(short = 'o', long = "option", value_name = "KEY=VALUE")]
+    option: Vec<String>,
+
     #[arg(long = "tools", short = 't', value_delimiter = ',')]
     tools: Option<Vec<String>>,
 
@@ -143,7 +146,7 @@ async fn main() -> Result<()> {
     if let Some(Command::Control(args)) = cli.command {
         return mush_cli::control::run(args).await;
     }
-    let cfg = config::load_config();
+    let cfg = config::load_config_with(&cli.option)?;
     let (_log_guards, log_buffer) = logging::init_logging(cfg.log_filter.as_deref(), cli.trace);
     tracing::info!("mush starting");
 
@@ -226,12 +229,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         _session_lease = store.lease(&meta.id)?;
         store.load(&meta.id)?
     } else {
-        Session::new(
-            &cli.model
-                .clone()
-                .unwrap_or_else(|| setup::default_model_id(&config::load_config(), &cwd)),
-            &cwd.display().to_string(),
-        )
+        let model_id = match cli.model.clone() {
+            Some(model) => model,
+            None => setup::default_model_id(&config::load_config_with(&cli.option)?, &cwd),
+        };
+        Session::new(&model_id, &cwd.display().to_string())
     };
     if let Some(model) = &cli.model {
         session.meta.model_id = model.clone().into();
@@ -266,6 +268,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         system: cli.system.clone(),
         no_tools: cli.no_tools,
         rlm: cli.rlm,
+        config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
         discovery: cli.discovery(),
@@ -667,6 +670,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         system: cli.system.clone(),
         no_tools: cli.no_tools,
         rlm: cli.rlm,
+        config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
         discovery: cli.discovery(),

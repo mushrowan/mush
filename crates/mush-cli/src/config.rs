@@ -331,20 +331,37 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OverrideError {
+    #[error("expected KEY=VALUE, got {0:?}")]
+    Shape(String),
+    #[error("unknown setting {0:?}")]
+    UnknownKey(String),
+    #[error("config rejected the override {key:?}: {error}")]
+    Invalid { key: String, error: String },
+}
+
 pub fn load_config() -> Config {
-    let path = config_path();
-    let mut config = if !path.exists() {
+    load_config_with(&[]).unwrap_or_else(|error| {
+        eprintln!("{}", Style::Yellow.stderr(format_args!("warning: {error}")));
         Config::default()
+    })
+}
+
+pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
+    let path = config_path();
+    let mut table = if !path.exists() {
+        toml::Table::new()
     } else {
         match std::fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str::<Config>(&content) {
-                Ok(config) => config,
+            Ok(content) => match toml::from_str::<toml::Table>(&content) {
+                Ok(table) => table,
                 Err(e) => {
                     eprintln!(
                         "{}",
                         Style::Yellow.stderr(format_args!("warning: failed to parse config: {e}"))
                     );
-                    Config::default()
+                    toml::Table::new()
                 }
             },
             Err(e) => {
@@ -352,8 +369,28 @@ pub fn load_config() -> Config {
                     "{}",
                     Style::Yellow.stderr(format_args!("warning: failed to read config: {e}"))
                 );
-                Config::default()
+                toml::Table::new()
             }
+        }
+    };
+    let schema = schemars::schema_for!(Config);
+    for spec in overrides {
+        apply_override(&mut table, schema.as_value(), spec)?;
+    }
+    let mut config: Config = match table.try_into() {
+        Ok(config) => config,
+        Err(e) if overrides.is_empty() => {
+            eprintln!(
+                "{}",
+                Style::Yellow.stderr(format_args!("warning: failed to parse config: {e}"))
+            );
+            Config::default()
+        }
+        Err(e) => {
+            return Err(OverrideError::Invalid {
+                key: overrides.join(" "),
+                error: e.to_string(),
+            });
         }
     };
 
@@ -368,7 +405,88 @@ pub fn load_config() -> Config {
         }
     }
 
-    config
+    Ok(config)
+}
+
+fn apply_override(
+    table: &mut toml::Table,
+    schema: &serde_json::Value,
+    spec: &str,
+) -> Result<(), OverrideError> {
+    let (key, raw) = spec
+        .split_once('=')
+        .ok_or_else(|| OverrideError::Shape(spec.to_string()))?;
+    let key = key.trim();
+    let path: Vec<&str> = key.split('.').collect();
+    if key.is_empty() || path.iter().any(|segment| segment.is_empty()) {
+        return Err(OverrideError::Shape(spec.to_string()));
+    }
+    if !schema_has_path(schema, schema, &path) {
+        return Err(OverrideError::UnknownKey(key.to_string()));
+    }
+    let value = parse_override_value(raw.trim());
+    let (last, parents) = path
+        .split_last()
+        .ok_or_else(|| OverrideError::Shape(spec.to_string()))?;
+    let mut node = table;
+    for segment in parents {
+        let entry = node
+            .entry((*segment).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::Table::new());
+        }
+        node = entry
+            .as_table_mut()
+            .ok_or_else(|| OverrideError::Shape(spec.to_string()))?;
+    }
+    node.insert((*last).to_string(), value);
+    Ok(())
+}
+
+fn parse_override_value(raw: &str) -> toml::Value {
+    toml::from_str::<toml::Table>(&format!("v = {raw}"))
+        .ok()
+        .and_then(|mut table| table.remove("v"))
+        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
+}
+
+fn schema_has_path(root: &serde_json::Value, node: &serde_json::Value, path: &[&str]) -> bool {
+    let Some((head, rest)) = path.split_first() else {
+        return true;
+    };
+    let node = resolve_ref(root, node);
+    if let Some(property) = node.get("properties").and_then(|p| p.get(*head)) {
+        return schema_has_path(root, property, rest);
+    }
+    if let Some(extra) = node.get("additionalProperties")
+        && extra.is_object()
+    {
+        return schema_has_path(root, extra, rest);
+    }
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        if let Some(options) = node.get(combinator).and_then(|v| v.as_array())
+            && options
+                .iter()
+                .any(|option| schema_has_path(root, option, path))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_ref<'a>(
+    root: &'a serde_json::Value,
+    node: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    let Some(reference) = node.get("$ref").and_then(|r| r.as_str()) else {
+        return node;
+    };
+    let Some(pointer) = reference.strip_prefix('#') else {
+        return node;
+    };
+    root.pointer(pointer).unwrap_or(node)
 }
 
 fn try_load_persisted_settings(
@@ -520,6 +638,66 @@ pub(crate) fn save_recent_models_to(path: &std::path::Path, models: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn overridden(specs: &[&str]) -> Result<Config, OverrideError> {
+        let schema = schemars::schema_for!(Config);
+        let mut table = toml::Table::new();
+        for spec in specs {
+            apply_override(&mut table, schema.as_value(), spec)?;
+        }
+        table
+            .try_into()
+            .map_err(|e: toml::de::Error| OverrideError::Invalid {
+                key: specs.join(" "),
+                error: e.to_string(),
+            })
+    }
+
+    #[test]
+    fn an_override_sets_a_flat_bool_and_a_nested_key() {
+        let config =
+            overridden(&["confirm_tools=true", "kernel.managed=false", "max_turns=7"]).unwrap();
+
+        assert!(config.confirm_tools);
+        assert!(!config.kernel.managed);
+        assert_eq!(config.max_turns, Some(7));
+    }
+
+    #[test]
+    fn a_bare_word_is_a_string_and_a_list_is_a_list() {
+        let config = overridden(&[
+            "model=claude-opus-4-7",
+            "kernel.extra_packages=[\"polars\", \"rich\"]",
+        ])
+        .unwrap();
+
+        assert_eq!(config.model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(config.kernel.extra_packages, vec!["polars", "rich"]);
+    }
+
+    #[test]
+    fn an_unknown_key_and_a_bad_shape_are_rejected() {
+        assert!(matches!(
+            overridden(&["confrim_tools=true"]),
+            Err(OverrideError::UnknownKey(key)) if key == "confrim_tools"
+        ));
+        assert!(matches!(
+            overridden(&["kernel.nope=1"]),
+            Err(OverrideError::UnknownKey(key)) if key == "kernel.nope"
+        ));
+        assert!(matches!(
+            overridden(&["confirm_tools"]),
+            Err(OverrideError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn a_wrong_type_is_rejected_by_the_config() {
+        assert!(matches!(
+            overridden(&["confirm_tools=maybe"]),
+            Err(OverrideError::Invalid { .. })
+        ));
+    }
 
     #[test]
     fn parse_full_config() {

@@ -41,6 +41,7 @@ pub struct SetupArgs {
     pub system: Option<String>,
     pub no_tools: bool,
     pub rlm: bool,
+    pub config_overrides: Vec<String>,
     pub tools: Option<Vec<String>>,
     pub append_system: Option<String>,
     pub discovery: mush_ext::DiscoveryOptions,
@@ -56,7 +57,7 @@ impl AppSetup {
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
 
-        let cfg = config::load_config();
+        let cfg = config::load_config_with(&args.config_overrides)?;
         let debug_cache = args.debug_cache || cfg.debug_cache;
         if let Some(t) = &mut timer {
             t.phase("config");
