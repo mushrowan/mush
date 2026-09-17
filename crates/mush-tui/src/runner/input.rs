@@ -363,7 +363,7 @@ async fn handle_streaming_key_event(
             edit_last_queued_steering(session, stream_state).await;
         }
         AppEvent::SlashCommand { action } => {
-            let state_changed = handle_slash_action(
+            handle_slash_action(
                 session,
                 action,
                 SlashEnv {
@@ -375,12 +375,6 @@ async fn handle_streaming_key_event(
                 },
             )
             .await;
-            if state_changed && let Some(ref saver) = deps.tui_config.save_session {
-                saver(super::streams::build_session_snapshot(
-                    session,
-                    deps.tui_config,
-                ));
-            }
         }
         _ => {}
     }
@@ -483,7 +477,7 @@ pub(super) async fn handle_idle_terminal_events(
                             }
                         }
                         AppEvent::SlashCommand { action } => {
-                            let state_changed = handle_slash_action(
+                            handle_slash_action(
                                 session,
                                 action,
                                 SlashEnv {
@@ -495,19 +489,12 @@ pub(super) async fn handle_idle_terminal_events(
                                 },
                             )
                             .await;
-
-                            if state_changed && let Some(ref saver) = deps.tui_config.save_session {
-                                saver(super::streams::build_session_snapshot(
-                                    session,
-                                    deps.tui_config,
-                                ));
-                            }
                         }
                         AppEvent::SettingsToggleSelected => {
                             apply_settings_toggle(session, deps.tui_config);
                         }
                         AppEvent::ModelSelected { model_id } => {
-                            let state_changed = handle_slash_action(
+                            handle_slash_action(
                                 session,
                                 crate::slash::SlashAction::Model {
                                     model_id: Some(model_id),
@@ -522,12 +509,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 },
                             )
                             .await;
-                            if state_changed && let Some(ref saver) = deps.tui_config.save_session {
-                                saver(super::streams::build_session_snapshot(
-                                    session,
-                                    deps.tui_config,
-                                ));
-                            }
                         }
                         AppEvent::PersistFavourites => {
                             if let Some(ref saver) = deps.tui_config.save_favourite_models {

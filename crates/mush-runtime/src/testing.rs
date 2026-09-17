@@ -75,6 +75,7 @@ pub fn echo_config(model: Model) -> TurnConfig {
         provider_api_keys: HashMap::new(),
         confirm_tools: false,
         auto_compact: false,
+        auto_fork_compact: false,
         compaction_model: None,
         forbidden_chars: Default::default(),
         tool_allowlist: None,

@@ -718,6 +718,7 @@ async fn start_pending(
         provider_api_keys: config.provider_api_keys.clone(),
         confirm_tools,
         auto_compact: false,
+        auto_fork_compact: false,
         compaction_model: None,
         forbidden_chars: Default::default(),
         tool_allowlist: None,

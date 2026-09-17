@@ -29,7 +29,7 @@ pub(super) async fn run_loop_iteration(
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    let action = if !runtime.session.connection.runtime.turn_active() {
+    let action = if !runtime.session.connection.state().turn_active {
         handle_idle_iteration(
             stream_state,
             runtime,
@@ -281,8 +281,6 @@ pub(super) async fn dispatch_client_event(
             super::streams::handle_turn_ended(
                 &mut runtime.session,
                 stream_state,
-                pane_id,
-                tui_config,
                 automatic_continuation,
                 cancelled,
             )

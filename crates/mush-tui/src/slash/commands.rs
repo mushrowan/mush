@@ -276,10 +276,20 @@ pub async fn handle(
         }
         SlashAction::Settings { args } => {
             handle_settings(app, tui_config, args);
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetStreamOptions(
+                    tui_config.options.clone(),
+                ))
+                .await;
             None
         }
         SlashAction::CompactionModel { model_id } => {
             handle_compaction_model(app, tui_config, model_id.as_deref());
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetCompactionModel(
+                    tui_config.compaction_model.clone().map(Box::new),
+                ))
+                .await;
             None
         }
         SlashAction::Login { provider: _ } => None,

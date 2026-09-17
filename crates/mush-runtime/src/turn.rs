@@ -21,6 +21,7 @@ pub struct TurnConfig {
     pub provider_api_keys: HashMap<String, ApiKey>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
+    pub auto_fork_compact: bool,
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
     pub tool_allowlist: Option<Vec<String>>,
@@ -125,10 +126,11 @@ impl SessionRuntime {
 
     pub async fn compaction_target(&self, config: &TurnConfig) -> CompactionTarget {
         let pane_model = self.model(&config.default_model);
-        let (model, options) = config
+        let (model, mut options) = config
             .compaction_model
             .clone()
             .unwrap_or_else(|| (pane_model.clone(), config.options.clone()));
+        options.session_id = Some(self.session_id.clone());
         let options = resolve_auth_into_options(&model, options, &config.provider_api_keys).await;
         CompactionTarget {
             model,
@@ -204,6 +206,7 @@ impl SessionRuntime {
         let (confirm_req_rx, confirm) = build_confirm_callback(config.confirm_tools);
 
         let mut call_options = config.options.clone();
+        call_options.session_id = Some(self.session_id.clone());
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.thinking = Some(thinking_level);
@@ -458,6 +461,45 @@ pub async fn auto_compact(
 mod tests {
     use super::*;
     use mush_ai::types::{Api, InputModality, ModelCost, Provider};
+
+    #[tokio::test]
+    async fn compaction_target_follows_the_pane_model_not_the_startup_one() {
+        let catalogue = mush_ai::models::all_models_with_user();
+        let startup = catalogue.first().unwrap().clone();
+        let switched = catalogue
+            .iter()
+            .find(|m| m.id != startup.id && m.compaction_window() != startup.compaction_window())
+            .unwrap()
+            .clone();
+        let config = crate::testing::echo_config(startup);
+        let mut runtime = SessionRuntime::default();
+        runtime.model_id = switched.id.to_string();
+
+        let target = runtime.compaction_target(&config).await;
+
+        assert_eq!(target.model.id, switched.id);
+        assert_eq!(target.window, switched.compaction_window());
+    }
+
+    #[tokio::test]
+    async fn compaction_target_prefers_the_configured_summariser_model() {
+        let catalogue = mush_ai::models::all_models_with_user();
+        let pane_model = catalogue.first().unwrap().clone();
+        let summariser = catalogue
+            .iter()
+            .find(|m| m.id != pane_model.id)
+            .unwrap()
+            .clone();
+        let mut config = crate::testing::echo_config(pane_model.clone());
+        config.compaction_model = Some((summariser.clone(), StreamOptions::default()));
+        let mut runtime = SessionRuntime::default();
+        runtime.model_id = pane_model.id.to_string();
+
+        let target = runtime.compaction_target(&config).await;
+
+        assert_eq!(target.model.id, summariser.id);
+        assert_eq!(target.window, pane_model.compaction_window());
+    }
 
     fn custom_model(provider: &str) -> Model {
         Model {

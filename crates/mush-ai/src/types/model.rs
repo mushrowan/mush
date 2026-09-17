@@ -201,7 +201,8 @@ impl ThinkingLevel {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StreamOptions {
     pub temperature: Option<Temperature>,
     pub max_tokens: Option<TokenCount>,

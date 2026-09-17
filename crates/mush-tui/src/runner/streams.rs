@@ -186,7 +186,7 @@ async fn submit_notice(session: &mut Session, notice: mush_tools::kernel_jobs::J
     session
         .app
         .push_bash_done(&notice.done, notice.origin.as_deref());
-    if session.connection.turn_active() {
+    if session.connection.state().turn_active {
         let _ = session
             .connection
             .send(mush_runtime::ClientCommand::Steer {
@@ -229,8 +229,6 @@ pub(super) fn poll_live_tool_output(
 pub(super) async fn handle_turn_ended(
     session: &mut Session,
     stream_state: &mut StreamState,
-    pane_id: PaneId,
-    tui_config: &mut TuiConfig,
     automatic_continuation: bool,
     cancelled: bool,
 ) {
@@ -245,10 +243,6 @@ pub(super) async fn handle_turn_ended(
             Some(crate::notify::Sound::Complete),
         );
         stream_state.completion_signal();
-    }
-
-    if tui_config.auto_fork_compact {
-        auto_compact(session, pane_id, tui_config).await;
     }
 }
 
@@ -309,32 +303,6 @@ async fn reconcile_openrouter_generation(
     }
 }
 
-async fn auto_compact(session: &mut Session, pane_id: PaneId, tui_config: &mut TuiConfig) {
-    let context_tokens = session.app.stats.context_tokens;
-    let messages = session.connection.transcript().await;
-    let target = compaction_target(session, pane_id, tui_config).await;
-
-    if !mush_session::compact::needs_compaction_for_messages(
-        context_tokens,
-        target.window,
-        &messages,
-    ) {
-        return;
-    }
-
-    match session
-        .connection
-        .send(mush_runtime::ClientCommand::Compact {
-            focus: mush_session::compact::CompactionFocus::default(),
-            auto: true,
-        })
-        .await
-    {
-        Ok(events) => super::looping::apply_command_events(session, tui_config, events).await,
-        Err(error) => tracing::debug!(%error, "auto compaction skipped"),
-    }
-}
-
 pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
     let events = session
         .connection
@@ -385,7 +353,7 @@ pub(super) async fn submit_streaming_input(
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
-    if session.connection.turn_active() {
+    if session.connection.state().turn_active {
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
         if image_bytes.is_empty() {
             session.app.push_queued_message(text.clone());
@@ -444,27 +412,6 @@ pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_sta
         .await;
 }
 
-pub(super) use mush_runtime::CompactionTarget;
-
-pub(super) async fn compaction_target(
-    session: &Session,
-    _pane_id: PaneId,
-    tui_config: &TuiConfig,
-) -> CompactionTarget {
-    session
-        .connection
-        .runtime
-        .compaction_target(&tui_config.turn_config())
-        .await
-}
-
-pub(crate) fn build_session_snapshot(
-    session: &Session,
-    _tui_config: &super::TuiConfig,
-) -> super::SessionSnapshot {
-    session.connection.runtime.snapshot()
-}
-
 pub(crate) fn apply_session_events(
     session: &mut Session,
     tui_config: &mut super::TuiConfig,
@@ -521,65 +468,6 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::event_handler;
-
-    #[tokio::test]
-    async fn compaction_target_follows_the_pane_model_not_the_startup_one() {
-        let catalogue = models::all_models_with_user();
-        let startup = catalogue.first().expect("catalogue is never empty").clone();
-        let switched = catalogue
-            .iter()
-            .find(|m| m.id != startup.id && m.compaction_window() != startup.compaction_window())
-            .expect("catalogue should hold two models with different windows")
-            .clone();
-
-        let mut config = crate::runner::TuiConfig::for_test();
-        config.model = startup.clone();
-
-        let pane_id = PaneId::new(1);
-        let app = crate::app::App::new(switched.id.clone(), switched.context_window);
-        let mut session = crate::session::Session::new(app);
-        session.connection.runtime.model_id = switched.id.to_string();
-
-        let target = compaction_target(&session, pane_id, &config).await;
-
-        assert_eq!(
-            target.model.id, switched.id,
-            "the pane's own model should write the summary"
-        );
-        assert_eq!(
-            target.window,
-            switched.compaction_window(),
-            "the pane's own window is the budget to compact against"
-        );
-    }
-
-    #[tokio::test]
-    async fn compaction_target_prefers_the_configured_summariser_model() {
-        let catalogue = models::all_models_with_user();
-        let pane_model = catalogue.first().expect("catalogue is never empty").clone();
-        let summariser = catalogue
-            .iter()
-            .find(|m| m.id != pane_model.id)
-            .expect("catalogue should hold two models")
-            .clone();
-
-        let mut config = crate::runner::TuiConfig::for_test();
-        config.model = pane_model.clone();
-        config.compaction_model = Some((summariser.clone(), StreamOptions::default()));
-
-        let pane_id = PaneId::new(1);
-        let app = crate::app::App::new(pane_model.id.clone(), pane_model.context_window);
-        let session = crate::session::Session::new(app);
-
-        let target = compaction_target(&session, pane_id, &config).await;
-
-        assert_eq!(target.model.id, summariser.id, "/compaction-model wins");
-        assert_eq!(
-            target.window,
-            pane_model.compaction_window(),
-            "the window still comes from the pane's model, not the summariser"
-        );
-    }
 
     #[test]
     fn stream_deps_uses_agent_injections() {
@@ -1637,11 +1525,10 @@ mod tests {
     #[test]
     fn build_session_snapshot_carries_system_prompt() {
         let mut session = Session::new(app());
-        let config = test_tui_config();
         session.connection.runtime.system_prompt =
             Some("you are running inside mush\nproject context: foo".into());
 
-        let snapshot = build_session_snapshot(&session, &config);
+        let snapshot = session.connection.runtime.snapshot();
 
         assert_eq!(
             snapshot.system_prompt.as_deref(),

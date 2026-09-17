@@ -45,6 +45,8 @@ pub enum ClientCommand {
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
     SetSystemPrompt(Option<String>),
+    SetStreamOptions(mush_ai::types::StreamOptions),
+    SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
     Compact {
         focus: CompactionFocus,
@@ -122,6 +124,7 @@ pub trait AgentConnection: Send {
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError>;
     async fn next_event(&mut self) -> Option<ClientEvent>;
     fn try_next_event(&mut self) -> Option<ClientEvent>;
+    async fn tick(&mut self) {}
     fn state(&self) -> ConnectionState;
     async fn transcript(&mut self) -> Vec<Message>;
     async fn history(&mut self) -> Vec<Message>;
@@ -137,6 +140,7 @@ pub struct InProcessConnection {
     queued: VecDeque<ClientEvent>,
     compaction: Option<tokio::task::JoinHandle<CompactionTaskResult>>,
     compaction_auto: bool,
+    fork_compaction_due: bool,
     failed_compaction: Option<FailedCompaction>,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
     inbox: Option<crate::inbox::OrchestratorInbox>,
@@ -167,6 +171,7 @@ impl InProcessConnection {
             queued: VecDeque::new(),
             compaction: None,
             compaction_auto: false,
+            fork_compaction_due: false,
             failed_compaction: None,
             title: None,
             inbox: None,
@@ -191,6 +196,7 @@ impl InProcessConnection {
                 provider_api_keys: std::collections::HashMap::new(),
                 confirm_tools: false,
                 auto_compact: false,
+                auto_fork_compact: false,
                 compaction_model: None,
                 forbidden_chars: Default::default(),
                 tool_allowlist: None,
@@ -293,9 +299,29 @@ impl InProcessConnection {
             return false;
         }
         self.poll_control().await;
+        if std::mem::take(&mut self.fork_compaction_due) {
+            let _ = self
+                .start_compaction(CompactionFocus::default(), true)
+                .await;
+        }
         let started = self.start_pending_prompt().await;
         self.runtime.save_if_dirty();
         started
+    }
+
+    fn fork_compaction_due(&self) -> bool {
+        if !self.config.auto_fork_compact {
+            return false;
+        }
+        let window = self
+            .runtime
+            .model(&self.config.default_model)
+            .compaction_window();
+        mush_session::compact::needs_compaction_for_messages(
+            self.runtime.context_tokens,
+            window,
+            &self.runtime.conversation.context(),
+        )
     }
 
     pub async fn idle(&self) -> bool {
@@ -697,6 +723,7 @@ impl InProcessConnection {
                 self.runtime.save_now_and_settle();
                 self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
+                self.fork_compaction_due = !cancelled && self.fork_compaction_due();
             }
             _ => {}
         }
@@ -735,9 +762,14 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
+            ClientCommand::SetStreamOptions(options) => self.config.options = options,
+            ClientCommand::SetCompactionModel(model) => {
+                self.config.compaction_model = model.map(|boxed| *boxed);
+            }
             ClientCommand::Session(command) => {
                 let events = self.runtime.handle(command).await;
                 self.sync_control_target();
+                self.runtime.save_now_and_settle();
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
             }
@@ -788,6 +820,10 @@ impl AgentConnection for InProcessConnection {
 
     fn try_next_event(&mut self) -> Option<ClientEvent> {
         self.poll_background()
+    }
+
+    async fn tick(&mut self) {
+        self.start_pending().await;
     }
 
     fn state(&self) -> ConnectionState {

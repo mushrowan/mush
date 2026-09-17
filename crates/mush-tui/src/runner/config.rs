@@ -135,6 +135,7 @@ impl TuiConfig {
             provider_api_keys: self.provider_api_keys.clone(),
             confirm_tools: self.confirm_tools,
             auto_compact: self.auto_compact,
+            auto_fork_compact: self.auto_fork_compact,
             compaction_model: self.compaction_options(),
             forbidden_chars: self.forbidden_chars.clone(),
             tool_allowlist: self.tool_allowlist.clone(),

@@ -621,7 +621,7 @@ mod tests {
 
         pane.connection.runtime.persist_pending_prompt();
         assert!(pane.connection.runtime.pending_prompt.is_some());
-        let snapshot = crate::runner::streams::build_session_snapshot(&pane, &test_config());
+        let snapshot = pane.connection.runtime.snapshot();
         let Message::User(user) = &snapshot.primary.context()[0] else {
             panic!("expected user message");
         };

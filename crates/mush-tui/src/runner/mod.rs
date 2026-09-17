@@ -94,10 +94,13 @@ pub async fn run_tui(
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
     let mut runtime = RunnerRuntime::new(&mut tui_config).await;
-    runtime
-        .session
-        .connection
-        .set_deps(tools.clone(), registry.clone());
+    {
+        let connection = &mut runtime.session.connection;
+        connection.set_deps(tools.clone(), registry.clone());
+        connection.set_config(tui_config.turn_config());
+        connection.set_injections(tui_config.injections());
+        connection.runtime.thinking_level = runtime.session.app.thinking_level.clone();
+    }
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
     }
@@ -130,10 +133,6 @@ pub async fn run_tui(
     diag::write_startup_diagnostics(startup_phases, Vec::new());
 
     let mut stream_state = StreamState::new();
-    runtime
-        .session
-        .connection
-        .set_injections(tui_config.injections());
     runtime.session.connection.attach_inbox_from_env();
     #[cfg(all(feature = "signal", not(test)))]
     {
@@ -166,10 +165,12 @@ pub async fn run_tui(
         .await;
         {
             let thinking_level = runtime.session.app.thinking_level.clone();
-            let context_tokens = runtime.session.app.stats.context_tokens;
             let connection = &mut runtime.session.connection;
-            connection.set_config(tui_config.turn_config());
-            connection.set_injections(tui_config.injections());
+            if connection.state().thinking_level != thinking_level {
+                let _ = connection
+                    .send(mush_runtime::ClientCommand::SetThinking(thinking_level))
+                    .await;
+            }
             if let Some(prompt) = runtime.pending_prompt.take() {
                 let _ = connection
                     .send(mush_runtime::ClientCommand::QueuePrompt {
@@ -178,9 +179,7 @@ pub async fn run_tui(
                     })
                     .await;
             }
-            connection.runtime.thinking_level = thinking_level;
-            connection.runtime.context_tokens = context_tokens;
-            connection.start_pending().await;
+            connection.tick().await;
         }
 
         report_loop_progress(
