@@ -70,7 +70,7 @@ pub struct Config {
     pub auto_compact: bool,
     #[serde(default)]
     pub auto_fork_compact: bool,
-    #[serde(default)]
+    #[serde(default = "default_rlm")]
     pub rlm: bool,
     pub rlm_max_depth: Option<u32>,
     #[serde(default)]
@@ -124,6 +124,10 @@ fn default_cache_timer() -> bool {
     true
 }
 
+fn default_rlm() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -140,7 +144,7 @@ impl Default for Config {
             force_budget_thinking: false,
             auto_compact: false,
             auto_fork_compact: false,
-            rlm: false,
+            rlm: true,
             rlm_max_depth: None,
             kernel: KernelConfig::default(),
             confirm_tools: false,

@@ -42,6 +42,7 @@ fn signals_checkpoint_and_cancel_during_startup() {
         std::fs::write(
             config.join("config.toml"),
             r#"
+rlm = false
 [mcp.wait]
 type = "local"
 command = ["sh", "-c", "touch ready; exec sleep 8"]
@@ -607,11 +608,6 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
             }
         }
         let mut child = cmd
-            .args(if with_control {
-                vec!["--control"]
-            } else {
-                Vec::new()
-            })
             .env("XDG_RUNTIME_DIR", dir.path())
             .args([
                 "--max-turns",

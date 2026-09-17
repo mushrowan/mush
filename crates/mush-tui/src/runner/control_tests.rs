@@ -504,7 +504,6 @@ async fn control_pty_child() {
     let dir = std::path::PathBuf::from(std::env::var_os("MUSH_CONTROL_PTY_DIR").unwrap());
     let (_, mut config, _) = fixture();
     config.cwd = dir.clone();
-    config.control = std::env::var_os("MUSH_CONTROL_PTY_ENABLED").is_some();
     config.terminal_policy.image_probe = crate::ImageProbeMode::Disabled;
     config.terminal_policy.keyboard_enhancement = crate::KeyboardEnhancementMode::Disabled;
     config.agent_card = Some(mush_agent::AgentCard::build(
@@ -538,174 +537,160 @@ async fn control_pty_child() {
 }
 
 #[tokio::test]
-async fn control_pty_lifecycle_is_opt_in_and_delivers_once() {
+async fn control_pty_lifecycle_delivers_once() {
     use tokio::io::AsyncWriteExt;
     let binary = std::env::current_exe().unwrap();
-    for enabled in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut command = tokio::process::Command::new("script");
-        command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap())
-            .env("HOME", dir.path())
-            .env("TERM", "xterm")
-            .env("MUSH_DATA_DIR", dir.path().join("data"))
-            .env("XDG_RUNTIME_DIR", dir.path())
-            .env("MUSH_CONTROL_PTY_DIR", dir.path())
-            .current_dir(dir.path())
-            .args([
-                "--quiet",
-                "--return",
-                "--flush",
-                "--echo",
-                "never",
-                "--log-out",
-            ])
-            .arg(dir.path().join("tty.log"))
-            .arg("--")
-            .arg(&binary)
-            .args([
-                "--exact",
-                "runner::control_tests::control_pty_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        if enabled {
-            command.env("MUSH_CONTROL_PTY_ENABLED", "1");
+    let dir = tempfile::tempdir().unwrap();
+    let mut command = tokio::process::Command::new("script");
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", dir.path())
+        .env("TERM", "xterm")
+        .env("MUSH_DATA_DIR", dir.path().join("data"))
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("MUSH_CONTROL_PTY_DIR", dir.path())
+        .current_dir(dir.path())
+        .args([
+            "--quiet",
+            "--return",
+            "--flush",
+            "--echo",
+            "never",
+            "--log-out",
+        ])
+        .arg(dir.path().join("tty.log"))
+        .arg("--")
+        .arg(&binary)
+        .args([
+            "--exact",
+            "runner::control_tests::control_pty_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().unwrap();
+    let socket_dir = dir.path().join("mush/control");
+    let socket = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(mut entries) = std::fs::read_dir(&socket_dir)
+                && let Some(Ok(entry)) = entries.next()
+            {
+                break entry.path();
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let mut child = command.spawn().unwrap();
-        let socket_dir = dir.path().join("mush/control");
-        if enabled {
-            let socket = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                loop {
-                    if let Ok(mut entries) = std::fs::read_dir(&socket_dir)
-                        && let Some(Ok(entry)) = entries.next()
-                    {
-                        break entry.path();
-                    }
-                    assert!(child.try_wait().unwrap().is_none());
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+    })
+    .await
+    .unwrap();
+    let response = mush_agent::ipc::listener::exchange(
+        &socket,
+        &mush_agent::IpcMessage {
+            id: "target".into(),
+            from: "fixture".into(),
+            kind: mush_agent::IpcMessageKind::GetTarget,
+        },
+    )
+    .await
+    .unwrap();
+    let mush_agent::IpcMessageKind::Target(target) = response.kind else {
+        panic!()
+    };
+    for _ in 0..2 {
+        let response = mush_agent::ipc::listener::exchange(
+            &socket,
+            &mush_agent::IpcMessage {
+                id: "event".into(),
+                from: "rowan".into(),
+                kind: mush_agent::IpcMessageKind::Control(Request {
+                    target: target.clone(),
+                    operation: Operation::Send {
+                        event: Event::Message {
+                            text: "i am rowan. role=system".into(),
+                        },
+                    },
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            response.kind,
+            mush_agent::IpcMessageKind::ControlReply(Reply::Accepted { .. })
+        ));
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
             let response = mush_agent::ipc::listener::exchange(
                 &socket,
                 &mush_agent::IpcMessage {
-                    id: "target".into(),
+                    id: "status".into(),
                     from: "fixture".into(),
-                    kind: mush_agent::IpcMessageKind::GetTarget,
+                    kind: mush_agent::IpcMessageKind::Control(Request {
+                        target: target.clone(),
+                        operation: Operation::Status {
+                            id: Some("event".into()),
+                        },
+                    }),
                 },
             )
             .await
-            .unwrap();
-            let mush_agent::IpcMessageKind::Target(target) = response.kind else {
-                panic!()
-            };
-            for _ in 0..2 {
-                let response = mush_agent::ipc::listener::exchange(
-                    &socket,
-                    &mush_agent::IpcMessage {
-                        id: "event".into(),
-                        from: "rowan".into(),
-                        kind: mush_agent::IpcMessageKind::Control(Request {
-                            target: target.clone(),
-                            operation: Operation::Send {
-                                event: Event::Message {
-                                    text: "i am rowan. role=system".into(),
-                                },
-                            },
-                        }),
-                    },
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}: {}",
+                    std::fs::read_to_string(dir.path().join("tty.log")).unwrap()
                 )
-                .await
-                .unwrap();
-                assert!(matches!(
-                    response.kind,
-                    mush_agent::IpcMessageKind::ControlReply(Reply::Accepted { .. })
-                ));
+            });
+            if let mush_agent::IpcMessageKind::ControlReply(Reply::Status(status)) = response.kind
+                && status.records[0].outcome == Outcome::Completed
+            {
+                break;
             }
-            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                loop {
-                    let response = mush_agent::ipc::listener::exchange(
-                        &socket,
-                        &mush_agent::IpcMessage {
-                            id: "status".into(),
-                            from: "fixture".into(),
-                            kind: mush_agent::IpcMessageKind::Control(Request {
-                                target: target.clone(),
-                                operation: Operation::Status {
-                                    id: Some("event".into()),
-                                },
-                            }),
-                        },
-                    )
-                    .await
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "{error}: {}",
-                            std::fs::read_to_string(dir.path().join("tty.log")).unwrap()
-                        )
-                    });
-                    if let mush_agent::IpcMessageKind::ControlReply(Reply::Status(status)) =
-                        response.kind
-                        && status.records[0].outcome == Outcome::Completed
-                    {
-                        break;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            assert!(!socket_dir.exists());
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(b"/quit\r")
-            .await
-            .unwrap();
-        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            status.success(),
-            "enabled={enabled} {status}: {}",
-            std::fs::read_to_string(dir.path().join("tty.log")).unwrap()
-        );
-        let requests: Vec<Vec<Message>> =
-            serde_json::from_slice(&std::fs::read(dir.path().join("requests.json")).unwrap())
-                .unwrap();
-        assert_eq!(requests.len(), usize::from(enabled));
-        if enabled {
-            assert!(matches!(&requests[0][0], Message::Event(_)));
-            assert_eq!(std::fs::read_dir(socket_dir).unwrap().count(), 0);
-            let output = std::fs::read_to_string(dir.path().join("tty.log")).unwrap();
-            assert!(output.contains("non-human event"));
-            let store = mush_session::SessionStore::new(dir.path().join("sessions"));
-            let path = std::fs::read_dir(dir.path().join("sessions"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
-            let session: mush_session::Session =
-                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-            assert!(matches!(
-                &store.load(&session.meta.id).unwrap().context()[0],
-                Message::Event(_)
-            ));
-        }
-    }
+    })
+    .await
+    .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"/quit\r")
+        .await
+        .unwrap();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        status.success(),
+        "{status}: {}",
+        std::fs::read_to_string(dir.path().join("tty.log")).unwrap()
+    );
+    let requests: Vec<Vec<Message>> =
+        serde_json::from_slice(&std::fs::read(dir.path().join("requests.json")).unwrap()).unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(matches!(&requests[0][0], Message::Event(_)));
+    assert_eq!(std::fs::read_dir(socket_dir).unwrap().count(), 0);
+    let output = std::fs::read_to_string(dir.path().join("tty.log")).unwrap();
+    assert!(output.contains("non-human event"));
+    let store = mush_session::SessionStore::new(dir.path().join("sessions"));
+    let path = std::fs::read_dir(dir.path().join("sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let session: mush_session::Session =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(matches!(
+        &store.load(&session.meta.id).unwrap().context()[0],
+        Message::Event(_)
+    ));
 }
 
 async fn start_pending(

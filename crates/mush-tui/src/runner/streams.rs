@@ -1266,7 +1266,6 @@ mod tests {
             file_rules: None,
             lsp_diagnostics: None,
             agent_card: None,
-            control: false,
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
             resolve_model: None,

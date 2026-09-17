@@ -181,7 +181,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config/mush");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.toml"), "auto_compact = false\ncompaction_model = 'missing-fixture-model'\n[api_keys]\nfixture = 'fixture-key'\n[lsp]\ndiagnostics = true\n[mcp.fixture]\ntype = 'local'\ncommand = ['__missing_output_fixture__']\n").unwrap();
+        std::fs::write(config.join("config.toml"), "rlm = false\nauto_compact = false\ncompaction_model = 'missing-fixture-model'\n[api_keys]\nfixture = 'fixture-key'\n[lsp]\ndiagnostics = true\n[mcp.fixture]\ntype = 'local'\ncommand = ['__missing_output_fixture__']\n").unwrap();
         std::fs::create_dir_all(dir.path().join(".mush/rules")).unwrap();
         std::fs::write(
             dir.path().join(".mush/rules/fixture.md"),

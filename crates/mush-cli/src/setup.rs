@@ -40,7 +40,6 @@ pub struct SetupArgs {
     pub max_turns: Option<usize>,
     pub system: Option<String>,
     pub no_tools: bool,
-    pub rlm: bool,
     pub config_overrides: Vec<String>,
     pub tools: Option<Vec<String>>,
     pub append_system: Option<String>,
@@ -91,7 +90,7 @@ impl AppSetup {
             t.phase("model + http");
         }
 
-        let rlm = args.rlm || cfg.rlm;
+        let rlm = cfg.rlm;
         let classic_tools = !args.no_tools && !rlm;
         let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
         let orphans = mush_tools::orphans::OrphanJournal::at(

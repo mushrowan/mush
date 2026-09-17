@@ -56,19 +56,17 @@ pub fn host_worker(
     registry: &ApiRegistry,
 ) -> io::Result<HostedWorker> {
     let mut connection = runtime::in_process_connection(tui_config, tools, registry);
-    let ipc_listener = if tui_config.control {
-        let card = tui_config
-            .agent_card
-            .as_ref()
-            .ok_or_else(|| io::Error::other("control requires an agent card"))?;
-        let card = std::sync::Arc::new(card.clone());
-        let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
-        let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
-        let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        connection.attach_control(control, sock);
-        Some(listener)
-    } else {
-        None
+    let ipc_listener = match &tui_config.agent_card {
+        Some(card) => {
+            let card = std::sync::Arc::new(card.clone());
+            let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
+            let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
+            let listener =
+                mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
+            connection.attach_control(control, sock);
+            Some(listener)
+        }
+        None => None,
     };
     connection.attach_inbox_from_env();
     Ok(HostedWorker {

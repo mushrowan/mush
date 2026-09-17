@@ -32,9 +32,6 @@ struct Cli {
     #[arg(short, long, alias = "print", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
 
-    #[arg(long)]
-    control: bool,
-
     #[arg(long, value_name = "SOCKET")]
     attach: Option<std::path::PathBuf>,
 
@@ -64,9 +61,6 @@ struct Cli {
 
     #[arg(long)]
     no_tools: bool,
-
-    #[arg(long)]
-    rlm: bool,
 
     #[arg(short = 'o', long = "option", value_name = "KEY=VALUE")]
     option: Vec<String>,
@@ -284,7 +278,6 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
-        rlm: cli.rlm,
         config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
@@ -318,27 +311,16 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     }
     status.write()?;
 
-    let control = cli
-        .control
-        .then(|| mush_agent::ipc::control::Control::new(session.meta.id.to_string()));
-    let listener = if let Some(control) = &control {
-        Some(mush_agent::IpcListener::start_control(
-            mush_agent::ipc::control_socket_path(&control.target().instance),
-            std::sync::Arc::new(mush_agent::AgentCard::build(&setup.model.id, &setup.tools)),
-            control.clone(),
-        )?)
-    } else {
-        None
-    };
-    let control_endpoint = listener
-        .as_ref()
-        .zip(control.as_ref())
-        .map(
-            |(listener, control)| mush_agent::exec_context::ControlEndpoint {
-                socket: listener.path().to_owned(),
-                target: control.target(),
-            },
-        );
+    let control = mush_agent::ipc::control::Control::new(session.meta.id.to_string());
+    let listener = mush_agent::IpcListener::start_control(
+        mush_agent::ipc::control_socket_path(&control.target().instance),
+        std::sync::Arc::new(mush_agent::AgentCard::build(&setup.model.id, &setup.tools)),
+        control.clone(),
+    )?;
+    let control_endpoint = Some(mush_agent::exec_context::ControlEndpoint {
+        socket: listener.path().to_owned(),
+        target: control.target(),
+    });
 
     let (compact_model, compact_options) = setup
         .compaction_model
@@ -402,7 +384,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         max_turns: setup.max_turns,
         hooks: Box::new(mush_agent::ClosureHooks {
             transform,
-            follow_up: control.clone().map(mush_cli::control::follow_up),
+            follow_up: Some(mush_cli::control::follow_up(control.clone())),
             ..mush_agent::ClosureHooks::default()
         }),
         injections: mush_agent::AgentInjections {
@@ -442,16 +424,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             event = stream.next() => event,
         };
         let Some(event) = event else { break };
-        if let Some(control) = &control {
-            match &event {
-                AgentEvent::AgentEnd => {
-                    control.finish(mush_agent::ipc::control::Outcome::Completed)
-                }
-                AgentEvent::Error { .. } | AgentEvent::MaxTurnsReached { .. } => {
-                    control.running_failed(true)
-                }
-                _ => {}
+        match &event {
+            AgentEvent::AgentEnd => control.finish(mush_agent::ipc::control::Outcome::Completed),
+            AgentEvent::Error { .. } | AgentEvent::MaxTurnsReached { .. } => {
+                control.running_failed(true)
             }
+            _ => {}
         }
         if transcript.apply(&mut session, &event) && !cli.no_session {
             store.save(&session)?;
@@ -623,9 +601,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         );
     }
 
-    if let Some(listener) = listener {
-        listener.shutdown().await?;
-    }
+    listener.shutdown().await?;
     if cancelled {
         return Err(eyre!("cancelled"));
     }
@@ -775,7 +751,6 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
-        rlm: cli.rlm,
         config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
@@ -905,7 +880,6 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
         file_rules: setup.file_rules,
         lsp_diagnostics: setup.lsp_diagnostics,
         agent_card: Some(agent_card),
-        control: cli.control,
         model_tiers: setup.cfg.model_tiers,
         compaction_model: setup.compaction_model,
         resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
@@ -1097,15 +1071,6 @@ mod tests {
         let session = session_from_snapshot(snapshot(None), "/tmp");
 
         assert_eq!(session.meta.title.as_deref(), Some("first question"));
-    }
-
-    #[test]
-    fn control_requires_an_explicit_launch_flag() {
-        assert!(!Cli::try_parse_from(["mush"]).unwrap().control);
-        assert!(Cli::try_parse_from(["mush", "--control"]).unwrap().control);
-        let print = Cli::try_parse_from(["mush", "--control", "--print", "fixture"]).unwrap();
-        assert!(print.control);
-        assert_eq!(print.prompt, ["fixture"]);
     }
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

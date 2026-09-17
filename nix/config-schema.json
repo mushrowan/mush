@@ -1103,7 +1103,7 @@
       }
     },
     "rlm": {
-      "default": false,
+      "default": true,
       "type": "boolean"
     },
     "rlm_max_depth": {
