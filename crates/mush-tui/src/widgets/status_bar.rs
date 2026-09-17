@@ -37,22 +37,6 @@ fn format_tokens(tokens: mush_ai::types::TokenCount) -> String {
     }
 }
 
-fn confirm_text(app: &App) -> Option<String> {
-    if app.interaction.mode != crate::app::AppMode::ToolConfirm {
-        return None;
-    }
-    if app.interaction.kernel_busy_reply.is_some() {
-        return Some(
-            "interrupted python cell still running. y wait, n kill and restart, esc cancel".into(),
-        );
-    }
-    Some(if let Some(ref prompt) = app.interaction.confirm_prompt {
-        format!("run {prompt}? (y/n)")
-    } else {
-        "confirm tool? (y/n)".into()
-    })
-}
-
 fn usage_bar_width(total_width: u16) -> usize {
     if total_width >= 140 {
         20
@@ -241,33 +225,23 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         }
     }
 
-    if app.interaction.status_bar.show_status_messages {
-        if let Some(label) = app.activity_label() {
-            b.section_break();
-            b.push_inline(Span::styled(
-                format!(
-                    "{} ",
-                    crate::widgets::working_icon::working_icon(app.shimmer_phase())
-                ),
-                dim,
-            ));
-            b.extend_inline(crate::widgets::shimmer::shimmer_spans(
-                &label,
-                &app.theme.shimmer,
-                app.shimmer_phase(),
-                dim,
-            ));
-        } else if let Some(ref status) = app.status
-            && status.text != "config reloaded"
-        {
-            let style = if status.error {
-                app.theme.tool_error
-            } else {
-                dim
-            };
-            b.section_break();
-            b.push_inline(Span::styled(status.text.clone(), style));
-        }
+    if app.interaction.status_bar.show_status_messages
+        && let Some(label) = app.activity_label()
+    {
+        b.section_break();
+        b.push_inline(Span::styled(
+            format!(
+                "{} ",
+                crate::widgets::working_icon::working_icon(app.shimmer_phase())
+            ),
+            dim,
+        ));
+        b.extend_inline(crate::widgets::shimmer::shimmer_spans(
+            &label,
+            &app.theme.shimmer,
+            app.shimmer_phase(),
+            dim,
+        ));
     }
 
     if app.interaction.status_bar.show_background_alerts
@@ -376,26 +350,16 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
     } else {
         String::new()
     };
-    let confirm = confirm_text(app);
-
     let left_width = spans_cell_width(&spans);
     let right_width = usize::from(right_text.as_str().cell_width());
     let total = left_width + 2 + right_width;
-    let wraps = total > width as usize;
-    let height = if confirm.is_some() {
-        if wraps { 3 } else { 2 }
-    } else if wraps {
-        2
-    } else {
-        1
-    };
+    let height = if total > width as usize { 2 } else { 1 };
 
     *app.render_state.status_bar_cache.borrow_mut() = Some(crate::app::CachedStatusBar {
         width,
         spans,
         right_text,
         cache_timer_text,
-        confirm,
         height,
     });
 }
@@ -429,22 +393,13 @@ impl<'a> StatusBar<'a> {
 
 impl Widget for StatusBar<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let dim = self.app.theme.dim;
-
         ensure_status_bar_cache(self.app, area.width);
         let cache = self.app.render_state.status_bar_cache.borrow();
         let Some(data) = cache.as_ref() else {
             return;
         };
 
-        let (main, confirm_area) = if let Some(confirm_str) = data.confirm.as_ref() {
-            let [main, conf] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-            (main, Some((conf, confirm_str.clone())))
-        } else {
-            (area, None)
-        };
-
+        let main = area;
         let right_width = (data.right_text.as_str().cell_width() + 1).min(main.width / 2);
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(right_width)]).areas(main);
@@ -461,14 +416,6 @@ impl Widget for StatusBar<'_> {
             )]))
             .alignment(HorizontalAlignment::Right)
             .render(right_area, buf);
-        }
-
-        if let Some((conf_area, text)) = confirm_area {
-            Paragraph::new(Line::from(vec![
-                Span::styled(" ", dim),
-                Span::styled(text, self.app.theme.confirm),
-            ]))
-            .render(conf_area, buf);
         }
     }
 }
@@ -731,24 +678,25 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_copy_reads_red() {
+    fn a_status_never_lands_in_the_bar() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.status = Some(crate::app_state::Status::error("clipboard failed: wl-copy"));
 
         let spans = left_spans(&app, 200);
 
-        let span = spans
-            .iter()
-            .find(|span| span.content == "clipboard failed: wl-copy")
-            .expect("the failure is on the status line");
-        assert_eq!(span.style, app.theme.tool_error);
+        assert!(
+            spans
+                .iter()
+                .all(|span| !span.content.contains("clipboard failed")),
+            "{spans:?}"
+        );
     }
 
     #[test]
     fn status_bar_left_side_uses_terminal_cell_width_for_halfwidth_dakuten() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.status_bar.show_cwd = false;
-        app.status = Some("abcｶﾞ".repeat(4).into());
+        app.model_id = "abcｶﾞ".repeat(4).into();
 
         let spans = left_spans(&app, 200);
         let ratatui_width = spans_cell_width(&spans);

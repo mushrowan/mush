@@ -316,6 +316,8 @@ fn build_message_lines(
 
     if msg.queued {
         push_queued_lines(msg, style.theme, width, &mut lines);
+    } else if let MessageRole::Status { error } = msg.role {
+        push_status_lines(msg, error, style.theme, width, &mut lines);
     } else if matches!(msg.role, MessageRole::BashDone) {
         push_bash_done_lines(msg, style.theme, width, &mut lines);
     } else if matches!(msg.role, MessageRole::User) {
@@ -727,6 +729,25 @@ fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (
             "background shell command finished".to_string(),
             theme.dim.fg.unwrap_or(Color::DarkGray),
         )
+    }
+}
+
+fn push_status_lines(
+    msg: &DisplayMessage,
+    error: bool,
+    theme: &Theme,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let cw = message_content_width(width as usize);
+    let style = if error { theme.tool_error } else { theme.dim };
+    for (index, text_line) in msg.content.lines().enumerate() {
+        let text = if error && index == 0 {
+            format!("\u{26a0} {text_line}")
+        } else {
+            text_line.to_string()
+        };
+        lines.extend(indent_line(Line::styled(text, style), cw));
     }
 }
 

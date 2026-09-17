@@ -338,7 +338,8 @@ impl Screen {
         }
         let input_h = input_height(&app.input, area.width);
         let status_h = status_bar_height(app, area.width);
-        let window = layout(area, input_h, status_h).messages;
+        let prompt_h = crate::widgets::prompt_line::height(app);
+        let window = layout(area, prompt_h, input_h, status_h).messages;
         let column = u16::try_from(app.viewport.cursor().column).unwrap_or(u16::MAX);
         Some((
             window.x + column.min(window.width.saturating_sub(1)),
@@ -353,7 +354,8 @@ impl Screen {
     pub fn render(&mut self, app: &App, area: Rect, buf: &mut Buffer) {
         let input_h = input_height(&app.input, area.width);
         let status_h = status_bar_height(app, area.width);
-        let regions = layout(area, input_h, status_h);
+        let prompt_h = crate::widgets::prompt_line::height(app);
+        let regions = layout(area, prompt_h, input_h, status_h);
         app.input.area.set(regions.input);
 
         let transcript = transcript_guards(app, area.width);
@@ -367,6 +369,7 @@ impl Screen {
         self.render_scrollbar(app, regions.messages, buf);
 
         TopBar::new(app).render(regions.top, buf);
+        crate::widgets::prompt_line::render(app, regions.prompt, buf);
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
     }

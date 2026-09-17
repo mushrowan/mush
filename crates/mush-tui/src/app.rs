@@ -278,6 +278,24 @@ impl App {
             .push(DisplayMessage::new(MessageRole::User, text));
     }
 
+    pub fn flush_status(&mut self) {
+        let Some(status) = self.status.take() else {
+            return;
+        };
+        let role = MessageRole::Status {
+            error: status.error,
+        };
+        if let Some(mut last) = self.messages.iter_mut().next_back()
+            && matches!(last.role, MessageRole::Status { .. })
+            && !last.queued
+        {
+            last.role = role;
+            last.content = status.text;
+            return;
+        }
+        self.messages.push(DisplayMessage::new(role, status.text));
+    }
+
     pub fn set_tool_details(&mut self, tool_call_id: &ToolCallId, details: &serde_json::Value) {
         let Some(mut msg) = self.messages.iter_mut().rev().find(|m| {
             m.tool_calls

@@ -161,7 +161,6 @@ impl RunnerRuntime {
                 let pane = &mut self.session;
                 pane.app.theme = tui_config.theme.clone();
             }
-            self.session.app.status = Some("config reloaded".into());
         }
     }
 

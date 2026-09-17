@@ -221,6 +221,7 @@ pub enum MessageRole {
     System,
     Event(mush_ai::types::EventKind),
     BashDone,
+    Status { error: bool },
 }
 
 #[derive(Debug, Clone)]

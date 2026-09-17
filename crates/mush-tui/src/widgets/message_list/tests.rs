@@ -1896,3 +1896,43 @@ fn a_detached_bash_done_is_one_line_and_names_the_exit_code_on_failure() {
         1
     );
 }
+
+#[test]
+fn a_status_flushes_into_a_dim_transcript_line_and_the_next_one_replaces_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("hi");
+    app.status = Some("aborted".into());
+    app.flush_status();
+    app.status = Some(crate::app_state::Status::error("clipboard failed: wl-copy"));
+    app.flush_status();
+
+    assert_eq!(app.messages.len(), 2);
+    assert_eq!(app.messages[1].role, MessageRole::Status { error: true });
+    let text = buffer_to_string(&render_app(&app, 60, 6));
+    assert!(
+        text.contains("\u{26a0} clipboard failed: wl-copy"),
+        "{text}"
+    );
+    assert!(!text.contains("aborted"), "{text}");
+    assert!(!text.contains("system"), "{text}");
+}
+
+#[test]
+fn a_status_after_a_new_message_gets_its_own_line() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.status = Some("compacted".into());
+    app.flush_status();
+    app.push_user_message("next");
+    app.status = Some("aborted".into());
+    app.flush_status();
+
+    let roles: Vec<_> = app.messages.iter().map(|m| m.role.clone()).collect();
+    assert_eq!(
+        roles,
+        vec![
+            MessageRole::Status { error: false },
+            MessageRole::User,
+            MessageRole::Status { error: false },
+        ]
+    );
+}

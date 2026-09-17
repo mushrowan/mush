@@ -17,7 +17,8 @@ impl<'a> Ui<'a> {
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
         let input_h = input_height(&self.app.input, area.width);
         let status_h = status_bar_height(self.app, area.width);
-        let chunks = layout(area, input_h, status_h);
+        let prompt_h = crate::widgets::prompt_line::height(self.app);
+        let chunks = layout(area, prompt_h, input_h, status_h);
         self.app.input.area.set(chunks.input);
         self.app
             .input
@@ -31,6 +32,7 @@ impl<'a> Ui<'a> {
 pub struct LayoutRegions {
     pub top: Rect,
     pub messages: Rect,
+    pub prompt: Rect,
     pub input: Rect,
     pub status: Rect,
 }
@@ -45,12 +47,13 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
     (layout.total_lines + 2).min(12)
 }
 
-pub fn layout(area: Rect, input_h: u16, status_h: u16) -> LayoutRegions {
+pub fn layout(area: Rect, prompt_h: u16, input_h: u16, status_h: u16) -> LayoutRegions {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(TOP_BAR_HEIGHT),
             Constraint::Min(0),
+            Constraint::Length(prompt_h),
             Constraint::Length(input_h),
             Constraint::Length(status_h),
         ])
@@ -59,8 +62,9 @@ pub fn layout(area: Rect, input_h: u16, status_h: u16) -> LayoutRegions {
     LayoutRegions {
         top: chunks[0],
         messages: chunks[1],
-        input: chunks[2],
-        status: chunks[3],
+        prompt: chunks[2],
+        input: chunks[3],
+        status: chunks[4],
     }
 }
 
@@ -148,11 +152,12 @@ mod tests {
     #[test]
     fn layout_regions_are_correct() {
         let area = Rect::new(0, 0, 80, 24);
-        let regions = layout(area, 3, 1);
+        let regions = layout(area, 0, 3, 1);
         assert_eq!(regions.top.height, 1);
         assert_eq!(regions.top.y, 0);
         assert_eq!(regions.status.height, 1);
         assert_eq!(regions.input.height, 3);
+        assert_eq!(regions.prompt.height, 0);
         assert_eq!(regions.messages.height, 19);
         assert_eq!(regions.messages.y, 1);
     }

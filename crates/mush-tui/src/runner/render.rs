@@ -62,6 +62,7 @@ fn draw_frame(
     app: &mut App,
     settings: &crate::settings::ScopedSettings,
 ) {
+    app.flush_status();
     app.render_state.status_bar_cache.borrow_mut().take();
     app.pane_info = None;
     app.background_alert = None;
@@ -130,7 +131,8 @@ fn draw_frame(
 fn input_region(app: &App, pane_area: Rect) -> Rect {
     let input_h = crate::ui::input_height(&app.input, pane_area.width);
     let status_h = crate::widgets::status_bar::status_bar_height(app, pane_area.width);
-    crate::ui::layout(pane_area, input_h, status_h).input
+    let prompt_h = crate::widgets::prompt_line::height(app);
+    crate::ui::layout(pane_area, prompt_h, input_h, status_h).input
 }
 
 #[cfg(test)]
