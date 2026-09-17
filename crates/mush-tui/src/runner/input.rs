@@ -159,13 +159,13 @@ async fn handle_compaction_recovery_action(
         crate::app_state::CompactionRecoveryAction::Cancel => {
             session.app.compacting = false;
             session.app.status = Some("compaction cancelled".into());
-            super::runtime::replay_compaction_inputs(session);
+            super::runtime::replay_compaction_inputs(session).await;
             return;
         }
     };
     drop(recovery);
     match session.connection.send(command).await {
-        Ok(events) => super::looping::apply_command_events(session, deps.tui_config, events),
+        Ok(events) => super::looping::apply_command_events(session, deps.tui_config, events).await,
         Err(error) => session.app.push_system_message(error.to_string()),
     }
 }
@@ -466,15 +466,15 @@ pub(super) async fn handle_idle_terminal_events(
                             let pane = &mut *session;
                             pane.app.active_tools.clear();
                             pane.app.start_streaming();
-                            pane.connection.runtime.pending_prompt =
-                                Some(crate::session::PendingPrompt::with_images(expanded, images));
-                            super::runtime::save_pane_pending_prompt(pane);
-                            if let Some(ref saver) = deps.tui_config.save_session {
-                                saver(super::streams::build_session_snapshot(
-                                    session,
-                                    deps.tui_config,
-                                ));
-                            }
+                            let _ = pane
+                                .connection
+                                .send(mush_runtime::ClientCommand::QueuePrompt {
+                                    text: expanded,
+                                    images,
+                                })
+                                .await;
+                            pane.connection.runtime.persist_pending_prompt();
+                            pane.connection.runtime.save_now_and_settle();
                         }
                         AppEvent::SlashCommand { action } => {
                             let state_changed = handle_slash_action(

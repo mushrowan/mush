@@ -25,6 +25,7 @@ use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 
 use crate::screen::Screen;
+use crate::session::AgentConnection;
 
 pub use self::config::{
     KernelBusyRequest, KernelNotices, KernelPrompts, LiveToolOutput, ModelResolver, PaneSnapshot,
@@ -190,7 +191,12 @@ pub async fn run_tui(
                 control_endpoint,
             });
             if let Some(prompt) = runtime.pending_prompt.take() {
-                connection.runtime.pending_prompt = Some(mush_runtime::PendingPrompt::text(prompt));
+                let _ = connection
+                    .send(mush_runtime::ClientCommand::QueuePrompt {
+                        text: prompt,
+                        images: Vec::new(),
+                    })
+                    .await;
             }
             connection.runtime.thinking_level = thinking_level;
             connection.runtime.context_tokens = context_tokens;

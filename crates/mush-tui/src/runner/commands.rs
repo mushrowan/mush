@@ -95,7 +95,7 @@ pub(super) async fn handle_slash_action(
                 .await
             {
                 Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events);
+                    super::looping::apply_command_events(session, tui_config, events).await;
                     state_changed = true;
                 }
                 Err(error) => session.app.push_system_message(error.to_string()),

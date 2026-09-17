@@ -7,7 +7,7 @@ use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
 use crate::app::App;
-use crate::session::Session;
+use crate::session::{AgentConnection, Session};
 use crate::slash_menu::SlashCommand;
 
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -295,7 +295,7 @@ fn spawn_usage_poller(
     rx
 }
 
-pub(super) fn replay_compaction_inputs(pane: &mut Session) {
+pub(super) async fn replay_compaction_inputs(pane: &mut Session) {
     let drained = pane.drain_compaction_inputs();
     if drained.is_empty() {
         return;
@@ -316,12 +316,13 @@ pub(super) fn replay_compaction_inputs(pane: &mut Session) {
     }
     pane.app.active_tools.clear();
     pane.app.start_streaming();
-    pane.connection.runtime.pending_prompt =
-        Some(crate::session::PendingPrompt::with_images(combined, images));
-}
-
-pub(super) fn save_pane_pending_prompt(pane: &mut Session) {
-    pane.connection.runtime.persist_pending_prompt();
+    let _ = pane
+        .connection
+        .send(mush_runtime::ClientCommand::QueuePrompt {
+            text: combined,
+            images,
+        })
+        .await;
 }
 
 fn watch_config(
@@ -580,14 +581,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_compaction_inputs_collapses_into_single_streaming_turn() {
+    #[tokio::test]
+    async fn replay_compaction_inputs_collapses_into_single_streaming_turn() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.queue_input_during_compaction("first thought".into(), vec![]);
         pane.queue_input_during_compaction("second thought".into(), vec![]);
 
-        replay_compaction_inputs(&mut pane);
+        replay_compaction_inputs(&mut pane).await;
 
         assert!(pane.connection.runtime.pending_compaction_inputs.is_empty());
         assert!(!pane.app.has_queued_messages());
@@ -608,20 +609,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replay_compaction_inputs_is_noop_when_nothing_queued() {
+    #[tokio::test]
+    async fn replay_compaction_inputs_is_noop_when_nothing_queued() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
 
-        replay_compaction_inputs(&mut pane);
+        replay_compaction_inputs(&mut pane).await;
 
         assert!(pane.connection.runtime.pending_prompt.is_none());
         assert!(!pane.app.stream.active);
         assert!(pane.app.messages.is_empty());
     }
 
-    #[test]
-    fn replay_compaction_inputs_preserves_images_for_pending_prompt() {
+    #[tokio::test]
+    async fn replay_compaction_inputs_preserves_images_for_pending_prompt() {
         use crate::input_buffer::PendingImage;
         use mush_ai::types::{ImageMimeType, Message, UserContent, UserContentPart};
 
@@ -636,9 +637,9 @@ mod tests {
             }],
         );
 
-        replay_compaction_inputs(&mut pane);
+        replay_compaction_inputs(&mut pane).await;
 
-        save_pane_pending_prompt(&mut pane);
+        pane.connection.runtime.persist_pending_prompt();
         assert!(pane.connection.runtime.pending_prompt.is_some());
         let snapshot = crate::runner::streams::build_session_snapshot(&pane, &test_config());
         let Message::User(user) = &snapshot.primary.context()[0] else {
@@ -671,8 +672,8 @@ mod tests {
         assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
     }
 
-    #[test]
-    fn applied_compaction_shows_the_banner_and_replays_queued_input() {
+    #[tokio::test]
+    async fn applied_compaction_shows_the_banner_and_replays_queued_input() {
         let mut msgs = Vec::new();
         for i in 0..12 {
             msgs.push(user_message(&format!("q {i}")));
@@ -701,7 +702,8 @@ mod tests {
             &mut pane,
             &mut config,
             vec![mush_runtime::ClientEvent::Compacted(applied)],
-        );
+        )
+        .await;
 
         assert!(!pane.app.compacting);
         assert!(
@@ -722,8 +724,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compaction_failure_opens_recovery_prompt() {
+    #[tokio::test]
+    async fn compaction_failure_opens_recovery_prompt() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
         let original = vec![user_message("hello"), assistant_message("hi")];
@@ -760,7 +762,8 @@ mod tests {
                 tokens_before,
                 model_id,
             }],
-        );
+        )
+        .await;
 
         let app = &runtime.session.app;
         assert_eq!(
@@ -796,8 +799,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fallback_recovery_applies_summary_and_replays_queued_input() {
+    #[tokio::test]
+    async fn fallback_recovery_applies_summary_and_replays_queued_input() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.queue_input_during_compaction("queued thought".into(), vec![]);
@@ -838,7 +841,7 @@ mod tests {
                 &mut pane.connection.runtime,
                 applied,
             );
-            replay_compaction_inputs(pane);
+            replay_compaction_inputs(pane).await;
         }
 
         let pane = &mut runtime.session;
@@ -854,8 +857,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancel_recovery_replays_queued_input_without_compacting() {
+    #[tokio::test]
+    async fn cancel_recovery_replays_queued_input_without_compacting() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.connection.runtime.conversation = ConversationState::from_messages(vec![
@@ -874,7 +877,7 @@ mod tests {
         {
             let pane = &mut runtime.session;
             pane.app.compacting = false;
-            replay_compaction_inputs(pane);
+            replay_compaction_inputs(pane).await;
         }
 
         let pane = &mut runtime.session;

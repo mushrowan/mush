@@ -25,6 +25,10 @@ pub enum ClientCommand {
         text: String,
         images: Vec<PendingImage>,
     },
+    QueuePrompt {
+        text: String,
+        images: Vec<PendingImage>,
+    },
     Steer {
         text: String,
         images: Vec<PendingImage>,
@@ -485,6 +489,9 @@ impl AgentConnection for InProcessConnection {
                     self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
                     self.start_pending_prompt().await;
                 }
+            }
+            ClientCommand::QueuePrompt { text, images } => {
+                self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
             }
             ClientCommand::Steer { text, images } => self.steer(text, images).await,
             ClientCommand::RetractSteer { text } => {

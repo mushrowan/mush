@@ -302,11 +302,11 @@ pub(super) async fn dispatch_client_event(
                 prompt,
             );
         }
-        event => apply_command_events(&mut runtime.session, tui_config, vec![event]),
+        event => apply_command_events(&mut runtime.session, tui_config, vec![event]).await,
     }
 }
 
-pub(super) fn apply_command_events(
+pub(super) async fn apply_command_events(
     session: &mut crate::session::Session,
     tui_config: &mut super::TuiConfig,
     events: Vec<ClientEvent>,
@@ -329,7 +329,7 @@ pub(super) fn apply_command_events(
             ClientEvent::Compacted(applied) => {
                 let after_count = session.connection.runtime.conversation.context_len();
                 crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
-                super::runtime::replay_compaction_inputs(session);
+                super::runtime::replay_compaction_inputs(session).await;
             }
             ClientEvent::CompactionFailed {
                 failure,

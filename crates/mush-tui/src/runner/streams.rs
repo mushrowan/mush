@@ -6,7 +6,7 @@ use mush_ai::types::{
     Message, Model, Provider, StreamOptions, Timestamp, TokenCount, ToolOutcome, ToolResultMessage,
 };
 
-use crate::session::{AgentConnection, PendingPrompt, Session};
+use crate::session::{AgentConnection, Session};
 use mush_ai::types::PaneId;
 
 const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
@@ -218,7 +218,13 @@ async fn submit_notice(session: &mut Session, notice: mush_tools::kernel_jobs::J
     } else {
         session.app.active_tools.clear();
         session.app.start_streaming();
-        session.connection.runtime.pending_prompt = Some(PendingPrompt::text(text));
+        let _ = session
+            .connection
+            .send(mush_runtime::ClientCommand::QueuePrompt {
+                text,
+                images: Vec::new(),
+            })
+            .await;
     }
 }
 
@@ -370,7 +376,7 @@ async fn auto_compact(session: &mut Session, pane_id: PaneId, tui_config: &mut T
         })
         .await
     {
-        Ok(events) => super::looping::apply_command_events(session, tui_config, events),
+        Ok(events) => super::looping::apply_command_events(session, tui_config, events).await,
         Err(error) => tracing::debug!(%error, "auto compaction skipped"),
     }
 }
@@ -464,7 +470,10 @@ pub(super) async fn submit_streaming_input(
         }
         pane.app.active_tools.clear();
         pane.app.start_streaming();
-        pane.connection.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
+        let _ = pane
+            .connection
+            .send(mush_runtime::ClientCommand::QueuePrompt { text, images })
+            .await;
     }
 }
 
