@@ -10,7 +10,7 @@ use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_cli::output::Style;
-use mush_cli::{commands, config, logging, setup, timing};
+use mush_cli::{commands, config, daemon, logging, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -31,9 +31,6 @@ struct Cli {
 
     #[arg(short, long, alias = "print", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
-
-    #[arg(long, value_name = "SOCKET")]
-    attach: Option<std::path::PathBuf>,
 
     #[arg(short = 'c', long = "continue")]
     resume: Option<String>,
@@ -100,6 +97,39 @@ struct Cli {
 }
 
 impl Cli {
+    fn worker_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut flag = |name: &str, on: bool| {
+            if on {
+                args.push(name.to_string());
+            }
+        };
+        flag("--thinking", self.thinking);
+        flag("--debug-cache", self.debug_cache);
+        flag("--no-tools", self.no_tools);
+        flag("--no-skills", self.no_skills);
+        flag("--no-context-files", self.no_context_files);
+        let mut value = |name: &str, value: Option<String>| {
+            if let Some(value) = value {
+                args.push(name.to_string());
+                args.push(value);
+            }
+        };
+        value("--model", self.model.clone());
+        value("--max-tokens", self.max_tokens.map(|n| n.to_string()));
+        value("--max-turns", self.max_turns.map(|n| n.to_string()));
+        value("--system", self.system.clone());
+        value("--append-system-prompt", self.append_system.clone());
+        value("--tools", self.tools.as_ref().map(|tools| tools.join(",")));
+        for option in &self.option {
+            value("--option", Some(option.clone()));
+        }
+        for skill in &self.skill {
+            value("--skill", Some(skill.display().to_string()));
+        }
+        args
+    }
+
     fn discovery(&self) -> mush_ext::DiscoveryOptions {
         mush_ext::DiscoveryOptions {
             skill_paths: self.skill.clone(),
@@ -122,6 +152,8 @@ enum Command {
         #[arg(long, value_name = "SOCKET")]
         socket: Option<std::path::PathBuf>,
     },
+    Ps,
+    Shutdown,
     Login {
         provider: Option<String>,
     },
@@ -180,6 +212,8 @@ async fn main() -> Result<()> {
         Some(Command::Control(_) | Command::Worker { .. } | Command::Daemon { .. }) => {
             unreachable!()
         }
+        Some(Command::Ps) => return daemon::ps().await,
+        Some(Command::Shutdown) => return daemon::shutdown().await,
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
@@ -710,9 +744,15 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
     });
 
-    match &cli.attach {
-        Some(socket) => {
-            let connection = mush_daemon::DaemonConnection::connect(socket).await?;
+    match cli.no_session {
+        false => {
+            let target = match (&cli.resume, &cli.fork) {
+                (Some(id), _) => mush_daemon::OpenTarget::Resume(id.clone()),
+                (None, Some(id)) => mush_daemon::OpenTarget::Fork(id.clone()),
+                (None, None) => mush_daemon::OpenTarget::New,
+            };
+            let descriptor = daemon::open(target, cli.worker_args()).await?;
+            let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
             let tui_config = client_config(&cli, &setup, &log_buffer, None);
             mush_tui::run_tui_attached(
                 tui_config,
@@ -722,8 +762,15 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             )
             .await
             .map_err(|e| eyre!("TUI error: {e}"))?;
+            eprintln!(
+                "{}",
+                Style::Dim.stderr(format_args!(
+                    "detached, mush -c {} reattaches",
+                    &descriptor.session_id[..8.min(descriptor.session_id.len())]
+                ))
+            );
         }
-        None => {
+        true => {
             let opened = open_session(&cli, &setup).await?;
             let worker = worker_config(&cli, &setup, &opened, kernel_signals);
             let tui_config = client_config(&cli, &setup, &log_buffer, Some(&opened.session));

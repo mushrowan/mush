@@ -369,11 +369,29 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
     assert!(status.success());
     child.stdin.take();
     let _ = child.wait();
+    let shutdown = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .env_clear()
+        .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
+        .env("HOME", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("data"))
+        .env("MUSH_CONFIG_DIR", &config)
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .arg("shutdown")
+        .status()
+        .unwrap();
+    assert!(shutdown.success());
     assert!(
         received
             .as_ref()
             .is_some_and(|s| s.contains("synthetic parent decision")),
-        "parent did not consume event"
+        "parent did not consume event: {}",
+        std::fs::read_dir(dir.path().join("data/workers"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(inbox.acknowledged(&event.event_id).unwrap());
     let saved = store.load(&session.meta.id).unwrap();

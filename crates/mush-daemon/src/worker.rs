@@ -10,6 +10,8 @@ use tokio::net::{UnixListener, UnixStream};
 use crate::protocol::{Frame, Reply, Request, encode};
 use crate::supervisor::WorkerDescriptor;
 
+const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct Descriptor {
     path: std::path::PathBuf,
     written: WorkerDescriptor,
@@ -113,6 +115,7 @@ async fn serve_until_closed(
                 }
                 continue;
             }
+            () = tokio::time::sleep(TICK) => continue,
         };
         if let Attached::Closed = attach(connection, stream, descriptor.as_deref_mut()).await {
             return Ok(());
@@ -189,6 +192,7 @@ async fn attach(
                     return Attached::Detached;
                 }
             }
+            () = tokio::time::sleep(TICK) => {}
             event = connection.next_event() => {
                 let Some(event) = event else {
                     let _ = client.write(&Frame::Closed).await;
