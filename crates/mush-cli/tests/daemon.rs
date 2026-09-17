@@ -214,3 +214,27 @@ async fn stopping_a_worker_with_a_client_attached_closes_the_client_cleanly() {
     assert!(!descriptor.socket.exists());
     assert!(!descriptor.socket.with_extension("json").exists());
 }
+
+#[tokio::test]
+async fn status_reports_the_build_and_the_worker_count() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Status { build, workers } =
+        daemon.request(SupervisorRequest::Status).await
+    else {
+        panic!("expected a status")
+    };
+    assert_eq!(workers, 0);
+    assert!(build.contains('@'));
+
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    assert_eq!(descriptor.build, build);
+    let SupervisorReply::Status { workers, .. } = daemon.request(SupervisorRequest::Status).await
+    else {
+        panic!("expected a status")
+    };
+    assert_eq!(workers, 1);
+}

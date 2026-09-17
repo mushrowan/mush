@@ -146,6 +146,9 @@ async fn run_tui_with(
     if tui_config.open_session_picker {
         crate::slash::commands::open_sessions_picker(&mut runtime.session.app);
     }
+    if let Some(notice) = tui_config.startup_notice.take() {
+        runtime.session.app.push_system_message(notice);
+    }
 
     draw_panes(
         &mut terminal,

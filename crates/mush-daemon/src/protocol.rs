@@ -49,6 +49,8 @@ pub enum Reply {
 pub enum Frame {
     Hello {
         state: ConnectionState,
+        #[serde(default)]
+        build: String,
     },
     Event {
         event: ClientEvent,

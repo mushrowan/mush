@@ -186,6 +186,9 @@ enum Command {
         socket: Option<std::path::PathBuf>,
     },
     Ps,
+    Stop {
+        id: String,
+    },
     Shutdown,
     Login {
         provider: Option<String>,
@@ -246,6 +249,7 @@ async fn main() -> Result<()> {
             unreachable!()
         }
         Some(Command::Ps) => return daemon::ps().await,
+        Some(Command::Stop { id }) => return daemon::stop(&id).await,
         Some(Command::Shutdown) => return daemon::shutdown().await,
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
@@ -805,6 +809,12 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
             let mut tui_config = client_config(&cli, &setup, &log_buffer, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
+            if connection.worker_build() != mush_daemon::build_id() {
+                tui_config.startup_notice = Some(format!(
+                    "this worker is from another build of mush. mush stop {} and start again to pick up the new one",
+                    &descriptor.session_id[..8.min(descriptor.session_id.len())]
+                ));
+            }
             mush_tui::run_tui_attached(
                 tui_config,
                 Box::new(connection),
@@ -1082,6 +1092,7 @@ fn client_config(
             km
         },
         open_session_picker: false,
+        startup_notice: None,
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
             let rlm = setup.rlm;

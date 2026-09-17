@@ -32,6 +32,7 @@ pub struct DaemonConnection {
     reader: tokio::task::JoinHandle<()>,
     buffered: VecDeque<ClientEvent>,
     state: ConnectionState,
+    worker_build: String,
     next_id: RequestId,
     closed: bool,
 }
@@ -52,8 +53,8 @@ impl DaemonConnection {
         let (reader, writer) = stream.into_split();
         let (tx, mut frames) = mpsc::channel(FRAME_BUFFER);
         let reader = tokio::spawn(read_frames(reader, tx));
-        let state = match frames.recv().await {
-            Some(Ok(Frame::Hello { state })) => state,
+        let (state, worker_build) = match frames.recv().await {
+            Some(Ok(Frame::Hello { state, build })) => (state, build),
             Some(Ok(_)) => return Err(ConnectError::BadHello),
             Some(Err(error)) => return Err(ConnectError::Codec(error)),
             None => return Err(ConnectError::NoHello),
@@ -64,9 +65,15 @@ impl DaemonConnection {
             reader,
             buffered: VecDeque::new(),
             state,
+            worker_build,
             next_id: 1,
             closed: false,
         })
+    }
+
+    #[must_use]
+    pub fn worker_build(&self) -> &str {
+        &self.worker_build
     }
 
     fn absorb_state(&mut self, state: Option<ConnectionState>) {
@@ -86,7 +93,7 @@ impl DaemonConnection {
                 self.absorb_state(state);
                 Some((id, result))
             }
-            Frame::Hello { state } => {
+            Frame::Hello { state, .. } => {
                 self.state = state;
                 None
             }

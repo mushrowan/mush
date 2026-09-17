@@ -40,6 +40,7 @@ pub enum SupervisorRequest {
         env: Vec<(String, String)>,
     },
     List,
+    Status,
     Stop {
         session_id: String,
     },
@@ -54,6 +55,10 @@ pub enum SupervisorReply {
         fresh: bool,
     },
     Workers(Vec<WorkerDescriptor>),
+    Status {
+        build: String,
+        workers: usize,
+    },
     Done,
     Error(String),
 }
@@ -62,6 +67,8 @@ pub enum SupervisorReply {
 pub struct WorkerDescriptor {
     pub session_id: String,
     pub model_id: String,
+    #[serde(default)]
+    pub build: String,
     pub pid: u32,
     pub start_id: Option<String>,
     pub cwd: PathBuf,
@@ -139,6 +146,10 @@ impl Supervisor {
                 Err(error) => SupervisorReply::Error(error.to_string()),
             },
             SupervisorRequest::List => SupervisorReply::Workers(self.roster()),
+            SupervisorRequest::Status => SupervisorReply::Status {
+                build: crate::build::build_id(),
+                workers: self.roster().len(),
+            },
             SupervisorRequest::Stop { session_id } => {
                 let Some(worker) = self
                     .roster()

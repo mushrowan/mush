@@ -14,7 +14,32 @@ const START_TIMEOUT: Duration = Duration::from_secs(10);
 pub async fn ensure_running() -> io::Result<PathBuf> {
     let socket = mush_daemon::daemon_socket_path();
     if answers(&socket) {
-        return Ok(socket);
+        match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Status).await {
+            Ok(SupervisorReply::Status { build, workers }) if build == mush_daemon::build_id() => {
+                let _ = workers;
+                return Ok(socket);
+            }
+            Ok(SupervisorReply::Status { workers, .. }) if workers > 0 => {
+                eprintln!(
+                    "{}",
+                    Style::Dim.stderr(format_args!(
+                        "the daemon is from another build and has {workers} worker(s) running; mush shutdown to replace it"
+                    ))
+                );
+                return Ok(socket);
+            }
+            Ok(_) => {
+                let _ =
+                    mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await;
+                wait_until_gone(&socket).await;
+            }
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "the daemon on {} did not answer a status request: {error}",
+                    socket.display()
+                )));
+            }
+        }
     }
     let _ = std::fs::remove_file(&socket);
     spawn(&socket)?;
@@ -35,6 +60,13 @@ pub async fn ensure_running() -> io::Result<PathBuf> {
 
 fn answers(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
+async fn wait_until_gone(socket: &Path) {
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    while answers(socket) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 fn spawn(socket: &Path) -> io::Result<()> {
@@ -86,20 +118,42 @@ pub async fn ps() -> Result<()> {
         println!("no workers");
         return Ok(());
     }
+    let build = mush_daemon::build_id();
     for worker in &workers {
+        let stale = if worker.build == build {
+            ""
+        } else {
+            ", other build"
+        };
         println!(
             "  {}  {} {}",
             Style::Dim.stdout(&worker.session_id[..8.min(worker.session_id.len())]),
             worker.model_id,
             Style::Dim.stdout(format_args!(
-                "(pid {}, {})",
+                "(pid {}, {}{stale})",
                 worker.pid,
                 worker.cwd.display()
             )),
         );
     }
-    println!("\nattach with: mush --resume <id>");
+    println!("\nattach with: mush --resume <id>, stop with: mush stop <id>");
     Ok(())
+}
+
+pub async fn stop(session_id: &str) -> Result<()> {
+    let socket = mush_daemon::daemon_socket_path();
+    if !answers(&socket) {
+        println!("no daemon running");
+        return Ok(());
+    }
+    let request = SupervisorRequest::Stop {
+        session_id: session_id.to_string(),
+    };
+    match mush_daemon::supervisor::request(&socket, &request).await? {
+        SupervisorReply::Done => Ok(()),
+        SupervisorReply::Error(error) => Err(eyre!("{error}")),
+        other => Err(eyre!("unexpected daemon reply: {other:?}")),
+    }
 }
 
 pub async fn shutdown() -> Result<()> {

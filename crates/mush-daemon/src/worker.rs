@@ -34,6 +34,7 @@ impl Descriptor {
             written: WorkerDescriptor {
                 session_id: String::new(),
                 model_id: String::new(),
+                build: crate::build::build_id(),
                 pid,
                 start_id: mush_tools::orphans::process_start_id(pid),
                 cwd,
@@ -194,6 +195,7 @@ impl Worker {
         };
         let hello = Frame::Hello {
             state: client.last_state.clone(),
+            build: crate::build::build_id(),
         };
         if client.write(&hello).await.is_err() {
             return Attached::Detached;

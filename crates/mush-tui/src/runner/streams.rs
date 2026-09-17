@@ -1161,6 +1161,7 @@ mod tests {
             save_recent_models: None,
             keymap: crate::keybinds::KeyMap::default(),
             open_session_picker: false,
+            startup_notice: None,
             reload_context: None,
             mcp: None,
             skills: Default::default(),
