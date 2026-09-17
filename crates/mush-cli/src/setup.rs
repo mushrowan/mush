@@ -10,52 +10,61 @@ use mush_session::compact;
 use crate::config;
 use crate::output::Style;
 
-pub struct AppSetup {
+pub struct ClientSetup {
     pub cfg: config::Config,
     pub model: Model,
     pub compaction_model: Option<(Model, StreamOptions)>,
-    pub registry: ApiRegistry,
     pub cwd: std::path::PathBuf,
-    pub system_prompt: String,
     pub options: StreamOptions,
     pub thinking_prefs: mush_tui::ThinkingPrefs,
-    pub tools: mush_agent::tool::ToolRegistry,
     pub debug_cache: bool,
+    pub http_client: mush_ai::http::HttpClient,
+    pub project_context: loader::ProjectContext,
+    pub rlm: bool,
+}
+
+pub struct ClientArgs {
+    pub model: Option<String>,
+    pub thinking: bool,
+    pub max_tokens: Option<u64>,
+    pub config_overrides: Vec<String>,
+    pub discovery: mush_ext::DiscoveryOptions,
+    pub debug_cache: bool,
+}
+
+pub struct AppSetup {
+    pub client: ClientSetup,
+    pub registry: ApiRegistry,
+    pub system_prompt: String,
+    pub tools: mush_agent::tool::ToolRegistry,
     pub max_turns: usize,
     pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub file_rules: Option<mush_agent::FileRuleCallback>,
     pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
-    pub http_client: mush_ai::http::HttpClient,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
-    pub skills: mush_tui::SkillCatalogue,
-    pub rlm: bool,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub kernel_packages: Vec<String>,
 }
 
 pub struct SetupArgs {
-    pub model: Option<String>,
-    pub thinking: bool,
-    pub max_tokens: Option<u64>,
+    pub client: ClientArgs,
     pub max_turns: Option<usize>,
     pub system: Option<String>,
     pub no_tools: bool,
-    pub config_overrides: Vec<String>,
     pub tools: Option<Vec<String>>,
     pub append_system: Option<String>,
-    pub discovery: mush_ext::DiscoveryOptions,
-    pub debug_cache: bool,
     pub output_sink: Option<mush_tools::bash::OutputSink>,
     pub kernel_notice_sink: Option<mush_tools::kernel_jobs::NoticeSink>,
     pub kernel_busy_prompt: Option<mush_tools::ipython::BusyKernelPrompt>,
     pub timer: Option<crate::timing::PhaseTimer>,
 }
 
-impl AppSetup {
-    #[tracing::instrument(name = "startup", skip_all)]
-    pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
-        let mut timer = args.timer;
-
+impl ClientSetup {
+    pub async fn init(
+        args: ClientArgs,
+        timer: Option<&mut crate::timing::PhaseTimer>,
+    ) -> Result<Self> {
+        let mut timer = timer;
         let cfg = config::load_config_with(&args.config_overrides)?;
         let debug_cache = args.debug_cache || cfg.debug_cache;
         if let Some(t) = &mut timer {
@@ -83,12 +92,66 @@ impl AppSetup {
                 .build()
                 .expect("failed to build http client"),
         );
-
-        let mut registry = ApiRegistry::new();
-        providers::register_builtins(&mut registry, http_client.clone());
         if let Some(t) = &mut timer {
             t.phase("model + http");
         }
+
+        let project_context = loader::discover_project_context_with(&cwd, &args.discovery);
+        for diagnostic in &project_context.skill_diagnostics {
+            tracing::warn!("skill: {diagnostic}");
+        }
+        if let Some(t) = &mut timer {
+            t.phase("project context");
+        }
+
+        let thinking_prefs = config::load_thinking_prefs();
+        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cwd, &cfg);
+        let mut options = stream_options_from_config(&cfg, thinking_level, args.max_tokens);
+        resolve_api_key(&mut options, &model, &cfg).await;
+        let compaction_model = init_compaction_model(&cfg, &model, &options).await;
+        if let Some(t) = &mut timer {
+            t.phase("api keys");
+        }
+
+        Ok(Self {
+            rlm: cfg.rlm,
+            cfg,
+            model,
+            compaction_model,
+            cwd,
+            options,
+            thinking_prefs,
+            debug_cache,
+            http_client,
+            project_context,
+        })
+    }
+
+    #[must_use]
+    pub fn skills(&self) -> mush_tui::SkillCatalogue {
+        mush_tui::SkillCatalogue {
+            skills: self.project_context.skills.clone(),
+            diagnostics: self.project_context.skill_diagnostics.clone(),
+        }
+    }
+}
+
+impl AppSetup {
+    #[tracing::instrument(name = "startup", skip_all)]
+    pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
+        let mut timer = args.timer;
+        let client = ClientSetup::init(args.client, timer.as_mut()).await?;
+        let ClientSetup {
+            cfg,
+            model,
+            cwd,
+            project_context,
+            http_client,
+            ..
+        } = &client;
+
+        let mut registry = ApiRegistry::new();
+        providers::register_builtins(&mut registry, http_client.clone());
 
         let rlm = cfg.rlm;
         let classic_tools = !args.no_tools && !rlm;
@@ -134,11 +197,11 @@ impl AppSetup {
             ])
         } else {
             init_builtin_tools(
-                &model,
-                &cwd,
+                model,
+                cwd,
                 args.output_sink,
                 args.no_tools,
-                &http_client,
+                http_client,
                 mush_tools::forbidden_chars::ForbiddenChars::with_classes(
                     cfg.forbidden_chars.iter().copied(),
                     cfg.forbidden_char_classes.iter().copied(),
@@ -151,28 +214,21 @@ impl AppSetup {
             t.phase("builtin tools");
         }
 
-        let mcp = init_mcp(&cfg, !classic_tools, &mut tools).await;
+        let mcp = init_mcp(cfg, !classic_tools, &mut tools).await;
         if let Some(t) = &mut timer {
             t.phase("mcp");
         }
 
-        let project_context = loader::discover_project_context_with(&cwd, &args.discovery);
-        for diagnostic in &project_context.skill_diagnostics {
-            tracing::warn!("skill: {diagnostic}");
-        }
-        init_skill_tools(&project_context, !classic_tools, &mut tools);
-        if let Some(t) = &mut timer {
-            t.phase("project context");
-        }
+        init_skill_tools(project_context, !classic_tools, &mut tools);
 
         let mut system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
             .unwrap_or_else(|| {
                 if rlm {
-                    build_rlm_system_prompt(&project_context, &cwd, &kernel_packages)
+                    build_rlm_system_prompt(project_context, cwd, &kernel_packages)
                 } else {
-                    build_system_prompt_from_context(&project_context, &cwd)
+                    build_system_prompt_from_context(project_context, cwd)
                 }
             });
         if let Some(extra) = args.append_system.as_deref().map(str::trim) {
@@ -183,29 +239,19 @@ impl AppSetup {
             t.phase("system prompt");
         }
 
-        let thinking_prefs = config::load_thinking_prefs();
-        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cwd, &cfg);
-        let mut options = stream_options_from_config(&cfg, thinking_level, args.max_tokens);
-        resolve_api_key(&mut options, &model, &cfg).await;
-
-        let compaction_model = init_compaction_model(&cfg, &model, &options).await;
-        if let Some(t) = &mut timer {
-            t.phase("api keys");
-        }
-
         let max_turns = args
             .max_turns
             .or(cfg.max_turns)
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
-        init_repo_map(&cfg, &cwd, !classic_tools, &mut tools);
+        init_repo_map(cfg, cwd, !classic_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("repo map");
         }
 
-        let file_rules = build_file_rules(&cwd);
-        let lsp_diagnostics = init_lsp(&cfg, &cwd, !classic_tools, &mut tools);
+        let file_rules = build_file_rules(cwd);
+        let lsp_diagnostics = init_lsp(cfg, cwd, !classic_tools, &mut tools);
         if let Some(t) = &mut timer {
             t.phase("lsp + rules");
         }
@@ -230,27 +276,15 @@ impl AppSetup {
 
         Ok((
             Self {
-                cfg,
-                model,
-                compaction_model,
+                client,
                 registry,
-                cwd,
                 system_prompt,
-                options,
-                thinking_prefs,
                 tools,
-                debug_cache,
                 max_turns,
                 lifecycle_hooks,
                 file_rules,
                 lsp_diagnostics,
-                http_client,
                 mcp,
-                skills: mush_tui::SkillCatalogue {
-                    skills: project_context.skills,
-                    diagnostics: project_context.skill_diagnostics,
-                },
-                rlm,
                 kernel_state,
                 kernel_packages,
             },

@@ -25,6 +25,7 @@ pub struct WorkerConfig {
     pub injections: mush_agent::AgentInjections,
     pub agent_card: Option<mush_agent::AgentCard>,
     pub kernel_signals: Option<crate::kernel_channels::KernelSignals>,
+    pub system_prompt_builder: Option<crate::connection::SystemPromptBuilder>,
 }
 
 impl WorkerConfig {
@@ -44,6 +45,7 @@ impl WorkerConfig {
             injections: mush_agent::AgentInjections::default(),
             agent_card: None,
             kernel_signals: None,
+            system_prompt_builder: None,
         }
     }
 
@@ -67,6 +69,7 @@ impl WorkerConfig {
             self.injections,
         );
         connection.attach_kernel(self.kernel_signals);
+        connection.set_system_prompt_builder(self.system_prompt_builder);
         connection
     }
 }

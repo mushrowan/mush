@@ -130,6 +130,17 @@ impl Cli {
         self.continue_recent || self.resume.is_some()
     }
 
+    fn client_args(&self) -> setup::ClientArgs {
+        setup::ClientArgs {
+            model: self.model.clone(),
+            thinking: self.thinking,
+            max_tokens: self.max_tokens,
+            config_overrides: self.option.clone(),
+            discovery: self.discovery(),
+            debug_cache: self.debug_cache,
+        }
+    }
+
     fn worker_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         let mut flag = |name: &str, on: bool| {
@@ -366,17 +377,15 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         None
     };
     let init = AppSetup::init(SetupArgs {
-        model: Some(session.meta.model_id.to_string()),
-        thinking: cli.thinking,
-        max_tokens: cli.max_tokens,
+        client: setup::ClientArgs {
+            model: Some(session.meta.model_id.to_string()),
+            ..cli.client_args()
+        },
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
-        config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
-        discovery: cli.discovery(),
-        debug_cache: cli.debug_cache,
         output_sink: None,
         kernel_notice_sink: None,
         kernel_busy_prompt: None,
@@ -396,9 +405,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         eprintln!("{report}");
     }
 
-    setup.options.session_id = Some(session.meta.id.clone());
-    session.meta.model_id = setup.model.id.clone();
-    status.model = Some(setup.model.id.to_string());
+    setup.client.options.session_id = Some(session.meta.id.clone());
+    session.meta.model_id = setup.client.model.id.clone();
+    status.model = Some(setup.client.model.id.to_string());
     status.state = "running";
     if !cli.no_session {
         store.save(&session)?;
@@ -408,7 +417,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let control = mush_agent::ipc::control::Control::new(session.meta.id.to_string());
     let listener = mush_agent::IpcListener::start_control(
         mush_agent::ipc::control_socket_path(&control.target().instance),
-        std::sync::Arc::new(mush_agent::AgentCard::build(&setup.model.id, &setup.tools)),
+        std::sync::Arc::new(mush_agent::AgentCard::build(
+            &setup.client.model.id,
+            &setup.tools,
+        )),
         control.clone(),
     )?;
     let control_endpoint = Some(mush_agent::exec_context::ControlEndpoint {
@@ -417,16 +429,19 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     });
 
     let (compact_model, compact_options) = setup
+        .client
         .compaction_model
         .clone()
-        .unwrap_or_else(|| (setup.model.clone(), setup.options.clone()));
-    let context_window = compact_model.context_window.max(setup.model.context_window);
+        .unwrap_or_else(|| (setup.client.model.clone(), setup.client.options.clone()));
+    let context_window = compact_model
+        .context_window
+        .max(setup.client.model.context_window);
     let reg_ref = setup.registry.clone();
     let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
     let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
-    let cwd = std::sync::Arc::new(setup.cwd.clone());
-    let transform: Option<mush_agent::TransformFn> = if setup.cfg.auto_compact {
+    let cwd = std::sync::Arc::new(setup.client.cwd.clone());
+    let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.auto_compact {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
             let o = compact_options.clone();
@@ -470,11 +485,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     };
 
     let config = AgentConfig {
-        model: setup.model.clone(),
+        model: setup.client.model.clone(),
         system_prompt: Some(setup.system_prompt),
         tools: setup.tools.clone(),
         registry: &setup.registry,
-        options: setup.options,
+        options: setup.client.options,
         max_turns: setup.max_turns,
         hooks: Box::new(mush_agent::ClosureHooks {
             transform,
@@ -588,7 +603,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     println!();
                     in_text = false;
                 }
-                let cost = models::calculate_cost(&setup.model, &message.usage);
+                let cost = models::calculate_cost(&setup.client.model, &message.usage);
                 eprintln!(
                     "\n{}",
                     Style::Dim.stderr(format_args!(
@@ -600,7 +615,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                         cost.total(),
                     )),
                 );
-                if setup.debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
+                if setup.client.debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
                     eprintln!(
                         "{}",
                         Style::Cyan.stderr(format_args!(
@@ -778,16 +793,12 @@ async fn worker_mode(
     Ok(())
 }
 
-async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
-    let Prepared {
-        setup,
-        kernel_signals,
-    } = prepare(&cli).await?;
-
+fn spawn_discovery_refresh(
+    http_client: mush_ai::http::HttpClient,
+) -> std::sync::mpsc::Receiver<mush_tui::runner::DiscoveryUpdate> {
     let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
-    let startup_discovery_client = setup.http_client.clone();
     tokio::spawn(async move {
-        let summary = mush_ai::discovery::refresh_and_save(startup_discovery_client).await;
+        let summary = mush_ai::discovery::refresh_and_save(http_client).await;
         tracing::info!(
             target: "mush::discovery",
             models = summary.total_models(),
@@ -796,10 +807,19 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         );
         let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
     });
+    discovery_rx
+}
 
+async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let target = cli.session_target()?;
     match cli.no_session {
         false => {
+            let mut timer = cli.profile_startup.then(timing::PhaseTimer::new);
+            let client = setup::ClientSetup::init(cli.client_args(), timer.as_mut()).await?;
+            if let Some(report) = timer.map(timing::PhaseTimer::finish) {
+                eprintln!("{report}");
+            }
+            let discovery_rx = spawn_discovery_refresh(client.http_client.clone());
             let open = match &target {
                 SessionTarget::Resume(id) => mush_daemon::OpenTarget::Resume(id.clone()),
                 SessionTarget::Fork(id) => mush_daemon::OpenTarget::Fork(id.clone()),
@@ -807,7 +827,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             };
             let descriptor = daemon::open(open, cli.worker_args()).await?;
             let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
-            let mut tui_config = client_config(&cli, &setup, &log_buffer, None);
+            let mut tui_config = client_config(&cli, &client, &log_buffer, None, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             if connection.worker_build() != mush_daemon::build_id() {
                 tui_config.startup_notice = Some(format!(
@@ -827,9 +847,20 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             );
         }
         true => {
+            let Prepared {
+                setup,
+                kernel_signals,
+            } = prepare(&cli).await?;
+            let discovery_rx = spawn_discovery_refresh(setup.client.http_client.clone());
             let opened = open_session(&target, &setup, cli.no_session).await?;
             let worker = worker_config(&cli, &setup, &opened, kernel_signals);
-            let mut tui_config = client_config(&cli, &setup, &log_buffer, Some(&opened.session));
+            let mut tui_config = client_config(
+                &cli,
+                &setup.client,
+                &log_buffer,
+                Some(&opened.session),
+                Some(&setup),
+            );
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             mush_tui::run_tui(
                 tui_config,
@@ -856,17 +887,12 @@ async fn prepare(cli: &Cli) -> Result<Prepared> {
         None
     };
     let (setup, startup_report) = AppSetup::init(SetupArgs {
-        model: cli.model.clone(),
-        thinking: cli.thinking,
-        max_tokens: cli.max_tokens,
+        client: cli.client_args(),
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
-        config_overrides: cli.option.clone(),
         tools: cli.tools.clone(),
         append_system: cli.append_system.clone(),
-        discovery: cli.discovery(),
-        debug_cache: cli.debug_cache,
         output_sink: Some(sinks.output),
         kernel_notice_sink: Some(sinks.notices),
         kernel_busy_prompt: Some(sinks.busy_prompt),
@@ -889,7 +915,7 @@ async fn open_session(
     setup: &AppSetup,
     no_session: bool,
 ) -> Result<OpenedSession> {
-    let cwd_str = setup.cwd.display().to_string();
+    let cwd_str = setup.client.cwd.display().to_string();
     let mut lease = None;
     let session = match target {
         SessionTarget::Resume(id) => {
@@ -908,7 +934,9 @@ async fn open_session(
             let meta = store.resolve(id)?;
             fork_session(store.load(&meta.id)?, &cwd_str)
         }
-        SessionTarget::New | SessionTarget::Pick => Session::new(setup.model.id.as_str(), &cwd_str),
+        SessionTarget::New | SessionTarget::Pick => {
+            Session::new(setup.client.model.id.as_str(), &cwd_str)
+        }
     };
     let saver = (!no_session)
         .then(|| SaverThread::spawn(cwd_str))
@@ -921,7 +949,7 @@ async fn open_session(
 }
 
 fn agent_card(setup: &AppSetup) -> mush_agent::AgentCard {
-    let mut card = mush_agent::AgentCard::build(&setup.model.id, &setup.tools);
+    let mut card = mush_agent::AgentCard::build(&setup.client.model.id, &setup.tools);
     card.capabilities = mush_agent::Capabilities {
         streaming: true,
         multi_pane: true,
@@ -938,26 +966,30 @@ fn worker_config(
     kernel_signals: mush_runtime::KernelSignals,
 ) -> mush_runtime::WorkerConfig {
     let session = &opened.session;
-    let mut options = setup.options.clone();
+    let mut options = setup.client.options.clone();
     options.session_id = Some(session.meta.id.clone());
-    let compaction_model = setup.compaction_model.clone().map(|(model, mut opts)| {
-        opts.session_id = Some(session.meta.id.clone());
-        (model, opts)
-    });
+    let compaction_model = setup
+        .client
+        .compaction_model
+        .clone()
+        .map(|(model, mut opts)| {
+            opts.session_id = Some(session.meta.id.clone());
+            (model, opts)
+        });
     let mut worker = mush_runtime::WorkerConfig::new(mush_runtime::TurnConfig {
-        default_model: setup.model.clone(),
+        default_model: setup.client.model.clone(),
         options,
         max_turns: setup.max_turns,
-        provider_api_keys: setup.cfg.api_keys.to_map(),
-        confirm_tools: setup.cfg.confirm_tools,
-        auto_compact: setup.cfg.auto_compact,
-        auto_fork_compact: setup.cfg.auto_fork_compact,
+        provider_api_keys: setup.client.cfg.api_keys.to_map(),
+        confirm_tools: setup.client.cfg.confirm_tools,
+        auto_compact: setup.client.cfg.auto_compact,
+        auto_fork_compact: setup.client.cfg.auto_fork_compact,
         compaction_model,
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
-            setup.cfg.forbidden_chars.iter().copied(),
-            setup.cfg.forbidden_char_classes.iter().copied(),
+            setup.client.cfg.forbidden_chars.iter().copied(),
+            setup.client.cfg.forbidden_char_classes.iter().copied(),
         ),
-        tool_allowlist: if setup.rlm {
+        tool_allowlist: if setup.client.rlm {
             Some(vec!["ipython".into()])
         } else {
             cli.tools.clone()
@@ -974,6 +1006,7 @@ fn worker_config(
             .unwrap_or_else(|| setup.system_prompt.clone()),
     );
     worker.thinking_level = setup
+        .client
         .options
         .thinking
         .clone()
@@ -981,6 +1014,7 @@ fn worker_config(
         .normalize_visible();
     worker.rlm_depth = env_depth("RLM_DEPTH").unwrap_or(0);
     worker.rlm_max_depth = setup
+        .client
         .cfg
         .rlm_max_depth
         .or_else(|| env_depth("RLM_MAX_DEPTH"))
@@ -997,34 +1031,50 @@ fn worker_config(
     };
     worker.agent_card = Some(agent_card(setup));
     worker.kernel_signals = Some(kernel_signals);
+    worker.system_prompt_builder = Some(std::sync::Arc::new({
+        let discovery = cli.discovery();
+        let rlm = setup.client.rlm;
+        let kernel_packages = setup.kernel_packages.clone();
+        let cwd = setup.client.cwd.clone();
+        move || {
+            let project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
+            if rlm {
+                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages)
+            } else {
+                build_system_prompt_from_context(&project, &cwd)
+            }
+        }
+    }));
     worker
 }
 
 fn client_config(
     cli: &Cli,
-    setup: &AppSetup,
+    client: &setup::ClientSetup,
     log_buffer: &logging::LogBuffer,
     session: Option<&Session>,
+    worker: Option<&AppSetup>,
 ) -> TuiConfig {
     let terminal_policy_overrides = cli.terminal_policy_overrides();
     let session_id = session
         .map(|session| session.meta.id.clone())
         .unwrap_or_default();
-    let mut options = setup.options.clone();
+    let mut options = client.options.clone();
     options.session_id = Some(session_id.clone());
-    let system_prompt = session
-        .and_then(|session| session.system_prompt.clone())
-        .unwrap_or_else(|| setup.system_prompt.clone());
 
-    let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
-    let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
+    let theme = mush_tui::Theme::from_config(&client.cfg.theme);
+    let terminal_policy = client
+        .cfg
+        .terminal
+        .with_overrides(terminal_policy_overrides);
     let config_file = config::config_dir().join("config.toml");
-    let (favourite_models, favourites_locked) =
-        config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
+    let (favourite_models, favourites_locked) = config::resolve_favourites(
+        &client.cfg.favourite_models,
+        config::load_favourite_models(),
+    );
 
     TuiConfig {
-        model: setup.model.clone(),
-        system_prompt: Some(system_prompt),
+        model: client.model.clone(),
         options,
         initial_title: session.and_then(|session| session.meta.title.clone()),
         theme,
@@ -1033,8 +1083,8 @@ fn client_config(
         } else {
             None
         },
-        provider_api_keys: setup.cfg.api_keys.to_map(),
-        thinking_prefs: setup.thinking_prefs.clone(),
+        provider_api_keys: client.cfg.api_keys.to_map(),
+        thinking_prefs: client.thinking_prefs.clone(),
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
         })),
@@ -1042,28 +1092,28 @@ fn client_config(
         save_last_models: Some(std::sync::Arc::new(|models| {
             config::save_last_models(models);
         })),
-        show_cost: setup.cfg.show_cost,
-        show_usage_lines: setup.cfg.show_usage_lines,
-        show_token_counters: setup.cfg.show_token_counters,
-        status_bar_config: setup.cfg.status_bar.clone(),
-        debug_cache: setup.debug_cache,
-        cache_timer: setup.cfg.cache_timer,
-        thinking_display: setup.cfg.thinking_display,
+        show_cost: client.cfg.show_cost,
+        show_usage_lines: client.cfg.show_usage_lines,
+        show_token_counters: client.cfg.show_token_counters,
+        status_bar_config: client.cfg.status_bar.clone(),
+        debug_cache: client.debug_cache,
+        cache_timer: client.cfg.cache_timer,
+        thinking_display: client.cfg.thinking_display,
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
         }),
         terminal_policy,
         cwd: std::env::current_dir().unwrap_or_default(),
-        agent_card: Some(agent_card(setup)),
-        model_tiers: setup.cfg.model_tiers.clone(),
-        compaction_model: setup.compaction_model.clone(),
+        agent_card: worker.map(agent_card),
+        model_tiers: client.cfg.model_tiers.clone(),
+        compaction_model: client.compaction_model.clone(),
         resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
-        http_client: Some(setup.http_client.clone()),
+        http_client: Some(client.http_client.clone()),
         session_id,
         settings: mush_tui::settings::ScopedSettings {
-            scope: setup.cfg.settings.scope,
-            anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
+            scope: client.cfg.settings.scope,
+            anthropic_betas: client.cfg.settings.anthropic_betas.clone(),
         },
         favourite_models,
         favourites_locked,
@@ -1080,7 +1130,7 @@ fn client_config(
         })),
         keymap: {
             let mut km = mush_tui::KeyMap::default();
-            let warnings = km.override_scoped(&setup.cfg.keys.scoped());
+            let warnings = km.override_scoped(&client.cfg.keys.scoped());
             for warning in warnings {
                 tracing::warn!("keybind config: {warning}");
             }
@@ -1090,19 +1140,10 @@ fn client_config(
         startup_notice: None,
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
-            let rlm = setup.rlm;
-            let kernel_packages = setup.kernel_packages.clone();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
                 let project = mush_ext::loader::discover_project_context_with(cwd, &discovery);
-                let system_prompt = if rlm {
-                    setup::build_rlm_system_prompt(&project, cwd, &kernel_packages)
-                } else {
-                    build_system_prompt_from_context(&project, cwd)
-                };
-                let templates = mush_ext::discover_templates(cwd);
                 mush_tui::ReloadedContext {
-                    system_prompt,
-                    templates,
+                    templates: mush_ext::discover_templates(cwd),
                     skills: mush_tui::SkillCatalogue {
                         skills: project.skills,
                         diagnostics: project.skill_diagnostics,
@@ -1110,8 +1151,8 @@ fn client_config(
                 }
             }
         })),
-        mcp: setup.mcp.clone(),
-        skills: setup.skills.clone(),
+        mcp: worker.and_then(|worker| worker.mcp.clone()),
+        skills: client.skills(),
     }
 }
 

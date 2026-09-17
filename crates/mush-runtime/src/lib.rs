@@ -18,7 +18,7 @@ use mush_session::ConversationState;
 pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
     AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
-    InProcessConnection, PRIMARY_PANE,
+    InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
 };
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use session::{

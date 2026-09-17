@@ -48,6 +48,7 @@ pub enum ClientCommand {
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
     SetSystemPrompt(Option<String>),
+    ReloadSystemPrompt,
     SetStreamOptions(mush_ai::types::StreamOptions),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
@@ -165,8 +166,11 @@ pub struct InProcessConnection {
     kernel: Option<crate::kernel_channels::KernelSignals>,
     busy_reply: Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
     side_questions: Vec<(String, tokio::task::JoinHandle<Result<String, String>>)>,
+    system_prompt_builder: Option<SystemPromptBuilder>,
     closed: bool,
 }
+
+pub type SystemPromptBuilder = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
 
 struct FailedCompaction {
     failure: mush_session::compact::CompactionFailureReport,
@@ -199,8 +203,13 @@ impl InProcessConnection {
             kernel: None,
             busy_reply: None,
             side_questions: Vec::new(),
+            system_prompt_builder: None,
             closed: false,
         }
+    }
+
+    pub fn set_system_prompt_builder(&mut self, builder: Option<SystemPromptBuilder>) {
+        self.system_prompt_builder = builder;
     }
 
     pub fn attach_kernel(&mut self, signals: Option<crate::kernel_channels::KernelSignals>) {
@@ -883,6 +892,16 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
+            ClientCommand::ReloadSystemPrompt => {
+                if let Some(build) = &self.system_prompt_builder {
+                    let prompt = build();
+                    self.runtime.system_prompt = Some(prompt.clone());
+                    self.queued
+                        .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
+                            Some(prompt),
+                        )));
+                }
+            }
             ClientCommand::SetStreamOptions(options) => self.config.options = options,
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);
@@ -1371,5 +1390,33 @@ mod tests {
         let last = asked.last().unwrap();
         assert!(matches!(last.last(), Some(Message::User(user)) if user.text() == "why slow?"));
         assert_eq!(last.len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn reload_rebuilds_the_system_prompt_through_the_worker_builder() {
+        let (mut connection, _requests) = connection();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        connection.set_system_prompt_builder(Some(Arc::new({
+            let calls = Arc::clone(&calls);
+            move || {
+                let n = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                format!("prompt v{n}")
+            }
+        })));
+
+        let events = connection
+            .send(ClientCommand::ReloadSystemPrompt)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            connection.runtime.system_prompt.as_deref(),
+            Some("prompt v1")
+        );
+        assert!(matches!(
+            &events[..],
+            [ClientEvent::Session(SessionEvent::SystemPromptChanged(Some(prompt)))]
+                if prompt == "prompt v1"
+        ));
     }
 }

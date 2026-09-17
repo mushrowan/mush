@@ -13,7 +13,6 @@ pub struct SkillCatalogue {
 }
 
 pub struct ReloadedContext {
-    pub system_prompt: String,
     pub templates: Vec<mush_ext::PromptTemplate>,
     pub skills: SkillCatalogue,
 }
@@ -24,7 +23,6 @@ pub type ModelResolver = std::sync::Arc<dyn Fn(&str) -> Option<Model> + Send + S
 
 pub struct TuiConfig {
     pub model: Model,
-    pub system_prompt: Option<String>,
     pub options: StreamOptions,
     pub initial_title: Option<String>,
     pub theme: crate::theme::Theme,
@@ -120,7 +118,6 @@ impl TuiConfig {
             generate_title: false,
         });
         worker.session_id = self.session_id.clone();
-        worker.system_prompt = self.system_prompt.clone();
         worker.injections.cwd = Some(self.cwd.clone());
         worker
     }
@@ -131,7 +128,6 @@ impl TuiConfig {
                 .into_iter()
                 .next()
                 .expect("builtin model catalogue is never empty"),
-            system_prompt: None,
             options: StreamOptions::default(),
             initial_title: None,
             theme: crate::theme::Theme::default(),

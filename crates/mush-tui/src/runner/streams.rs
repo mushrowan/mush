@@ -352,7 +352,7 @@ pub(crate) fn apply_session_events(
                 tui_config.session_id = id.clone();
                 tui_config.options.session_id = Some(id);
             }
-            SessionEvent::SystemPromptChanged(prompt) => tui_config.system_prompt = prompt,
+            SessionEvent::SystemPromptChanged(_) => {}
             SessionEvent::Title(title) => session.app.session_title = title,
             SessionEvent::TranscriptReplaced {
                 reason,
@@ -1127,7 +1127,6 @@ mod tests {
         let model = models::all_models_with_user().into_iter().next().unwrap();
         super::super::TuiConfig {
             model,
-            system_prompt: None,
             options: mush_ai::types::StreamOptions::default(),
             initial_title: None,
             theme: crate::theme::Theme::default(),

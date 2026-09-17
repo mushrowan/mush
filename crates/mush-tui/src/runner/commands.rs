@@ -204,12 +204,9 @@ pub(super) async fn handle_slash_action(
                 return false;
             };
             let reloaded = reload(cwd);
-            tui_config.system_prompt = Some(reloaded.system_prompt.clone());
             let _ = session
                 .connection
-                .send(mush_runtime::ClientCommand::SetSystemPrompt(Some(
-                    reloaded.system_prompt,
-                )))
+                .send(mush_runtime::ClientCommand::ReloadSystemPrompt)
                 .await;
             apply_reloaded_templates(session, &reloaded.templates);
             let warnings = reloaded.skills.diagnostics.len();
