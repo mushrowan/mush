@@ -1,0 +1,25 @@
+[package]
+name = "mush-daemon"
+description = "worker process hosting a session runtime, and the client connection that talks to it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mush-ai.workspace = true
+mush-session.workspace = true
+mush-runtime.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mush-agent.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

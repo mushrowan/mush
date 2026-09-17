@@ -5,6 +5,7 @@ default-members = [
   "crates/mush-agent",
   "crates/mush-ai",
   "crates/mush-cli",
+  "crates/mush-daemon",
   "crates/mush-ext",
   "crates/mush-kernel",
   "crates/mush-lsp",
