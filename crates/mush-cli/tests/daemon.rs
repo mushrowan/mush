@@ -187,3 +187,30 @@ async fn a_worker_that_dies_during_startup_is_reported() {
     };
     assert!(error.contains("worker exited during startup"), "{error}");
 }
+
+#[tokio::test]
+async fn stopping_a_worker_with_a_client_attached_closes_the_client_cleanly() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let mut client = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+
+    let stop = daemon.request(SupervisorRequest::Stop {
+        session_id: descriptor.session_id.clone(),
+    });
+    let (stopped, closed) = tokio::join!(
+        stop,
+        tokio::time::timeout(Duration::from_secs(10), client.next_event())
+    );
+
+    assert!(matches!(stopped, SupervisorReply::Done));
+    assert!(closed.unwrap().is_none());
+    assert!(!alive(descriptor.pid));
+    assert!(!descriptor.socket.exists());
+    assert!(!descriptor.socket.with_extension("json").exists());
+}

@@ -13,6 +13,7 @@ mush-session.workspace = true
 mush-runtime.workspace = true
 mush-tools.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true

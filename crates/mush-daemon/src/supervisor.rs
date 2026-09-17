@@ -3,12 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use mush_runtime::ClientCommand;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::protocol::{Frame, Request, decode, encode};
+use crate::protocol::{decode, encode};
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -263,39 +262,15 @@ impl Supervisor {
 }
 
 async fn stop(worker: &WorkerDescriptor) -> io::Result<()> {
-    let graceful = tokio::time::timeout(STOP_TIMEOUT, async {
-        let stream = UnixStream::connect(&worker.socket).await?;
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let request = Request::Command {
-            id: 1,
-            command: ClientCommand::Shutdown,
-        };
-        writer
-            .write_all(&encode(&request).map_err(io::Error::other)?)
-            .await?;
-        while let Some(line) = lines.next_line().await? {
-            if matches!(decode::<Frame>(&line), Ok(Frame::Closed)) {
-                break;
-            }
-        }
-        Ok::<(), io::Error>(())
-    })
-    .await;
-    match graceful {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(%error, pid = worker.pid, "graceful stop failed"),
-        Err(_) => tracing::warn!(pid = worker.pid, "graceful stop timed out"),
-    }
     for signal in [rustix::process::Signal::TERM, rustix::process::Signal::KILL] {
-        if wait_for_exit(worker, STOP_TIMEOUT).await {
-            break;
-        }
         if let Some(pid) = i32::try_from(worker.pid)
             .ok()
             .and_then(rustix::process::Pid::from_raw)
         {
             let _ = rustix::process::kill_process_group(pid, signal);
+        }
+        if wait_for_exit(worker, STOP_TIMEOUT).await {
+            break;
         }
     }
     let _ = std::fs::remove_file(&worker.socket);

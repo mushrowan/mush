@@ -17,7 +17,7 @@ fn spawn_worker() -> Worker {
     let socket = dir.path().join("worker.sock");
     let listener = bind(&socket).unwrap();
     let (connection, _requests) = mush_runtime::testing::echo_connection();
-    let task = tokio::spawn(serve(connection, listener, None));
+    let task = tokio::spawn(serve(connection, listener, None, Default::default()));
     Worker {
         _dir: dir,
         socket,
@@ -172,7 +172,7 @@ async fn a_client_attaching_mid_turn_replays_the_turn_so_far() {
     let socket = dir.path().join("worker.sock");
     let listener = bind(&socket).unwrap();
     let (connection, release) = mush_runtime::testing::stalled_connection();
-    let _task = tokio::spawn(serve(connection, listener, None));
+    let _task = tokio::spawn(serve(connection, listener, None, Default::default()));
 
     let mut first = DaemonConnection::connect(&socket).await.unwrap();
     first.send(prompt("hello")).await.unwrap();

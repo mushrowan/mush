@@ -754,7 +754,15 @@ async fn worker_mode(
         connection,
         ipc_listener,
     } = mush_runtime::host_worker(worker, &setup.tools, &setup.registry)?;
-    let served = mush_daemon::serve(connection, listener, descriptor).await;
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            let _ = headless::shutdown_signal().await;
+            shutdown.cancel();
+        }
+    });
+    let served = mush_daemon::serve(connection, listener, descriptor, shutdown).await;
     let _ = std::fs::remove_file(&socket);
     served?;
     if let Some(listener) = ipc_listener {

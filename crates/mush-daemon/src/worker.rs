@@ -3,11 +3,13 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 
 use mush_runtime::{
-    AgentConnection, Applied, ClientEvent, ConnectionError, ConnectionState, InProcessConnection,
+    AgentConnection, Applied, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
+    InProcessConnection,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{Frame, Reply, Request, encode};
 use crate::supervisor::WorkerDescriptor;
@@ -115,40 +117,146 @@ pub async fn serve(
     mut connection: InProcessConnection,
     listener: UnixListener,
     mut descriptor: Option<Descriptor>,
+    shutdown: CancellationToken,
 ) -> io::Result<()> {
-    let mut log = TurnLog::default();
-    let served =
-        serve_until_closed(&mut connection, &listener, descriptor.as_mut(), &mut log).await;
+    let mut worker = Worker {
+        log: TurnLog::default(),
+        shutdown,
+        shutting_down: false,
+    };
+    let served = worker
+        .serve_until_closed(&mut connection, &listener, descriptor.as_mut())
+        .await;
     if let Some(descriptor) = &descriptor {
         descriptor.remove();
     }
     served
 }
 
-async fn serve_until_closed(
-    connection: &mut InProcessConnection,
-    listener: &UnixListener,
-    mut descriptor: Option<&mut Descriptor>,
-    log: &mut TurnLog,
-) -> io::Result<()> {
-    loop {
-        connection.start_pending().await;
-        if let Some(descriptor) = descriptor.as_deref_mut() {
-            descriptor.refresh(&connection.state());
-        }
-        let stream = tokio::select! {
-            accepted = listener.accept() => accepted?.0,
-            event = connection.next_event() => {
-                let Some(event) = event else {
-                    return Ok(());
-                };
-                log.record(&event);
-                continue;
+struct Worker {
+    log: TurnLog,
+    shutdown: CancellationToken,
+    shutting_down: bool,
+}
+
+impl Worker {
+    async fn shut_down(&mut self, connection: &mut InProcessConnection) {
+        self.shutting_down = true;
+        let _ = connection.send(ClientCommand::Shutdown).await;
+    }
+
+    async fn serve_until_closed(
+        &mut self,
+        connection: &mut InProcessConnection,
+        listener: &UnixListener,
+        mut descriptor: Option<&mut Descriptor>,
+    ) -> io::Result<()> {
+        loop {
+            connection.start_pending().await;
+            if let Some(descriptor) = descriptor.as_deref_mut() {
+                descriptor.refresh(&connection.state());
             }
-            () = tokio::time::sleep(TICK) => continue,
+            let stream = tokio::select! {
+                accepted = listener.accept() => accepted?.0,
+                event = connection.next_event() => {
+                    let Some(event) = event else {
+                        return Ok(());
+                    };
+                    self.log.record(&event);
+                    continue;
+                }
+                () = self.shutdown.cancelled(), if !self.shutting_down => {
+                    self.shut_down(connection).await;
+                    continue;
+                }
+                () = tokio::time::sleep(TICK) => continue,
+            };
+            if let Attached::Closed = self
+                .attach(connection, stream, descriptor.as_deref_mut())
+                .await
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    async fn attach(
+        &mut self,
+        connection: &mut InProcessConnection,
+        stream: UnixStream,
+        mut descriptor: Option<&mut Descriptor>,
+    ) -> Attached {
+        let (reader, writer) = stream.into_split();
+        let mut client = Client {
+            lines: BufReader::new(reader).lines(),
+            writer,
+            last_state: connection.state(),
         };
-        if let Attached::Closed = attach(connection, stream, descriptor.as_deref_mut(), log).await {
-            return Ok(());
+        let hello = Frame::Hello {
+            state: client.last_state.clone(),
+        };
+        if client.write(&hello).await.is_err() {
+            return Attached::Detached;
+        }
+        for event in &self.log.events {
+            let frame = Frame::Event {
+                event: event.clone(),
+                state: None,
+            };
+            if client.write(&frame).await.is_err() {
+                return Attached::Detached;
+            }
+        }
+        loop {
+            connection.start_pending().await;
+            tokio::select! {
+                line = client.lines.next_line() => {
+                    let Ok(Some(line)) = line else {
+                        return Attached::Detached;
+                    };
+                    let request = match crate::protocol::decode::<Request>(&line) {
+                        Ok(request) => request,
+                        Err(error) => {
+                            tracing::warn!(%error, "dropping a malformed request");
+                            continue;
+                        }
+                    };
+                    let id = request.id();
+                    let result = handle(connection, request).await;
+                    if let Ok(Reply::Events { events }) = &result {
+                        for event in events {
+                            self.log.record(event);
+                        }
+                    }
+                    let state = client.state_delta(connection);
+                    if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
+                        descriptor.refresh(state);
+                    }
+                    let frame = Frame::Response { id, result, state };
+                    if client.write(&frame).await.is_err() {
+                        return Attached::Detached;
+                    }
+                }
+                () = self.shutdown.cancelled(), if !self.shutting_down => {
+                    self.shut_down(connection).await;
+                }
+                () = tokio::time::sleep(TICK) => {}
+                event = connection.next_event() => {
+                    let Some(event) = event else {
+                        let _ = client.write(&Frame::Closed).await;
+                        return Attached::Closed;
+                    };
+                    self.log.record(&event);
+                    let state = client.state_delta(connection);
+                    if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
+                        descriptor.refresh(state);
+                    }
+                    let frame = Frame::Event { event, state };
+                    if client.write(&frame).await.is_err() {
+                        return Attached::Detached;
+                    }
+                }
+            }
         }
     }
 }
@@ -177,83 +285,6 @@ impl Client {
         }
         self.last_state = state.clone();
         Some(state)
-    }
-}
-
-async fn attach(
-    connection: &mut InProcessConnection,
-    stream: UnixStream,
-    mut descriptor: Option<&mut Descriptor>,
-    log: &mut TurnLog,
-) -> Attached {
-    let (reader, writer) = stream.into_split();
-    let mut client = Client {
-        lines: BufReader::new(reader).lines(),
-        writer,
-        last_state: connection.state(),
-    };
-    let hello = Frame::Hello {
-        state: client.last_state.clone(),
-    };
-    if client.write(&hello).await.is_err() {
-        return Attached::Detached;
-    }
-    for event in &log.events {
-        let frame = Frame::Event {
-            event: event.clone(),
-            state: None,
-        };
-        if client.write(&frame).await.is_err() {
-            return Attached::Detached;
-        }
-    }
-    loop {
-        connection.start_pending().await;
-        tokio::select! {
-            line = client.lines.next_line() => {
-                let Ok(Some(line)) = line else {
-                    return Attached::Detached;
-                };
-                let request = match crate::protocol::decode::<Request>(&line) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        tracing::warn!(%error, "dropping a malformed request");
-                        continue;
-                    }
-                };
-                let id = request.id();
-                let result = handle(connection, request).await;
-                if let Ok(Reply::Events { events }) = &result {
-                    for event in events {
-                        log.record(event);
-                    }
-                }
-                let state = client.state_delta(connection);
-                if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
-                    descriptor.refresh(state);
-                }
-                let frame = Frame::Response { id, result, state };
-                if client.write(&frame).await.is_err() {
-                    return Attached::Detached;
-                }
-            }
-            () = tokio::time::sleep(TICK) => {}
-            event = connection.next_event() => {
-                let Some(event) = event else {
-                    let _ = client.write(&Frame::Closed).await;
-                    return Attached::Closed;
-                };
-                log.record(&event);
-                let state = client.state_delta(connection);
-                if let (Some(descriptor), Some(state)) = (descriptor.as_deref_mut(), &state) {
-                    descriptor.refresh(state);
-                }
-                let frame = Frame::Event { event, state };
-                if client.write(&frame).await.is_err() {
-                    return Attached::Detached;
-                }
-            }
-        }
     }
 }
 
