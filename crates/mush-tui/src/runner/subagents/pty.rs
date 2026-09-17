@@ -117,14 +117,15 @@ async fn subagent_panel_pty_fixture() {
     );
     config.terminal_policy.image_probe = crate::ImageProbeMode::Disabled;
     config.terminal_policy.keyboard_enhancement = crate::KeyboardEnhancementMode::Disabled;
-    config.max_turns = 3;
     if std::env::var_os("MUSH_PANEL_REMAP").is_some() {
         let keys: crate::keybinds::KeysConfig =
             toml::from_str("[shared]\ntoggle_subagents = 'ctrl+p'").unwrap();
         assert!(config.keymap.override_scoped(&keys.scoped()).is_empty());
     }
     let saved_dir = dir.clone();
-    config.save_session = Some(Arc::new(move |snapshot| {
+    let mut worker = config.worker_for_test();
+    worker.turn.max_turns = 3;
+    worker.saver = Some(Arc::new(move |snapshot| {
         let value = serde_json::json!({"session":snapshot.session_id.to_string(),"messages":snapshot.primary.context()});
         std::fs::write(saved_dir.join("saved.json"), value.to_string()).unwrap();
     }));
@@ -135,7 +136,7 @@ async fn subagent_panel_pty_fixture() {
     }));
     let mut tools = ToolRegistry::new();
     tools.register_shared(Arc::new(FakeTool(dir.clone())));
-    crate::run_tui(config, &tools, &registry, None)
+    crate::run_tui(config, worker, &tools, &registry, None)
         .await
         .unwrap();
     std::fs::write(

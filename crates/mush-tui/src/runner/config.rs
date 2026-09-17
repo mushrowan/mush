@@ -1,5 +1,4 @@
 use mush_ai::types::{Model, StreamOptions};
-use mush_session::ConversationState;
 
 pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
@@ -38,10 +37,7 @@ pub struct TuiConfig {
     pub model: Model,
     pub system_prompt: Option<String>,
     pub options: StreamOptions,
-    pub max_turns: usize,
-    pub initial_conversation: ConversationState,
     pub initial_title: Option<String>,
-    pub initial_panes: Vec<PaneSnapshot>,
     pub theme: crate::theme::Theme,
     pub config_path: Option<std::path::PathBuf>,
     pub provider_api_keys: std::collections::HashMap<String, mush_ai::ApiKey>,
@@ -49,11 +45,6 @@ pub struct TuiConfig {
     pub save_thinking_prefs: Option<super::ThinkingPrefsSaver>,
     pub last_models: super::LastModels,
     pub save_last_models: Option<super::LastModelsSaver>,
-    pub save_session: Option<SessionSaver>,
-    pub generate_title: bool,
-    pub confirm_tools: bool,
-    pub auto_compact: bool,
-    pub auto_fork_compact: bool,
     pub show_cost: bool,
     pub show_usage_lines: bool,
     pub show_token_counters: bool,
@@ -64,11 +55,7 @@ pub struct TuiConfig {
     pub tool_output_live: Option<LiveToolOutput>,
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
     pub terminal_policy: crate::terminal_policy::TerminalPolicy,
-    pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub cwd: std::path::PathBuf,
-    pub dynamic_system_context: Option<mush_agent::DynamicContext>,
-    pub file_rules: Option<mush_agent::FileRuleCallback>,
-    pub lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     pub agent_card: Option<mush_agent::AgentCard>,
     pub model_tiers: std::collections::HashMap<String, String>,
     pub compaction_model: Option<(Model, StreamOptions)>,
@@ -85,13 +72,8 @@ pub struct TuiConfig {
     pub reload_context: Option<ReloadCallback>,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
-    pub tool_allowlist: Option<Vec<String>>,
     pub kernel_notices: Option<KernelNotices>,
     pub kernel_prompts: Option<KernelPrompts>,
-    pub kernel_state: Option<std::sync::Arc<dyn mush_kernel::KernelState>>,
-    pub rlm_depth: u32,
-    pub rlm_max_depth: u32,
-    pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
 }
 
 impl TuiConfig {
@@ -111,35 +93,6 @@ impl TuiConfig {
             options.session_id = Some(self.session_id.clone());
             (model.clone(), options)
         })
-    }
-
-    #[must_use]
-    pub fn injections(&self) -> mush_agent::AgentInjections {
-        mush_agent::AgentInjections {
-            lifecycle_hooks: self.lifecycle_hooks.clone(),
-            cwd: Some(self.cwd.clone()),
-            dynamic_system_context: self.dynamic_system_context.clone(),
-            file_rules: self.file_rules.clone(),
-            lsp_diagnostics: self.lsp_diagnostics.clone(),
-            control_endpoint: None,
-        }
-    }
-
-    #[must_use]
-    pub fn turn_config(&self) -> mush_runtime::TurnConfig {
-        mush_runtime::TurnConfig {
-            default_model: self.model.clone(),
-            options: self.stream_options(),
-            max_turns: self.max_turns,
-            provider_api_keys: self.provider_api_keys.clone(),
-            confirm_tools: self.confirm_tools,
-            auto_compact: self.auto_compact,
-            auto_fork_compact: self.auto_fork_compact,
-            compaction_model: self.compaction_options(),
-            forbidden_chars: self.forbidden_chars.clone(),
-            tool_allowlist: self.tool_allowlist.clone(),
-            generate_title: self.generate_title,
-        }
     }
 
     pub(crate) fn seed_app(&self, app: &mut crate::app::App) {
@@ -164,6 +117,26 @@ impl TuiConfig {
 
 #[cfg(test)]
 impl TuiConfig {
+    pub(crate) fn worker_for_test(&self) -> mush_runtime::WorkerConfig {
+        let mut worker = mush_runtime::WorkerConfig::new(mush_runtime::TurnConfig {
+            default_model: self.model.clone(),
+            options: self.stream_options(),
+            max_turns: 32,
+            provider_api_keys: self.provider_api_keys.clone(),
+            confirm_tools: false,
+            auto_compact: false,
+            auto_fork_compact: false,
+            compaction_model: self.compaction_options(),
+            forbidden_chars: Default::default(),
+            tool_allowlist: None,
+            generate_title: false,
+        });
+        worker.session_id = self.session_id.clone();
+        worker.system_prompt = self.system_prompt.clone();
+        worker.injections.cwd = Some(self.cwd.clone());
+        worker
+    }
+
     pub(crate) fn for_test() -> Self {
         Self {
             model: mush_ai::models::all_models_with_user()
@@ -172,10 +145,7 @@ impl TuiConfig {
                 .expect("builtin model catalogue is never empty"),
             system_prompt: None,
             options: StreamOptions::default(),
-            max_turns: 32,
-            initial_conversation: ConversationState::default(),
             initial_title: None,
-            initial_panes: Vec::new(),
             theme: crate::theme::Theme::default(),
             config_path: None,
             provider_api_keys: std::collections::HashMap::new(),
@@ -183,11 +153,6 @@ impl TuiConfig {
             save_thinking_prefs: None,
             last_models: super::LastModels::default(),
             save_last_models: None,
-            save_session: None,
-            generate_title: false,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,
@@ -198,11 +163,7 @@ impl TuiConfig {
             tool_output_live: None,
             log_buffer: None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             cwd: std::path::PathBuf::from("/tmp"),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
             agent_card: None,
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
@@ -219,13 +180,8 @@ impl TuiConfig {
             reload_context: None,
             mcp: None,
             skills: SkillCatalogue::default(),
-            tool_allowlist: None,
             kernel_notices: None,
             kernel_prompts: None,
-            kernel_state: None,
-            rlm_depth: 0,
-            rlm_max_depth: mush_runtime::session::DEFAULT_RLM_MAX_DEPTH,
-            forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::default(),
         }
     }
 }

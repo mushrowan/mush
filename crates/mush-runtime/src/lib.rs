@@ -7,6 +7,7 @@ pub mod snapshot;
 #[doc(hidden)]
 pub mod testing;
 pub mod turn;
+pub mod worker;
 
 use mush_agent::AgentEvent;
 use mush_ai::types::{Message, Timestamp, ToolResultMessage};
@@ -23,6 +24,7 @@ pub use session::{
 };
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
 pub use turn::{CompactionTarget, TurnConfig, TurnDeps, TurnRequest};
+pub use worker::{HostedWorker, WorkerConfig, host_worker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

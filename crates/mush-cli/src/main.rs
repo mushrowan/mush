@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
 
     if let Some(Command::Worker { socket }) = &cli.command {
         let socket = socket.clone();
-        return worker_mode(cli, socket, log_buffer).await;
+        return worker_mode(cli, socket).await;
     }
     match cli.command {
         Some(Command::Control(_) | Command::Worker { .. }) => unreachable!(),
@@ -611,59 +611,53 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     Ok(())
 }
 
-struct Composed {
-    tui_config: TuiConfig,
-    tools: mush_agent::tool::ToolRegistry,
-    registry: mush_ai::registry::ApiRegistry,
-    http_client: mush_ai::http::HttpClient,
-    session_saver: Option<SaverThread>,
+struct KernelChannels {
+    tool_output_live: mush_tui::runner::LiveToolOutput,
+    kernel_notices: mush_tui::runner::KernelNotices,
+    kernel_prompts: mush_tui::runner::KernelPrompts,
 }
 
-async fn worker_mode(
-    cli: Cli,
-    socket: std::path::PathBuf,
-    log_buffer: logging::LogBuffer,
-) -> Result<()> {
+struct Prepared {
+    setup: AppSetup,
+    channels: KernelChannels,
+}
+
+struct OpenedSession {
+    session: Session,
+    _lease: Option<std::fs::File>,
+    saver: Option<SaverThread>,
+}
+
+async fn worker_mode(cli: Cli, socket: std::path::PathBuf) -> Result<()> {
     let listener = mush_daemon::bind(&socket)?;
-    let Composed {
-        mut tui_config,
-        tools,
-        registry,
-        session_saver,
-        ..
-    } = compose(cli, log_buffer).await?;
+    let Prepared { setup, .. } = prepare(&cli).await?;
+    let opened = open_session(&cli, &setup).await?;
+    let worker = worker_config(&cli, &setup, &opened);
     eprintln!(
         "{}",
         Style::Dim.stderr(format_args!("worker listening on {}", socket.display()))
     );
-    let mush_tui::HostedWorker {
+    let mush_runtime::HostedWorker {
         connection,
         ipc_listener,
-    } = mush_tui::host_worker(&mut tui_config, &tools, &registry)?;
+    } = mush_runtime::host_worker(worker, &setup.tools, &setup.registry)?;
     let served = mush_daemon::serve(connection, listener).await;
     let _ = std::fs::remove_file(&socket);
     served?;
     if let Some(listener) = ipc_listener {
         listener.shutdown().await?;
     }
-    if let Some(saver) = session_saver {
+    if let Some(saver) = opened.saver {
         saver.finish();
     }
     Ok(())
 }
 
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
-    let attach = cli.attach.clone();
-    let Composed {
-        tui_config,
-        tools,
-        registry,
-        http_client,
-        session_saver,
-    } = compose(cli, log_buffer).await?;
+    let Prepared { setup, channels } = prepare(&cli).await?;
 
     let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
-    let startup_discovery_client = http_client;
+    let startup_discovery_client = setup.http_client.clone();
     tokio::spawn(async move {
         let summary = mush_ai::discovery::refresh_and_save(startup_discovery_client).await;
         tracing::info!(
@@ -675,33 +669,42 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
     });
 
-    match attach {
+    match &cli.attach {
         Some(socket) => {
-            let connection = mush_daemon::DaemonConnection::connect(&socket).await?;
+            let connection = mush_daemon::DaemonConnection::connect(socket).await?;
+            let tui_config = client_config(&cli, &setup, &channels, &log_buffer, None);
             mush_tui::run_tui_attached(
                 tui_config,
                 Box::new(connection),
-                &registry,
+                &setup.registry,
                 Some(discovery_rx),
             )
             .await
             .map_err(|e| eyre!("TUI error: {e}"))?;
         }
         None => {
-            mush_tui::run_tui(tui_config, &tools, &registry, Some(discovery_rx))
-                .await
-                .map_err(|e| eyre!("TUI error: {e}"))?;
+            let opened = open_session(&cli, &setup).await?;
+            let worker = worker_config(&cli, &setup, &opened);
+            let tui_config =
+                client_config(&cli, &setup, &channels, &log_buffer, Some(&opened.session));
+            mush_tui::run_tui(
+                tui_config,
+                worker,
+                &setup.tools,
+                &setup.registry,
+                Some(discovery_rx),
+            )
+            .await
+            .map_err(|e| eyre!("TUI error: {e}"))?;
+            if let Some(saver) = opened.saver {
+                saver.finish();
+            }
         }
-    }
-
-    if let Some(saver) = session_saver {
-        saver.finish();
     }
     Ok(())
 }
 
-async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
-    let terminal_policy_overrides = cli.terminal_policy_overrides();
+async fn prepare(cli: &Cli) -> Result<Prepared> {
     let tool_output_live: mush_tui::runner::LiveToolOutput =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let sink_state = tool_output_live.clone();
@@ -744,7 +747,7 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
     } else {
         None
     };
-    let (mut setup, startup_report) = AppSetup::init(SetupArgs {
+    let (setup, startup_report) = AppSetup::init(SetupArgs {
         model: cli.model.clone(),
         thinking: cli.thinking,
         max_tokens: cli.max_tokens,
@@ -767,12 +770,23 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
         eprintln!("{report}");
     }
 
+    Ok(Prepared {
+        setup,
+        channels: KernelChannels {
+            tool_output_live,
+            kernel_notices,
+            kernel_prompts,
+        },
+    })
+}
+
+async fn open_session(cli: &Cli, setup: &AppSetup) -> Result<OpenedSession> {
     let cwd_str = setup.cwd.display().to_string();
-    let mut _session_lease = None;
+    let mut lease = None;
     let session = if let Some(ref resume_id) = cli.resume {
         let store = SessionStore::new(SessionStore::default_dir());
         let meta = store.resolve(resume_id)?;
-        _session_lease = store.lease(&meta.id)?;
+        lease = store.lease(&meta.id)?;
         if let Some(kernel) = &setup.kernel_state {
             kernel
                 .restore_from(&SessionStore::kernel_state_path(&meta.id))
@@ -786,60 +800,130 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
     } else {
         Session::new(setup.model.id.as_str(), &cwd_str)
     };
-    let initial_panes: Vec<mush_tui::PaneSnapshot> = session
-        .panes
-        .iter()
-        .map(|p| mush_tui::PaneSnapshot {
-            pane_id: p.pane_id,
-            label: p.label.clone(),
-            model_id: p.model_id.to_string(),
-            conversation: p.conversation.clone(),
-        })
-        .collect();
-    let session_id = session.meta.id.clone();
-    setup.options.session_id = Some(session_id.clone());
+    let saver = (!cli.no_session)
+        .then(|| SaverThread::spawn(cwd_str))
+        .transpose()?;
+    Ok(OpenedSession {
+        session,
+        _lease: lease,
+        saver,
+    })
+}
 
-    let system_prompt = session.system_prompt.clone().unwrap_or(setup.system_prompt);
+fn agent_card(setup: &AppSetup) -> mush_agent::AgentCard {
+    let mut card = mush_agent::AgentCard::build(&setup.model.id, &setup.tools);
+    card.capabilities = mush_agent::Capabilities {
+        streaming: true,
+        multi_pane: true,
+        messaging: true,
+        lsp: setup.lsp_diagnostics.is_some(),
+    };
+    card
+}
+
+fn worker_config(
+    cli: &Cli,
+    setup: &AppSetup,
+    opened: &OpenedSession,
+) -> mush_runtime::WorkerConfig {
+    let session = &opened.session;
+    let mut options = setup.options.clone();
+    options.session_id = Some(session.meta.id.clone());
+    let compaction_model = setup.compaction_model.clone().map(|(model, mut opts)| {
+        opts.session_id = Some(session.meta.id.clone());
+        (model, opts)
+    });
+    let mut worker = mush_runtime::WorkerConfig::new(mush_runtime::TurnConfig {
+        default_model: setup.model.clone(),
+        options,
+        max_turns: setup.max_turns,
+        provider_api_keys: setup.cfg.api_keys.to_map(),
+        confirm_tools: setup.cfg.confirm_tools,
+        auto_compact: setup.cfg.auto_compact,
+        auto_fork_compact: setup.cfg.auto_fork_compact,
+        compaction_model,
+        forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
+            setup.cfg.forbidden_chars.iter().copied(),
+            setup.cfg.forbidden_char_classes.iter().copied(),
+        ),
+        tool_allowlist: if setup.rlm {
+            Some(vec!["ipython".into()])
+        } else {
+            cli.tools.clone()
+        },
+        generate_title: !cli.no_session,
+    });
+    worker.conversation = session.conversation.clone();
+    worker.session_id = session.meta.id.clone();
+    worker.title = session.meta.title.clone();
+    worker.system_prompt = Some(
+        session
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| setup.system_prompt.clone()),
+    );
+    worker.thinking_level = setup
+        .options
+        .thinking
+        .clone()
+        .unwrap_or(ThinkingLevel::Off)
+        .normalize_visible();
+    worker.rlm_depth = env_depth("RLM_DEPTH").unwrap_or(0);
+    worker.rlm_max_depth = setup
+        .cfg
+        .rlm_max_depth
+        .or_else(|| env_depth("RLM_MAX_DEPTH"))
+        .unwrap_or(mush_tui::DEFAULT_RLM_MAX_DEPTH);
+    worker.kernel_state = setup.kernel_state.clone();
+    worker.saver = opened.saver.as_ref().map(|saver| saver.handle());
+    worker.injections = mush_agent::AgentInjections {
+        lifecycle_hooks: setup.lifecycle_hooks.clone(),
+        cwd: Some(std::env::current_dir().unwrap_or_default()),
+        dynamic_system_context: None,
+        file_rules: setup.file_rules.clone(),
+        lsp_diagnostics: setup.lsp_diagnostics.clone(),
+        control_endpoint: None,
+    };
+    worker.agent_card = Some(agent_card(setup));
+    worker
+}
+
+fn client_config(
+    cli: &Cli,
+    setup: &AppSetup,
+    channels: &KernelChannels,
+    log_buffer: &logging::LogBuffer,
+    session: Option<&Session>,
+) -> TuiConfig {
+    let terminal_policy_overrides = cli.terminal_policy_overrides();
+    let session_id = session
+        .map(|session| session.meta.id.clone())
+        .unwrap_or_default();
+    let mut options = setup.options.clone();
+    options.session_id = Some(session_id.clone());
+    let system_prompt = session
+        .and_then(|session| session.system_prompt.clone())
+        .unwrap_or_else(|| setup.system_prompt.clone());
 
     let theme = mush_tui::Theme::from_config(&setup.cfg.theme);
-
     let terminal_policy = setup.cfg.terminal.with_overrides(terminal_policy_overrides);
-
-    let agent_card = {
-        let mut card = mush_agent::AgentCard::build(&setup.model.id, &setup.tools);
-        card.capabilities = mush_agent::Capabilities {
-            streaming: true,
-            multi_pane: true,
-            messaging: true,
-            lsp: setup.lsp_diagnostics.is_some(),
-        };
-        card
-    };
-
     let config_file = config::config_dir().join("config.toml");
-    let provider_api_keys = setup.cfg.api_keys.to_map();
     let (favourite_models, favourites_locked) =
         config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
-    let session_saver = (!cli.no_session)
-        .then(|| SaverThread::spawn(cwd_str.clone()))
-        .transpose()?;
 
-    let tui_config = TuiConfig {
-        model: setup.model,
+    TuiConfig {
+        model: setup.model.clone(),
         system_prompt: Some(system_prompt),
-        options: setup.options,
-        max_turns: setup.max_turns,
-        initial_title: session.meta.title.clone(),
-        initial_conversation: session.conversation,
-        initial_panes,
+        options,
+        initial_title: session.and_then(|session| session.meta.title.clone()),
         theme,
         config_path: if config_file.exists() {
             Some(config_file)
         } else {
             None
         },
-        provider_api_keys,
-        thinking_prefs: setup.thinking_prefs,
+        provider_api_keys: setup.cfg.api_keys.to_map(),
+        thinking_prefs: setup.thinking_prefs.clone(),
         save_thinking_prefs: Some(std::sync::Arc::new(|prefs| {
             config::save_thinking_prefs(prefs);
         })),
@@ -847,10 +931,6 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
         save_last_models: Some(std::sync::Arc::new(|models| {
             config::save_last_models(models);
         })),
-        save_session: session_saver.as_ref().map(|saver| saver.handle()),
-        confirm_tools: setup.cfg.confirm_tools,
-        auto_compact: setup.cfg.auto_compact,
-        auto_fork_compact: setup.cfg.auto_fork_compact,
         show_cost: setup.cfg.show_cost,
         show_usage_lines: setup.cfg.show_usage_lines,
         show_token_counters: setup.cfg.show_token_counters,
@@ -858,38 +938,26 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
         debug_cache: setup.debug_cache,
         cache_timer: setup.cfg.cache_timer,
         thinking_display: setup.cfg.thinking_display,
-        tool_output_live: Some(tool_output_live),
-        kernel_notices: Some(kernel_notices),
-        kernel_prompts: Some(kernel_prompts),
-        kernel_state: setup.kernel_state.clone(),
-        rlm_depth: env_depth("RLM_DEPTH").unwrap_or(0),
-        rlm_max_depth: setup
-            .cfg
-            .rlm_max_depth
-            .or_else(|| env_depth("RLM_MAX_DEPTH"))
-            .unwrap_or(mush_tui::DEFAULT_RLM_MAX_DEPTH),
+        tool_output_live: Some(channels.tool_output_live.clone()),
+        kernel_notices: Some(channels.kernel_notices.clone()),
+        kernel_prompts: Some(channels.kernel_prompts.clone()),
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))
         }),
-        generate_title: !cli.no_session,
         terminal_policy,
-        lifecycle_hooks: setup.lifecycle_hooks,
         cwd: std::env::current_dir().unwrap_or_default(),
-        dynamic_system_context: None,
-        file_rules: setup.file_rules,
-        lsp_diagnostics: setup.lsp_diagnostics,
-        agent_card: Some(agent_card),
-        model_tiers: setup.cfg.model_tiers,
-        compaction_model: setup.compaction_model,
+        agent_card: Some(agent_card(setup)),
+        model_tiers: setup.cfg.model_tiers.clone(),
+        compaction_model: setup.compaction_model.clone(),
         resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
         http_client: Some(setup.http_client.clone()),
-        session_id: session_id.clone(),
+        session_id,
         settings: mush_tui::settings::ScopedSettings {
             scope: setup.cfg.settings.scope,
             anthropic_betas: setup.cfg.settings.anthropic_betas.clone(),
         },
-        favourite_models: favourite_models.clone(),
+        favourite_models,
         favourites_locked,
         save_favourite_models: if favourites_locked {
             None
@@ -933,25 +1001,8 @@ async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
             }
         })),
         mcp: setup.mcp.clone(),
-        skills: setup.skills,
-        tool_allowlist: if setup.rlm {
-            Some(vec!["ipython".into()])
-        } else {
-            cli.tools.clone()
-        },
-        forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
-            setup.cfg.forbidden_chars.iter().copied(),
-            setup.cfg.forbidden_char_classes.iter().copied(),
-        ),
-    };
-
-    Ok(Composed {
-        tui_config,
-        tools: setup.tools,
-        registry: setup.registry,
-        http_client: setup.http_client,
-        session_saver,
-    })
+        skills: setup.skills.clone(),
+    }
 }
 
 struct SaverThread {

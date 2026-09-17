@@ -561,10 +561,9 @@ mod tests {
         let mut image_protos = HashMap::new();
         let saved = Arc::new(std::sync::Mutex::new(None));
         let save_target = saved.clone();
-        let mut tui_config = test_tui_config();
-        tui_config.save_session = Some(Arc::new(move |snapshot| {
+        let saver: mush_runtime::SessionSaver = Arc::new(move |snapshot| {
             *save_target.lock().unwrap() = Some(snapshot);
-        }));
+        });
         for turn in 0..2 {
             let messages = conversation.context();
             let transform = build_context_transform(
@@ -609,7 +608,7 @@ mod tests {
                 if matches!(event, AgentEvent::ContextCompacted { .. }) {
                     let mut session =
                         Session::new(App::new(model.id.clone(), model.context_window));
-                    session.in_process().runtime.saver = tui_config.save_session.clone();
+                    session.in_process().runtime.saver = Some(saver.clone());
                     let (_confirm_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
                     let generation = session.in_process().runtime.turns.register_active(
                         PaneId::new(1),
@@ -1234,10 +1233,7 @@ mod tests {
             model,
             system_prompt: None,
             options: mush_ai::types::StreamOptions::default(),
-            max_turns: 32,
-            initial_conversation: Default::default(),
             initial_title: None,
-            initial_panes: vec![],
             theme: crate::theme::Theme::default(),
             config_path: None,
             provider_api_keys: std::collections::HashMap::new(),
@@ -1245,11 +1241,6 @@ mod tests {
             save_thinking_prefs: None,
             last_models: super::super::LastModels::default(),
             save_last_models: None,
-            save_session: None,
-            generate_title: false,
-            confirm_tools: false,
-            auto_compact: false,
-            auto_fork_compact: false,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,
@@ -1260,11 +1251,7 @@ mod tests {
             tool_output_live: None,
             log_buffer: None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             cwd: std::path::PathBuf::from("/tmp"),
-            dynamic_system_context: None,
-            file_rules: None,
-            lsp_diagnostics: None,
             agent_card: None,
             model_tiers: std::collections::HashMap::new(),
             compaction_model: None,
@@ -1281,13 +1268,8 @@ mod tests {
             reload_context: None,
             mcp: None,
             skills: Default::default(),
-            tool_allowlist: None,
             kernel_notices: None,
             kernel_prompts: None,
-            kernel_state: None,
-            rlm_depth: 0,
-            rlm_max_depth: 2,
-            forbidden_chars: Default::default(),
         }
     }
 

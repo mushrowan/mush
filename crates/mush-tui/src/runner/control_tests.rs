@@ -518,7 +518,9 @@ async fn control_pty_child() {
         fail: false,
     }));
     let saved_dir = dir.clone();
-    config.save_session = Some(Arc::new(move |snapshot| {
+    let mut worker = config.worker_for_test();
+    worker.agent_card = config.agent_card.clone();
+    worker.saver = Some(Arc::new(move |snapshot| {
         let mut session = mush_session::Session::new("fixture", &saved_dir.display().to_string());
         session.meta.id = snapshot.session_id;
         session.conversation = snapshot.primary;
@@ -526,7 +528,7 @@ async fn control_pty_child() {
             .save(&session)
             .unwrap();
     }));
-    super::run_tui(config, &ToolRegistry::new(), &registry, None)
+    super::run_tui(config, worker, &ToolRegistry::new(), &registry, None)
         .await
         .unwrap();
     mush_ai::private_io::write_private(

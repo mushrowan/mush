@@ -38,6 +38,7 @@ mush-session.workspace = true
 mush-ext.workspace = true
 mush-mcp.workspace = true
 mush-tui.workspace = true
+mush-runtime.workspace = true
 mush-daemon.workspace = true
 mush-treesitter.workspace = true
 mush-lsp.workspace = true

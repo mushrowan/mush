@@ -6,7 +6,7 @@ use mush_ai::types::{Message, ThinkingLevel};
 use notify::RecommendedWatcher;
 
 use crate::app::App;
-use crate::session::{AgentConnection, InProcessConnection, Session, SessionRuntime};
+use crate::session::{AgentConnection, Session};
 use crate::slash_menu::SlashCommand;
 
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -352,30 +352,6 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     }
 
     app
-}
-
-pub(super) fn in_process_connection(
-    tui_config: &mut TuiConfig,
-    tools: &mush_agent::tool::ToolRegistry,
-    registry: &mush_ai::registry::ApiRegistry,
-) -> InProcessConnection {
-    let mut runtime = SessionRuntime::new(std::mem::take(&mut tui_config.initial_conversation));
-    runtime.saver = tui_config.save_session.clone();
-    runtime.session_id = tui_config.session_id.clone();
-    runtime.title = tui_config.initial_title.clone();
-    runtime.model_id = tui_config.model.id.to_string();
-    runtime.system_prompt = tui_config.system_prompt.clone();
-    runtime.rlm_depth = tui_config.rlm_depth;
-    runtime.rlm_max_depth = tui_config.rlm_max_depth;
-    runtime.thinking_level = initial_thinking_level(tui_config);
-    runtime.set_kernel_state(tui_config.kernel_state.clone());
-    InProcessConnection::new(
-        runtime,
-        tools.clone(),
-        registry.clone(),
-        tui_config.turn_config(),
-        tui_config.injections(),
-    )
 }
 
 fn seed_from_state(
@@ -968,8 +944,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                let connection = in_process_connection(
-                    &mut config,
+                let connection = config.worker_for_test().connect(
                     &mush_agent::tool::ToolRegistry::new(),
                     &mush_ai::registry::ApiRegistry::new(),
                 );

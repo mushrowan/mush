@@ -45,46 +45,17 @@ pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir}
 
 use self::diag::verify_terminal_restored;
 
-pub struct HostedWorker {
-    pub connection: mush_runtime::InProcessConnection,
-    pub ipc_listener: Option<mush_agent::IpcListener>,
-}
-
-pub fn host_worker(
-    tui_config: &mut TuiConfig,
-    tools: &ToolRegistry,
-    registry: &ApiRegistry,
-) -> io::Result<HostedWorker> {
-    let mut connection = runtime::in_process_connection(tui_config, tools, registry);
-    let ipc_listener = match &tui_config.agent_card {
-        Some(card) => {
-            let card = std::sync::Arc::new(card.clone());
-            let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
-            let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
-            let listener =
-                mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-            connection.attach_control(control, sock);
-            Some(listener)
-        }
-        None => None,
-    };
-    connection.attach_inbox_from_env();
-    Ok(HostedWorker {
-        connection,
-        ipc_listener,
-    })
-}
-
 pub async fn run_tui(
-    mut tui_config: TuiConfig,
+    tui_config: TuiConfig,
+    worker: mush_runtime::WorkerConfig,
     tools: &ToolRegistry,
     registry: &ApiRegistry,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<()> {
-    let HostedWorker {
+    let mush_runtime::HostedWorker {
         connection,
         ipc_listener,
-    } = host_worker(&mut tui_config, tools, registry)?;
+    } = mush_runtime::host_worker(worker, tools, registry)?;
     run_tui_with(
         tui_config,
         Box::new(connection),

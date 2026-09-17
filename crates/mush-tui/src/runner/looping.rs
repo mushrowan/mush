@@ -514,9 +514,6 @@ mod tests {
         ] {
             let mut config = super::super::TuiConfig::for_test();
             config.cache_timer = case != "disabled";
-            config.auto_fork_compact = false;
-            config.generate_title = false;
-            config.save_session = None;
             let session = crate::session::Session::new(crate::app::App::new(
                 config.model.id.clone(),
                 config.model.context_window,
