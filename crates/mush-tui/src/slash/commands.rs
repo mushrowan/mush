@@ -2,24 +2,22 @@ use std::fmt::Write;
 
 use mush_ai::models;
 use mush_ai::types::*;
-use mush_session::ConversationState;
 
 use crate::TuiConfig;
 use crate::app::App;
 use crate::runner::ThinkingPrefs;
-use crate::session::SessionRuntime;
 use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
 
-pub fn handle(
+pub async fn handle(
     app: &mut App,
-    runtime: &mut SessionRuntime,
+    connection: &mut dyn mush_runtime::AgentConnection,
     tui_config: &mut TuiConfig,
     thinking_prefs: &ThinkingPrefs,
     action: &SlashAction,
 ) -> Option<String> {
-    let conversation = &runtime.conversation;
+    let state = connection.state();
     match action {
         SlashAction::Subagents { .. } => None,
         SlashAction::Help => {
@@ -145,7 +143,7 @@ pub fn handle(
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {
-            show_tree(app, conversation);
+            show_tree(app, &connection.tree());
             None
         }
         SlashAction::Branch { index: None } => {
@@ -196,7 +194,11 @@ pub fn handle(
             show_all: _,
         } => {
             handle_model_switch(app, tui_config, thinking_prefs, model_id);
-            runtime.model_id = app.model_id.to_string();
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetModel(
+                    app.model_id.to_string(),
+                ))
+                .await;
             None
         }
         SlashAction::Search { query } => {
@@ -228,8 +230,8 @@ pub fn handle(
                 "session: {title}\nid: {}\nfile: {}{saved}\nmessages in context: {}, entries in tree: {}\nmodel: {}",
                 tui_config.session_id,
                 path.display(),
-                conversation.context_len(),
-                conversation.tree().len(),
+                state.context_len,
+                state.tree_len,
                 app.model_id,
             ));
             None
@@ -237,14 +239,16 @@ pub fn handle(
         SlashAction::RlmMaxDepth { max_depth: None } => {
             app.push_system_message(format!(
                 "rlm max depth: {} (depth {})",
-                runtime.rlm_max_depth, runtime.rlm_depth
+                state.rlm_max_depth, state.rlm_depth
             ));
             None
         }
         SlashAction::RlmMaxDepth {
             max_depth: Some(max_depth),
         } => {
-            runtime.set_rlm_max_depth(*max_depth);
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetRlmMaxDepth(*max_depth))
+                .await;
             app.status = Some(format!("rlm max depth set: {max_depth}").into());
             None
         }
@@ -486,8 +490,7 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
-fn show_tree(app: &mut App, conversation: &ConversationState) {
-    let tree = conversation.tree();
+fn show_tree(app: &mut App, tree: &mush_session::tree::SessionTree) {
     let user_msgs: Vec<_> = tree
         .current_branch()
         .into_iter()
@@ -940,7 +943,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     crate::conversation_display::rebuild_display(app, conversation);
 }
 
-pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str) {
+pub fn handle_export(app: &mut App, history: &[Message], args: &str) {
     let path = if args.trim().is_empty() {
         std::path::PathBuf::from("conversation.md")
     } else {
@@ -948,8 +951,7 @@ pub fn handle_export(app: &mut App, conversation: &ConversationState, args: &str
     };
 
     let mut md = String::new();
-    let messages = conversation.display_history();
-    for msg in &messages {
+    for msg in history {
         match msg {
             Message::Event(event) => {
                 md.push_str(&format!("## non-human event\n\n{}\n\n", event.audit_text()))
@@ -1041,9 +1043,13 @@ mod tests {
         let human: Message = serde_json::from_value(serde_json::json!({
             "role":"user", "content":"[local control event] genuine human fixture", "timestamp_ms":13
         })).unwrap();
-        let conversation = ConversationState::from_messages(vec![event, human]);
+        let conversation = mush_session::ConversationState::from_messages(vec![event, human]);
         let mut app = App::new("fixture".into(), TokenCount::new(65536));
-        handle_export(&mut app, &conversation, path.to_str().unwrap());
+        handle_export(
+            &mut app,
+            &conversation.display_history(),
+            path.to_str().unwrap(),
+        );
         let markdown = std::fs::read_to_string(path).unwrap();
         assert_eq!(markdown.matches("## non-human event\n").count(), 1);
         assert_eq!(markdown.matches("## you\n").count(), 1);
@@ -1147,26 +1153,28 @@ mod tests {
         assert!(app.compaction_model_id.is_none());
     }
 
-    fn name_session(app: &mut App, title: Option<&str>) {
+    async fn name_session(app: &mut App, title: Option<&str>) {
         let mut config = test_tui_config(None);
-        let mut runtime = SessionRuntime::default();
+        let mut connection =
+            mush_runtime::InProcessConnection::detached(mush_runtime::SessionRuntime::default());
         handle(
             app,
-            &mut runtime,
+            &mut connection,
             &mut config,
             &ThinkingPrefs::default(),
             &SlashAction::Name {
                 title: title.map(str::to_string),
             },
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn name_without_a_title_reports_the_current_one() {
+    #[tokio::test]
+    async fn name_without_a_title_reports_the_current_one() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.session_title = Some("port prime".into());
 
-        name_session(&mut app, None);
+        name_session(&mut app, None).await;
 
         assert_eq!(app.session_title.as_deref(), Some("port prime"));
         assert!(

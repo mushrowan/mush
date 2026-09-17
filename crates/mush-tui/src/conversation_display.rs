@@ -414,7 +414,11 @@ mod tests {
         assert_eq!(app.messages[2].role, MessageRole::Event(EventKind::Summary));
         let dir = tempfile::tempdir().unwrap();
         let export = dir.path().join("export.md");
-        crate::slash::commands::handle_export(&mut app, &conversation, export.to_str().unwrap());
+        crate::slash::commands::handle_export(
+            &mut app,
+            &conversation.display_history(),
+            export.to_str().unwrap(),
+        );
         let exported = std::fs::read_to_string(export).unwrap();
         assert!(exported.starts_with("## non-human event\n"));
         assert!(exported.contains("\"timestamp_ms\":12"));
@@ -472,7 +476,7 @@ mod tests {
             let export = dir.path().join("audit.md");
             crate::slash::commands::handle_export(
                 &mut app,
-                &conversation,
+                &conversation.display_history(),
                 export.to_str().unwrap(),
             );
             let exported = std::fs::read_to_string(export).unwrap();

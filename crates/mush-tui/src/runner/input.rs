@@ -438,9 +438,7 @@ pub(super) async fn handle_idle_terminal_events(
                             }
                             let expanded = slash::expand_template(&text);
                             let pane = &mut *session;
-                            if pane.label.is_none()
-                                && pane.connection.runtime.conversation.is_empty()
-                            {
+                            if pane.label.is_none() && pane.connection.state().context_len == 0 {
                                 pane.label = Some(expanded.chars().take(30).collect());
                             }
                             let pane = &mut *session;

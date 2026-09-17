@@ -67,6 +67,7 @@ pub fn finish_side_question(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_runtime::AgentConnection;
 
     #[test]
     fn the_context_ends_with_the_question_and_carries_no_tools() {
@@ -131,13 +132,9 @@ mod tests {
             .unwrap();
         model.api = mush_ai::types::Api::AnthropicMessages;
         model.provider = mush_ai::types::Provider::Anthropic;
-        let before = session.connection.runtime.conversation.context_len();
+        let before = session.connection.state().context_len;
 
-        let context = side_question_context(
-            None,
-            session.connection.runtime.conversation.context(),
-            "why slow?",
-        );
+        let context = side_question_context(None, session.connection.transcript(), "why slow?");
         let pending = start_side_question(
             &mut session.app,
             registry,
@@ -151,10 +148,7 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        assert_eq!(
-            session.connection.runtime.conversation.context_len(),
-            before
-        );
+        assert_eq!(session.connection.state().context_len, before);
         let last = session.app.messages.iter().last().unwrap();
         assert_eq!(
             last.content,

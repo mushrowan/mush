@@ -42,6 +42,7 @@ pub enum ClientCommand {
     },
     SetModel(String),
     SetThinking(ThinkingLevel),
+    SetRlmMaxDepth(u32),
     Session(SessionCommand),
     Compact {
         focus: CompactionFocus,
@@ -85,6 +86,9 @@ pub struct ConnectionState {
     pub thinking_level: ThinkingLevel,
     pub context_tokens: TokenCount,
     pub context_len: usize,
+    pub tree_len: usize,
+    pub rlm_depth: u32,
+    pub rlm_max_depth: u32,
     pub turn_active: bool,
     pub compacting: bool,
 }
@@ -107,6 +111,8 @@ pub trait AgentConnection: Send {
     async fn next_event(&mut self) -> Option<ClientEvent>;
     fn state(&self) -> ConnectionState;
     fn transcript(&self) -> Vec<Message>;
+    fn history(&self) -> Vec<Message>;
+    fn tree(&self) -> mush_session::tree::SessionTree;
 }
 
 pub struct InProcessConnection {
@@ -503,6 +509,7 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::ConfirmTool { allow } => self.confirm(allow).await,
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
+            ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
             ClientCommand::Session(command) => {
                 let events = self.runtime.handle(command).await;
                 self.queued
@@ -561,6 +568,9 @@ impl AgentConnection for InProcessConnection {
             thinking_level: self.runtime.thinking_level.clone(),
             context_tokens: self.runtime.context_tokens,
             context_len: self.runtime.conversation.context_len(),
+            tree_len: self.runtime.conversation.tree().len(),
+            rlm_depth: self.runtime.rlm_depth,
+            rlm_max_depth: self.runtime.rlm_max_depth,
             turn_active: self.turn_active(),
             compacting: self.compaction.is_some(),
         }
@@ -568,6 +578,14 @@ impl AgentConnection for InProcessConnection {
 
     fn transcript(&self) -> Vec<Message> {
         self.runtime.conversation.context()
+    }
+
+    fn history(&self) -> Vec<Message> {
+        self.runtime.conversation.display_history()
+    }
+
+    fn tree(&self) -> mush_session::tree::SessionTree {
+        self.runtime.conversation.tree().clone()
     }
 }
 
