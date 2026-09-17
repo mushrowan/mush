@@ -236,7 +236,6 @@ pub async fn run_tui(
         runtime.notify_cache_state(tui_config.cache_timer);
         stream_state.poll_signal().await;
 
-        let compaction_finished = runtime.poll_pending_compactions(&tui_config).await;
         let side_question_finished = runtime.session.poll_side_questions().await;
 
         let maintenance_tick = last_draw.elapsed() >= std::time::Duration::from_secs(1)
@@ -246,7 +245,6 @@ pub async fn run_tui(
             || inbox_disabled
             || notice_submitted
             || discovery_updated
-            || compaction_finished
             || side_question_finished
             || maintenance_tick;
         if should_draw {
@@ -255,12 +253,7 @@ pub async fn run_tui(
             {
                 last_animation = std::time::Instant::now();
             }
-            trace_draw_reasons(
-                action,
-                discovery_updated,
-                compaction_finished,
-                maintenance_tick,
-            );
+            trace_draw_reasons(action, discovery_updated, maintenance_tick);
             runtime.poll_usage();
             report_loop_progress(
                 &stall_watchdog,
@@ -324,20 +317,12 @@ fn report_loop_progress(
     );
 }
 
-fn trace_draw_reasons(
-    action: LoopAction,
-    discovery_updated: bool,
-    compaction_finished: bool,
-    maintenance_tick: bool,
-) {
+fn trace_draw_reasons(action: LoopAction, discovery_updated: bool, maintenance_tick: bool) {
     if matches!(action, LoopAction::Redraw) {
         tracing::trace!(target: "mush_tui::draw_reason", reason = "loop_action", "draw requested");
     }
     if discovery_updated {
         tracing::trace!(target: "mush_tui::draw_reason", reason = "discovery_updated", "draw requested");
-    }
-    if compaction_finished {
-        tracing::trace!(target: "mush_tui::draw_reason", reason = "compaction_finished", "draw requested");
     }
     if maintenance_tick {
         tracing::trace!(target: "mush_tui::draw_reason", reason = "maintenance_tick", "draw requested");

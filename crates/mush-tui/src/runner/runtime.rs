@@ -1,16 +1,13 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig, streams};
-use mush_ai::types::PaneId;
+use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use mush_ai::types::ThinkingLevel;
 use mush_session::ConversationState;
 use notify::RecommendedWatcher;
 
 use crate::app::App;
 use crate::session::Session;
-use crate::slash::PendingCompaction;
 use crate::slash_menu::SlashCommand;
 
 pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -79,9 +76,7 @@ pub(super) struct RunnerRuntime {
     pub session: Session,
     pub thinking_prefs: ThinkingPrefs,
     pub thinking_saver: Option<ThinkingPrefsSaver>,
-    pub lifecycle_hooks: mush_agent::LifecycleHooks,
     pub pending_prompt: Option<String>,
-    pub pending_compactions: HashMap<PaneId, PendingCompaction>,
     usage_rx: Option<tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage>>,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
@@ -96,9 +91,7 @@ impl RunnerRuntime {
             session,
             thinking_prefs,
             thinking_saver: None,
-            lifecycle_hooks: mush_agent::LifecycleHooks::default(),
             pending_prompt: None,
-            pending_compactions: HashMap::new(),
             usage_rx: None,
             _config_watcher: None,
             config_rx: None,
@@ -142,9 +135,7 @@ impl RunnerRuntime {
             session,
             thinking_prefs: std::mem::take(&mut tui_config.thinking_prefs),
             thinking_saver: tui_config.save_thinking_prefs.clone(),
-            lifecycle_hooks: tui_config.lifecycle_hooks.clone(),
             pending_prompt: None,
-            pending_compactions: HashMap::new(),
             usage_rx,
             _config_watcher,
             config_rx,
@@ -229,71 +220,6 @@ impl RunnerRuntime {
                 })
             })
             .collect()
-    }
-
-    pub(super) async fn poll_pending_compactions(&mut self, tui_config: &TuiConfig) -> bool {
-        let finished: Vec<PaneId> = self
-            .pending_compactions
-            .iter()
-            .filter_map(|(id, pending)| pending.task.is_finished().then_some(*id))
-            .collect();
-        if finished.is_empty() {
-            return false;
-        }
-        for pane_id in finished {
-            let Some(pending) = self.pending_compactions.remove(&pane_id) else {
-                continue;
-            };
-            let result = match pending.task.await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "compaction task panicked");
-                    {
-                        let pane = &mut self.session;
-                        pane.app.compacting = false;
-                        pane.app.push_system_message("compaction failed");
-                    }
-                    continue;
-                }
-            };
-            self.handle_compaction_task_result(pane_id, result, tui_config);
-        }
-        true
-    }
-
-    pub(super) fn handle_compaction_task_result(
-        &mut self,
-        _pane_id: PaneId,
-        result: crate::slash::CompactionTaskResult,
-        tui_config: &TuiConfig,
-    ) {
-        let applied = {
-            let pane = &mut self.session;
-            match result {
-                crate::slash::CompactionTaskResult::Applied(result) => {
-                    crate::slash::apply_applied_compaction(
-                        &mut pane.app,
-                        &mut pane.connection.runtime,
-                        result,
-                    );
-                    replay_compaction_inputs(pane);
-                    true
-                }
-                crate::slash::CompactionTaskResult::Failed {
-                    failure,
-                    tokens_before,
-                    model_id,
-                } => {
-                    pane.app
-                        .open_compaction_recovery(failure, tokens_before, model_id);
-                    false
-                }
-            }
-        };
-
-        if applied && let Some(saver) = &tui_config.save_session {
-            saver(streams::build_session_snapshot(&self.session, tui_config));
-        }
     }
 
     pub(super) fn notify_cache_state(&mut self, enabled: bool) {
@@ -746,9 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn applied_compaction_persists_session() {
-        use std::sync::{Arc, Mutex};
-
+    fn applied_compaction_shows_the_banner_and_replays_queued_input() {
         let mut msgs = Vec::new();
         for i in 0..12 {
             msgs.push(user_message(&format!("q {i}")));
@@ -757,16 +681,10 @@ mod tests {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
         pane.connection.runtime.conversation = ConversationState::from_messages(msgs);
-        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
-
-        let saved: Arc<Mutex<Option<crate::runner::SessionSnapshot>>> = Arc::new(Mutex::new(None));
-        let saved_clone = saved.clone();
+        pane.queue_input_during_compaction("while you were away".into(), Vec::new());
         let mut config = test_config();
-        config.save_session = Some(Arc::new(move |snapshot| {
-            *saved_clone.lock().unwrap() = Some(snapshot);
-        }));
 
-        let context = runtime.session.connection.runtime.conversation.context();
+        let context = pane.connection.runtime.conversation.context();
         let applied = crate::slash::AppliedCompaction {
             messages: context,
             summary: "summary of earlier turns".into(),
@@ -778,22 +696,29 @@ mod tests {
             diagnostics: mush_session::compact::CompactionDiagnostics::default(),
             instructions: None,
         };
-        let result = crate::slash::CompactionTaskResult::Applied(applied);
 
-        runtime.handle_compaction_task_result(PaneId::new(1), result, &config);
+        super::super::looping::apply_command_events(
+            &mut pane,
+            &mut config,
+            vec![mush_runtime::ClientEvent::Compacted(applied)],
+        );
 
-        let snapshot = saved
-            .lock()
-            .unwrap()
-            .take()
-            .expect("session must be saved after a successful compaction");
-        let has_compaction =
-            snapshot.primary.tree().entries().iter().any(|entry| {
-                matches!(entry.kind, mush_session::tree::EntryKind::Compaction { .. })
-            });
+        assert!(!pane.app.compacting);
         assert!(
-            has_compaction,
-            "persisted snapshot must contain the compaction node"
+            pane.app
+                .status
+                .as_ref()
+                .is_some_and(|status| status.text.starts_with("compacted with test")),
+            "{:?}",
+            pane.app.status
+        );
+        assert_eq!(
+            pane.connection
+                .runtime
+                .pending_prompt
+                .as_ref()
+                .map(|p| p.text.as_str()),
+            Some("while you were away")
         );
     }
 
@@ -819,7 +744,23 @@ mod tests {
             model_id: "test".into(),
         };
 
-        runtime.handle_compaction_task_result(PaneId::new(1), failed, &test_config());
+        let crate::slash::CompactionTaskResult::Failed {
+            failure,
+            tokens_before,
+            model_id,
+        } = failed
+        else {
+            unreachable!()
+        };
+        super::super::looping::apply_command_events(
+            &mut runtime.session,
+            &mut test_config(),
+            vec![mush_runtime::ClientEvent::CompactionFailed {
+                failure,
+                tokens_before,
+                model_id,
+            }],
+        );
 
         let app = &runtime.session.app;
         assert_eq!(

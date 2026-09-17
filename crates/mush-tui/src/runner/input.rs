@@ -1,4 +1,3 @@
-use mush_ai::types::PaneId;
 use std::io;
 use std::path::Path;
 
@@ -7,7 +6,7 @@ use mush_ai::registry::ApiRegistry;
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
-use crate::session::Session;
+use crate::session::{AgentConnection, Session};
 
 use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
 use super::streams::{
@@ -38,11 +37,8 @@ pub(super) struct InputDeps<'a> {
     pub thinking_prefs: &'a mut ThinkingPrefs,
     pub thinking_saver: &'a Option<ThinkingPrefsSaver>,
     pub registry: &'a ApiRegistry,
-    pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
-    pub pending_compactions:
-        &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     pub size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 }
@@ -146,66 +142,31 @@ async fn handle_compaction_recovery_action(
     deps: &mut InputDeps<'_>,
     action: crate::app_state::CompactionRecoveryAction,
 ) {
-    let pane_id = PaneId::new(1);
     let Some(recovery) = session.app.interaction.compaction_recovery.take() else {
         session.app.interaction.mode = app::AppMode::Insert;
         return;
     };
     session.app.interaction.mode = app::AppMode::Insert;
 
-    match action {
+    let command = match action {
         crate::app_state::CompactionRecoveryAction::Retry => {
-            if deps.pending_compactions.contains_key(&pane_id) {
-                session
-                    .app
-                    .push_system_message("compaction already in progress on this pane");
-                return;
-            }
-            let target = super::streams::compaction_target(session, pane_id, deps.tui_config).await;
-            session.app.status = Some("retrying compaction…".into());
-            session.app.compacting = true;
-            let task = crate::slash::start_compaction(
-                recovery.failure.original_messages().to_vec(),
-                target.model,
-                target.options,
-                deps.registry.clone(),
-                Some(deps.lifecycle_hooks.clone()),
-                Some(deps.cwd.to_path_buf()),
-                recovery.failure.focus().clone(),
-            );
-            deps.pending_compactions
-                .insert(pane_id, crate::slash::PendingCompaction { task });
+            session.app.status = Some("retrying compaction\u{2026}".into());
+            mush_runtime::ClientCommand::CompactionRetry
         }
         crate::app_state::CompactionRecoveryAction::Fallback => {
-            let applied = crate::slash::fallback_applied_compaction(
-                recovery.failure,
-                recovery.tokens_before,
-                recovery.model_id,
-                Some(deps.lifecycle_hooks),
-                Some(deps.cwd),
-            )
-            .await;
-            let pane = &mut *session;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.connection.runtime,
-                applied,
-            );
-            super::runtime::replay_compaction_inputs(pane);
-            if let Some(saver) = &deps.tui_config.save_session {
-                saver(super::streams::build_session_snapshot(
-                    session,
-                    deps.tui_config,
-                ));
-            }
+            mush_runtime::ClientCommand::CompactionFallback
         }
         crate::app_state::CompactionRecoveryAction::Cancel => {
-            let pane = &mut *session;
-            pane.app.compacting = false;
-            pane.app.status = Some("compaction cancelled".into());
-            pane.app.push_system_message("compaction cancelled");
-            super::runtime::replay_compaction_inputs(pane);
+            session.app.compacting = false;
+            session.app.status = Some("compaction cancelled".into());
+            super::runtime::replay_compaction_inputs(session);
+            return;
         }
+    };
+    drop(recovery);
+    match session.connection.send(command).await {
+        Ok(events) => super::looping::apply_command_events(session, deps.tui_config, events),
+        Err(error) => session.app.push_system_message(error.to_string()),
     }
 }
 
@@ -409,10 +370,8 @@ async fn handle_streaming_key_event(
                     tui_config: deps.tui_config,
                     thinking_prefs: deps.thinking_prefs,
                     registry: deps.registry,
-                    lifecycle_hooks: deps.lifecycle_hooks,
                     cwd: deps.cwd,
                     pending_prompt: deps.pending_prompt,
-                    pending_compactions: deps.pending_compactions,
                 },
             )
             .await;
@@ -472,8 +431,7 @@ pub(super) async fn handle_idle_terminal_events(
                 } else {
                     match app_event {
                         AppEvent::UserSubmit { text, images } => {
-                            let pane_id = PaneId::new(1);
-                            if deps.pending_compactions.contains_key(&pane_id) {
+                            if session.connection.state().compacting {
                                 let pane = &mut *session;
                                 pane.queue_input_during_compaction(text, images);
                                 continue;
@@ -526,10 +484,8 @@ pub(super) async fn handle_idle_terminal_events(
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
                                     registry: deps.registry,
-                                    lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
-                                    pending_compactions: deps.pending_compactions,
                                 },
                             )
                             .await;
@@ -555,10 +511,8 @@ pub(super) async fn handle_idle_terminal_events(
                                     tui_config: deps.tui_config,
                                     thinking_prefs: deps.thinking_prefs,
                                     registry: deps.registry,
-                                    lifecycle_hooks: deps.lifecycle_hooks,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
-                                    pending_compactions: deps.pending_compactions,
                                 },
                             )
                             .await;
@@ -819,7 +773,7 @@ mod tests {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             let (reply, mut received) = tokio::sync::oneshot::channel();
             state.register_active(
-                PaneId::new(1),
+                mush_ai::types::PaneId::new(1),
                 mush_runtime::StreamMeta {
                     cancel: tokio_util::sync::CancellationToken::new(),
                     steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -846,9 +800,7 @@ mod tests {
                 .completion(mush_notify::Completion(1));
             let mut tui_config = streaming_test_config();
             let registry = mush_ai::registry::ApiRegistry::new();
-            let lifecycle_hooks = mush_agent::LifecycleHooks::default();
             let mut pending_prompt = None;
-            let mut pending_compactions = std::collections::HashMap::new();
             let image_picker = None;
             let size_cache = Rc::new(CachedSizeState::default());
             let mut deps = InputDeps {
@@ -856,10 +808,8 @@ mod tests {
                 thinking_prefs: &mut ThinkingPrefs::default(),
                 thinking_saver: &None,
                 registry: &registry,
-                lifecycle_hooks: &lifecycle_hooks,
                 cwd: std::path::Path::new(""),
                 pending_prompt: &mut pending_prompt,
-                pending_compactions: &mut pending_compactions,
                 image_picker: &image_picker,
                 size_cache: &size_cache,
             };
@@ -910,7 +860,7 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut stream_state = StreamState::new();
         session.connection.runtime.turns.register_active(
-            PaneId::new(1),
+            mush_ai::types::PaneId::new(1),
             mush_runtime::StreamMeta {
                 cancel: tokio_util::sync::CancellationToken::new(),
                 steering_queue: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -925,9 +875,7 @@ mod tests {
         );
         let mut tui_config = streaming_test_config();
         let registry = mush_ai::registry::ApiRegistry::new();
-        let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
-        let mut pending_compactions = std::collections::HashMap::new();
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
         let mut deps = InputDeps {
@@ -935,10 +883,8 @@ mod tests {
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
             registry: &registry,
-            lifecycle_hooks: &lifecycle_hooks,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
-            pending_compactions: &mut pending_compactions,
             image_picker: &image_picker,
             size_cache: &size_cache,
         };
@@ -967,9 +913,7 @@ mod tests {
         let mut stream_state = StreamState::new();
         let mut tui_config = streaming_test_config();
         let registry = mush_ai::registry::ApiRegistry::new();
-        let lifecycle_hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
-        let mut pending_compactions = std::collections::HashMap::new();
         let image_picker = None;
         let size_cache = Rc::new(CachedSizeState::default());
         let mut deps = InputDeps {
@@ -977,10 +921,8 @@ mod tests {
             thinking_prefs: &mut ThinkingPrefs::default(),
             thinking_saver: &None,
             registry: &registry,
-            lifecycle_hooks: &lifecycle_hooks,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
-            pending_compactions: &mut pending_compactions,
             image_picker: &image_picker,
             size_cache: &size_cache,
         };

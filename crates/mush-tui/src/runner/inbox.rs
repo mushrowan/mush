@@ -8,6 +8,7 @@ use mush_session::inbox::contains;
 use mush_session::inbox::{Consumer, Event};
 
 use super::{TuiConfig, runtime::RunnerRuntime, streams::StreamState};
+use crate::session::AgentConnection;
 
 pub(super) struct OrchestratorInbox {
     consumer: Arc<Consumer>,
@@ -205,7 +206,7 @@ pub(super) async fn safe_to_consume(_state: &StreamState, runtime: &RunnerRuntim
         && runtime.session.app.input.images.is_empty()
         && runtime.session.app.active_tools.is_empty()
         && runtime.pending_prompt.is_none()
-        && runtime.pending_compactions.is_empty()
+        && !runtime.session.connection.state().compacting
         && runtime.session.connection.runtime.pending_prompt.is_none()
         && runtime
             .session

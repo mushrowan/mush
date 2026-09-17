@@ -245,7 +245,7 @@ pub(super) async fn handle_turn_ended(
     session: &mut Session,
     stream_state: &mut StreamState,
     pane_id: PaneId,
-    tui_config: &TuiConfig,
+    tui_config: &mut TuiConfig,
     registry: &ApiRegistry,
     automatic_continuation: bool,
     cancelled: bool,
@@ -284,7 +284,7 @@ pub(super) async fn handle_turn_ended(
     }
 
     if tui_config.auto_fork_compact {
-        auto_compact(session, pane_id, tui_config, registry).await;
+        auto_compact(session, pane_id, tui_config).await;
     }
 
     stream_state.save_session_now(session, tui_config);
@@ -349,16 +349,9 @@ async fn reconcile_openrouter_generation(
     }
 }
 
-async fn auto_compact(
-    session: &mut Session,
-    pane_id: PaneId,
-    tui_config: &TuiConfig,
-    registry: &ApiRegistry,
-) {
-    let pane = &*session;
-
-    let context_tokens = pane.app.stats.context_tokens;
-    let messages = pane.connection.runtime.conversation.context();
+async fn auto_compact(session: &mut Session, pane_id: PaneId, tui_config: &mut TuiConfig) {
+    let context_tokens = session.app.stats.context_tokens;
+    let messages = session.connection.runtime.conversation.context();
     let target = compaction_target(session, pane_id, tui_config).await;
 
     if !mush_session::compact::needs_compaction_for_messages(
@@ -369,50 +362,16 @@ async fn auto_compact(
         return;
     }
 
-    let pane = &mut *session;
-
-    let task = crate::slash::start_compaction(
-        messages,
-        target.model,
-        target.options,
-        registry.clone(),
-        Some(tui_config.lifecycle_hooks.clone()),
-        Some(tui_config.cwd.clone()),
-        mush_session::compact::CompactionFocus::default(),
-    );
-    let Ok(result) = task.await else {
-        pane.app.push_system_message("auto-compaction task failed");
-        return;
-    };
-
-    let pane = session;
-    match result {
-        crate::slash::CompactionTaskResult::Applied(result) => {
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.connection.runtime,
-                result,
-            );
-        }
-        crate::slash::CompactionTaskResult::Failed {
-            failure,
-            tokens_before,
-            model_id,
-        } => {
-            let applied = crate::slash::fallback_applied_compaction(
-                failure,
-                tokens_before,
-                model_id,
-                Some(&tui_config.lifecycle_hooks),
-                Some(&tui_config.cwd),
-            )
-            .await;
-            crate::slash::apply_applied_compaction(
-                &mut pane.app,
-                &mut pane.connection.runtime,
-                applied,
-            );
-        }
+    match session
+        .connection
+        .send(mush_runtime::ClientCommand::Compact {
+            focus: mush_session::compact::CompactionFocus::default(),
+            auto: true,
+        })
+        .await
+    {
+        Ok(events) => super::looping::apply_command_events(session, tui_config, events),
+        Err(error) => tracing::debug!(%error, "auto compaction skipped"),
     }
 }
 

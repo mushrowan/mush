@@ -269,10 +269,8 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
             registry: &registry,
-            lifecycle_hooks: &mush_agent::LifecycleHooks::default(),
             cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
-            pending_compactions: &mut runtime.pending_compactions,
         },
     )
     .await;
@@ -301,10 +299,8 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
             registry: &registry,
-            lifecycle_hooks: &mush_agent::LifecycleHooks::default(),
             cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
-            pending_compactions: &mut runtime.pending_compactions,
         },
     )
     .await;
@@ -1083,10 +1079,8 @@ async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
                 tui_config: &mut config,
                 thinking_prefs: &runtime.thinking_prefs,
                 registry: &registry,
-                lifecycle_hooks: &runtime.lifecycle_hooks,
                 cwd: &runtime.cwd,
                 pending_prompt: &mut runtime.pending_prompt,
-                pending_compactions: &mut runtime.pending_compactions,
             },
         )
         .await;

@@ -1,10 +1,9 @@
-use mush_ai::types::PaneId;
 use std::path::Path;
 
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::ThinkingLevel;
 
-use crate::session::Session;
+use crate::session::{AgentConnection, Session};
 use crate::slash::{self, SlashAction};
 
 use super::{ThinkingPrefs, TuiConfig};
@@ -13,11 +12,8 @@ pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
     pub thinking_prefs: &'a ThinkingPrefs,
     pub registry: &'a ApiRegistry,
-    pub lifecycle_hooks: &'a mush_agent::LifecycleHooks,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
-    pub pending_compactions:
-        &'a mut std::collections::HashMap<mush_ai::types::PaneId, crate::slash::PendingCompaction>,
 }
 
 async fn run_session_command(
@@ -25,7 +21,24 @@ async fn run_session_command(
     tui_config: &mut TuiConfig,
     command: mush_runtime::SessionCommand,
 ) -> bool {
-    let events = session.connection.runtime.handle(command).await;
+    let events = match session
+        .connection
+        .send(mush_runtime::ClientCommand::Session(command))
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            session.app.push_system_message(error.to_string());
+            return false;
+        }
+    };
+    let events: Vec<mush_runtime::SessionEvent> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            mush_runtime::ClientEvent::Session(event) => Some(event),
+            _ => None,
+        })
+        .collect();
     let changed = events.iter().any(|event| {
         matches!(
             event,
@@ -46,10 +59,8 @@ pub(super) async fn handle_slash_action(
         tui_config,
         thinking_prefs,
         registry,
-        lifecycle_hooks,
         cwd,
         pending_prompt,
-        pending_compactions,
     } = env;
     let mut state_changed = false;
     let changes_conversation = matches!(
@@ -68,7 +79,7 @@ pub(super) async fn handle_slash_action(
             || !session.app.active_tools.is_empty()
             || session.connection.runtime.pending_prompt.is_some()
             || pending_prompt.is_some()
-            || !pending_compactions.is_empty())
+            || session.connection.state().compacting)
     {
         session.app.status = Some("wait for the active turn before switching conversation".into());
         return false;
@@ -78,39 +89,16 @@ pub(super) async fn handle_slash_action(
             super::subagents::command(&mut session.app, tui_config, &args).await;
         }
         SlashAction::Compact { focus } => {
-            let pane_id = PaneId::new(1);
-            let messages = session.connection.runtime.conversation.context();
-            if messages.len() <= slash::MIN_MESSAGES_FOR_COMPACTION {
-                session
-                    .app
-                    .push_system_message("conversation too short to compact");
-            } else {
-                use std::collections::hash_map::Entry;
-                match pending_compactions.entry(pane_id) {
-                    Entry::Occupied(_) => {
-                        session
-                            .app
-                            .push_system_message("compaction already in progress on this pane");
-                    }
-                    Entry::Vacant(slot) => {
-                        let target =
-                            super::streams::compaction_target(session, pane_id, tui_config).await;
-                        let pane = &mut *session;
-                        pane.app.status = Some("compacting…".into());
-                        pane.app.compacting = true;
-                        let task = slash::start_compaction(
-                            messages,
-                            target.model,
-                            target.options,
-                            registry.clone(),
-                            Some(lifecycle_hooks.clone()),
-                            Some(cwd.to_path_buf()),
-                            focus,
-                        );
-                        slot.insert(slash::PendingCompaction { task });
-                        state_changed = true;
-                    }
+            match session
+                .connection
+                .send(mush_runtime::ClientCommand::Compact { focus, auto: false })
+                .await
+            {
+                Ok(events) => {
+                    super::looping::apply_command_events(session, tui_config, events);
+                    state_changed = true;
                 }
+                Err(error) => session.app.push_system_message(error.to_string()),
             }
         }
         SlashAction::Side { question } => {
@@ -621,9 +609,7 @@ mod tests {
 
     fn run(session: &mut Session, config: &mut TuiConfig, action: SlashAction) {
         let registry = mush_ai::registry::ApiRegistry::new();
-        let hooks = mush_agent::LifecycleHooks::default();
         let mut pending_prompt = None;
-        let mut pending_compactions = std::collections::HashMap::new();
         futures::executor::block_on(handle_slash_action(
             session,
             action,
@@ -631,10 +617,8 @@ mod tests {
                 tui_config: config,
                 thinking_prefs: &ThinkingPrefs::default(),
                 registry: &registry,
-                lifecycle_hooks: &hooks,
                 cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
-                pending_compactions: &mut pending_compactions,
             },
         ));
     }

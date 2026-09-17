@@ -76,10 +76,8 @@ fn input_parts<'a>(
         session,
         thinking_prefs,
         thinking_saver,
-        lifecycle_hooks,
         cwd,
         pending_prompt,
-        pending_compactions,
         ..
     } = runtime;
     (
@@ -89,10 +87,8 @@ fn input_parts<'a>(
             thinking_prefs,
             thinking_saver,
             registry,
-            lifecycle_hooks,
             cwd,
             pending_prompt,
-            pending_compactions,
             image_picker,
             size_cache,
         },
@@ -282,8 +278,8 @@ pub(super) async fn dispatch_client_event(
             }
         }
         ClientEvent::TurnEnded { cancelled } => {
-            let automatic_continuation = runtime.pending_prompt.is_some()
-                || runtime.pending_compactions.contains_key(&pane_id);
+            let automatic_continuation =
+                runtime.pending_prompt.is_some() || runtime.session.connection.state().compacting;
             super::streams::handle_turn_ended(
                 &mut runtime.session,
                 stream_state,
@@ -306,25 +302,49 @@ pub(super) async fn dispatch_client_event(
                 prompt,
             );
         }
-        ClientEvent::Session(event) => {
-            super::streams::apply_session_events(&mut runtime.session, tui_config, vec![event]);
-        }
-        ClientEvent::Compacting => {
-            runtime.session.app.compacting = true;
-            runtime.session.app.status = Some("compacting\u{2026}".into());
-        }
-        ClientEvent::Compacted(applied) => {
-            let after_count = runtime
-                .session
-                .connection
-                .runtime
-                .conversation
-                .context_len();
-            crate::slash::show_applied_compaction(&mut runtime.session.app, &applied, after_count);
-        }
-        ClientEvent::CompactionFailed { .. } => {
-            runtime.session.app.compacting = false;
-            runtime.session.app.push_system_message("compaction failed");
+        event => apply_command_events(&mut runtime.session, tui_config, vec![event]),
+    }
+}
+
+pub(super) fn apply_command_events(
+    session: &mut crate::session::Session,
+    tui_config: &mut super::TuiConfig,
+    events: Vec<ClientEvent>,
+) {
+    for event in events {
+        match event {
+            ClientEvent::Session(event) => {
+                super::streams::apply_session_events(session, tui_config, vec![event]);
+            }
+            ClientEvent::TurnStarted => {
+                session.app.active_tools.clear();
+                if !session.app.stream.active {
+                    session.app.start_streaming();
+                }
+            }
+            ClientEvent::Compacting => {
+                session.app.compacting = true;
+                session.app.status = Some("compacting\u{2026}".into());
+            }
+            ClientEvent::Compacted(applied) => {
+                let after_count = session.connection.runtime.conversation.context_len();
+                crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
+                super::runtime::replay_compaction_inputs(session);
+            }
+            ClientEvent::CompactionFailed {
+                failure,
+                tokens_before,
+                model_id,
+            } => {
+                session
+                    .app
+                    .open_compaction_recovery(failure, tokens_before, model_id);
+            }
+            ClientEvent::Agent { .. }
+            | ClientEvent::TurnEnded { .. }
+            | ClientEvent::ConfirmRequest { .. } => {
+                tracing::warn!(?event, "stream event returned from a command");
+            }
         }
     }
 }

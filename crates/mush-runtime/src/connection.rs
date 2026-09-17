@@ -41,7 +41,10 @@ pub enum ClientCommand {
     Session(SessionCommand),
     Compact {
         focus: CompactionFocus,
+        auto: bool,
     },
+    CompactionRetry,
+    CompactionFallback,
     Shutdown,
 }
 
@@ -88,13 +91,15 @@ pub enum ConnectionError {
     Compacting,
     #[error("conversation too short to compact")]
     TooShortToCompact,
+    #[error("no failed compaction to recover")]
+    NothingToRecover,
     #[error("connection closed")]
     Closed,
 }
 
 #[async_trait::async_trait]
 pub trait AgentConnection: Send {
-    async fn send(&mut self, command: ClientCommand) -> Result<(), ConnectionError>;
+    async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError>;
     async fn next_event(&mut self) -> Option<ClientEvent>;
     fn state(&self) -> ConnectionState;
     fn transcript(&self) -> Vec<Message>;
@@ -108,7 +113,15 @@ pub struct InProcessConnection {
     injections: mush_agent::AgentInjections,
     queued: VecDeque<ClientEvent>,
     compaction: Option<tokio::task::JoinHandle<CompactionTaskResult>>,
+    compaction_auto: bool,
+    failed_compaction: Option<FailedCompaction>,
     closed: bool,
+}
+
+struct FailedCompaction {
+    failure: mush_session::compact::CompactionFailureReport,
+    tokens_before: usize,
+    model_id: String,
 }
 
 impl InProcessConnection {
@@ -128,6 +141,8 @@ impl InProcessConnection {
             injections,
             queued: VecDeque::new(),
             compaction: None,
+            compaction_auto: false,
+            failed_compaction: None,
             closed: false,
         }
     }
@@ -221,7 +236,31 @@ impl InProcessConnection {
         }
         let result = task.now_or_never()?;
         self.compaction = None;
-        Some(self.finish_compaction(result.ok()?))
+        let result = result.ok()?;
+        if self.compaction_auto
+            && let CompactionTaskResult::Failed {
+                failure,
+                tokens_before,
+                model_id,
+            } = result
+        {
+            let hooks = self.injections.lifecycle_hooks.clone();
+            let cwd = self.injections.cwd.clone();
+            self.compaction = Some(tokio::spawn(async move {
+                CompactionTaskResult::Applied(
+                    crate::compaction::fallback_applied_compaction(
+                        failure,
+                        tokens_before,
+                        model_id,
+                        Some(&hooks),
+                        cwd.as_deref(),
+                    )
+                    .await,
+                )
+            }));
+            return None;
+        }
+        Some(self.finish_compaction(result))
     }
 
     fn finish_compaction(&mut self, result: CompactionTaskResult) -> ClientEvent {
@@ -232,18 +271,25 @@ impl InProcessConnection {
                     applied.summarised_count,
                     applied.messages.clone(),
                 );
-                self.runtime.save_debounced();
+                self.runtime.save_now_and_settle();
                 ClientEvent::Compacted(applied)
             }
             CompactionTaskResult::Failed {
                 failure,
                 tokens_before,
                 model_id,
-            } => ClientEvent::CompactionFailed {
-                failure,
-                tokens_before,
-                model_id,
-            },
+            } => {
+                self.failed_compaction = Some(FailedCompaction {
+                    failure: failure.clone(),
+                    tokens_before,
+                    model_id: model_id.clone(),
+                });
+                ClientEvent::CompactionFailed {
+                    failure,
+                    tokens_before,
+                    model_id,
+                }
+            }
         }
     }
 
@@ -314,14 +360,55 @@ impl InProcessConnection {
         }
     }
 
-    async fn start_compaction(&mut self, focus: CompactionFocus) -> Result<(), ConnectionError> {
-        if self.compaction.is_some() {
-            return Err(ConnectionError::Compacting);
-        }
+    async fn start_compaction(
+        &mut self,
+        focus: CompactionFocus,
+        auto: bool,
+    ) -> Result<(), ConnectionError> {
         let messages = self.runtime.conversation.context();
         if messages.len() <= crate::compaction::MIN_MESSAGES_FOR_COMPACTION {
             return Err(ConnectionError::TooShortToCompact);
         }
+        self.spawn_compaction(messages, focus).await?;
+        self.compaction_auto = auto;
+        Ok(())
+    }
+
+    async fn retry_compaction(&mut self) -> Result<(), ConnectionError> {
+        let failed = self
+            .failed_compaction
+            .take()
+            .ok_or(ConnectionError::NothingToRecover)?;
+        let messages = failed.failure.original_messages().to_vec();
+        let focus = failed.failure.focus().clone();
+        self.spawn_compaction(messages, focus).await
+    }
+
+    async fn fallback_compaction(&mut self) -> Result<ClientEvent, ConnectionError> {
+        let failed = self
+            .failed_compaction
+            .take()
+            .ok_or(ConnectionError::NothingToRecover)?;
+        let applied = crate::compaction::fallback_applied_compaction(
+            failed.failure,
+            failed.tokens_before,
+            failed.model_id,
+            Some(&self.injections.lifecycle_hooks),
+            self.injections.cwd.as_deref(),
+        )
+        .await;
+        Ok(self.finish_compaction(CompactionTaskResult::Applied(applied)))
+    }
+
+    async fn spawn_compaction(
+        &mut self,
+        messages: Vec<Message>,
+        focus: CompactionFocus,
+    ) -> Result<(), ConnectionError> {
+        if self.compaction.is_some() {
+            return Err(ConnectionError::Compacting);
+        }
+        self.compaction_auto = false;
         let target = self.runtime.compaction_target(&self.config).await;
         let task = crate::compaction::start_compaction(
             messages,
@@ -385,10 +472,11 @@ impl InProcessConnection {
 
 #[async_trait::async_trait]
 impl AgentConnection for InProcessConnection {
-    async fn send(&mut self, command: ClientCommand) -> Result<(), ConnectionError> {
+    async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError> {
         if self.closed {
             return Err(ConnectionError::Closed);
         }
+        let before = self.queued.len();
         match command {
             ClientCommand::Prompt { text, images } => {
                 if self.turn_active() {
@@ -413,7 +501,12 @@ impl AgentConnection for InProcessConnection {
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
             }
-            ClientCommand::Compact { focus } => self.start_compaction(focus).await?,
+            ClientCommand::Compact { focus, auto } => self.start_compaction(focus, auto).await?,
+            ClientCommand::CompactionRetry => self.retry_compaction().await?,
+            ClientCommand::CompactionFallback => {
+                let event = self.fallback_compaction().await?;
+                self.queued.push_back(event);
+            }
             ClientCommand::Shutdown => {
                 self.runtime.turns.abort(PRIMARY_PANE);
                 let id = self.runtime.session_id.clone();
@@ -422,7 +515,7 @@ impl AgentConnection for InProcessConnection {
                 self.closed = true;
             }
         }
-        Ok(())
+        Ok(self.queued.drain(before..).collect())
     }
 
     async fn next_event(&mut self) -> Option<ClientEvent> {
@@ -574,7 +667,7 @@ mod tests {
     async fn a_prompt_runs_a_turn_and_the_transcript_holds_both_sides() {
         let (mut connection, requests) = connection();
 
-        connection
+        let started = connection
             .send(ClientCommand::Prompt {
                 text: "hello".into(),
                 images: Vec::new(),
@@ -583,7 +676,10 @@ mod tests {
             .unwrap();
         let events = drain_turn(&mut connection).await;
 
-        assert!(matches!(events[0], ClientEvent::TurnStarted), "{events:?}");
+        assert!(
+            matches!(started[..], [ClientEvent::TurnStarted]),
+            "{started:?}"
+        );
         assert!(events.iter().any(|event| matches!(
             event,
             ClientEvent::Agent {
@@ -614,19 +710,65 @@ mod tests {
         drain_turn(&mut connection).await;
         let before = connection.state().session_id.clone();
 
-        connection
+        let events = connection
             .send(ClientCommand::Session(SessionCommand::New))
             .await
             .unwrap();
-        let first = connection.next_event().await.unwrap();
 
         assert!(matches!(
-            first,
-            ClientEvent::Session(SessionEvent::SessionIdChanged(_))
+            events.first(),
+            Some(ClientEvent::Session(SessionEvent::SessionIdChanged(_)))
         ));
         assert_ne!(connection.state().session_id, before);
         assert!(connection.transcript().is_empty());
         assert_eq!(connection.state().context_tokens, TokenCount::ZERO);
+    }
+
+    fn user(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(mush_ai::types::UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_compaction_runs_in_the_background_applies_and_saves() {
+        let (mut connection, _) = connection();
+        let messages: Vec<Message> = (0..30)
+            .map(|i| user(&format!("turn {i}: {}", "x".repeat(400))))
+            .collect();
+        connection.runtime.conversation = ConversationState::from_messages(messages);
+        let saved = Arc::new(Mutex::new(0usize));
+        let counter = saved.clone();
+        connection.runtime.saver = Some(Arc::new(move |_| {
+            *counter.lock().unwrap() += 1;
+        }));
+
+        let started = connection
+            .send(ClientCommand::Compact {
+                focus: CompactionFocus::default(),
+                auto: false,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(started[..], [ClientEvent::Compacting]));
+        assert!(connection.state().compacting);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = connection.next_event().await {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(event, ClientEvent::Compacted(_)), "{event:?}");
+        assert!(!connection.state().compacting);
+        assert!(connection.transcript().len() < 30);
+        assert_eq!(*saved.lock().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -636,6 +778,7 @@ mod tests {
         let outcome = connection
             .send(ClientCommand::Compact {
                 focus: CompactionFocus::default(),
+                auto: false,
             })
             .await;
 
