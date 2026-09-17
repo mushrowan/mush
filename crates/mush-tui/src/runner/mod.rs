@@ -5,7 +5,6 @@ use ratatui::backend::CrosstermBackend;
 
 mod commands;
 mod config;
-mod control;
 #[cfg(test)]
 mod control_tests;
 mod diag;
@@ -113,8 +112,7 @@ pub async fn run_tui(
         let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
         let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
         let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        runtime.session.connection.runtime.control = Some(control);
-        runtime.session.connection.runtime.control_socket = Some(sock);
+        runtime.session.connection.attach_control(control, sock);
         Some(listener)
     } else {
         None
@@ -176,8 +174,6 @@ pub async fn run_tui(
         )
         .await;
         if inbox_ready {
-            control::poll(&stream_state, &mut runtime, &tui_config).await?;
-            let control_endpoint = runtime.session.control_endpoint();
             let thinking_level = runtime.session.app.thinking_level.clone();
             let context_tokens = runtime.session.app.stats.context_tokens;
             let connection = &mut runtime.session.connection;
@@ -188,7 +184,7 @@ pub async fn run_tui(
                 dynamic_system_context: tui_config.dynamic_system_context.clone(),
                 file_rules: tui_config.file_rules.clone(),
                 lsp_diagnostics: tui_config.lsp_diagnostics.clone(),
-                control_endpoint,
+                control_endpoint: None,
             });
             if let Some(prompt) = runtime.pending_prompt.take() {
                 let _ = connection

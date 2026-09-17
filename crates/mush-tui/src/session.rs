@@ -53,10 +53,6 @@ impl Session {
         self.app.input.cursor = 0;
     }
 
-    pub fn control_endpoint(&self) -> Option<mush_agent::exec_context::ControlEndpoint> {
-        self.connection.runtime.control_endpoint()
-    }
-
     pub fn drain_compaction_inputs(&mut self) -> Vec<(String, Vec<PendingImage>)> {
         let drained = self.connection.runtime.drain_compaction_inputs();
         let _ = self.app.take_queued_messages();

@@ -80,6 +80,7 @@ pub enum ClientEvent {
         cancelled: bool,
     },
     ToolsCancelled(Vec<ToolCallId>),
+    MessageInjected(mush_ai::types::EventMessage),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -97,6 +98,8 @@ pub struct ConnectionState {
     pub turn_model: Option<mush_ai::types::Model>,
     pub active_turns: usize,
     pub compacting: bool,
+    pub pending_prompt: bool,
+    pub controlled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -213,10 +216,69 @@ impl InProcessConnection {
         self.injections = injections;
     }
 
+    pub fn attach_control(
+        &mut self,
+        control: mush_agent::ipc::control::Control,
+        socket: std::path::PathBuf,
+    ) {
+        self.runtime.control = Some(control);
+        self.runtime.control_socket = Some(socket);
+    }
+
     pub async fn start_pending(&mut self) -> bool {
+        self.poll_control().await;
         let started = self.start_pending_prompt().await;
         self.runtime.save_if_dirty();
         started
+    }
+
+    pub async fn idle(&self) -> bool {
+        !self.turn_active()
+            && self.compaction.is_none()
+            && self.runtime.pending_prompt.is_none()
+            && self.runtime.pending_compaction_inputs.is_empty()
+            && self.runtime.steering_queue.lock().await.is_empty()
+            && self.runtime.conversation.leaf_id().is_none_or(|leaf| {
+                self.runtime
+                    .conversation
+                    .tree()
+                    .unanswered_tool_calls(leaf)
+                    .is_empty()
+            })
+    }
+
+    fn sync_control_target(&self) {
+        if let Some(control) = &self.runtime.control
+            && control.target().session != self.runtime.session_id.as_str()
+        {
+            control.activate(self.runtime.session_id.to_string());
+        }
+    }
+
+    pub async fn poll_control(&mut self) {
+        let Some(control) = self.runtime.control.clone() else {
+            return;
+        };
+        self.sync_control_target();
+        if !self.idle().await {
+            return;
+        }
+        control.finish(mush_agent::ipc::control::Outcome::Failed);
+        let Some(delivery) = control.take_next(&control.target()) else {
+            return;
+        };
+        let message = match delivery.message() {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(%error, "dropping a control delivery that isn't a message");
+                return;
+            }
+        };
+        let Message::Event(event) = message else {
+            return;
+        };
+        self.runtime.accept_event(event.clone());
+        self.queued.push_back(ClientEvent::MessageInjected(event));
     }
 
     fn poll_background(&mut self) -> Option<ClientEvent> {
@@ -273,6 +335,10 @@ impl InProcessConnection {
     }
 
     async fn abort(&mut self) -> Vec<ClientEvent> {
+        if let Some(control) = &self.runtime.control {
+            control.finish(mush_agent::ipc::control::Outcome::Cancelled);
+            self.runtime.pending_prompt = None;
+        }
         let cancelled = self.runtime.record_cancelled_tools();
         self.runtime.turns.abort(PRIMARY_PANE);
         self.runtime.steering_queue.lock().await.clear();
@@ -384,9 +450,11 @@ impl InProcessConnection {
         let Some(prompt) = self.runtime.pending_prompt.take() else {
             return false;
         };
+        let mut injections = self.injections.clone();
+        injections.control_endpoint = self.runtime.control_endpoint();
         let deps = TurnDeps {
             config: self.config.clone(),
-            injections: self.injections.clone(),
+            injections,
             tools: &self.tools,
             registry: &self.registry,
         };
@@ -524,6 +592,17 @@ impl InProcessConnection {
     }
 
     fn on_agent_event(&mut self, event: &AgentEvent) {
+        if let Some(control) = &self.runtime.control {
+            match event {
+                AgentEvent::Error { .. } | AgentEvent::MaxTurnsReached { .. } => {
+                    control.running_failed(true);
+                }
+                AgentEvent::AgentEnd => {
+                    control.finish(mush_agent::ipc::control::Outcome::Completed);
+                }
+                _ => {}
+            }
+        }
         match event {
             AgentEvent::MessageEnd { message } => {
                 if let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) {
@@ -588,6 +667,7 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::Session(command) => {
                 let events = self.runtime.handle(command).await;
+                self.sync_control_target();
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
             }
@@ -659,6 +739,8 @@ impl AgentConnection for InProcessConnection {
                 .map(|meta| meta.model.clone()),
             active_turns: self.runtime.turns.active_turns(),
             compacting: self.compaction.is_some(),
+            pending_prompt: self.runtime.pending_prompt.is_some(),
+            controlled: self.runtime.control.is_some(),
         }
     }
 

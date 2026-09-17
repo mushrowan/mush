@@ -1,4 +1,3 @@
-use super::control::*;
 use super::streams::StreamState;
 use super::{TuiConfig, runtime::RunnerRuntime};
 use crate::session::AgentConnection;
@@ -475,8 +474,10 @@ fn fixture() -> (RunnerRuntime, TuiConfig, Control) {
         config.model.context_window,
     ));
     let control = Control::new(config.session_id.to_string());
-    session.connection.runtime.control = Some(control.clone());
-    session.connection.runtime.control_socket = Some("/fixture/control.sock".into());
+    session.connection.runtime.session_id = config.session_id.clone();
+    session
+        .connection
+        .attach_control(control.clone(), "/fixture/control.sock".into());
     (
         RunnerRuntime::from_pane(session, Default::default()),
         config,
@@ -708,7 +709,6 @@ async fn start_pending(
     registry: &ApiRegistry,
     confirm_tools: bool,
 ) {
-    let control_endpoint = runtime.session.control_endpoint();
     let connection = &mut runtime.session.connection;
     connection.set_deps(tools.clone(), registry.clone());
     connection.set_config(mush_runtime::TurnConfig {
@@ -723,14 +723,28 @@ async fn start_pending(
         tool_allowlist: None,
         generate_title: false,
     });
-    connection.set_injections(mush_agent::AgentInjections {
-        control_endpoint,
-        ..Default::default()
-    });
+    connection.set_injections(mush_agent::AgentInjections::default());
     if let Some(prompt) = runtime.pending_prompt.take() {
         connection.runtime.pending_prompt = Some(mush_runtime::PendingPrompt::text(prompt));
     }
     connection.start_pending().await;
+}
+
+async fn poll(
+    _state: &StreamState,
+    runtime: &mut RunnerRuntime,
+    _config: &TuiConfig,
+) -> std::io::Result<()> {
+    runtime.session.connection.poll_control().await;
+    while let Some(event) = runtime.session.connection.try_next_event() {
+        super::looping::apply_command_events(
+            &mut runtime.session,
+            &mut TuiConfig::for_test(),
+            vec![event],
+        )
+        .await;
+    }
+    Ok(())
 }
 
 async fn dispatch(
@@ -1184,11 +1198,13 @@ async fn pending_user_inputs_and_session_switch_block_old_events() {
     let (mut runtime, mut config, control) = fixture();
     let mut state = StreamState::new();
     enqueue(&control, "old");
-    runtime.pending_prompt = Some("ordinary".into());
+    runtime.session.connection.runtime.pending_prompt =
+        Some(crate::session::PendingPrompt::text("ordinary"));
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Queued);
-    runtime.pending_prompt = None;
+    runtime.session.connection.runtime.pending_prompt = None;
     config.session_id = SessionId::new();
+    runtime.session.connection.runtime.session_id = config.session_id.clone();
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "old"), Outcome::Unavailable);
     enqueue(&control, "cancel");
@@ -1199,17 +1215,33 @@ async fn pending_user_inputs_and_session_switch_block_old_events() {
 
 #[tokio::test]
 async fn failed_event_remains_running_until_agent_end() {
-    let (_, _, control) = fixture();
+    let (mut runtime, config, control) = fixture();
     enqueue(&control, "retry");
     control.take_next(&control.target()).unwrap();
-    complete(
-        Some(&control),
-        &AgentEvent::Error {
+    let pane = PaneId::new(1);
+    let generation = runtime.session.connection.runtime.turns.register_active(
+        pane,
+        mush_runtime::StreamMeta {
+            steering_queue: runtime.session.connection.runtime.steering_queue.clone(),
+            confirm_req_rx: tokio::sync::mpsc::channel(1).1,
+            confirm_reply: Arc::new(tokio::sync::Mutex::new(None)),
+            model: config.model.clone(),
+            context_tokens: Default::default(),
+            cancel: Default::default(),
+        },
+    );
+    runtime.session.connection.ingest_agent_event(
+        pane,
+        generation,
+        AgentEvent::Error {
             error: "fixture".into(),
         },
     );
     assert_eq!(outcome(&control, "retry"), Outcome::Running);
-    complete(Some(&control), &AgentEvent::AgentEnd);
+    runtime
+        .session
+        .connection
+        .ingest_agent_event(pane, generation, AgentEvent::AgentEnd);
     assert_eq!(outcome(&control, "retry"), Outcome::Failed);
 }
 

@@ -72,14 +72,15 @@ pub(super) async fn handle_slash_action(
             | SlashAction::Fork { .. }
             | SlashAction::Clone
     );
+    let state = session.connection.state();
     if changes_conversation
-        && session.connection.runtime.control.is_some()
-        && (session.connection.runtime.turn_active()
+        && state.controlled
+        && (state.turn_active
             || session.app.stream.active
             || !session.app.active_tools.is_empty()
-            || session.connection.runtime.pending_prompt.is_some()
+            || state.pending_prompt
             || pending_prompt.is_some()
-            || session.connection.state().compacting)
+            || state.compacting)
     {
         session.app.status = Some("wait for the active turn before switching conversation".into());
         return false;
@@ -303,9 +304,6 @@ pub(super) async fn handle_slash_action(
         }
     }
 
-    if changes_conversation && let Some(control) = &session.connection.runtime.control {
-        control.activate(tui_config.session_id.to_string());
-    }
     state_changed
 }
 

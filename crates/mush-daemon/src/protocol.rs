@@ -105,6 +105,8 @@ mod tests {
             turn_model: None,
             active_turns: 0,
             compacting: false,
+            pending_prompt: false,
+            controlled: false,
         }
     }
 

@@ -341,10 +341,6 @@ async fn auto_compact(session: &mut Session, pane_id: PaneId, tui_config: &mut T
 }
 
 pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
-    if let Some(control) = &session.connection.runtime.control {
-        control.finish(mush_agent::ipc::control::Outcome::Cancelled);
-        session.connection.runtime.pending_prompt = None;
-    }
     let events = session
         .connection
         .send(mush_runtime::ClientCommand::Abort)

@@ -338,6 +338,10 @@ pub(super) async fn apply_command_events(
                     .open_compaction_recovery(failure, tokens_before, model_id);
             }
             ClientEvent::ToolsCancelled(_) => {}
+            ClientEvent::MessageInjected(event) => {
+                session.app.push_event_message(&event);
+                session.app.start_streaming();
+            }
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {
@@ -355,8 +359,6 @@ async fn dispatch_agent_event(
     tui_config: &mut super::TuiConfig,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    super::control::complete(runtime.session.connection.runtime.control.as_ref(), &event);
-
     {
         let pane = &mut runtime.session;
         let model = pane
