@@ -126,6 +126,7 @@ impl TuiConfig {
             compaction_model: self.compaction_options(),
             forbidden_chars: self.forbidden_chars.clone(),
             tool_allowlist: self.tool_allowlist.clone(),
+            generate_title: self.generate_title,
         }
     }
 

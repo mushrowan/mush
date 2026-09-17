@@ -14,7 +14,7 @@ use crate::compaction::{AppliedCompaction, CompactionTaskResult};
 use crate::session::{
     PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime, StreamGeneration,
 };
-use crate::turn::{TurnConfig, TurnDeps, TurnRequest, build_user_content};
+use crate::turn::{TurnConfig, TurnDeps, TurnRequest, build_user_content, resolve_auth_for_model};
 
 pub const PRIMARY_PANE: PaneId = PaneId::new(1);
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
@@ -76,6 +76,7 @@ pub enum ClientEvent {
     TurnEnded {
         cancelled: bool,
     },
+    ToolsCancelled(Vec<ToolCallId>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +126,7 @@ pub struct InProcessConnection {
     compaction: Option<tokio::task::JoinHandle<CompactionTaskResult>>,
     compaction_auto: bool,
     failed_compaction: Option<FailedCompaction>,
+    title: Option<tokio::task::JoinHandle<Option<String>>>,
     closed: bool,
 }
 
@@ -153,6 +155,7 @@ impl InProcessConnection {
             compaction: None,
             compaction_auto: false,
             failed_compaction: None,
+            title: None,
             closed: false,
         }
     }
@@ -177,6 +180,7 @@ impl InProcessConnection {
                 compaction_model: None,
                 forbidden_chars: Default::default(),
                 tool_allowlist: None,
+                generate_title: false,
             },
             mush_agent::AgentInjections::default(),
         )
@@ -211,7 +215,62 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_confirm() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_title() {
+            return Some(event);
+        }
         self.try_poll_compaction()
+    }
+
+    fn try_poll_title(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        let task = self.title.as_mut()?;
+        if !task.is_finished() {
+            return None;
+        }
+        let title = task.now_or_never()?;
+        self.title = None;
+        let title = title.ok().flatten()?;
+        self.runtime.title = Some(title.clone());
+        self.runtime.save_debounced();
+        Some(ClientEvent::Session(SessionEvent::Title(Some(title))))
+    }
+
+    fn spawn_title(&mut self) {
+        if !self.config.generate_title || !self.runtime.title_due() || self.title.is_some() {
+            return;
+        }
+        self.runtime.title_generated = true;
+        let messages = self.runtime.conversation.context_prefix(4);
+        let registry = self.registry.clone();
+        let model = self.config.default_model.clone();
+        let keys = self.config.provider_api_keys.clone();
+        self.title = Some(tokio::spawn(async move {
+            let (api_key, account_id) = resolve_auth_for_model(&model, &keys).await;
+            let options = mush_ai::types::StreamOptions {
+                api_key,
+                account_id,
+                ..Default::default()
+            };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                mush_session::title::generate_title(messages, &registry, &model, &options),
+            )
+            .await
+            .ok()
+            .flatten()
+        }));
+    }
+
+    async fn abort(&mut self) -> Vec<ClientEvent> {
+        let cancelled = self.runtime.record_cancelled_tools();
+        self.runtime.turns.abort(PRIMARY_PANE);
+        self.runtime.steering_queue.lock().await.clear();
+        self.runtime.save_debounced();
+        if cancelled.is_empty() {
+            Vec::new()
+        } else {
+            vec![ClientEvent::ToolsCancelled(cancelled)]
+        }
     }
 
     fn try_poll_confirm(&mut self) -> Option<ClientEvent> {
@@ -473,6 +532,7 @@ impl InProcessConnection {
                     .remove(PRIMARY_PANE)
                     .is_none_or(|meta| meta.cancel.is_cancelled());
                 self.runtime.save_now_and_settle();
+                self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
             }
             _ => {}
@@ -505,7 +565,10 @@ impl AgentConnection for InProcessConnection {
                     tracing::warn!(%text, "no steering queue entry matched the retracted message");
                 }
             }
-            ClientCommand::Abort => self.runtime.turns.abort(PRIMARY_PANE),
+            ClientCommand::Abort => {
+                let events = self.abort().await;
+                self.queued.extend(events);
+            }
             ClientCommand::ConfirmTool { allow } => self.confirm(allow).await,
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
@@ -522,7 +585,7 @@ impl AgentConnection for InProcessConnection {
                 self.queued.push_back(event);
             }
             ClientCommand::Shutdown => {
-                self.runtime.turns.abort(PRIMARY_PANE);
+                self.abort().await;
                 let id = self.runtime.session_id.clone();
                 self.runtime.snapshot_kernel(&id).await;
                 self.runtime.save_now_and_settle();
@@ -661,6 +724,7 @@ mod tests {
             compaction_model: None,
             forbidden_chars: Default::default(),
             tool_allowlist: None,
+            generate_title: false,
         };
         let connection = InProcessConnection::new(
             runtime,
@@ -794,6 +858,75 @@ mod tests {
         assert!(!connection.state().compacting);
         assert!(connection.transcript().len() < 30);
         assert_eq!(*saved.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_answers_the_open_tool_calls_and_clears_the_steering_queue() {
+        use mush_ai::types::{AssistantContentPart, ToolCall, ToolCallId, ToolName};
+        let (mut connection, _) = connection();
+        let call = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                id: ToolCallId::from("call_1"),
+                name: ToolName::from("ipython"),
+                arguments: serde_json::json!({ "code": "1" }),
+            })])
+            .model("m".into())
+            .provider(mush_ai::types::Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .stop_reason(StopReason::ToolUse)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        connection.runtime.conversation =
+            ConversationState::from_messages(vec![user("go"), Message::Assistant(call)]);
+        connection
+            .runtime
+            .steering_queue
+            .lock()
+            .await
+            .push(user("later"));
+
+        let events = connection.send(ClientCommand::Abort).await.unwrap();
+
+        assert!(matches!(
+            &events[..],
+            [ClientEvent::ToolsCancelled(ids)] if ids == &[ToolCallId::from("call_1")]
+        ));
+        let transcript = connection.transcript();
+        assert!(matches!(
+            transcript.last(),
+            Some(Message::ToolResult(result))
+                if result.tool_call_id.as_str() == "call_1" && result.outcome.is_error()
+        ));
+        assert!(connection.runtime.steering_queue.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_finished_turn_names_the_session_when_asked() {
+        let (mut connection, _) = connection();
+        connection.config.generate_title = true;
+        connection
+            .send(ClientCommand::Prompt {
+                text: "please look at the parser".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        let title = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(ClientEvent::Session(SessionEvent::Title(title))) =
+                    connection.next_event().await
+                {
+                    break title;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(title.as_deref(), Some("hi back"));
+        assert_eq!(connection.state().title.as_deref(), Some("hi back"));
     }
 
     #[tokio::test]

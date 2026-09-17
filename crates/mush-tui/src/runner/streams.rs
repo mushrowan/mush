@@ -1,15 +1,10 @@
 use std::sync::Arc;
 
 use mush_agent::AgentEvent;
-use mush_ai::registry::ApiRegistry;
-use mush_ai::types::{
-    Message, Model, Provider, StreamOptions, Timestamp, TokenCount, ToolOutcome, ToolResultMessage,
-};
+use mush_ai::types::{Model, Provider, TokenCount, ToolOutcome};
 
 use crate::session::{AgentConnection, Session};
 use mush_ai::types::PaneId;
-
-const USER_CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 
 use super::TuiConfig;
 
@@ -78,14 +73,6 @@ impl StreamState {
         _tui_config: &super::TuiConfig,
     ) {
         session.connection.runtime.save_if_dirty();
-    }
-
-    pub(super) fn save_session_now(
-        &mut self,
-        session: &mut Session,
-        _tui_config: &super::TuiConfig,
-    ) {
-        session.connection.runtime.save_now_and_settle();
     }
 }
 
@@ -252,7 +239,6 @@ pub(super) async fn handle_turn_ended(
     stream_state: &mut StreamState,
     pane_id: PaneId,
     tui_config: &mut TuiConfig,
-    registry: &ApiRegistry,
     automatic_continuation: bool,
     cancelled: bool,
 ) {
@@ -274,26 +260,9 @@ pub(super) async fn handle_turn_ended(
         stream_state.completion_signal();
     }
 
-    if tui_config.generate_title && session.connection.runtime.title_due() {
-        let opts = StreamOptions {
-            api_key: tui_config.options.api_key.clone(),
-            ..Default::default()
-        };
-        if let Some(title) = session
-            .connection
-            .runtime
-            .generate_title(registry, &tui_config.model, &opts)
-            .await
-        {
-            session.app.session_title = Some(title);
-        }
-    }
-
     if tui_config.auto_fork_compact {
         auto_compact(session, pane_id, tui_config).await;
     }
-
-    stream_state.save_session_now(session, tui_config);
 }
 
 pub(super) async fn handle_agent_event_side_effects(
@@ -386,17 +355,23 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
         control.finish(mush_agent::ipc::control::Outcome::Cancelled);
         session.connection.runtime.pending_prompt = None;
     }
-    record_cancelled_tools(session);
-
-    let _ = session
+    let events = session
         .connection
         .send(mush_runtime::ClientCommand::Abort)
-        .await;
+        .await
+        .unwrap_or_default();
+    for event in events {
+        if let mush_runtime::ClientEvent::ToolsCancelled(ids) = event {
+            show_cancelled_tools(session, &ids);
+        }
+    }
 
     let pane = &mut *session;
     pane.app.finish_streaming(None, None);
+    pane.app.stream.active = false;
+    pane.app.active_tools.clear();
+    pane.app.status = Some("aborted".into());
     let restored = pane.app.take_queued_messages();
-    pane.connection.runtime.steering_queue.lock().await.clear();
     if !restored.is_empty() {
         let text = restored.join("\n");
         pane.app.input.text = text.clone();
@@ -404,40 +379,23 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
     }
 }
 
-fn record_cancelled_tools(pane: &mut crate::session::Session) {
-    let running_tools: Vec<_> = pane
+fn show_cancelled_tools(pane: &mut Session, ids: &[mush_ai::types::ToolCallId]) {
+    let running: Vec<_> = pane
         .app
         .active_tools
         .iter()
-        .filter(|tool| tool.status == crate::display_types::ToolCallStatus::Running)
+        .filter(|tool| ids.contains(&tool.tool_call_id))
         .map(|tool| (tool.tool_call_id.clone(), tool.name.clone()))
         .collect();
-
-    for (tool_call_id, tool_name) in running_tools {
-        let result = mush_agent::tool::ToolResult::error(USER_CANCELLED_TOOL_MESSAGE);
+    for (tool_call_id, tool_name) in running {
         pane.app.end_tool(
             &tool_call_id,
             &tool_name,
             ToolOutcome::Error,
-            Some(USER_CANCELLED_TOOL_MESSAGE),
+            Some(mush_runtime::session::CANCELLED_TOOL_MESSAGE),
             None,
         );
-        pane.connection
-            .runtime
-            .conversation
-            .append_message(Message::ToolResult(ToolResultMessage {
-                tool_call_id,
-                tool_name: tool_name.into(),
-                content: result.content,
-                outcome: result.outcome,
-                timestamp_ms: Timestamp::now(),
-                details: None,
-            }));
     }
-
-    pane.app.stream.active = false;
-    pane.app.active_tools.clear();
-    pane.app.status = Some("aborted".into());
 }
 
 pub(super) async fn submit_streaming_input(
@@ -570,7 +528,11 @@ mod tests {
     use super::*;
 
     use mush_ai::models;
-    use mush_ai::types::{ModelId, ToolCallId, UserContent, UserContentPart, UserMessage};
+    use mush_ai::registry::ApiRegistry;
+    use mush_ai::types::{
+        Message, ModelId, StreamOptions, Timestamp, ToolCallId, UserContent, UserContentPart,
+        UserMessage,
+    };
     use std::collections::HashMap;
 
     use mush_agent::{AgentConfig, agent_loop};
@@ -1704,29 +1666,6 @@ mod tests {
             snapshot.system_prompt.as_deref(),
             Some("you are running inside mush\nproject context: foo")
         );
-    }
-
-    #[test]
-    fn save_session_debounced_respects_interval() {
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        let save_count = std::sync::Arc::new(AtomicU32::new(0));
-        let count_clone = save_count.clone();
-        let config = test_tui_config();
-        let mut session = Session::new(app());
-        session.connection.runtime.saver = Some(std::sync::Arc::new(move |_| {
-            count_clone.fetch_add(1, Ordering::Relaxed);
-        }));
-        let mut stream_state = StreamState::new();
-
-        session.connection.runtime.save_debounced();
-        assert_eq!(save_count.load(Ordering::Relaxed), 1);
-
-        session.connection.runtime.save_debounced();
-        assert_eq!(save_count.load(Ordering::Relaxed), 1);
-
-        stream_state.save_session_now(&mut session, &config);
-        assert_eq!(save_count.load(Ordering::Relaxed), 2);
     }
 
     #[test]

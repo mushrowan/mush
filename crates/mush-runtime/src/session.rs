@@ -220,6 +220,7 @@ pub struct SessionRuntime {
 }
 
 pub const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
+pub const CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
 
 impl SessionRuntime {
@@ -314,29 +315,45 @@ impl SessionRuntime {
         !self.title_generated && self.title.is_none() && self.conversation.context_len() >= 2
     }
 
-    pub async fn generate_title(
-        &mut self,
-        registry: &ApiRegistry,
-        model: &mush_ai::types::Model,
-        options: &mush_ai::types::StreamOptions,
-    ) -> Option<String> {
-        if !self.title_due() {
-            return None;
+    pub fn record_cancelled_tools(&mut self) -> Vec<ToolCallId> {
+        use mush_ai::types::{
+            AssistantContentPart, TextContent, ToolResultContentPart, ToolResultMessage,
+        };
+        let context = self.conversation.context();
+        let mut answered: Vec<ToolCallId> = Vec::new();
+        let mut open = Vec::new();
+        for message in context.iter().rev() {
+            match message {
+                Message::ToolResult(result) => answered.push(result.tool_call_id.clone()),
+                Message::Assistant(assistant) => {
+                    for part in &assistant.content {
+                        if let AssistantContentPart::ToolCall(call) = part
+                            && !answered.contains(&call.id)
+                        {
+                            open.push((call.id.clone(), call.name.clone()));
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            }
         }
-        let messages = self.conversation.context_prefix(4);
-        let generated = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            mush_session::title::generate_title(messages, registry, model, options),
-        )
-        .await
-        .ok()
-        .flatten();
-        self.title_generated = true;
-        if let Some(title) = generated {
-            self.title = Some(title.clone());
-            return Some(title);
+        let mut cancelled = Vec::new();
+        for (tool_call_id, tool_name) in open {
+            self.conversation
+                .append_message(Message::ToolResult(ToolResultMessage {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name,
+                    content: vec![ToolResultContentPart::Text(TextContent {
+                        text: CANCELLED_TOOL_MESSAGE.into(),
+                    })],
+                    outcome: mush_ai::types::ToolOutcome::Error,
+                    timestamp_ms: mush_ai::types::Timestamp::now(),
+                    details: None,
+                }));
+            cancelled.push(tool_call_id);
         }
-        None
+        cancelled
     }
 
     #[must_use]

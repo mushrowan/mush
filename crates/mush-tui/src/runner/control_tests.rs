@@ -182,7 +182,6 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
                     &mut state,
                     &mut runtime,
                     &mut config,
-                    &registry,
                     &None,
                 )
                 .await;
@@ -721,6 +720,7 @@ async fn start_pending(
         compaction_model: None,
         forbidden_chars: Default::default(),
         tool_allowlist: None,
+        generate_title: false,
     });
     connection.set_injections(mush_agent::AgentInjections {
         control_endpoint,
@@ -736,7 +736,7 @@ async fn dispatch(
     runtime: &mut RunnerRuntime,
     state: &mut StreamState,
     config: &mut TuiConfig,
-    registry: &ApiRegistry,
+    _registry: &ApiRegistry,
     pane: PaneId,
     generation: mush_runtime::StreamGeneration,
     event: AgentEvent,
@@ -746,10 +746,10 @@ async fn dispatch(
         .connection
         .ingest_agent_event(pane, generation, event)
     {
-        super::looping::dispatch_client_event(event, state, runtime, config, registry, &None).await;
+        super::looping::dispatch_client_event(event, state, runtime, config, &None).await;
     }
     while let Some(event) = runtime.session.connection.try_next_event() {
-        super::looping::dispatch_client_event(event, state, runtime, config, registry, &None).await;
+        super::looping::dispatch_client_event(event, state, runtime, config, &None).await;
     }
 }
 

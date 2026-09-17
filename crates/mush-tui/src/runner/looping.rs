@@ -118,7 +118,7 @@ async fn handle_streaming_iteration(
             if let Some(event) = result {
                 saw_agent_event = true;
                 saw_settling_agent_event |= is_settling_client_event(&event);
-                dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
+                dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
                 trace_draw_reason("agent_event");
                 runtime.tick_streaming_text_panes();
             }
@@ -137,7 +137,7 @@ async fn handle_streaming_iteration(
                         saw_agent_event = true;
                         saw_settling_agent_event |= is_settling_client_event(&event);
                         drained_events += 1;
-                        dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
+                        dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
                         trace_draw_reason("agent_event_drain");
                         runtime.tick_streaming_text_panes();
                     }
@@ -159,7 +159,7 @@ async fn handle_streaming_iteration(
             }
             while let Some(event) = runtime.session.connection.try_next_event() {
                 tick_changed = true;
-                dispatch_client_event(event, stream_state, runtime, tui_config, registry, image_picker).await;
+                dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
                 trace_draw_reason("client_event_tick");
             }
             if super::streams::poll_kernel_busy_prompt(
@@ -262,7 +262,6 @@ pub(super) async fn dispatch_client_event(
     stream_state: &mut super::streams::StreamState,
     runtime: &mut RunnerRuntime,
     tui_config: &mut super::TuiConfig,
-    registry: &ApiRegistry,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
     let pane_id = mush_runtime::PRIMARY_PANE;
@@ -285,7 +284,6 @@ pub(super) async fn dispatch_client_event(
                 stream_state,
                 pane_id,
                 tui_config,
-                registry,
                 automatic_continuation,
                 cancelled,
             )
@@ -340,6 +338,7 @@ pub(super) async fn apply_command_events(
                     .app
                     .open_compaction_recovery(failure, tokens_before, model_id);
             }
+            ClientEvent::ToolsCancelled(_) => {}
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {
@@ -436,15 +435,7 @@ async fn handle_idle_iteration(
     let mut events_seen = false;
     while let Some(event) = runtime.session.connection.try_next_event() {
         events_seen = true;
-        dispatch_client_event(
-            event,
-            stream_state,
-            runtime,
-            tui_config,
-            registry,
-            image_picker,
-        )
-        .await;
+        dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
     }
     stream_state.save_dirty_session(&mut runtime.session, tui_config);
     let picker_changed = drain_session_picker(&mut runtime.session);
@@ -615,7 +606,6 @@ mod tests {
             if case == "cancel" {
                 cancel.cancel();
             }
-            let registry = ApiRegistry::new();
             let feed = async |runtime: &mut RunnerRuntime,
                               state: &mut StreamState,
                               config: &mut TuiConfig,
@@ -627,9 +617,9 @@ mod tests {
                 else {
                     return;
                 };
-                dispatch_client_event(event, state, runtime, config, &registry, &None).await;
+                dispatch_client_event(event, state, runtime, config, &None).await;
                 while let Some(event) = runtime.session.connection.try_next_event() {
-                    dispatch_client_event(event, state, runtime, config, &registry, &None).await;
+                    dispatch_client_event(event, state, runtime, config, &None).await;
                 }
             };
             for turn_index in 0..3 {

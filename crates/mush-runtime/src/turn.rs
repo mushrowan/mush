@@ -24,6 +24,7 @@ pub struct TurnConfig {
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
     pub tool_allowlist: Option<Vec<String>>,
+    pub generate_title: bool,
 }
 
 pub struct TurnDeps<'a> {
