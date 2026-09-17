@@ -2802,6 +2802,7 @@ dependencies = [
  "futures",
  "mush-agent",
  "mush-ai",
+ "mush-daemon",
  "mush-ext",
  "mush-kernel",
  "mush-lsp",

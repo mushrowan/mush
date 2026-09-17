@@ -21,6 +21,7 @@ mod thinking_prefs;
 
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
+use mush_runtime::AgentConnection;
 
 use crate::screen::Screen;
 
@@ -44,10 +45,87 @@ pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir}
 
 use self::diag::verify_terminal_restored;
 
+pub struct HostedWorker {
+    pub connection: mush_runtime::InProcessConnection,
+    pub ipc_listener: Option<mush_agent::IpcListener>,
+}
+
+pub fn host_worker(
+    tui_config: &mut TuiConfig,
+    tools: &ToolRegistry,
+    registry: &ApiRegistry,
+) -> io::Result<HostedWorker> {
+    let mut connection = runtime::in_process_connection(tui_config, tools, registry);
+    let ipc_listener = if tui_config.control {
+        let card = tui_config
+            .agent_card
+            .as_ref()
+            .ok_or_else(|| io::Error::other("control requires an agent card"))?;
+        let card = std::sync::Arc::new(card.clone());
+        let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
+        let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
+        let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
+        connection.attach_control(control, sock);
+        Some(listener)
+    } else {
+        None
+    };
+    connection.attach_inbox_from_env();
+    Ok(HostedWorker {
+        connection,
+        ipc_listener,
+    })
+}
+
 pub async fn run_tui(
     mut tui_config: TuiConfig,
     tools: &ToolRegistry,
     registry: &ApiRegistry,
+    startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
+) -> io::Result<()> {
+    let HostedWorker {
+        connection,
+        ipc_listener,
+    } = host_worker(&mut tui_config, tools, registry)?;
+    run_tui_with(
+        tui_config,
+        Box::new(connection),
+        registry,
+        ipc_listener,
+        ExitPolicy::Shutdown,
+        startup_discovery,
+    )
+    .await
+}
+
+pub async fn run_tui_attached(
+    tui_config: TuiConfig,
+    connection: Box<dyn AgentConnection>,
+    registry: &ApiRegistry,
+    startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
+) -> io::Result<()> {
+    run_tui_with(
+        tui_config,
+        connection,
+        registry,
+        None,
+        ExitPolicy::Detach,
+        startup_discovery,
+    )
+    .await
+}
+
+pub enum ExitPolicy {
+    Shutdown,
+    Detach,
+}
+
+async fn run_tui_with(
+    mut tui_config: TuiConfig,
+    connection: Box<dyn AgentConnection>,
+    registry: &ApiRegistry,
+    ipc_listener: Option<mush_agent::IpcListener>,
+    exit: ExitPolicy,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<()> {
     let env = crate::terminal_policy::TtyEnvironment::detect();
@@ -92,23 +170,7 @@ pub async fn run_tui(
         "after_terminal_new",
         terminal.size().map(|size| Some((size.width, size.height))),
     ));
-    let mut connection = runtime::in_process_connection(&mut tui_config, tools, registry);
-    let ipc_listener = if tui_config.control {
-        let card = tui_config
-            .agent_card
-            .as_ref()
-            .ok_or_else(|| io::Error::other("control requires an agent card"))?;
-        let card = std::sync::Arc::new(card.clone());
-        let control = mush_agent::ipc::control::Control::new(tui_config.session_id.to_string());
-        let sock = mush_agent::ipc::control_socket_path(&control.target().instance);
-        let listener = mush_agent::IpcListener::start_control(sock.clone(), card, control.clone())?;
-        connection.attach_control(control, sock);
-        Some(listener)
-    } else {
-        None
-    };
-    connection.attach_inbox_from_env();
-    let mut runtime = RunnerRuntime::new(&mut tui_config, Box::new(connection)).await;
+    let mut runtime = RunnerRuntime::new(&mut tui_config, connection).await;
     if let Some(rx) = startup_discovery {
         runtime.install_discovery_updates(rx);
     }
@@ -250,11 +312,13 @@ pub async fn run_tui(
         }
     }
 
-    let _ = runtime
-        .session
-        .connection
-        .send(mush_runtime::ClientCommand::Shutdown)
-        .await;
+    if let ExitPolicy::Shutdown = exit {
+        let _ = runtime
+            .session
+            .connection
+            .send(mush_runtime::ClientCommand::Shutdown)
+            .await;
+    }
     if let Some(listener) = ipc_listener {
         listener.shutdown().await.map_err(io::Error::other)?;
     }

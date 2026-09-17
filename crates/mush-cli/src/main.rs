@@ -35,6 +35,9 @@ struct Cli {
     #[arg(long)]
     control: bool,
 
+    #[arg(long, value_name = "SOCKET")]
+    attach: Option<std::path::PathBuf>,
+
     #[arg(short = 'c', long = "continue")]
     resume: Option<String>,
 
@@ -115,12 +118,22 @@ impl Cli {
 #[derive(clap::Subcommand)]
 enum Command {
     Control(mush_cli::control::ControlArgs),
-    Login { provider: Option<String> },
-    Logout { provider: Option<String> },
+    Worker {
+        #[arg(long, value_name = "SOCKET")]
+        socket: std::path::PathBuf,
+    },
+    Login {
+        provider: Option<String>,
+    },
+    Logout {
+        provider: Option<String>,
+    },
     Models,
     Sessions,
     Status,
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
     Config,
 }
 
@@ -152,8 +165,12 @@ async fn main() -> Result<()> {
 
     mush_agent::truncation::cleanup();
 
+    if let Some(Command::Worker { socket }) = &cli.command {
+        let socket = socket.clone();
+        return worker_mode(cli, socket, log_buffer).await;
+    }
     match cli.command {
-        Some(Command::Control(_)) => unreachable!(),
+        Some(Command::Control(_) | Command::Worker { .. }) => unreachable!(),
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
@@ -618,7 +635,96 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     Ok(())
 }
 
+struct Composed {
+    tui_config: TuiConfig,
+    tools: mush_agent::tool::ToolRegistry,
+    registry: mush_ai::registry::ApiRegistry,
+    http_client: mush_ai::http::HttpClient,
+    session_saver: Option<SaverThread>,
+}
+
+async fn worker_mode(
+    cli: Cli,
+    socket: std::path::PathBuf,
+    log_buffer: logging::LogBuffer,
+) -> Result<()> {
+    let listener = mush_daemon::bind(&socket)?;
+    let Composed {
+        mut tui_config,
+        tools,
+        registry,
+        session_saver,
+        ..
+    } = compose(cli, log_buffer).await?;
+    eprintln!(
+        "{}",
+        Style::Dim.stderr(format_args!("worker listening on {}", socket.display()))
+    );
+    let mush_tui::HostedWorker {
+        connection,
+        ipc_listener,
+    } = mush_tui::host_worker(&mut tui_config, &tools, &registry)?;
+    let served = mush_daemon::serve(connection, listener).await;
+    let _ = std::fs::remove_file(&socket);
+    served?;
+    if let Some(listener) = ipc_listener {
+        listener.shutdown().await?;
+    }
+    if let Some(saver) = session_saver {
+        saver.finish();
+    }
+    Ok(())
+}
+
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
+    let attach = cli.attach.clone();
+    let Composed {
+        tui_config,
+        tools,
+        registry,
+        http_client,
+        session_saver,
+    } = compose(cli, log_buffer).await?;
+
+    let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
+    let startup_discovery_client = http_client;
+    tokio::spawn(async move {
+        let summary = mush_ai::discovery::refresh_and_save(startup_discovery_client).await;
+        tracing::info!(
+            target: "mush::discovery",
+            models = summary.total_models(),
+            "{}",
+            summary.one_line()
+        );
+        let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
+    });
+
+    match attach {
+        Some(socket) => {
+            let connection = mush_daemon::DaemonConnection::connect(&socket).await?;
+            mush_tui::run_tui_attached(
+                tui_config,
+                Box::new(connection),
+                &registry,
+                Some(discovery_rx),
+            )
+            .await
+            .map_err(|e| eyre!("TUI error: {e}"))?;
+        }
+        None => {
+            mush_tui::run_tui(tui_config, &tools, &registry, Some(discovery_rx))
+                .await
+                .map_err(|e| eyre!("TUI error: {e}"))?;
+        }
+    }
+
+    if let Some(saver) = session_saver {
+        saver.finish();
+    }
+    Ok(())
+}
+
+async fn compose(cli: Cli, log_buffer: logging::LogBuffer) -> Result<Composed> {
     let terminal_policy_overrides = cli.terminal_policy_overrides();
     let tool_output_live: mush_tui::runner::LiveToolOutput =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -739,8 +845,6 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     let provider_api_keys = setup.cfg.api_keys.to_map();
     let (favourite_models, favourites_locked) =
         config::resolve_favourites(&setup.cfg.favourite_models, config::load_favourite_models());
-    let startup_discovery_client = setup.http_client.clone();
-
     let session_saver = (!cli.no_session)
         .then(|| SaverThread::spawn(cwd_str.clone()))
         .transpose()?;
@@ -805,7 +909,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         model_tiers: setup.cfg.model_tiers,
         compaction_model: setup.compaction_model,
         resolve_model: Some(std::sync::Arc::new(mush_ai::discovery::resolve_model_by_id)),
-        http_client: Some(setup.http_client),
+        http_client: Some(setup.http_client.clone()),
         session_id: session_id.clone(),
         settings: mush_tui::settings::ScopedSettings {
             scope: setup.cfg.settings.scope,
@@ -867,31 +971,13 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         ),
     };
 
-    let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
-    tokio::spawn(async move {
-        let summary = mush_ai::discovery::refresh_and_save(startup_discovery_client).await;
-        tracing::info!(
-            target: "mush::discovery",
-            models = summary.total_models(),
-            "{}",
-            summary.one_line()
-        );
-        let _ = discovery_tx.send(mush_tui::runner::DiscoveryUpdate::Refreshed);
-    });
-
-    mush_tui::run_tui(
+    Ok(Composed {
         tui_config,
-        &setup.tools,
-        &setup.registry,
-        Some(discovery_rx),
-    )
-    .await
-    .map_err(|e| eyre!("TUI error: {e}"))?;
-
-    if let Some(saver) = session_saver {
-        saver.finish();
-    }
-    Ok(())
+        tools: setup.tools,
+        registry: setup.registry,
+        http_client: setup.http_client,
+        session_saver,
+    })
 }
 
 struct SaverThread {

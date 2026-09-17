@@ -30,6 +30,7 @@ mush-agent = { path = "crates/mush-agent" }
 mush-tools = { path = "crates/mush-tools" }
 mush-session = { path = "crates/mush-session" }
 mush-runtime = { path = "crates/mush-runtime" }
+mush-daemon = { path = "crates/mush-daemon" }
 mush-supervisor = { path = "crates/mush-supervisor" }
 mush-ext = { path = "crates/mush-ext" }
 mush-mcp = { path = "crates/mush-mcp" }

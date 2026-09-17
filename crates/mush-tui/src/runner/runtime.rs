@@ -104,6 +104,7 @@ impl RunnerRuntime {
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut app = build_initial_app(tui_config, &cwd);
+        seed_from_state(&mut app, tui_config, &connection.state());
         let history = connection.history().await;
         let context = connection.transcript().await;
         replay_history(&mut app, &history, &context);
@@ -375,6 +376,28 @@ pub(super) fn in_process_connection(
         tui_config.turn_config(),
         tui_config.injections(),
     )
+}
+
+fn seed_from_state(
+    app: &mut App,
+    tui_config: &mut TuiConfig,
+    state: &mush_runtime::ConnectionState,
+) {
+    tui_config.session_id = state.session_id.clone();
+    tui_config.options.session_id = Some(state.session_id.clone());
+    app.session_title = state.title.clone();
+    app.thinking_level = state.thinking_level.clone();
+    if state.turn_active {
+        app.start_streaming();
+    }
+    if app.model_id.as_str() != state.model_id {
+        app.model_id = state.model_id.as_str().into();
+        if let Some(merged) = mush_ai::discovery::find_merged_model_by_id(&state.model_id) {
+            app.stats.context_window = merged.model.context_window;
+            app.supported_thinking_levels = merged.model.supported_thinking_levels.clone();
+            tui_config.model = merged.model;
+        }
+    }
 }
 
 fn initial_thinking_level(tui_config: &TuiConfig) -> ThinkingLevel {
