@@ -38,7 +38,7 @@ pub enum CompactionTaskResult {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppliedCompaction {
     pub messages: Vec<Message>,
     pub summary: String,

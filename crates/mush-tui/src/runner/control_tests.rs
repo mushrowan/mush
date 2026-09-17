@@ -1,6 +1,7 @@
 use super::control::*;
 use super::streams::StreamState;
 use super::{TuiConfig, runtime::RunnerRuntime};
+use crate::session::AgentConnection;
 use mush_agent::AgentEvent;
 use mush_agent::ipc::control::{Control, Event, Operation, Outcome, Reply, Request};
 use mush_agent::tool::{AgentTool, ToolRegistry, ToolResult};

@@ -28,7 +28,7 @@ pub struct CompactionResult {
     pub diagnostics: CompactionDiagnostics,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactionDiagnostics {
     pub model_id: String,
     pub retries: u32,
@@ -36,7 +36,7 @@ pub struct CompactionDiagnostics {
     pub fallback_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactionFocus {
     pub context_budget: Option<TokenCount>,
     pub instructions: Option<String>,
@@ -52,7 +52,7 @@ impl CompactionFocus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionFailureReport {
     messages: Vec<Message>,
     keep_recent: Option<usize>,

@@ -10,7 +10,7 @@ use mush_ai::types::{ImageMimeType, Message, Model, PaneId, SessionId, ToolCallI
 use mush_session::ConversationState;
 use tokio::sync::{Mutex, mpsc, watch};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct StreamGeneration(pub u64);
 
 pub type TurnEvent = (PaneId, StreamGeneration, AgentEvent);
@@ -156,7 +156,7 @@ impl TurnEvents {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PendingImage {
     pub data: Vec<u8>,
     pub mime_type: ImageMimeType,

@@ -19,7 +19,8 @@ use crate::turn::{TurnConfig, TurnDeps, TurnRequest, build_user_content, resolve
 pub const PRIMARY_PANE: PaneId = PaneId::new(1);
 const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(33);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ClientCommand {
     Prompt {
         text: String,
@@ -54,7 +55,8 @@ pub enum ClientCommand {
     Shutdown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ClientEvent {
     Agent {
         generation: StreamGeneration,
@@ -80,7 +82,7 @@ pub enum ClientEvent {
     ToolsCancelled(Vec<ToolCallId>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionState {
     pub session_id: mush_ai::types::SessionId,
     pub title: Option<String>,
@@ -97,7 +99,8 @@ pub struct ConnectionState {
     pub compacting: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ConnectionError {
     #[error("compaction already in progress")]
     Compacting,
@@ -107,16 +110,19 @@ pub enum ConnectionError {
     NothingToRecover,
     #[error("connection closed")]
     Closed,
+    #[error("transport: {0}")]
+    Transport(String),
 }
 
 #[async_trait::async_trait]
 pub trait AgentConnection: Send {
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError>;
     async fn next_event(&mut self) -> Option<ClientEvent>;
+    fn try_next_event(&mut self) -> Option<ClientEvent>;
     fn state(&self) -> ConnectionState;
-    fn transcript(&self) -> Vec<Message>;
-    fn history(&self) -> Vec<Message>;
-    fn tree(&self) -> mush_session::tree::SessionTree;
+    async fn transcript(&mut self) -> Vec<Message>;
+    async fn history(&mut self) -> Vec<Message>;
+    async fn tree(&mut self) -> mush_session::tree::SessionTree;
 }
 
 pub struct InProcessConnection {
@@ -213,7 +219,7 @@ impl InProcessConnection {
         started
     }
 
-    pub fn try_next_event(&mut self) -> Option<ClientEvent> {
+    fn poll_background(&mut self) -> Option<ClientEvent> {
         if let Some(event) = self.queued.pop_front() {
             return Some(event);
         }
@@ -610,7 +616,7 @@ impl AgentConnection for InProcessConnection {
             if self.closed {
                 return None;
             }
-            if let Some(event) = self.try_next_event() {
+            if let Some(event) = self.poll_background() {
                 return Some(event);
             }
             if !self.runtime.turn_active() {
@@ -628,6 +634,10 @@ impl AgentConnection for InProcessConnection {
                 return Some(event);
             }
         }
+    }
+
+    fn try_next_event(&mut self) -> Option<ClientEvent> {
+        self.poll_background()
     }
 
     fn state(&self) -> ConnectionState {
@@ -652,15 +662,15 @@ impl AgentConnection for InProcessConnection {
         }
     }
 
-    fn transcript(&self) -> Vec<Message> {
+    async fn transcript(&mut self) -> Vec<Message> {
         self.runtime.conversation.context()
     }
 
-    fn history(&self) -> Vec<Message> {
+    async fn history(&mut self) -> Vec<Message> {
         self.runtime.conversation.display_history()
     }
 
-    fn tree(&self) -> mush_session::tree::SessionTree {
+    async fn tree(&mut self) -> mush_session::tree::SessionTree {
         self.runtime.conversation.tree().clone()
     }
 }
@@ -668,85 +678,12 @@ impl AgentConnection for InProcessConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::{
-        Api, AssistantContentPart, AssistantMessage, Model, StopReason, StreamOptions, TextContent,
-    };
+    use mush_ai::types::{Api, AssistantMessage, StopReason};
     use mush_session::ConversationState;
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    struct Echo {
-        requests: Arc<Mutex<Vec<Vec<Message>>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl mush_ai::registry::ApiProvider for Echo {
-        fn api(&self) -> Api {
-            Api::AnthropicMessages
-        }
-
-        async fn stream(
-            &self,
-            model: &Model,
-            context: &mush_ai::registry::LlmContext,
-            _options: &StreamOptions,
-        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
-            self.requests.lock().unwrap().push(context.messages.clone());
-            let message = AssistantMessage::builder()
-                .content(vec![AssistantContentPart::Text(TextContent {
-                    text: "hi back".into(),
-                })])
-                .model(model.id.clone())
-                .provider(model.provider.clone())
-                .api(model.api)
-                .stop_reason(StopReason::Stop)
-                .timestamp_ms(Timestamp::zero())
-                .build();
-            Ok(Box::pin(futures::stream::iter([
-                mush_ai::stream::StreamEvent::TextDelta {
-                    content_index: 0,
-                    delta: "hi back".into(),
-                },
-                mush_ai::stream::StreamEvent::Done {
-                    reason: StopReason::Stop,
-                    message,
-                },
-            ])))
-        }
-    }
-
     fn connection() -> (InProcessConnection, Arc<Mutex<Vec<Vec<Message>>>>) {
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = ApiRegistry::new();
-        registry.register(Box::new(Echo {
-            requests: requests.clone(),
-        }));
-        let model = mush_ai::models::all_models()
-            .into_iter()
-            .find(|model| model.api == Api::AnthropicMessages)
-            .unwrap();
-        let mut runtime = SessionRuntime::new(ConversationState::new());
-        runtime.model_id = model.id.to_string();
-        let config = TurnConfig {
-            default_model: model,
-            options: StreamOptions::default(),
-            max_turns: 4,
-            provider_api_keys: HashMap::new(),
-            confirm_tools: false,
-            auto_compact: false,
-            compaction_model: None,
-            forbidden_chars: Default::default(),
-            tool_allowlist: None,
-            generate_title: false,
-        };
-        let connection = InProcessConnection::new(
-            runtime,
-            ToolRegistry::new(),
-            registry,
-            config,
-            mush_agent::AgentInjections::default(),
-        );
-        (connection, requests)
+        crate::testing::echo_connection()
     }
 
     async fn drain_turn(connection: &mut InProcessConnection) -> Vec<ClientEvent> {
@@ -790,7 +727,7 @@ mod tests {
                 ..
             }
         )));
-        let transcript = connection.transcript();
+        let transcript = connection.transcript().await;
         assert_eq!(transcript.len(), 2);
         assert!(matches!(&transcript[0], Message::User(user) if user.text() == "hello"));
         assert!(matches!(&transcript[1], Message::Assistant(_)));
@@ -822,7 +759,7 @@ mod tests {
             Some(ClientEvent::Session(SessionEvent::SessionIdChanged(_)))
         ));
         assert_ne!(connection.state().session_id, before);
-        assert!(connection.transcript().is_empty());
+        assert!(connection.transcript().await.is_empty());
         assert_eq!(connection.state().context_tokens, TokenCount::ZERO);
     }
 
@@ -869,7 +806,7 @@ mod tests {
 
         assert!(matches!(event, ClientEvent::Compacted(_)), "{event:?}");
         assert!(!connection.state().compacting);
-        assert!(connection.transcript().len() < 30);
+        assert!(connection.transcript().await.len() < 30);
         assert_eq!(*saved.lock().unwrap(), 1);
     }
 
@@ -904,7 +841,7 @@ mod tests {
             &events[..],
             [ClientEvent::ToolsCancelled(ids)] if ids == &[ToolCallId::from("call_1")]
         ));
-        let transcript = connection.transcript();
+        let transcript = connection.transcript().await;
         assert!(matches!(
             transcript.last(),
             Some(Message::ToolResult(result))

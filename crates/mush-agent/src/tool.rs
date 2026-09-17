@@ -7,7 +7,7 @@ use mush_ai::types::{
 };
 use serde::de::DeserializeOwned;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[must_use]
 pub struct ToolResult {
     pub content: Vec<ToolResultContentPart>,

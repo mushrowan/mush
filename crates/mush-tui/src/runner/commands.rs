@@ -104,7 +104,7 @@ pub(super) async fn handle_slash_action(
         SlashAction::Side { question } => {
             let context = slash::side_question::side_question_context(
                 tui_config.system_prompt.as_deref(),
-                session.connection.transcript(),
+                session.connection.transcript().await,
                 &question,
             );
             let pending = slash::side_question::start_side_question(
@@ -121,7 +121,7 @@ pub(super) async fn handle_slash_action(
             let pane = &mut *session;
             slash::handle_export(
                 &mut pane.app,
-                &pane.connection.history(),
+                &pane.connection.history().await,
                 path.as_deref().unwrap_or(""),
             );
         }

@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HookPoint {
     PreSession,
     PreToolUse,
@@ -30,7 +31,7 @@ impl LifecycleHook {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HookResult {
     pub success: bool,
     pub output: String,

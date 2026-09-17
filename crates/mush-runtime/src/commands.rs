@@ -7,7 +7,8 @@ use mush_session::{ConversationState, SessionStore};
 use crate::session::SessionRuntime;
 use crate::snapshot::SessionSnapshot;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionCommand {
     New,
     Resume { id: SessionId },
@@ -19,7 +20,8 @@ pub enum SessionCommand {
     Name { title: Option<String> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Replaced {
     New,
     Resumed,
@@ -37,7 +39,8 @@ impl Replaced {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionEvent {
     SessionIdChanged(SessionId),
     SystemPromptChanged(Option<String>),

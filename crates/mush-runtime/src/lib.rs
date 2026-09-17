@@ -3,6 +3,8 @@ pub mod compaction;
 pub mod connection;
 pub mod session;
 pub mod snapshot;
+#[doc(hidden)]
+pub mod testing;
 pub mod turn;
 
 use mush_agent::AgentEvent;
@@ -21,7 +23,8 @@ pub use session::{
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
 pub use turn::{CompactionTarget, TurnConfig, TurnDeps, TurnRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Applied {
     Nothing,
     Appended,

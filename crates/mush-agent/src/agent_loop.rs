@@ -5,7 +5,8 @@ use mush_ai::types::*;
 
 use crate::tool::{ToolRegistry, ToolResult};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEvent {
     AgentStart,
@@ -79,7 +80,7 @@ pub enum ContextTransformResult {
     Compacted(ContextCompaction),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ContextCompaction {
     pub messages: Vec<Message>,
     pub summary: String,

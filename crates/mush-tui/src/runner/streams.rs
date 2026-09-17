@@ -316,7 +316,7 @@ async fn reconcile_openrouter_generation(
 
 async fn auto_compact(session: &mut Session, pane_id: PaneId, tui_config: &mut TuiConfig) {
     let context_tokens = session.app.stats.context_tokens;
-    let messages = session.connection.transcript();
+    let messages = session.connection.transcript().await;
     let target = compaction_target(session, pane_id, tui_config).await;
 
     if !mush_session::compact::needs_compaction_for_messages(

@@ -134,7 +134,8 @@ mod tests {
         model.provider = mush_ai::types::Provider::Anthropic;
         let before = session.connection.state().context_len;
 
-        let context = side_question_context(None, session.connection.transcript(), "why slow?");
+        let context =
+            side_question_context(None, session.connection.transcript().await, "why slow?");
         let pending = start_side_question(
             &mut session.app,
             registry,

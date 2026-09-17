@@ -143,7 +143,7 @@ pub async fn handle(
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {
-            show_tree(app, &connection.tree());
+            show_tree(app, &connection.tree().await);
             None
         }
         SlashAction::Branch { index: None } => {
