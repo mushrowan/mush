@@ -308,7 +308,9 @@ impl KernelJobs {
     pub async fn snapshot(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let cell = self.cell(job_id).await?;
         let mut job = cell.state.lock().await;
-        job.read = true;
+        if job.end.is_some() {
+            job.read = true;
+        }
         Ok(snapshot_of(job_id, &job))
     }
 
@@ -492,6 +494,32 @@ mod tests {
                 origin: Some("call_7".into()),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn polling_a_running_job_keeps_its_finish_notice() {
+        let jobs = KernelJobs::default();
+        let notices = Arc::new(std::sync::Mutex::new(Vec::<JobNotice>::new()));
+        jobs.set_notice_sink({
+            let notices = notices.clone();
+            Arc::new(move |notice| notices.lock().unwrap().push(notice))
+        });
+
+        let (id, pid) = jobs
+            .start(&cwd(), "sleep 0.3; exit 1", None, None)
+            .await
+            .unwrap();
+        let early = jobs.snapshot(&id).await.unwrap();
+        assert!(early.running);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while notices.lock().unwrap().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let notices = notices.lock().unwrap().clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].done.pid, pid);
+        assert_eq!(notices[0].done.exit_code, 1);
     }
 
     #[test]
