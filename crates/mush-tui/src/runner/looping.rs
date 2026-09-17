@@ -11,7 +11,7 @@ use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
 use super::runtime::RunnerRuntime;
-use super::streams::{StreamState, poll_live_tool_output};
+use super::streams::StreamState;
 use mush_runtime::ClientEvent;
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
@@ -162,17 +162,9 @@ async fn handle_streaming_iteration(
                 dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
                 trace_draw_reason("client_event_tick");
             }
-            if super::streams::poll_kernel_busy_prompt(
-                &mut runtime.session,
-                stream_state,
-                &tui_config.kernel_prompts,
-            ) {
+            if super::streams::poll_kernel_busy_prompt(&mut runtime.session, stream_state) {
                 tick_changed = true;
                 trace_draw_reason("kernel_busy_prompt");
-            }
-            if poll_live_tool_output(&mut runtime.session, &tui_config.tool_output_live) {
-                tick_changed = true;
-                trace_draw_reason("live_tool_output");
             }
             if drain_session_picker(&mut runtime.session) {
                 tick_changed = true;
@@ -339,6 +331,20 @@ pub(super) async fn apply_command_events(
             ClientEvent::MessageInjected(event) => {
                 session.app.push_event_message(&event);
                 session.app.start_streaming();
+            }
+            ClientEvent::ToolOutput { exec_id, line } => {
+                session.app.push_tool_output_by_exec_id(&exec_id, &line);
+            }
+            ClientEvent::BashDone(notice) => {
+                session
+                    .app
+                    .push_bash_done(&notice.done, notice.origin.as_deref());
+            }
+            ClientEvent::KernelBusy => {
+                session.app.interaction.kernel_busy = crate::app_state::KernelBusy::Pending;
+            }
+            ClientEvent::KernelBusyWithdrawn => {
+                super::streams::withdraw_kernel_busy(session);
             }
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }

@@ -152,6 +152,13 @@ impl Default for StatusBarConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelBusy {
+    None,
+    Pending,
+    Asked,
+}
+
 #[derive(Debug)]
 pub struct InteractionState {
     pub mode: AppMode,
@@ -162,8 +169,7 @@ pub struct InteractionState {
     pub search: SearchState,
     pub confirm_prompt: Option<String>,
     pub confirm_tool_call_id: Option<ToolCallId>,
-    pub kernel_busy_reply:
-        Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
+    pub kernel_busy: KernelBusy,
     pub show_cost: bool,
     pub show_usage_lines: bool,
     pub show_token_counters: bool,
@@ -186,7 +192,7 @@ impl Default for InteractionState {
             search: SearchState::default(),
             confirm_prompt: None,
             confirm_tool_call_id: None,
-            kernel_busy_reply: None,
+            kernel_busy: KernelBusy::None,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,

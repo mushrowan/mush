@@ -323,9 +323,9 @@ async fn handle_streaming_key_event(
         return Ok(LoopAction::Redraw);
     }
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
-        if session.app.interaction.kernel_busy_reply.is_some() {
+        if session.app.interaction.kernel_busy == crate::app_state::KernelBusy::Asked {
             if let Some(choice) = kernel_busy_answer(key.code) {
-                super::streams::answer_kernel_busy(session, choice);
+                super::streams::answer_kernel_busy(session, choice).await;
                 return Ok(LoopAction::Redraw);
             }
             return Ok(LoopAction::Continue);

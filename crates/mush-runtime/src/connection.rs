@@ -54,6 +54,7 @@ pub enum ClientCommand {
     },
     CompactionRetry,
     CompactionFallback,
+    AnswerKernelBusy(mush_tools::ipython::BusyKernelChoice),
     Shutdown,
 }
 
@@ -83,6 +84,13 @@ pub enum ClientEvent {
     },
     ToolsCancelled(Vec<ToolCallId>),
     MessageInjected(mush_ai::types::EventMessage),
+    ToolOutput {
+        exec_id: String,
+        line: String,
+    },
+    BashDone(mush_tools::kernel_jobs::JobNotice),
+    KernelBusy,
+    KernelBusyWithdrawn,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -145,6 +153,8 @@ pub struct InProcessConnection {
     failed_compaction: Option<FailedCompaction>,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
     inbox: Option<crate::inbox::OrchestratorInbox>,
+    kernel: Option<crate::kernel_channels::KernelSignals>,
+    busy_reply: Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
     closed: bool,
 }
 
@@ -176,8 +186,14 @@ impl InProcessConnection {
             failed_compaction: None,
             title: None,
             inbox: None,
+            kernel: None,
+            busy_reply: None,
             closed: false,
         }
+    }
+
+    pub fn attach_kernel(&mut self, signals: Option<crate::kernel_channels::KernelSignals>) {
+        self.kernel = signals;
     }
 
     #[must_use]
@@ -300,6 +316,7 @@ impl InProcessConnection {
             return false;
         }
         self.poll_control().await;
+        self.submit_kernel_notices().await;
         if std::mem::take(&mut self.fork_compaction_due) {
             let _ = self
                 .start_compaction(CompactionFocus::default(), true)
@@ -383,7 +400,53 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_title() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_kernel() {
+            return Some(event);
+        }
         self.try_poll_compaction()
+    }
+
+    fn try_poll_kernel(&mut self) -> Option<ClientEvent> {
+        if self
+            .busy_reply
+            .as_ref()
+            .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+        {
+            self.busy_reply = None;
+            return Some(ClientEvent::KernelBusyWithdrawn);
+        }
+        let kernel = self.kernel.as_mut()?;
+        while let Ok((exec_id, line)) = kernel.output.try_recv() {
+            self.queued
+                .push_back(ClientEvent::ToolOutput { exec_id, line });
+        }
+        let mut latest = None;
+        while let Ok(reply) = kernel.busy.try_recv() {
+            latest = Some(reply);
+        }
+        if let Some(reply) = latest.filter(|reply| !reply.is_closed()) {
+            self.busy_reply = Some(reply);
+            self.queued.push_back(ClientEvent::KernelBusy);
+        }
+        self.queued.pop_front()
+    }
+
+    async fn submit_kernel_notices(&mut self) {
+        let mut notices = Vec::new();
+        if let Some(kernel) = self.kernel.as_mut() {
+            while let Ok(notice) = kernel.notices.try_recv() {
+                notices.push(notice);
+            }
+        }
+        for notice in notices {
+            let text = notice.done.text();
+            self.queued.push_back(ClientEvent::BashDone(notice));
+            if self.runtime.turn_active() {
+                self.steer(text, Vec::new()).await;
+            } else {
+                self.queue_prompt(&text, Vec::new());
+            }
+        }
     }
 
     fn try_poll_title(&mut self) -> Option<ClientEvent> {
@@ -763,6 +826,11 @@ impl AgentConnection for InProcessConnection {
                 self.queued.extend(events);
             }
             ClientCommand::ConfirmTool { allow } => self.confirm(allow).await,
+            ClientCommand::AnswerKernelBusy(choice) => {
+                if let Some(reply) = self.busy_reply.take() {
+                    let _ = reply.send(choice);
+                }
+            }
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
@@ -1098,5 +1166,120 @@ mod tests {
             connection.send(ClientCommand::Abort).await,
             Err(ConnectionError::Closed)
         ));
+    }
+
+    fn bash_done(command: &str, exit_code: i32) -> mush_tools::kernel_jobs::JobNotice {
+        mush_tools::kernel_jobs::JobNotice {
+            done: mush_tools::kernel_jobs::BashDone {
+                pid: Some(77),
+                exit_code,
+                command: command.into(),
+            },
+            origin: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
+        let (mut connection, _requests) = connection();
+        let (sinks, signals) = crate::kernel_channels::kernel_channels();
+        connection.attach_kernel(Some(signals));
+
+        (sinks.notices)(bash_done("exit 5", 5));
+        connection.tick().await;
+
+        let events: Vec<_> = std::iter::from_fn(|| connection.try_next_event()).collect();
+        assert!(
+            matches!(&events[..], [ClientEvent::BashDone(notice), ClientEvent::TurnStarted] if notice.done.exit_code == 5),
+            "{events:?}"
+        );
+        let transcript = connection.transcript().await;
+        assert!(matches!(
+            &transcript[0],
+            Message::User(user) if user.text().starts_with("[bash-done pid:77 exit:5]")
+        ));
+
+        (sinks.notices)(bash_done("second", 0));
+        connection.tick().await;
+
+        let events: Vec<_> = std::iter::from_fn(|| connection.try_next_event()).collect();
+        assert!(
+            matches!(&events[..], [ClientEvent::BashDone(_)]),
+            "{events:?}"
+        );
+        let queued = connection
+            .runtime
+            .turns
+            .meta(PRIMARY_PANE)
+            .expect("the turn is running")
+            .steering_queue
+            .lock()
+            .await
+            .len();
+        assert_eq!(queued, 1);
+    }
+
+    #[tokio::test]
+    async fn a_busy_kernel_question_reaches_the_client_and_the_answer_reaches_the_tool() {
+        use mush_tools::ipython::BusyKernelChoice;
+        let (mut connection, _requests) = connection();
+        let (sinks, signals) = crate::kernel_channels::kernel_channels();
+        connection.attach_kernel(Some(signals));
+
+        let answer = (sinks.busy_prompt)();
+        assert!(matches!(
+            connection.try_next_event(),
+            Some(ClientEvent::KernelBusy)
+        ));
+        assert!(connection.try_next_event().is_none());
+
+        connection
+            .send(ClientCommand::AnswerKernelBusy(BusyKernelChoice::Kill))
+            .await
+            .unwrap();
+
+        assert_eq!(answer.await, BusyKernelChoice::Kill);
+    }
+
+    #[tokio::test]
+    async fn an_aborted_cell_withdraws_its_busy_question() {
+        let (mut connection, _requests) = connection();
+        let (sinks, signals) = crate::kernel_channels::kernel_channels();
+        connection.attach_kernel(Some(signals));
+
+        let answer = (sinks.busy_prompt)();
+        assert!(matches!(
+            connection.try_next_event(),
+            Some(ClientEvent::KernelBusy)
+        ));
+        drop(answer);
+
+        assert!(matches!(
+            connection.try_next_event(),
+            Some(ClientEvent::KernelBusyWithdrawn)
+        ));
+        assert!(connection.try_next_event().is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_output_lines_arrive_as_events() {
+        let (mut connection, _requests) = connection();
+        let (sinks, signals) = crate::kernel_channels::kernel_channels();
+        connection.attach_kernel(Some(signals));
+
+        (sinks.output)("tc_1", "building");
+        (sinks.output)("tc_2", "testing");
+
+        let events: Vec<_> = std::iter::from_fn(|| connection.try_next_event()).collect();
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    ClientEvent::ToolOutput { exec_id: a, line: la },
+                    ClientEvent::ToolOutput { exec_id: b, line: lb },
+                ] if a == "tc_1" && la == "building" && b == "tc_2" && lb == "testing"
+            ),
+            "{events:?}"
+        );
     }
 }

@@ -85,36 +85,15 @@ pub(super) fn show_confirm_request(
     );
 }
 
-pub(super) fn poll_kernel_busy_prompt(
-    session: &mut Session,
-    stream_state: &StreamState,
-    prompts: &Option<crate::runner::config::KernelPrompts>,
-) -> bool {
+pub(super) fn poll_kernel_busy_prompt(session: &mut Session, stream_state: &StreamState) -> bool {
     let app = &mut session.app;
-    if let Some(reply) = &app.interaction.kernel_busy_reply
-        && reply.is_closed()
+    if app.interaction.kernel_busy != crate::app_state::KernelBusy::Pending
+        || app.interaction.mode != crate::app::AppMode::Insert
     {
-        app.interaction.kernel_busy_reply = None;
-        if app.interaction.mode == crate::app::AppMode::ToolConfirm {
-            app.interaction.mode = crate::app::AppMode::Insert;
-        }
-        return true;
-    }
-    if app.interaction.mode != crate::app::AppMode::Insert {
         return false;
     }
-    let Some(prompts) = prompts else {
-        return false;
-    };
-    let Some(request) = prompts
-        .lock()
-        .ok()
-        .and_then(|mut guard| guard.drain(..).rfind(|request| !request.reply.is_closed()))
-    else {
-        return false;
-    };
     app.interaction.mode = crate::app::AppMode::ToolConfirm;
-    app.interaction.kernel_busy_reply = Some(request.reply);
+    app.interaction.kernel_busy = crate::app_state::KernelBusy::Asked;
     (stream_state.notify)(
         "python kernel is busy",
         "an interrupted cell is still running",
@@ -123,14 +102,26 @@ pub(super) fn poll_kernel_busy_prompt(
     true
 }
 
-pub(super) fn answer_kernel_busy(
+pub(super) fn withdraw_kernel_busy(session: &mut Session) {
+    let app = &mut session.app;
+    if app.interaction.kernel_busy == crate::app_state::KernelBusy::Asked
+        && app.interaction.mode == crate::app::AppMode::ToolConfirm
+    {
+        app.interaction.mode = crate::app::AppMode::Insert;
+    }
+    app.interaction.kernel_busy = crate::app_state::KernelBusy::None;
+}
+
+pub(super) async fn answer_kernel_busy(
     session: &mut Session,
     choice: mush_tools::ipython::BusyKernelChoice,
 ) {
+    let _ = session
+        .connection
+        .send(mush_runtime::ClientCommand::AnswerKernelBusy(choice))
+        .await;
     let app = &mut session.app;
-    if let Some(reply) = app.interaction.kernel_busy_reply.take() {
-        let _ = reply.send(choice);
-    }
+    app.interaction.kernel_busy = crate::app_state::KernelBusy::None;
     app.interaction.mode = crate::app::AppMode::Insert;
     app.status = Some(
         match choice {
@@ -161,69 +152,6 @@ pub(super) async fn answer_confirmation(
             None => "tool denied".into(),
         }));
     }
-}
-
-pub(super) async fn submit_kernel_notices(
-    session: &mut Session,
-    _stream_state: &StreamState,
-    notices: &Option<crate::runner::config::KernelNotices>,
-) -> bool {
-    let Some(notices) = notices else {
-        return false;
-    };
-    let pending: Vec<mush_tools::kernel_jobs::JobNotice> = match notices.lock() {
-        Ok(mut guard) if !guard.is_empty() => guard.drain(..).collect(),
-        _ => return false,
-    };
-    for notice in pending {
-        submit_notice(session, notice).await;
-    }
-    true
-}
-
-async fn submit_notice(session: &mut Session, notice: mush_tools::kernel_jobs::JobNotice) {
-    let text = notice.done.text();
-    session
-        .app
-        .push_bash_done(&notice.done, notice.origin.as_deref());
-    if session.connection.state().turn_active {
-        let _ = session
-            .connection
-            .send(mush_runtime::ClientCommand::Steer {
-                text,
-                images: Vec::new(),
-            })
-            .await;
-    } else {
-        session.app.active_tools.clear();
-        session.app.start_streaming();
-        let _ = session
-            .connection
-            .send(mush_runtime::ClientCommand::QueuePrompt {
-                text,
-                images: Vec::new(),
-            })
-            .await;
-    }
-}
-
-pub(super) fn poll_live_tool_output(
-    session: &mut Session,
-    live: &Option<crate::runner::config::LiveToolOutput>,
-) -> bool {
-    let Some(live) = live else {
-        return false;
-    };
-    let updates: Vec<(String, String)> = match live.lock() {
-        Ok(mut guard) if !guard.is_empty() => guard.drain().collect(),
-        _ => return false,
-    };
-    let app = &mut session.app;
-    let mut changed = false;
-    for (exec_id, line) in updates {
-        changed |= app.push_tool_output_by_exec_id(&exec_id, &line);
-    }
-    changed
 }
 
 pub(super) async fn handle_turn_ended(
@@ -482,6 +410,7 @@ mod tests {
     }
 
     use crate::app::App;
+    use crate::runner::looping::apply_command_events;
     use crate::session::Session;
 
     fn app() -> App {
@@ -674,110 +603,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
-        let pane_id = PaneId::new(1);
+    async fn a_bash_done_event_lands_in_the_transcript() {
         let mut session = Session::new(app());
-        let stream_state = StreamState::new();
-        let notices: crate::runner::config::KernelNotices =
-            Arc::new(std::sync::Mutex::new(vec![bash_done("exit 5", 5)]));
+        let mut config = test_tui_config();
 
-        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
-        assert_eq!(
-            session
-                .in_process()
-                .runtime
-                .pending_prompt
-                .as_ref()
-                .map(|p| p.text.as_str()),
-            Some("[bash-done pid:77 exit:5]\n\nCommand: \"exit 5\"")
-        );
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![mush_runtime::ClientEvent::BashDone(bash_done("exit 5", 5))],
+        )
+        .await;
+
         assert_eq!(
             session.app.messages.last().map(|m| m.role.clone()),
             Some(crate::app::MessageRole::BashDone)
         );
-        assert!(!submit_kernel_notices(&mut session, &stream_state, &Some(notices.clone())).await);
-
-        let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
-        let steering_queue = Arc::new(Mutex::new(Vec::new()));
-        session.in_process().runtime.turns.register_active(
-            pane_id,
-            StreamMeta {
-                steering_queue: steering_queue.clone(),
-                confirm_req_rx,
-                confirm_reply: Arc::new(Mutex::new(None)),
-                model: models::all_models_with_user().into_iter().next().unwrap(),
-                context_tokens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                cancel: tokio_util::sync::CancellationToken::new(),
-            },
-        );
-        notices.lock().unwrap().push(bash_done("second", 0));
-
-        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices)).await);
-        assert_eq!(steering_queue.lock().await.len(), 1);
-        assert!(!session.app.messages.iter().any(|m| m.queued));
     }
 
     #[tokio::test]
-    async fn a_busy_kernel_request_becomes_a_prompt_and_the_answer_reaches_the_tool() {
+    async fn a_busy_kernel_event_becomes_a_question_and_the_answer_goes_to_the_worker() {
         use mush_tools::ipython::BusyKernelChoice;
         let mut session = Session::new(app());
+        let mut config = test_tui_config();
         let stream_state = StreamState::new();
-        let (reply, answer) = tokio::sync::oneshot::channel();
-        let prompts: crate::runner::config::KernelPrompts = Arc::new(std::sync::Mutex::new(vec![
-            crate::runner::config::KernelBusyRequest { reply },
-        ]));
 
-        assert!(poll_kernel_busy_prompt(
+        apply_command_events(
             &mut session,
-            &stream_state,
-            &Some(prompts.clone())
-        ));
+            &mut config,
+            vec![mush_runtime::ClientEvent::KernelBusy],
+        )
+        .await;
+        assert!(poll_kernel_busy_prompt(&mut session, &stream_state));
         assert_eq!(
             session.app.interaction.mode,
             crate::app::AppMode::ToolConfirm
         );
-        assert!(!poll_kernel_busy_prompt(
-            &mut session,
-            &stream_state,
-            &Some(prompts.clone())
-        ));
+        assert!(!poll_kernel_busy_prompt(&mut session, &stream_state));
 
-        answer_kernel_busy(&mut session, BusyKernelChoice::Kill);
+        answer_kernel_busy(&mut session, BusyKernelChoice::Kill).await;
 
-        assert_eq!(answer.await, Ok(BusyKernelChoice::Kill));
         assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+        assert_eq!(
+            session.app.interaction.kernel_busy,
+            crate::app_state::KernelBusy::None
+        );
     }
 
     #[tokio::test]
-    async fn an_aborted_cell_takes_its_busy_prompt_away() {
+    async fn a_withdrawn_busy_kernel_question_closes_the_prompt() {
         let mut session = Session::new(app());
+        let mut config = test_tui_config();
         let stream_state = StreamState::new();
-        let (reply, answer) =
-            tokio::sync::oneshot::channel::<mush_tools::ipython::BusyKernelChoice>();
-        let prompts: crate::runner::config::KernelPrompts = Arc::new(std::sync::Mutex::new(vec![
-            crate::runner::config::KernelBusyRequest { reply },
-        ]));
-        assert!(poll_kernel_busy_prompt(
+        apply_command_events(
             &mut session,
-            &stream_state,
-            &Some(prompts.clone())
-        ));
+            &mut config,
+            vec![mush_runtime::ClientEvent::KernelBusy],
+        )
+        .await;
+        assert!(poll_kernel_busy_prompt(&mut session, &stream_state));
 
-        drop(answer);
-
-        assert!(poll_kernel_busy_prompt(
+        apply_command_events(
             &mut session,
-            &stream_state,
-            &Some(prompts)
-        ));
+            &mut config,
+            vec![mush_runtime::ClientEvent::KernelBusyWithdrawn],
+        )
+        .await;
+
         assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
-        assert!(session.app.interaction.kernel_busy_reply.is_none());
+        assert_eq!(
+            session.app.interaction.kernel_busy,
+            crate::app_state::KernelBusy::None
+        );
     }
 
     #[tokio::test]
     async fn a_notice_with_a_known_origin_attaches_to_its_cell() {
         let mut session = Session::new(app());
-        let stream_state = StreamState::new();
+        let mut config = test_tui_config();
         let mut cell = crate::app::DisplayMessage::new(crate::app::MessageRole::Assistant, "");
         cell.tool_calls.push(crate::app::DisplayToolCall {
             tool_call_id: "call_9".into(),
@@ -794,15 +696,17 @@ mod tests {
         let before = session.app.messages.len();
         let mut notice = bash_done("exit 5", 5);
         notice.origin = Some("call_9".into());
-        let notices: crate::runner::config::KernelNotices =
-            Arc::new(std::sync::Mutex::new(vec![notice]));
 
-        assert!(submit_kernel_notices(&mut session, &stream_state, &Some(notices)).await);
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![mush_runtime::ClientEvent::BashDone(notice)],
+        )
+        .await;
 
         assert_eq!(session.app.messages.len(), before);
         let attached = &session.app.messages.last().unwrap().tool_calls[0].bash_done;
         assert_eq!(attached.as_ref().map(|d| d.exit_code), Some(5));
-        assert!(session.in_process().runtime.pending_prompt.is_some());
     }
 
     #[tokio::test]
@@ -1174,23 +1078,25 @@ mod tests {
         );
     }
 
-    fn live_map(entries: &[(&str, &str)]) -> Option<crate::runner::config::LiveToolOutput> {
-        let map = entries
+    async fn tool_output(session: &mut Session, entries: &[(&str, &str)]) {
+        let mut config = test_tui_config();
+        let events = entries
             .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .map(|(exec_id, line)| mush_runtime::ClientEvent::ToolOutput {
+                exec_id: (*exec_id).to_string(),
+                line: (*line).to_string(),
+            })
             .collect();
-        Some(std::sync::Arc::new(std::sync::Mutex::new(map)))
+        apply_command_events(session, &mut config, events).await;
     }
 
-    #[test]
-    fn poll_live_tool_output_updates_focused_tool() {
-        let _pane_id = PaneId::new(1);
+    #[tokio::test]
+    async fn tool_output_updates_the_focused_tool() {
         let mut session = Session::new(app());
         let tool_call_id = ToolCallId::from("tc_live");
         session.app.start_tool(&tool_call_id, "bash", "cargo test");
 
-        let live = live_map(&[("tc_live", "running")]);
-        assert!(poll_live_tool_output(&mut session, &live));
+        tool_output(&mut session, &[("tc_live", "running")]).await;
 
         assert_eq!(
             session.app.active_tools[0].live_output.as_deref(),
@@ -1198,33 +1104,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn poll_live_tool_output_routes_each_exec_id_to_its_own_panel() {
+    #[tokio::test]
+    async fn tool_output_routes_each_exec_id_to_its_own_panel() {
         let mut session = Session::new(app());
         let a = ToolCallId::from("tc_a");
         let b = ToolCallId::from("tc_b");
         session.app.start_tool(&a, "bash", "jj st");
         session.app.start_tool(&b, "bash", "cargo test");
 
-        let live = live_map(&[("tc_a", "jj output"), ("tc_b", "test output")]);
-        assert!(poll_live_tool_output(&mut session, &live));
+        tool_output(
+            &mut session,
+            &[("tc_a", "jj output"), ("tc_b", "test output")],
+        )
+        .await;
 
         let tools = &session.app.active_tools;
         assert_eq!(tools[0].live_output.as_deref(), Some("jj output"));
         assert_eq!(tools[1].live_output.as_deref(), Some("test output"));
-    }
-
-    #[test]
-    fn poll_live_tool_output_reports_unchanged_output() {
-        let _pane_id = PaneId::new(1);
-        let mut session = Session::new(app());
-        let tool_call_id = ToolCallId::from("tc_live");
-        session.app.start_tool(&tool_call_id, "bash", "cargo test");
-        session.app.push_tool_output(&tool_call_id, "running");
-
-        let live = live_map(&[("tc_live", "running")]);
-
-        assert!(!poll_live_tool_output(&mut session, &live));
     }
 
     fn test_tui_config() -> super::super::TuiConfig {
@@ -1248,7 +1144,6 @@ mod tests {
             debug_cache: false,
             cache_timer: false,
             thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
             log_buffer: None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -1268,8 +1163,6 @@ mod tests {
             reload_context: None,
             mcp: None,
             skills: Default::default(),
-            kernel_notices: None,
-            kernel_prompts: None,
         }
     }
 

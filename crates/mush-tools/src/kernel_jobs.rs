@@ -11,7 +11,7 @@ pub type NoticeSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
 
 const NOTICE_COMMAND_CAP: usize = 2000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BashDone {
     pub pid: Option<u32>,
     pub exit_code: i32,
@@ -49,7 +49,7 @@ impl BashDone {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JobNotice {
     pub done: BashDone,
     pub origin: Option<String>,

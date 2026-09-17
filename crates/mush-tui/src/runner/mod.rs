@@ -26,8 +26,8 @@ use mush_runtime::AgentConnection;
 use crate::screen::Screen;
 
 pub use self::config::{
-    KernelBusyRequest, KernelNotices, KernelPrompts, LiveToolOutput, ModelResolver, PaneSnapshot,
-    ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig,
+    ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot,
+    SkillCatalogue, TuiConfig,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver};
@@ -180,12 +180,6 @@ async fn run_tui_with(
             "start_pending_streams",
             "before start_pending_streams",
         );
-        let notice_submitted = streams::submit_kernel_notices(
-            &mut runtime.session,
-            &stream_state,
-            &tui_config.kernel_notices,
-        )
-        .await;
         {
             let thinking_level = runtime.session.app.thinking_level.clone();
             let connection = &mut runtime.session.connection;
@@ -250,7 +244,6 @@ async fn run_tui_with(
             && runtime.needs_periodic_redraw(tui_config.cache_timer);
 
         let should_draw = matches!(action, LoopAction::Redraw)
-            || notice_submitted
             || discovery_updated
             || side_question_finished
             || maintenance_tick;

@@ -4,18 +4,7 @@ pub type FavouriteModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
 pub type RecentModelsSaver = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 
-pub type LiveToolOutput =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
-
 pub use mush_runtime::{PaneSnapshot, SessionSaver, SessionSnapshot};
-
-pub type KernelNotices = std::sync::Arc<std::sync::Mutex<Vec<mush_tools::kernel_jobs::JobNotice>>>;
-
-pub struct KernelBusyRequest {
-    pub reply: tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>,
-}
-
-pub type KernelPrompts = std::sync::Arc<std::sync::Mutex<Vec<KernelBusyRequest>>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct SkillCatalogue {
@@ -52,7 +41,6 @@ pub struct TuiConfig {
     pub debug_cache: bool,
     pub cache_timer: bool,
     pub thinking_display: crate::app::ThinkingDisplay,
-    pub tool_output_live: Option<LiveToolOutput>,
     pub log_buffer: Option<std::sync::Arc<dyn Fn(usize) -> Vec<String> + Send + Sync>>,
     pub terminal_policy: crate::terminal_policy::TerminalPolicy,
     pub cwd: std::path::PathBuf,
@@ -72,8 +60,6 @@ pub struct TuiConfig {
     pub reload_context: Option<ReloadCallback>,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
-    pub kernel_notices: Option<KernelNotices>,
-    pub kernel_prompts: Option<KernelPrompts>,
 }
 
 impl TuiConfig {
@@ -160,7 +146,6 @@ impl TuiConfig {
             debug_cache: false,
             cache_timer: false,
             thinking_display: crate::app::ThinkingDisplay::Collapse,
-            tool_output_live: None,
             log_buffer: None,
             terminal_policy: crate::terminal_policy::TerminalPolicy::default(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -180,8 +165,6 @@ impl TuiConfig {
             reload_context: None,
             mcp: None,
             skills: SkillCatalogue::default(),
-            kernel_notices: None,
-            kernel_prompts: None,
         }
     }
 }

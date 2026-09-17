@@ -611,15 +611,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     Ok(())
 }
 
-struct KernelChannels {
-    tool_output_live: mush_tui::runner::LiveToolOutput,
-    kernel_notices: mush_tui::runner::KernelNotices,
-    kernel_prompts: mush_tui::runner::KernelPrompts,
-}
-
 struct Prepared {
     setup: AppSetup,
-    channels: KernelChannels,
+    kernel_signals: mush_runtime::KernelSignals,
 }
 
 struct OpenedSession {
@@ -630,9 +624,12 @@ struct OpenedSession {
 
 async fn worker_mode(cli: Cli, socket: std::path::PathBuf) -> Result<()> {
     let listener = mush_daemon::bind(&socket)?;
-    let Prepared { setup, .. } = prepare(&cli).await?;
+    let Prepared {
+        setup,
+        kernel_signals,
+    } = prepare(&cli).await?;
     let opened = open_session(&cli, &setup).await?;
-    let worker = worker_config(&cli, &setup, &opened);
+    let worker = worker_config(&cli, &setup, &opened, kernel_signals);
     eprintln!(
         "{}",
         Style::Dim.stderr(format_args!("worker listening on {}", socket.display()))
@@ -654,7 +651,10 @@ async fn worker_mode(cli: Cli, socket: std::path::PathBuf) -> Result<()> {
 }
 
 async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
-    let Prepared { setup, channels } = prepare(&cli).await?;
+    let Prepared {
+        setup,
+        kernel_signals,
+    } = prepare(&cli).await?;
 
     let (discovery_tx, discovery_rx) = std::sync::mpsc::channel();
     let startup_discovery_client = setup.http_client.clone();
@@ -672,7 +672,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     match &cli.attach {
         Some(socket) => {
             let connection = mush_daemon::DaemonConnection::connect(socket).await?;
-            let tui_config = client_config(&cli, &setup, &channels, &log_buffer, None);
+            let tui_config = client_config(&cli, &setup, &log_buffer, None);
             mush_tui::run_tui_attached(
                 tui_config,
                 Box::new(connection),
@@ -684,9 +684,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
         }
         None => {
             let opened = open_session(&cli, &setup).await?;
-            let worker = worker_config(&cli, &setup, &opened);
-            let tui_config =
-                client_config(&cli, &setup, &channels, &log_buffer, Some(&opened.session));
+            let worker = worker_config(&cli, &setup, &opened, kernel_signals);
+            let tui_config = client_config(&cli, &setup, &log_buffer, Some(&opened.session));
             mush_tui::run_tui(
                 tui_config,
                 worker,
@@ -705,43 +704,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
 }
 
 async fn prepare(cli: &Cli) -> Result<Prepared> {
-    let tool_output_live: mush_tui::runner::LiveToolOutput =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let sink_state = tool_output_live.clone();
-    let output_sink: mush_tools::bash::OutputSink =
-        std::sync::Arc::new(move |exec_id: &str, line: &str| {
-            if let Ok(mut guard) = sink_state.lock() {
-                guard.insert(exec_id.to_string(), line.to_string());
-            }
-        });
-    let kernel_notices: mush_tui::runner::KernelNotices =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let kernel_notice_sink: mush_tools::kernel_jobs::NoticeSink = {
-        let notices = kernel_notices.clone();
-        std::sync::Arc::new(move |notice: mush_tools::kernel_jobs::JobNotice| {
-            if let Ok(mut guard) = notices.lock() {
-                guard.push(notice);
-            }
-        })
-    };
-
-    let kernel_prompts: mush_tui::runner::KernelPrompts =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let kernel_busy_prompt: mush_tools::ipython::BusyKernelPrompt = {
-        let prompts = kernel_prompts.clone();
-        std::sync::Arc::new(move || {
-            let (reply, answer) = tokio::sync::oneshot::channel();
-            if let Ok(mut guard) = prompts.lock() {
-                guard.push(mush_tui::runner::KernelBusyRequest { reply });
-            }
-            Box::pin(async move {
-                answer
-                    .await
-                    .unwrap_or(mush_tools::ipython::BusyKernelChoice::Cancel)
-            })
-        })
-    };
-
+    let (sinks, kernel_signals) = mush_runtime::kernel_channels();
     let timer = if cli.profile_startup {
         Some(timing::PhaseTimer::new())
     } else {
@@ -759,9 +722,9 @@ async fn prepare(cli: &Cli) -> Result<Prepared> {
         append_system: cli.append_system.clone(),
         discovery: cli.discovery(),
         debug_cache: cli.debug_cache,
-        output_sink: Some(output_sink),
-        kernel_notice_sink: Some(kernel_notice_sink),
-        kernel_busy_prompt: Some(kernel_busy_prompt),
+        output_sink: Some(sinks.output),
+        kernel_notice_sink: Some(sinks.notices),
+        kernel_busy_prompt: Some(sinks.busy_prompt),
         timer,
     })
     .await?;
@@ -772,11 +735,7 @@ async fn prepare(cli: &Cli) -> Result<Prepared> {
 
     Ok(Prepared {
         setup,
-        channels: KernelChannels {
-            tool_output_live,
-            kernel_notices,
-            kernel_prompts,
-        },
+        kernel_signals,
     })
 }
 
@@ -825,6 +784,7 @@ fn worker_config(
     cli: &Cli,
     setup: &AppSetup,
     opened: &OpenedSession,
+    kernel_signals: mush_runtime::KernelSignals,
 ) -> mush_runtime::WorkerConfig {
     let session = &opened.session;
     let mut options = setup.options.clone();
@@ -885,13 +845,13 @@ fn worker_config(
         control_endpoint: None,
     };
     worker.agent_card = Some(agent_card(setup));
+    worker.kernel_signals = Some(kernel_signals);
     worker
 }
 
 fn client_config(
     cli: &Cli,
     setup: &AppSetup,
-    channels: &KernelChannels,
     log_buffer: &logging::LogBuffer,
     session: Option<&Session>,
 ) -> TuiConfig {
@@ -938,9 +898,6 @@ fn client_config(
         debug_cache: setup.debug_cache,
         cache_timer: setup.cfg.cache_timer,
         thinking_display: setup.cfg.thinking_display,
-        tool_output_live: Some(channels.tool_output_live.clone()),
-        kernel_notices: Some(channels.kernel_notices.clone()),
-        kernel_prompts: Some(channels.kernel_prompts.clone()),
         log_buffer: Some({
             let buf = log_buffer.clone();
             std::sync::Arc::new(move |n| buf.tail(n))

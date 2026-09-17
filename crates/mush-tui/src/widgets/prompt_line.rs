@@ -10,7 +10,7 @@ pub fn question(app: &App) -> Option<String> {
     if app.interaction.mode != AppMode::ToolConfirm {
         return None;
     }
-    if app.interaction.kernel_busy_reply.is_some() {
+    if app.interaction.kernel_busy == crate::app_state::KernelBusy::Asked {
         return Some(
             "interrupted python cell still running. y wait, n kill and restart, esc cancel".into(),
         );
@@ -63,8 +63,7 @@ mod tests {
             Some("run bash rm -rf build? y/n")
         );
 
-        let (reply, _rx) = tokio::sync::oneshot::channel();
-        app.interaction.kernel_busy_reply = Some(reply);
+        app.interaction.kernel_busy = crate::app_state::KernelBusy::Asked;
         assert!(
             question(&app)
                 .unwrap()

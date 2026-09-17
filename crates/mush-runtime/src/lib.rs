@@ -2,6 +2,7 @@ pub mod commands;
 pub mod compaction;
 pub mod connection;
 pub mod inbox;
+pub mod kernel_channels;
 pub mod session;
 pub mod snapshot;
 #[doc(hidden)]
@@ -18,6 +19,7 @@ pub use connection::{
     AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
     InProcessConnection, PRIMARY_PANE,
 };
+pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use session::{
     ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,
     StreamGeneration, StreamMeta, TurnEvent, TurnEvents, TurnStream,

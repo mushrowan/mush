@@ -24,6 +24,7 @@ pub struct WorkerConfig {
     pub turn: TurnConfig,
     pub injections: mush_agent::AgentInjections,
     pub agent_card: Option<mush_agent::AgentCard>,
+    pub kernel_signals: Option<crate::kernel_channels::KernelSignals>,
 }
 
 impl WorkerConfig {
@@ -42,6 +43,7 @@ impl WorkerConfig {
             turn,
             injections: mush_agent::AgentInjections::default(),
             agent_card: None,
+            kernel_signals: None,
         }
     }
 
@@ -57,13 +59,15 @@ impl WorkerConfig {
         runtime.rlm_max_depth = self.rlm_max_depth;
         runtime.thinking_level = self.thinking_level;
         runtime.set_kernel_state(self.kernel_state);
-        InProcessConnection::new(
+        let mut connection = InProcessConnection::new(
             runtime,
             tools.clone(),
             registry.clone(),
             self.turn,
             self.injections,
-        )
+        );
+        connection.attach_kernel(self.kernel_signals);
+        connection
     }
 }
 
