@@ -209,6 +209,10 @@ impl AgentConnection for DaemonConnection {
         }
     }
 
+    fn closed(&self) -> bool {
+        self.closed
+    }
+
     fn state(&self) -> ConnectionState {
         self.state.clone()
     }

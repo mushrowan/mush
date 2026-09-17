@@ -29,7 +29,8 @@ pub(super) async fn run_loop_iteration(
     size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    let action = if !runtime.session.connection.state().turn_active {
+    note_closed_connection(runtime);
+    let action = if runtime.connection_closed || !runtime.session.connection.state().turn_active {
         handle_idle_iteration(
             stream_state,
             runtime,
@@ -427,6 +428,20 @@ fn drain_session_picker(session: &mut crate::session::Session) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn note_closed_connection(runtime: &mut RunnerRuntime) -> bool {
+    if runtime.connection_closed || !runtime.session.connection.closed() {
+        return false;
+    }
+    runtime.connection_closed = true;
+    let app = &mut runtime.session.app;
+    app.finish_streaming(None, None);
+    app.active_tools.clear();
+    app.status = Some(crate::app_state::Status::error(
+        "the worker closed the connection. /quit to leave",
+    ));
+    true
+}
+
 async fn handle_idle_iteration(
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
@@ -455,6 +470,32 @@ async fn handle_idle_iteration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_closed_connection_is_noticed_once() {
+        let config = super::super::TuiConfig::for_test();
+        let mut session = crate::session::Session::new(crate::app::App::new(
+            config.model.id.clone(),
+            config.model.context_window,
+        ));
+        session.app.start_streaming();
+        let mut runtime = RunnerRuntime::from_pane(session, Default::default());
+        assert!(!note_closed_connection(&mut runtime));
+
+        runtime
+            .session
+            .connection
+            .send(mush_runtime::ClientCommand::Shutdown)
+            .await
+            .unwrap();
+
+        assert!(note_closed_connection(&mut runtime));
+        assert!(!runtime.session.app.stream.active);
+        let status = runtime.session.app.status.clone().unwrap();
+        assert!(status.error);
+        assert!(status.text.contains("/quit"));
+        assert!(!note_closed_connection(&mut runtime));
+    }
 
     #[cfg(feature = "signal")]
     struct SignalFake(tokio::time::Instant);

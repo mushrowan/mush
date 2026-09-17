@@ -135,6 +135,7 @@ pub trait AgentConnection: Send + std::any::Any {
     fn try_next_event(&mut self) -> Option<ClientEvent>;
     async fn tick(&mut self) {}
     fn state(&self) -> ConnectionState;
+    fn closed(&self) -> bool;
     async fn transcript(&mut self) -> Vec<Message>;
     async fn history(&mut self) -> Vec<Message>;
     async fn tree(&mut self) -> mush_session::tree::SessionTree;
@@ -897,6 +898,10 @@ impl AgentConnection for InProcessConnection {
 
     async fn tick(&mut self) {
         self.start_pending().await;
+    }
+
+    fn closed(&self) -> bool {
+        self.closed
     }
 
     fn state(&self) -> ConnectionState {
