@@ -12,7 +12,10 @@ pub enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
     },
-    Interrupt,
+    Interrupt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
     HostReply {
         id: String,
         ok: bool,
@@ -120,7 +123,7 @@ mod tests {
             r#"{"type":"execute","id":"c1","code":"x = 1","origin":"call_7"}"#
         );
         assert_eq!(
-            serde_json::to_string(&Request::Interrupt).unwrap(),
+            serde_json::to_string(&Request::Interrupt { id: None }).unwrap(),
             r#"{"type":"interrupt"}"#
         );
     }

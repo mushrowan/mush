@@ -209,6 +209,64 @@ async fn a_rejected_host_request_raises_in_the_cell() {
 }
 
 #[tokio::test]
+async fn an_interrupt_that_beats_its_cell_is_parked_and_delivered_on_start() {
+    let kernel = Arc::new(kernel().await);
+
+    kernel.interrupt().await.unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        kernel.execute("n = 0\nwhile True:\n    n += 1"),
+    )
+    .await
+    .expect("the parked interrupt lands on the next cell")
+    .unwrap();
+    assert!(output.interrupted(), "{output:?}");
+
+    let after = kernel.execute("1 + 1").await.unwrap();
+    assert_eq!(
+        after.result.as_deref(),
+        Some("2"),
+        "a parked interrupt fires once"
+    );
+    Arc::try_unwrap(kernel)
+        .ok()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_interrupt_naming_another_cell_leaves_the_running_one_alone() {
+    let kernel = Arc::new(kernel().await);
+
+    let runner = {
+        let kernel = kernel.clone();
+        tokio::spawn(async move {
+            kernel
+                .execute("import time\ntime.sleep(0.4)\n'slept'")
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    kernel.interrupt_cell("cell-does-not-exist").await.unwrap();
+
+    let output = tokio::time::timeout(Duration::from_secs(5), runner)
+        .await
+        .expect("the cell finishes")
+        .unwrap()
+        .unwrap();
+    assert!(!output.interrupted(), "{output:?}");
+    assert_eq!(output.result.as_deref(), Some("'slept'"));
+    Arc::try_unwrap(kernel)
+        .ok()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_busy_loop_can_be_interrupted() {
     let kernel = Arc::new(kernel().await);
 
@@ -269,24 +327,41 @@ async fn an_awaiting_cell_can_be_interrupted() {
 }
 
 #[tokio::test]
-async fn dropping_an_execute_future_interrupts_the_cell() {
+async fn dropping_an_execute_future_stops_the_cell_and_frees_the_kernel() {
     let kernel = Arc::new(kernel().await);
 
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let runner = {
         let kernel = kernel.clone();
         tokio::spawn(async move {
-            let _ = kernel.execute("n = 0\nwhile True:\n    n += 1").await;
+            let mut started = Some(started_tx);
+            let _ = kernel
+                .execute_streaming(
+                    "print('running', flush=True)\nn = 0\nwhile True:\n    n += 1",
+                    |event| {
+                        if matches!(event, mush_kernel::Event::Stdout { .. })
+                            && let Some(tx) = started.take()
+                        {
+                            let _ = tx.send(());
+                        }
+                    },
+                )
+                .await;
         })
     };
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .expect("the cell starts")
+        .unwrap();
     runner.abort();
     let _ = runner.await;
 
-    let after = tokio::time::timeout(Duration::from_secs(5), kernel.execute("n > 0"))
+    let after = tokio::time::timeout(Duration::from_secs(5), kernel.execute("'alive'"))
         .await
-        .expect("the abandoned cell was interrupted")
+        .expect("the abandoned loop was interrupted, so the kernel takes a new cell")
         .unwrap();
-    assert_eq!(after.result.as_deref(), Some("True"));
+    assert_eq!(after.result.as_deref(), Some("'alive'"));
+    assert!(!kernel.busy());
     Arc::try_unwrap(kernel)
         .ok()
         .unwrap()

@@ -25,6 +25,9 @@ _current_origin: contextvars.ContextVar = contextvars.ContextVar("mush_origin", 
 _loop: asyncio.AbstractEventLoop | None = None
 _pending_replies: dict = {}
 _running: dict = {"id": None, "task": None}
+_parked_interrupts: set = set()
+_interrupt_next = False
+_interrupt_lock = threading.Lock()
 _main_thread = threading.main_thread().ident
 _namespace: dict = {}
 _cell_count = 0
@@ -472,6 +475,8 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
     origin_token = _current_origin.set(origin)
     ok = True
     try:
+        if _take_parked_interrupt(cell_id):
+            raise KeyboardInterrupt
         tree = ast.parse(code, filename)
         trailing = None
         if tree.body and isinstance(tree.body[-1], ast.Expr):
@@ -520,8 +525,10 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
         sys.stderr.flush()
         _current_cell.reset(token)
         _current_origin.reset(origin_token)
-        _running["id"] = None
-        _running["task"] = None
+        with _interrupt_lock:
+            _running["id"] = None
+            _running["task"] = None
+            _parked_interrupts.discard(cell_id)
         emit({"type": "done", "id": cell_id, "ok": ok})
 
 
@@ -588,6 +595,45 @@ def _on_sigint(signum, frame) -> None:
         raise KeyboardInterrupt
 
 
+def _interrupt(cell_id) -> None:
+    """Interrupt a cell, parking the request when that cell has not started.
+
+    A bare interrupt hits the running cell, or the next one to start. An
+    interrupt naming a cell only ever hits that cell. Runs on the reader
+    thread: the signal has to reach a loop stuck in synchronous code.
+    """
+    global _interrupt_next
+    with _interrupt_lock:
+        running = _running["id"]
+        if cell_id is None:
+            if running is None:
+                _interrupt_next = True
+                return
+            cell_id = running
+        elif cell_id != running:
+            _parked_interrupts.add(cell_id)
+            return
+    _deliver_interrupt(cell_id)
+
+
+def _deliver_interrupt(cell_id: str) -> None:
+    assert _loop is not None
+    _loop.call_soon_threadsafe(_cancel_cell, cell_id)
+    signal.pthread_kill(_main_thread, signal.SIGINT)
+
+
+def _take_parked_interrupt(cell_id: str) -> bool:
+    global _interrupt_next
+    with _interrupt_lock:
+        if cell_id in _parked_interrupts:
+            _parked_interrupts.discard(cell_id)
+            return True
+        if _interrupt_next:
+            _interrupt_next = False
+            return True
+        return False
+
+
 def _cancel_cell(cell_id: str) -> None:
     task = _running["task"]
     if task is not None and _running["id"] == cell_id and not task.done():
@@ -607,10 +653,7 @@ def _reader(queue: asyncio.Queue) -> None:
             continue
         kind = request.get("type")
         if kind == "interrupt":
-            cell_id = _running["id"]
-            if cell_id is not None:
-                _loop.call_soon_threadsafe(_cancel_cell, cell_id)
-                signal.pthread_kill(_main_thread, signal.SIGINT)
+            _interrupt(request.get("id"))
             continue
         if kind == "host_reply":
             future = _pending_replies.pop(request.get("id"), None)
@@ -654,8 +697,9 @@ async def _serve() -> None:
             task = asyncio.ensure_future(
                 _run_cell(request["id"], request.get("code", ""), request.get("origin"))
             )
-            _running["id"] = request["id"]
-            _running["task"] = task
+            with _interrupt_lock:
+                _running["id"] = request["id"]
+                _running["task"] = task
             try:
                 await task
             except asyncio.CancelledError:

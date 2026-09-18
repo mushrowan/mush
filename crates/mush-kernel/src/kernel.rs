@@ -330,7 +330,14 @@ impl Kernel {
     }
 
     pub async fn interrupt(&self) -> Result<(), KernelError> {
-        self.send(&Request::Interrupt).await
+        self.send(&Request::Interrupt { id: None }).await
+    }
+
+    pub async fn interrupt_cell(&self, id: &str) -> Result<(), KernelError> {
+        self.send(&Request::Interrupt {
+            id: Some(id.to_string()),
+        })
+        .await
     }
 
     #[must_use]
@@ -494,7 +501,7 @@ impl Drop for InterruptOnDrop {
         if let Some((shared, id)) = self.shared.take() {
             shared.unregister(&id);
             tokio::spawn(async move {
-                let _ = write_request(&shared.stdin, &Request::Interrupt).await;
+                let _ = write_request(&shared.stdin, &Request::Interrupt { id: Some(id) }).await;
             });
         }
     }
