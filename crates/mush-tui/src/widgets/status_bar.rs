@@ -264,6 +264,16 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         b.push_inline(Span::styled(label, app.theme.status_model));
     }
 
+    if let Some(status) = &app.autonomous
+        && status.enabled
+    {
+        b.section_break();
+        b.push_inline(Span::styled(
+            format!("auto #{}", status.continuations),
+            app.theme.status_model,
+        ));
+    }
+
     if let Some(heartbeat) = app.heartbeat() {
         b.section_break();
         let label = match heartbeat.status {

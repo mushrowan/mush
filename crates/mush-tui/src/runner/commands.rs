@@ -69,6 +69,54 @@ async fn send_schedule(
     }
 }
 
+pub(crate) fn format_autonomous(status: Option<&mush_runtime::AutonomousStatus>) -> String {
+    let Some(status) = status else {
+        return "autonomous mode off. /autonomous on [--gate \"cmd\"] [--max-turns N] ...".into();
+    };
+    let limit = |name: &str, value: Option<u64>, used: u64| match value {
+        Some(max) => format!("{name} {used}/{max}"),
+        None => format!("{name} {used}/unlimited"),
+    };
+    let mut text = format!(
+        "autonomous mode {}\n{}, {}, {}, {}",
+        if status.enabled { "on" } else { "off" },
+        limit(
+            "continuations",
+            status.limits.max_continuations.map(u64::from),
+            u64::from(status.continuations)
+        ),
+        limit(
+            "turns",
+            status.limits.max_turns.map(u64::from),
+            u64::from(status.turns)
+        ),
+        limit("tokens", status.limits.max_tokens, status.tokens),
+        limit(
+            "seconds",
+            status.limits.timeout_ms.map(|ms| ms / 1000),
+            status.elapsed_ms / 1000
+        ),
+    );
+    if !status.gates.commands.is_empty() {
+        text.push_str(&format!(
+            "\ngates ({} retries, {}s each): {}",
+            status.gates.max_retries,
+            status.gates.timeout_ms / 1000,
+            status.gates.commands.join(" ; ")
+        ));
+    }
+    if let Some(failure) = &status.last_failure {
+        text.push_str(&format!(
+            "\nlast gate failure: `{}` {} (attempt {})",
+            failure.command, failure.exit_text, failure.attempt
+        ));
+    }
+    if let Some(reason) = &status.stopped {
+        text.push_str(&format!("\nstopped: {reason}"));
+    }
+    text
+}
+
 pub(crate) fn format_heartbeat(heartbeat: Option<&mush_runtime::Job>) -> String {
     match heartbeat {
         None => "no heartbeat. /heartbeat [every 10m] <instruction>".into(),
@@ -206,6 +254,33 @@ pub(super) async fn handle_slash_action(
                 None => "no system prompt is set".to_string(),
             };
             session.app.push_system_message(text);
+        }
+        SlashAction::Autonomous(action) => {
+            let command = match action {
+                slash::AutonomousAction::Status => {
+                    session
+                        .app
+                        .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
+                    return false;
+                }
+                slash::AutonomousAction::On { limits, gates } => {
+                    mush_runtime::AutonomousCommand::On { limits, gates }
+                }
+                slash::AutonomousAction::Off => mush_runtime::AutonomousCommand::Off,
+            };
+            match session
+                .connection
+                .send(mush_runtime::ClientCommand::Autonomous(command))
+                .await
+            {
+                Ok(events) => {
+                    super::looping::apply_command_events(session, tui_config, events).await;
+                    session
+                        .app
+                        .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
+                }
+                Err(error) => session.app.push_system_message(error.to_string()),
+            }
         }
         SlashAction::Heartbeat(action) => {
             let command = match action {

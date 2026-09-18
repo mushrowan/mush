@@ -137,6 +137,7 @@ pub struct App {
     pub children: Vec<mush_runtime::ChildSummary>,
     pub goal: Option<mush_runtime::Goal>,
     pub jobs: Vec<mush_runtime::Job>,
+    pub autonomous: Option<mush_runtime::AutonomousStatus>,
 }
 
 mod modals;
@@ -201,7 +202,22 @@ impl App {
             children: Vec::new(),
             goal: None,
             jobs: Vec::new(),
+            autonomous: None,
         }
+    }
+
+    pub fn note_autonomous(&mut self, status: mush_runtime::AutonomousStatus) {
+        let was_enabled = self.autonomous.as_ref().is_some_and(|s| s.enabled);
+        let was_stopped = self.autonomous.as_ref().and_then(|s| s.stopped.clone());
+        if status.enabled && !was_enabled {
+            self.status = Some("autonomous mode on".into());
+        } else if !status.enabled
+            && status.stopped != was_stopped
+            && let Some(reason) = &status.stopped
+        {
+            self.status = Some(format!("autonomous mode stopped: {reason}").into());
+        }
+        self.autonomous = Some(status);
     }
 
     #[must_use]

@@ -204,7 +204,8 @@ pub async fn handle(
         | SlashAction::SystemPrompt
         | SlashAction::Goal(_)
         | SlashAction::Heartbeat(_)
-        | SlashAction::Schedule(_) => None,
+        | SlashAction::Schedule(_)
+        | SlashAction::Autonomous(_) => None,
         SlashAction::SessionInfo => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
             let path = store.session_path(&tui_config.session_id);

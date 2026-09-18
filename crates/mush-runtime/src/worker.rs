@@ -32,6 +32,7 @@ pub struct WorkerConfig {
     pub scheduler: Option<Arc<crate::schedule::Scheduler>>,
     pub notes: Option<Arc<crate::notes::Notes>>,
     pub parent: Option<SessionId>,
+    pub autonomous: Option<Arc<crate::autonomous::Autonomous>>,
 }
 
 impl WorkerConfig {
@@ -58,6 +59,7 @@ impl WorkerConfig {
             scheduler: None,
             notes: None,
             parent: None,
+            autonomous: None,
         }
     }
 
@@ -90,6 +92,7 @@ impl WorkerConfig {
         connection.set_goal_store(self.goal);
         connection.set_scheduler(self.scheduler);
         connection.set_notes(self.notes);
+        connection.set_autonomous(self.autonomous);
         connection
     }
 }

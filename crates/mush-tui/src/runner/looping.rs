@@ -340,6 +340,7 @@ pub(super) async fn apply_command_events(
             ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
             ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
             ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),
+            ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {

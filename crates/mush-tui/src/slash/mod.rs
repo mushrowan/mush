@@ -45,6 +45,10 @@ pub enum SlashParseError {
     )]
     HeartbeatUsage,
     #[error(
+        "usage: /autonomous on [--max-continuations N] [--max-turns N] [--max-tokens N] [--timeout-ms N] [--gate \"cmd\"]... [--gate-retries N] [--gate-timeout-ms N] | /autonomous status|off"
+    )]
+    AutonomousUsage,
+    #[error(
         "usage: /schedule add \"in 30m\"|\"every 10m\" [--label name] <prompt> | /schedule list|pause|resume|cancel <id>"
     )]
     ScheduleUsage,
@@ -116,6 +120,7 @@ pub enum SlashAction {
     Goal(GoalAction),
     Heartbeat(HeartbeatAction),
     Schedule(ScheduleAction),
+    Autonomous(AutonomousAction),
     Endpoints {
         model_id: Option<String>,
     },
@@ -207,6 +212,153 @@ pub enum ScheduleAction {
     Pause(String),
     Resume(String),
     Cancel(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousAction {
+    Status,
+    On {
+        limits: mush_runtime::Limits,
+        gates: mush_runtime::Gates,
+    },
+    Off,
+}
+
+fn parse_budget_number(value: &str) -> Result<Option<u64>, SlashParseError> {
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(None);
+    }
+    value
+        .replace(['_', ','], "")
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| SlashParseError::AutonomousUsage)
+}
+
+pub fn parse_autonomous_options(
+    words: &[String],
+) -> Result<(mush_runtime::Limits, mush_runtime::Gates), SlashParseError> {
+    let mut named_budget = false;
+    let mut gates = mush_runtime::Gates::default();
+    let mut budget = mush_runtime::Limits::unlimited();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index].as_str();
+        let (flag, inline) = match word.split_once('=') {
+            Some((flag, value)) => (flag, Some(value.to_string())),
+            None => (word, None),
+        };
+        let flag = flag
+            .strip_prefix("--autonomous-")
+            .map(|rest| format!("--{rest}"))
+            .unwrap_or_else(|| flag.to_string());
+        let value = match &inline {
+            Some(inline) => Some(inline.clone()),
+            None => words.get(index + 1).cloned(),
+        };
+        let mut take = |what: &mut dyn FnMut(&str) -> Result<(), SlashParseError>| {
+            let value = value.clone().ok_or(SlashParseError::AutonomousUsage)?;
+            what(&value)?;
+            if inline.is_none() {
+                index += 1;
+            }
+            Ok::<(), SlashParseError>(())
+        };
+        match flag.as_str() {
+            "--max-continuations" => {
+                take(&mut |v| {
+                    budget.max_continuations = parse_budget_number(v)?.map(|n| n as u32);
+                    Ok(())
+                })?;
+                named_budget = true;
+            }
+            "--max-turns" => {
+                take(&mut |v| {
+                    budget.max_turns = parse_budget_number(v)?.map(|n| n as u32);
+                    Ok(())
+                })?;
+                named_budget = true;
+            }
+            "--max-tokens" => {
+                take(&mut |v| {
+                    budget.max_tokens = parse_budget_number(v)?;
+                    Ok(())
+                })?;
+                named_budget = true;
+            }
+            "--timeout-ms" => {
+                take(&mut |v| {
+                    budget.timeout_ms = parse_budget_number(v)?;
+                    Ok(())
+                })?;
+                named_budget = true;
+            }
+            "--gate" => take(&mut |v| {
+                gates.commands.push(v.to_string());
+                Ok(())
+            })?,
+            "--gate-retries" => take(&mut |v| {
+                gates.max_retries = parse_budget_number(v)?.map_or(u32::MAX, |n| n as u32);
+                Ok(())
+            })?,
+            "--gate-timeout-ms" => take(&mut |v| {
+                gates.timeout_ms = parse_budget_number(v)?.unwrap_or(u64::MAX);
+                Ok(())
+            })?,
+            _ => return Err(SlashParseError::AutonomousUsage),
+        }
+        index += 1;
+    }
+    let limits = if named_budget {
+        budget
+    } else {
+        mush_runtime::Limits::defaults()
+    };
+    Ok((limits, gates))
+}
+
+fn parse_autonomous(args: &str) -> Result<AutonomousAction, SlashParseError> {
+    let words = shell_words(args.trim());
+    match words.first().map(String::as_str) {
+        None | Some("status") => Ok(AutonomousAction::Status),
+        Some("off") => Ok(AutonomousAction::Off),
+        Some("on") => {
+            let (limits, gates) = parse_autonomous_options(&words[1..])?;
+            Ok(AutonomousAction::On { limits, gates })
+        }
+        _ => Err(SlashParseError::AutonomousUsage),
+    }
+}
+
+pub fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_word = false;
+    for ch in text.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                has_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if has_word {
+                    words.push(std::mem::take(&mut current));
+                    has_word = false;
+                }
+            }
+            (None, c) => {
+                current.push(c);
+                has_word = true;
+            }
+        }
+    }
+    if has_word {
+        words.push(current);
+    }
+    words
 }
 
 fn parse_heartbeat(args: &str) -> Result<HeartbeatAction, SlashParseError> {
@@ -403,6 +555,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             .map_err(|_| SlashParseError::RlmMaxDepthUsage),
         "goal" => parse_goal(args).map(SlashAction::Goal),
         "heartbeat" => parse_heartbeat(args).map(SlashAction::Heartbeat),
+        "autonomous" => parse_autonomous(args).map(SlashAction::Autonomous),
         "schedule" => parse_schedule(args).map(SlashAction::Schedule),
         "btw" | "side" if args.is_empty() => Err(SlashParseError::SideUsage),
         "btw" | "side" => Ok(SlashAction::Side {
@@ -804,6 +957,45 @@ mod tests {
             parse("/goal").unwrap(),
             SlashAction::Goal(GoalAction::Status)
         );
+    }
+
+    #[test]
+    fn autonomous_options_define_the_whole_budget_when_named() {
+        let (limits, gates) = parse_autonomous_options(&[]).unwrap();
+        assert_eq!(limits, mush_runtime::Limits::defaults());
+        assert!(gates.commands.is_empty());
+
+        let words: Vec<String> = shell_words(
+            "--max-tokens 100,000 --gate \"cargo test\" --gate 'cargo clippy' --gate-retries 2 --max-turns=unlimited",
+        );
+        let (limits, gates) = parse_autonomous_options(&words).unwrap();
+        assert_eq!(limits.max_tokens, Some(100_000));
+        assert_eq!(limits.max_turns, None);
+        assert_eq!(
+            limits.max_continuations, None,
+            "an unnamed limit becomes unlimited"
+        );
+        assert_eq!(gates.commands, ["cargo test", "cargo clippy"]);
+        assert_eq!(gates.max_retries, 2);
+
+        let cli_spelling: Vec<String> = shell_words("--autonomous-max-continuations 7");
+        let (limits, _) = parse_autonomous_options(&cli_spelling).unwrap();
+        assert_eq!(limits.max_continuations, Some(7));
+
+        assert!(parse_autonomous_options(&shell_words("--max-turns")).is_err());
+        assert!(parse_autonomous_options(&shell_words("--bogus 1")).is_err());
+        assert_eq!(
+            parse("/autonomous").unwrap(),
+            SlashAction::Autonomous(AutonomousAction::Status)
+        );
+        assert_eq!(
+            parse("/autonomous off").unwrap(),
+            SlashAction::Autonomous(AutonomousAction::Off)
+        );
+        assert!(matches!(
+            parse("/autonomous on --gate \"just check\"").unwrap(),
+            SlashAction::Autonomous(AutonomousAction::On { gates, .. }) if gates.commands == ["just check"]
+        ));
     }
 
     #[test]

@@ -18,6 +18,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("goal", "set a goal the harness keeps working toward"),
     ("heartbeat", "prompt this session every so often"),
     ("schedule", "run a prompt later or on an interval"),
+    (
+        "autonomous",
+        "keep working without a human until gates pass or a limit",
+    ),
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),

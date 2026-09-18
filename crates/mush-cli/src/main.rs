@@ -77,6 +77,24 @@ struct Cli {
     #[arg(long, value_name = "TOKENS", requires = "goal")]
     goal_budget: Option<u64>,
 
+    #[arg(long)]
+    autonomous: bool,
+
+    #[arg(long = "autonomous-gate", value_name = "CMD")]
+    autonomous_gate: Vec<String>,
+
+    #[arg(long = "autonomous-max-continuations", value_name = "N")]
+    autonomous_max_continuations: Option<String>,
+
+    #[arg(long = "autonomous-max-turns", value_name = "N")]
+    autonomous_max_turns: Option<String>,
+
+    #[arg(long = "autonomous-max-tokens", value_name = "N")]
+    autonomous_max_tokens: Option<String>,
+
+    #[arg(long = "autonomous-timeout-ms", value_name = "N")]
+    autonomous_timeout_ms: Option<String>,
+
     #[arg(long = "skill")]
     skill: Vec<std::path::PathBuf>,
 
@@ -134,6 +152,49 @@ impl Cli {
 
     fn resumes_a_session(&self) -> bool {
         self.continue_recent || self.resume.is_some()
+    }
+
+    fn startup_commands(&self) -> Vec<mush_runtime::ClientCommand> {
+        let mut commands = Vec::new();
+        if let Some(objective) = &self.goal {
+            commands.push(mush_runtime::ClientCommand::Goal(
+                mush_runtime::GoalCommand::Create {
+                    objective: objective.clone(),
+                    token_budget: self.goal_budget,
+                },
+            ));
+        }
+        let wants_autonomous = self.autonomous
+            || !self.autonomous_gate.is_empty()
+            || self.autonomous_max_continuations.is_some()
+            || self.autonomous_max_turns.is_some()
+            || self.autonomous_max_tokens.is_some()
+            || self.autonomous_timeout_ms.is_some();
+        if wants_autonomous {
+            let mut words = Vec::new();
+            for gate in &self.autonomous_gate {
+                words.push("--gate".to_string());
+                words.push(gate.clone());
+            }
+            for (flag, value) in [
+                ("--max-continuations", &self.autonomous_max_continuations),
+                ("--max-turns", &self.autonomous_max_turns),
+                ("--max-tokens", &self.autonomous_max_tokens),
+                ("--timeout-ms", &self.autonomous_timeout_ms),
+            ] {
+                if let Some(value) = value {
+                    words.push(flag.to_string());
+                    words.push(value.clone());
+                }
+            }
+            match mush_tui::slash::parse_autonomous_options(&words) {
+                Ok((limits, gates)) => commands.push(mush_runtime::ClientCommand::Autonomous(
+                    mush_runtime::AutonomousCommand::On { limits, gates },
+                )),
+                Err(error) => eprintln!("{}", Style::Dim.stderr(format_args!("{error}"))),
+            }
+        }
+        commands
     }
 
     fn client_args(&self) -> setup::ClientArgs {
@@ -1251,6 +1312,9 @@ fn worker_config(
         worker.scheduler = Some(scheduler);
         worker.notes = Some(notes);
     }
+    worker.autonomous = Some(std::sync::Arc::new(mush_runtime::Autonomous::new(
+        setup.client.cwd.clone(),
+    )));
     worker
 }
 
@@ -1344,17 +1408,7 @@ fn client_config(
         },
         open_session_picker: false,
         startup_notice: None,
-        startup_commands: cli
-            .goal
-            .as_ref()
-            .map(|objective| {
-                mush_runtime::ClientCommand::Goal(mush_runtime::GoalCommand::Create {
-                    objective: objective.clone(),
-                    token_budget: cli.goal_budget,
-                })
-            })
-            .into_iter()
-            .collect(),
+        startup_commands: cli.startup_commands(),
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {

@@ -62,6 +62,7 @@ pub enum ClientCommand {
     SideQuestion(String),
     Goal(crate::goal::GoalCommand),
     Schedule(crate::schedule::ScheduleCommand),
+    Autonomous(crate::autonomous::AutonomousCommand),
     Shutdown,
 }
 
@@ -106,6 +107,7 @@ pub enum ClientEvent {
     GoalChanged(Option<Box<crate::goal::Goal>>),
     ScheduleChanged(Vec<crate::schedule::Job>),
     ProgressNote(String),
+    AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -186,6 +188,8 @@ pub struct InProcessConnection {
     known_jobs: Vec<crate::schedule::Job>,
     deferred_jobs: VecDeque<String>,
     notes: Option<std::sync::Arc<crate::notes::Notes>>,
+    autonomous: Option<std::sync::Arc<crate::autonomous::Autonomous>>,
+    gate_task: Option<tokio::task::JoinHandle<Vec<crate::autonomous::GateRun>>>,
     closed: bool,
 }
 
@@ -233,7 +237,90 @@ impl InProcessConnection {
             known_jobs: Vec::new(),
             deferred_jobs: VecDeque::new(),
             notes: None,
+            autonomous: None,
+            gate_task: None,
             closed: false,
+        }
+    }
+
+    pub fn set_autonomous(
+        &mut self,
+        autonomous: Option<std::sync::Arc<crate::autonomous::Autonomous>>,
+    ) {
+        self.autonomous = autonomous;
+    }
+
+    async fn continue_autonomous(&mut self) {
+        let Some(autonomous) = self.autonomous.clone() else {
+            return;
+        };
+        if !autonomous.due()
+            || self.gate_task.is_some()
+            || self.runtime.turn_active()
+            || self.compaction.is_some()
+            || self.runtime.pending_prompt.is_some()
+            || self.children_running()
+        {
+            return;
+        }
+        let commands = autonomous.gate_commands();
+        if commands.is_empty() {
+            self.apply_autonomous_decision(autonomous.decide(Vec::new()));
+            return;
+        }
+        let timeout = autonomous.gate_timeout();
+        self.gate_task = Some(tokio::spawn(async move {
+            let mut runs = Vec::new();
+            for command in commands {
+                let snapshot = crate::autonomous::workspace_snapshot(autonomous.cwd());
+                if autonomous.skip_gate(&command, snapshot.as_deref()) {
+                    runs.push(crate::autonomous::GateRun {
+                        command,
+                        passed: false,
+                        skipped: true,
+                        exit_text: String::new(),
+                        output: String::new(),
+                        snapshot,
+                    });
+                    break;
+                }
+                let run = crate::autonomous::run_gate(&command, autonomous.cwd(), timeout).await;
+                let passed = run.passed;
+                runs.push(run);
+                if !passed {
+                    break;
+                }
+            }
+            runs
+        }));
+    }
+
+    fn try_poll_autonomous(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        let finished = self
+            .gate_task
+            .as_ref()
+            .is_some_and(|task| task.is_finished());
+        if !finished {
+            return None;
+        }
+        let task = self.gate_task.take()?;
+        let runs = task.now_or_never()?.unwrap_or_default();
+        let autonomous = self.autonomous.clone()?;
+        self.apply_autonomous_decision(autonomous.decide(runs));
+        self.queued.pop_front()
+    }
+
+    fn apply_autonomous_decision(&mut self, decision: crate::autonomous::Decision) {
+        let changed = !matches!(decision, crate::autonomous::Decision::Idle);
+        if let crate::autonomous::Decision::Continue(prompt) = decision {
+            self.queue_prompt(&prompt, Vec::new());
+        }
+        if changed && let Some(autonomous) = &self.autonomous {
+            self.queued
+                .push_back(ClientEvent::AutonomousChanged(Box::new(
+                    autonomous.status(),
+                )));
         }
     }
 
@@ -555,6 +642,7 @@ impl InProcessConnection {
         self.submit_kernel_notices().await;
         self.poll_schedule().await;
         self.continue_goal().await;
+        self.continue_autonomous().await;
         if std::mem::take(&mut self.fork_compaction_due) {
             let _ = self
                 .start_compaction(CompactionFocus::default(), true)
@@ -651,6 +739,9 @@ impl InProcessConnection {
             return Some(event);
         }
         if let Some(event) = self.try_poll_schedule() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_autonomous() {
             return Some(event);
         }
         self.try_poll_compaction()
@@ -1063,6 +1154,10 @@ impl InProcessConnection {
                 if let Some(goal) = &self.goal {
                     goal.record_usage(message.usage.total_tokens().get());
                 }
+                if let Some(autonomous) = &self.autonomous {
+                    autonomous.record_usage(message.usage.total_tokens().get());
+                    autonomous.record_assistant_turn();
+                }
                 self.runtime.save_debounced();
             }
             AgentEvent::ToolExecEnd { .. } | AgentEvent::ContextCompacted { .. } => {
@@ -1080,6 +1175,9 @@ impl InProcessConnection {
                 self.fork_compaction_due = !cancelled && self.fork_compaction_due();
                 if !cancelled && let Some(goal) = &self.goal {
                     goal.turn_ended();
+                }
+                if !cancelled && let Some(autonomous) = &self.autonomous {
+                    autonomous.turn_ended();
                 }
             }
             _ => {}
@@ -1125,6 +1223,14 @@ impl AgentConnection for InProcessConnection {
                 }
             }
             ClientCommand::SideQuestion(question) => self.ask_side_question(question),
+            ClientCommand::Autonomous(command) => {
+                let autonomous = self.autonomous.clone().ok_or_else(|| {
+                    ConnectionError::Refused("autonomous mode is not available".into())
+                })?;
+                let status = autonomous.apply(command);
+                self.queued
+                    .push_back(ClientEvent::AutonomousChanged(Box::new(status)));
+            }
             ClientCommand::Schedule(command) => {
                 let scheduler = self.scheduler.clone().ok_or_else(|| {
                     ConnectionError::Refused("schedules are not available".into())
@@ -1968,5 +2074,124 @@ mod tests {
         let prompt = connection.system_prompt().await.unwrap();
         assert!(prompt.starts_with("base\n\n# Notes"));
         assert!(prompt.ends_with("- remember the socket path"));
+    }
+
+    #[tokio::test]
+    async fn autonomous_mode_continues_until_its_limit_and_reports_the_stop() {
+        let (mut connection, requests) = connection();
+        let autonomous = Arc::new(crate::autonomous::Autonomous::new(std::env::temp_dir()));
+        connection.set_autonomous(Some(Arc::clone(&autonomous)));
+        connection
+            .send(ClientCommand::Autonomous(
+                crate::autonomous::AutonomousCommand::On {
+                    limits: crate::autonomous::Limits {
+                        max_continuations: Some(1),
+                        ..crate::autonomous::Limits::unlimited()
+                    },
+                    gates: crate::autonomous::Gates::default(),
+                },
+            ))
+            .await
+            .unwrap();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        connection.start_pending().await;
+        assert!(
+            connection.state().turn_active,
+            "one continuation follows the first turn"
+        );
+        drain_turn(&mut connection).await;
+        assert!(matches!(
+            &requests.lock().unwrap()[1].last(),
+            Some(Message::User(user)) if user.text().starts_with("[autonomous-continuation 1]")
+        ));
+
+        connection.start_pending().await;
+        assert!(!connection.state().turn_active, "the limit stops the run");
+        let stopped =
+            std::iter::from_fn(|| connection.try_next_event()).find_map(|event| match event {
+                ClientEvent::AutonomousChanged(status) if status.stopped.is_some() => Some(status),
+                _ => None,
+            });
+        assert_eq!(
+            stopped.unwrap().stopped.as_deref(),
+            Some("1 continuations used")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_gate_becomes_the_next_prompt_and_a_passing_one_ends_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut connection, requests) = connection();
+        let autonomous = Arc::new(crate::autonomous::Autonomous::new(dir.path().to_path_buf()));
+        connection.set_autonomous(Some(Arc::clone(&autonomous)));
+        connection
+            .send(ClientCommand::Autonomous(
+                crate::autonomous::AutonomousCommand::On {
+                    limits: crate::autonomous::Limits::unlimited(),
+                    gates: crate::autonomous::Gates {
+                        commands: vec!["test -f done".into()],
+                        max_retries: 3,
+                        timeout_ms: 5_000,
+                    },
+                },
+            ))
+            .await
+            .unwrap();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !connection.state().turn_active {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the gate failure prompts a continuation"
+            );
+            connection.start_pending().await;
+            let _ = connection.try_next_event();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drain_turn(&mut connection).await;
+        assert!(matches!(
+            &requests.lock().unwrap()[1].last(),
+            Some(Message::User(user)) if user.text().starts_with("[autonomous-continuation: gate failed]")
+                && user.text().contains("`test -f done` exited with 1")
+        ));
+
+        std::fs::write(dir.path().join("done"), "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            connection.start_pending().await;
+            let stopped =
+                std::iter::from_fn(|| connection.try_next_event()).find_map(|event| match event {
+                    ClientEvent::AutonomousChanged(status) if status.stopped.is_some() => {
+                        Some(status)
+                    }
+                    _ => None,
+                });
+            if let Some(status) = stopped {
+                assert_eq!(status.stopped.as_deref(), Some("all gates passed"));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the passing gate ends the run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!connection.state().turn_active);
     }
 }
