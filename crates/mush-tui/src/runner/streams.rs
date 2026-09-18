@@ -1161,6 +1161,7 @@ mod tests {
             keymap: crate::keybinds::KeyMap::default(),
             open_session_picker: false,
             startup_notice: None,
+            startup_commands: Vec::new(),
             reload_context: None,
             mcp: None,
             skills: Default::default(),

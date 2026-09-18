@@ -145,6 +145,14 @@ async fn run_tui_with(
     if let Some(notice) = tui_config.startup_notice.take() {
         runtime.session.app.push_system_message(notice);
     }
+    for command in std::mem::take(&mut tui_config.startup_commands) {
+        match runtime.session.connection.send(command).await {
+            Ok(events) => {
+                looping::apply_command_events(&mut runtime.session, &mut tui_config, events).await;
+            }
+            Err(error) => runtime.session.app.push_system_message(error.to_string()),
+        }
+    }
 
     draw_panes(
         &mut terminal,

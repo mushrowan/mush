@@ -71,6 +71,12 @@ struct Cli {
     #[arg(long = "append-system-prompt")]
     append_system: Option<String>,
 
+    #[arg(long, value_name = "OBJECTIVE")]
+    goal: Option<String>,
+
+    #[arg(long, value_name = "TOKENS", requires = "goal")]
+    goal_budget: Option<u64>,
+
     #[arg(long = "skill")]
     skill: Vec<std::path::PathBuf>,
 
@@ -1335,6 +1341,17 @@ fn client_config(
         },
         open_session_picker: false,
         startup_notice: None,
+        startup_commands: cli
+            .goal
+            .as_ref()
+            .map(|objective| {
+                mush_runtime::ClientCommand::Goal(mush_runtime::GoalCommand::Create {
+                    objective: objective.clone(),
+                    token_budget: cli.goal_budget,
+                })
+            })
+            .into_iter()
+            .collect(),
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
@@ -1423,6 +1440,15 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use super::*;
+
+    #[test]
+    fn a_goal_flag_needs_an_objective_for_its_budget() {
+        let cli =
+            Cli::try_parse_from(["mush", "--goal", "ship it", "--goal-budget", "5000"]).unwrap();
+        assert_eq!(cli.goal.as_deref(), Some("ship it"));
+        assert_eq!(cli.goal_budget, Some(5000));
+        assert!(Cli::try_parse_from(["mush", "--goal-budget", "5000"]).is_err());
+    }
 
     #[test]
     fn resume_takes_an_optional_id_and_continue_takes_none() {
