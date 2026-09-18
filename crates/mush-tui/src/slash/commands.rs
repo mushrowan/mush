@@ -34,7 +34,7 @@ pub async fn handle(
             help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
             help.push_str("  /refresh-models - refresh discovered model catalogue\n");
             help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
-            help.push_str("  /tree          - show conversation tree\n");
+            help.push_str("  /tree          - browse the conversation tree and jump to a message\n");
             help.push_str(
                 "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
             );
@@ -139,11 +139,17 @@ pub async fn handle(
         | SlashAction::Undo
         | SlashAction::Resume { .. }
         | SlashAction::Branch { index: Some(_) }
+        | SlashAction::NavigateTree { .. }
         | SlashAction::Name { title: Some(_) } => None,
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {
-            show_tree(app, &connection.tree().await);
+            let items = crate::message_picker::tree_items(&connection.tree().await);
+            open_message_picker(
+                app,
+                crate::message_picker::MessagePickerPurpose::Tree,
+                items,
+            );
             None
         }
         SlashAction::Fork { index: None } => {
@@ -546,54 +552,6 @@ fn unix_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn show_tree(app: &mut App, tree: &mush_session::tree::SessionTree) {
-    let user_msgs: Vec<_> = tree
-        .current_branch()
-        .into_iter()
-        .filter(|e| {
-            matches!(
-                e.kind,
-                mush_session::tree::EntryKind::Message {
-                    message: Message::User(_)
-                }
-            )
-        })
-        .collect();
-
-    if user_msgs.is_empty() {
-        app.push_system_message("no messages yet");
-        return;
-    }
-
-    let mut info = format!(
-        "tree: {} entries, {} branch points\n",
-        tree.len(),
-        tree.entries()
-            .iter()
-            .filter(|e| tree.is_branch_point(&e.id))
-            .count()
-    );
-    for (i, entry) in user_msgs.iter().enumerate() {
-        if let mush_session::tree::EntryKind::Message {
-            message: Message::User(u),
-        } = &entry.kind
-        {
-            let text = match &u.content {
-                UserContent::Text(t) => t.as_str(),
-                _ => "(parts)",
-            };
-            let preview = truncate_with_ellipsis(text, 60);
-            let marker = if tree.is_branch_point(&entry.id) {
-                " ⑂"
-            } else {
-                ""
-            };
-            info.push_str(&format!("  {}: {preview}{marker}\n", i + 1));
-        }
-    }
-    app.push_system_message(info);
 }
 
 fn handle_model_switch(

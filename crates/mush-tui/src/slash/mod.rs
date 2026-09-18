@@ -91,6 +91,9 @@ pub enum SlashAction {
     },
     Clone,
     Tree,
+    NavigateTree {
+        entry_id: mush_session::tree::EntryId,
+    },
     Compact {
         focus: mush_session::compact::CompactionFocus,
     },
@@ -166,6 +169,7 @@ impl SlashAction {
                 | Self::New
                 | Self::Resume { .. }
                 | Self::Branch { .. }
+                | Self::NavigateTree { .. }
                 | Self::Fork { .. }
                 | Self::Clone
                 | Self::Compact { .. }

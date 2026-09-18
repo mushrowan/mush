@@ -29,7 +29,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("branch", "branch from an earlier user message"),
     ("fork", "new session from before an earlier user message"),
     ("clone", "copy the current branch into a new session"),
-    ("tree", "show conversation tree"),
+    ("tree", "browse the conversation tree and jump to a message"),
     (
         "compact",
         "summarise old messages ([--context-budget <n>] [focus instructions])",

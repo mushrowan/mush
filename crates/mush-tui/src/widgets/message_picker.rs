@@ -1,4 +1,6 @@
-use crate::message_picker::{MessagePickerState, filtered_items};
+use crate::message_picker::{
+    MessagePickerKind, MessagePickerPurpose, MessagePickerState, filtered_items,
+};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{PopupSize, centred_popup};
 use ratatui::Frame;
@@ -66,17 +68,33 @@ pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
         .last()
         .map_or(1, |item| item.index.to_string().len());
 
+    let tree = picker.purpose == MessagePickerPurpose::Tree;
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, item) in items.iter().enumerate().skip(scroll).take(visible) {
         let is_selected = i == picker.selected;
         let prefix = if is_selected { "▸ " } else { "  " };
         let number = format!("{:>number_width$}  ", item.index);
+        let indent = if tree {
+            "  ".repeat(item.depth)
+        } else {
+            String::new()
+        };
+        let tag = match (tree, item.kind) {
+            (true, MessagePickerKind::BranchSummary) => "summary ",
+            (true, MessagePickerKind::Compaction) => "compaction ",
+            _ => "",
+        };
+        let fork = if tree && item.fork { " ⑂" } else { "" };
         let style = if is_selected {
             theme.picker_selected.add_modifier(Modifier::BOLD)
+        } else if tree && !item.on_branch {
+            theme.dim
         } else {
             Style::default()
         };
-        let max_text = (list_area.width as usize).saturating_sub(prefix.len() + number.len());
+        let max_text = (list_area.width as usize).saturating_sub(
+            prefix.len() + number.len() + indent.len() + tag.len() + fork.chars().count(),
+        );
         let text = if item.text.chars().count() > max_text {
             let t: String = item
                 .text
@@ -90,7 +108,10 @@ pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
             Span::styled(number, theme.dim),
+            Span::raw(indent),
+            Span::styled(tag, theme.dim),
             Span::styled(text, style),
+            Span::styled(fork, theme.dim),
         ]));
     }
     if lines.is_empty() {

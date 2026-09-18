@@ -1338,10 +1338,7 @@ fn message_items() -> Vec<crate::message_picker::MessagePickerItem> {
     ["fix the build", "add tests", "ship it"]
         .into_iter()
         .enumerate()
-        .map(|(i, text)| crate::message_picker::MessagePickerItem {
-            index: i + 1,
-            text: text.into(),
-        })
+        .map(|(i, text)| crate::message_picker::MessagePickerItem::numbered(i + 1, text))
         .collect()
 }
 
@@ -1385,6 +1382,27 @@ fn message_picker_filter_then_enter_branches_before_the_match() {
         Some(AppEvent::SlashCommand {
             action: crate::slash::SlashAction::Branch { index: Some(1) }
         })
+    ));
+}
+
+#[test]
+fn tree_picker_enter_navigates_to_the_highlighted_entry() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let entry = mush_session::tree::EntryId::new();
+    let mut item = crate::message_picker::MessagePickerItem::numbered(1, "q0");
+    item.entry_id = Some(entry.clone());
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Tree,
+        vec![item],
+    );
+
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+
+    assert!(matches!(
+        event,
+        Some(AppEvent::SlashCommand {
+            action: crate::slash::SlashAction::NavigateTree { entry_id }
+        }) if entry_id == entry
     ));
 }
 

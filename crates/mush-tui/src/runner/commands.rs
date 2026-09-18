@@ -205,6 +205,7 @@ pub(super) async fn handle_slash_action(
             | SlashAction::Resume { .. }
             | SlashAction::Undo
             | SlashAction::Branch { .. }
+            | SlashAction::NavigateTree { .. }
             | SlashAction::Fork { .. }
             | SlashAction::Clone
     );
@@ -431,6 +432,14 @@ pub(super) async fn handle_slash_action(
         SlashAction::Undo => {
             state_changed =
                 run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await;
+        }
+        SlashAction::NavigateTree { entry_id } => {
+            state_changed = run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::NavigateTree { entry_id },
+            )
+            .await;
         }
         SlashAction::Branch { index: Some(index) } => {
             state_changed = run_session_command(
@@ -896,6 +905,34 @@ mod tests {
         assert_eq!(picker.items.len(), 2);
         assert_eq!(picker.items[1].text, "second");
         assert_eq!(picker.selected_item().unwrap().index, 2);
+    }
+
+    #[test]
+    fn tree_opens_a_picker_and_a_choice_rewinds_the_conversation() {
+        let mut session = conversation_session(vec![user("first"), user("second")]);
+        let mut config = TuiConfig::for_test();
+
+        run(&mut session, &mut config, SlashAction::Tree);
+
+        let picker = session.app.interaction.message_picker.as_ref().unwrap();
+        assert_eq!(
+            picker.purpose,
+            crate::message_picker::MessagePickerPurpose::Tree
+        );
+        let target = picker.items[1].entry_id.clone().unwrap();
+        session.app.close_message_picker();
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::NavigateTree { entry_id: target },
+        );
+
+        assert_eq!(
+            session.in_process().runtime.conversation.context(),
+            vec![user("first")]
+        );
+        assert_eq!(session.app.input.text, "second");
     }
 
     #[test]

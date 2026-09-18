@@ -1222,15 +1222,20 @@ fn handle_message_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::Confirm, key) {
         let chosen = picker
             .selected_item()
-            .map(|item| (picker.purpose, item.index));
+            .map(|item| (picker.purpose, item.index, item.entry_id.clone()));
         app.close_message_picker();
-        let (purpose, index) = chosen?;
+        let (purpose, index, entry_id) = chosen?;
         let action = match purpose {
             crate::message_picker::MessagePickerPurpose::Fork => {
                 crate::slash::SlashAction::Fork { index: Some(index) }
             }
             crate::message_picker::MessagePickerPurpose::Branch => {
                 crate::slash::SlashAction::Branch { index: Some(index) }
+            }
+            crate::message_picker::MessagePickerPurpose::Tree => {
+                crate::slash::SlashAction::NavigateTree {
+                    entry_id: entry_id?,
+                }
             }
         };
         return Some(AppEvent::SlashCommand { action });

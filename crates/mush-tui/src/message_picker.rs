@@ -6,6 +6,7 @@ use crate::fuzzy::FuzzyFilter;
 pub enum MessagePickerPurpose {
     Fork,
     Branch,
+    Tree,
 }
 
 impl MessagePickerPurpose {
@@ -14,6 +15,7 @@ impl MessagePickerPurpose {
         match self {
             Self::Fork => " fork from message ",
             Self::Branch => " branch from message ",
+            Self::Tree => " conversation tree ",
         }
     }
 
@@ -21,15 +23,46 @@ impl MessagePickerPurpose {
     pub const fn verb(self) -> &'static str {
         match self {
             Self::Fork => "fork",
-            Self::Branch => "branch",
+            Self::Branch | Self::Tree => "branch",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessagePickerKind {
+    User,
+    BranchSummary,
+    Compaction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagePickerItem {
     pub index: usize,
     pub text: String,
+    pub kind: MessagePickerKind,
+    pub depth: usize,
+    pub on_branch: bool,
+    pub fork: bool,
+    pub entry_id: Option<mush_session::tree::EntryId>,
+}
+
+impl MessagePickerItem {
+    #[must_use]
+    pub fn numbered(index: usize, text: impl Into<String>) -> Self {
+        Self {
+            index,
+            text: one_line(&text.into()),
+            kind: MessagePickerKind::User,
+            depth: 0,
+            on_branch: true,
+            fork: false,
+            entry_id: None,
+        }
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Debug)]
@@ -44,7 +77,10 @@ pub struct MessagePickerState {
 impl MessagePickerState {
     #[must_use]
     pub fn new(purpose: MessagePickerPurpose, items: Vec<MessagePickerItem>) -> Self {
-        let selected = items.len().saturating_sub(1);
+        let selected = items
+            .iter()
+            .rposition(|item| item.on_branch)
+            .unwrap_or(items.len().saturating_sub(1));
         Self {
             purpose,
             items,
@@ -99,9 +135,39 @@ pub fn user_message_items(messages: &[mush_ai::types::Message]) -> Vec<MessagePi
             _ => None,
         })
         .enumerate()
-        .map(|(i, text)| MessagePickerItem {
-            index: i + 1,
-            text: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        .map(|(i, text)| MessagePickerItem::numbered(i + 1, text))
+        .collect()
+}
+
+#[must_use]
+pub fn tree_items(tree: &mush_session::tree::SessionTree) -> Vec<MessagePickerItem> {
+    use mush_session::tree::EntryKind;
+    let mut index = 0;
+    tree.rows()
+        .into_iter()
+        .filter_map(|row| {
+            let (kind, text) = match &row.entry.kind {
+                EntryKind::Message {
+                    message: mush_ai::types::Message::User(user),
+                } => (MessagePickerKind::User, user.text()),
+                EntryKind::BranchSummary { summary, .. } => {
+                    (MessagePickerKind::BranchSummary, summary.clone())
+                }
+                EntryKind::Compaction { summary, .. } => {
+                    (MessagePickerKind::Compaction, summary.clone())
+                }
+                EntryKind::Message { .. } => return None,
+            };
+            index += 1;
+            Some(MessagePickerItem {
+                index,
+                text: one_line(&text),
+                kind,
+                depth: row.depth,
+                on_branch: row.on_branch,
+                fork: row.is_fork,
+                entry_id: Some(row.entry.id.clone()),
+            })
         })
         .collect()
 }
@@ -151,6 +217,35 @@ mod tests {
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].index, 2);
         assert_eq!(picker.selected_item().unwrap().index, 2);
+    }
+
+    #[test]
+    fn tree_items_keep_the_shape_and_start_on_the_live_branch() {
+        use mush_session::tree::SessionTree;
+        let mut tree = SessionTree::new();
+        let q0 = tree.append_message(user("q0"));
+        tree.append_message(user("q1 abandoned"));
+        tree.branch(&q0);
+        tree.append_message(user("q2"));
+
+        let items = tree_items(&tree);
+        let shape: Vec<(usize, &str, usize, bool)> = items
+            .iter()
+            .map(|item| (item.index, item.text.as_str(), item.depth, item.on_branch))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (1, "q0", 0, true),
+                (2, "q1 abandoned", 1, false),
+                (3, "q2", 0, true),
+            ]
+        );
+        assert!(items[0].fork);
+        assert!(items.iter().all(|item| item.entry_id.is_some()));
+
+        let picker = MessagePickerState::new(MessagePickerPurpose::Tree, items);
+        assert_eq!(picker.selected_item().unwrap().text, "q2");
     }
 
     #[test]
