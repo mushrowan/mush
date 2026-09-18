@@ -5,6 +5,7 @@ pub mod family;
 pub mod goal;
 pub mod inbox;
 pub mod kernel_channels;
+pub mod notes;
 pub mod schedule;
 pub mod session;
 pub mod side_question;
@@ -29,6 +30,7 @@ pub use family::{
 };
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
+pub use notes::Notes;
 pub use schedule::{Delivery, Job, JobSource, JobStatus, ScheduleCommand, ScheduleKind, Scheduler};
 pub use session::{
     ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,

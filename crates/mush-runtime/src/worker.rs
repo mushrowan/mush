@@ -30,6 +30,7 @@ pub struct WorkerConfig {
     pub family: Option<Arc<crate::family::Family>>,
     pub goal: Option<Arc<crate::goal::GoalStore>>,
     pub scheduler: Option<Arc<crate::schedule::Scheduler>>,
+    pub notes: Option<Arc<crate::notes::Notes>>,
 }
 
 impl WorkerConfig {
@@ -54,6 +55,7 @@ impl WorkerConfig {
             family: None,
             goal: None,
             scheduler: None,
+            notes: None,
         }
     }
 
@@ -84,6 +86,7 @@ impl WorkerConfig {
         connection.set_family(self.family);
         connection.set_goal_store(self.goal);
         connection.set_scheduler(self.scheduler);
+        connection.set_notes(self.notes);
         connection
     }
 }

@@ -1046,11 +1046,13 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             };
             let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(None));
             let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(None));
+            let notes = mush_runtime::Notes::new(None);
             if let Some(host) = ipython.mush_host() {
                 host.set_extension(std::sync::Arc::new(
                     mush_runtime::RlmHandler::new(family, identity)
                         .with_goal(goal.clone())
-                        .with_scheduler(scheduler.clone()),
+                        .with_scheduler(scheduler.clone())
+                        .with_notes(notes.clone()),
                 ));
             }
             let project =
@@ -1087,6 +1089,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             worker.kernel_signals = Some(signals);
             worker.goal = Some(goal);
             worker.scheduler = Some(scheduler);
+            worker.notes = Some(notes);
             Ok(mush_runtime::ChildParts {
                 config: worker,
                 tools: mush_agent::tool::ToolRegistry::from_shared(vec![
@@ -1224,17 +1227,20 @@ fn worker_config(
                 .as_ref()
                 .map(|dir| dir.join("scheduled-jobs.json")),
         ));
+        let notes = mush_runtime::Notes::new(artifacts.as_ref().map(|dir| dir.join("notes.md")));
         if let Some(host) = ipython.mush_host() {
             host.set_extension(std::sync::Arc::new(
                 mush_runtime::RlmHandler::new(family.clone(), root)
                     .with_goal(goal.clone())
-                    .with_scheduler(scheduler.clone()),
+                    .with_scheduler(scheduler.clone())
+                    .with_notes(notes.clone()),
             ));
         }
         worker.agent_inbox = Some(family.root_inbox());
         worker.family = Some(family);
         worker.goal = Some(goal);
         worker.scheduler = Some(scheduler);
+        worker.notes = Some(notes);
     }
     worker
 }

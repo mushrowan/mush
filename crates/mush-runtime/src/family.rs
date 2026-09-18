@@ -871,6 +871,7 @@ pub struct RlmHandler {
     identity: Identity,
     goal: Option<Arc<crate::goal::GoalStore>>,
     scheduler: Option<Arc<crate::schedule::Scheduler>>,
+    notes: Option<Arc<crate::notes::Notes>>,
 }
 
 impl RlmHandler {
@@ -881,7 +882,14 @@ impl RlmHandler {
             identity,
             goal: None,
             scheduler: None,
+            notes: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_notes(mut self, notes: Arc<crate::notes::Notes>) -> Self {
+        self.notes = Some(notes);
+        self
     }
 
     #[must_use]
@@ -1046,6 +1054,25 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
                         .collect::<Vec<_>>()
                 }))
+            }
+            "rlm.note" | "rlm.notes" | "rlm.clear_notes" => {
+                let notes = self
+                    .notes
+                    .as_ref()
+                    .ok_or_else(|| mush_kernel::HostError("notes are not available here".into()))?;
+                let text = match kind {
+                    "rlm.note" => {
+                        let text = str_field("text")
+                            .ok_or_else(|| mush_kernel::HostError("text is required".into()))?;
+                        notes.append(&text).map_err(mush_kernel::HostError)?
+                    }
+                    "rlm.clear_notes" => {
+                        notes.replace("");
+                        String::new()
+                    }
+                    _ => notes.read(),
+                };
+                Ok(serde_json::json!({ "notes": text }))
             }
             "rlm_heartbeat.list" => {
                 let (_, jobs) = self.rlm_heartbeats()?;

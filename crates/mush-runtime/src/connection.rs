@@ -183,6 +183,7 @@ pub struct InProcessConnection {
     scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>,
     known_jobs: Vec<crate::schedule::Job>,
     deferred_jobs: VecDeque<String>,
+    notes: Option<std::sync::Arc<crate::notes::Notes>>,
     closed: bool,
 }
 
@@ -229,14 +230,25 @@ impl InProcessConnection {
             scheduler: None,
             known_jobs: Vec::new(),
             deferred_jobs: VecDeque::new(),
+            notes: None,
             closed: false,
         }
+    }
+
+    pub fn set_notes(&mut self, notes: Option<std::sync::Arc<crate::notes::Notes>>) {
+        if let Some(notes) = &notes {
+            self.injections.dynamic_system_context = Some(notes.dynamic_context());
+        }
+        self.notes = notes;
     }
 
     fn rebind_artifacts(&mut self) {
         let persisted = self.runtime.saver.is_some();
         let dir = persisted
             .then(|| mush_session::SessionStore::default_artifact_dir(&self.runtime.session_id));
+        if let Some(notes) = &self.notes {
+            notes.rebind(dir.as_ref().map(|dir| dir.join("notes.md")));
+        }
         if let Some(family) = &self.family {
             family.rebind(
                 self.runtime.session_id.to_string(),

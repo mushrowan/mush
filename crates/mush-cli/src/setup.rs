@@ -665,6 +665,10 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          - `attach_image(path, ...)` puts a png, jpeg, gif or webp in front of you as pixels. \
          Use it to look at a screenshot, chart or diagram; use a library when you need to \
          compute over the image.\n\
+         - `await rlm.note(text)` keeps a short note that survives compaction and kernel \
+         restarts; the notes appear in your system prompt. `await rlm.notes()` reads them, \
+         `await rlm.clear_notes()` drops them. Use them for decisions, paths and state a long \
+         task needs later.\n\
          - Use Python for loops, conditionals and parsing. Use `bash()` to run programs, not \
          to write shell programs.\n\
          - Run a project's own commands through its own environment (`cargo test`, `npm run \

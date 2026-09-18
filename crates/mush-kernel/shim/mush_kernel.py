@@ -257,6 +257,15 @@ class _Rlm:
     async def progress_note(self, text: str) -> None:
         await host_request("rlm.progress_note", {"text": text})
 
+    async def note(self, text: str) -> str:
+        return str((await host_request("rlm.note", {"text": text})).get("notes", ""))
+
+    async def notes(self) -> str:
+        return str((await host_request("rlm.notes", {})).get("notes", ""))
+
+    async def clear_notes(self) -> None:
+        await host_request("rlm.clear_notes", {})
+
 
 class _AgentMessage:
     async def send(self, message: str, *, receiver_role: str = "parent", receiver_name: str | None = None, mode: str = "auto") -> dict:
