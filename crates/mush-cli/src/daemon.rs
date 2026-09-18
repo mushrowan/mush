@@ -168,3 +168,71 @@ pub async fn shutdown() -> Result<()> {
         other => Err(eyre!("unexpected daemon reply: {other:?}")),
     }
 }
+
+pub async fn send(session: &str, text: &str) -> Result<()> {
+    use mush_agent::ipc::control::{Event, Operation, Reply, Request, Target};
+    use mush_agent::{IpcMessage, IpcMessageKind};
+
+    let control_dir = mush_agent::ipc::runtime_dir().join("control");
+    let sockets: Vec<PathBuf> = std::fs::read_dir(&control_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
+        .collect();
+    let mut found: Option<(PathBuf, Target)> = None;
+    for socket in sockets {
+        let Ok(response) = mush_agent::ipc::listener::exchange(
+            &socket,
+            &IpcMessage {
+                id: mush_agent::ipc::control::new_id(),
+                from: "mush-send".into(),
+                kind: IpcMessageKind::GetTarget,
+            },
+        )
+        .await
+        else {
+            continue;
+        };
+        let IpcMessageKind::Target(target) = response.kind else {
+            continue;
+        };
+        if target.session.starts_with(session) {
+            if found.is_some() {
+                return Err(eyre!("{session} matches more than one running session"));
+            }
+            found = Some((socket, target));
+        }
+    }
+    let Some((socket, target)) = found else {
+        return Err(eyre!("no running session matches {session}"));
+    };
+    let response = mush_agent::ipc::listener::exchange(
+        &socket,
+        &IpcMessage {
+            id: mush_agent::ipc::control::new_id(),
+            from: "mush-send".into(),
+            kind: IpcMessageKind::Control(Request {
+                target: target.clone(),
+                operation: Operation::Send {
+                    event: Event::Message {
+                        text: text.to_string(),
+                    },
+                },
+            }),
+        },
+    )
+    .await?;
+    match response.kind {
+        IpcMessageKind::ControlReply(Reply::Accepted { .. }) => {
+            println!(
+                "queued for {}",
+                &target.session[..8.min(target.session.len())]
+            );
+            Ok(())
+        }
+        IpcMessageKind::ControlReply(Reply::Error { code }) => Err(eyre!("{code}")),
+        other => Err(eyre!("unexpected reply: {other:?}")),
+    }
+}

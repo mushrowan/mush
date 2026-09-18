@@ -200,6 +200,11 @@ enum Command {
     Stop {
         id: String,
     },
+    Send {
+        session: String,
+        #[arg(num_args = 1.., trailing_var_arg = true)]
+        text: Vec<String>,
+    },
     Shutdown,
     Login {
         provider: Option<String>,
@@ -261,6 +266,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Ps) => return daemon::ps().await,
         Some(Command::Stop { id }) => return daemon::stop(&id).await,
+        Some(Command::Send { session, text }) => {
+            return daemon::send(&session, &text.join(" ")).await;
+        }
         Some(Command::Shutdown) => return daemon::shutdown().await,
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
