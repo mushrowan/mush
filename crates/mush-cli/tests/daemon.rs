@@ -324,3 +324,83 @@ async fn mush_send_queues_a_message_for_a_running_session() {
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("no running session matches nope"));
 }
+
+#[tokio::test]
+async fn a_session_owned_by_a_worker_refuses_a_second_opener() {
+    let daemon = Daemon::start();
+    let config = daemon.dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    let model = mush_ai::types::Model::builder()
+        .id("gpt-lease-fixture".into())
+        .name("fixture".into())
+        .provider(mush_ai::types::Provider::Custom("fixture".into()))
+        .api(mush_ai::types::Api::OpenaiResponses)
+        .base_url("http://127.0.0.1:9".into())
+        .context_window(mush_ai::types::TokenCount::new(100_000))
+        .max_output_tokens(mush_ai::types::TokenCount::new(64))
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "rlm = false\n[api_keys]\nfixture = 'fixture-key'\n",
+    )
+    .unwrap();
+    let SupervisorReply::Worker { descriptor, .. } = daemon
+        .request(SupervisorRequest::Open {
+            target: OpenTarget::New,
+            args: ["--no-tools", "--model", "gpt-lease-fixture"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            cwd: daemon.dir.path().to_path_buf(),
+            env: env(daemon.dir.path()),
+        })
+        .await
+    else {
+        panic!("expected a worker")
+    };
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let id = mush_ai::types::SessionId::from(descriptor.session_id.as_str());
+    assert!(store.is_leased(&id));
+    let mut placeholder = mush_session::Session::new(
+        "gpt-lease-fixture",
+        &daemon.dir.path().display().to_string(),
+    );
+    placeholder.meta.id = id.clone();
+    store.save(&placeholder).unwrap();
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env_clear();
+    for (key, value) in env(daemon.dir.path()) {
+        command.env(key, value);
+    }
+    let refused = command
+        .args([
+            "--no-tools",
+            "--model",
+            "gpt-lease-fixture",
+            "--resume",
+            &descriptor.session_id,
+            "-p",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("is open in another mush"), "{stderr}");
+
+    assert!(matches!(
+        daemon
+            .request(SupervisorRequest::Stop {
+                session_id: descriptor.session_id.clone(),
+            })
+            .await,
+        SupervisorReply::Done
+    ));
+    assert!(!store.is_leased(&id));
+}

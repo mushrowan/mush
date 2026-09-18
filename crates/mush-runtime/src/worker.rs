@@ -21,6 +21,7 @@ pub struct WorkerConfig {
     pub rlm_max_depth: u32,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub saver: Option<SessionSaver>,
+    pub lease: Option<mush_session::SessionLease>,
     pub turn: TurnConfig,
     pub injections: mush_agent::AgentInjections,
     pub agent_card: Option<mush_agent::AgentCard>,
@@ -49,6 +50,7 @@ impl WorkerConfig {
             rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
             kernel_state: None,
             saver: None,
+            lease: None,
             turn,
             injections: mush_agent::AgentInjections::default(),
             agent_card: None,
@@ -69,6 +71,7 @@ impl WorkerConfig {
     pub fn connect(self, tools: &ToolRegistry, registry: &ApiRegistry) -> InProcessConnection {
         let mut runtime = SessionRuntime::new(self.conversation);
         runtime.saver = self.saver;
+        runtime.lease = self.lease;
         runtime.session_id = self.session_id;
         runtime.title = self.title;
         runtime.model_id = self.turn.default_model.id.to_string();

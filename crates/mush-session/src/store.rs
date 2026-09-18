@@ -19,6 +19,22 @@ pub enum StoreError {
         prefix: String,
         matches: Vec<String>,
     },
+
+    #[error("session {0} is open in another mush. mush --resume {0} attaches to it")]
+    Busy(SessionId),
+}
+
+#[derive(Debug)]
+pub struct SessionLease {
+    _file: std::fs::File,
+    id: SessionId,
+}
+
+impl SessionLease {
+    #[must_use]
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
 }
 
 pub struct SessionStore {
@@ -38,16 +54,39 @@ pub struct IgnoredSessionFile {
 }
 
 impl SessionStore {
-    pub fn is_leased(&self, id: &SessionId) -> bool {
-        self.base_dir
-            .join(format!("{id}.lease"))
-            .symlink_metadata()
-            .is_ok()
+    fn lease_path(&self, id: &SessionId) -> PathBuf {
+        self.base_dir.join(format!("{id}.lease"))
     }
 
-    pub fn lease(&self, id: &SessionId) -> Result<Option<std::fs::File>, StoreError> {
-        if !self.is_leased(id) {
-            return Ok(None);
+    fn open_lease_file(&self, id: &SessionId) -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(&self.base_dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.lease_path(id))
+    }
+
+    pub fn is_leased(&self, id: &SessionId) -> bool {
+        if self.lease_path(id).symlink_metadata().is_err() {
+            return false;
+        }
+        match self.open_lease_file(id) {
+            Ok(file) => matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            Err(_) => true,
+        }
+    }
+
+    pub fn acquire(&self, id: &SessionId) -> Result<SessionLease, StoreError> {
+        let file = self.open_lease_file(id)?;
+        match file.try_lock() {
+            Ok(()) => {
+                return Ok(SessionLease {
+                    _file: file,
+                    id: id.clone(),
+                });
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
         }
         let inherited = std::env::var("MUSH_SESSION_LEASE_FD")
             .ok()
@@ -57,11 +96,22 @@ impl SessionStore {
                     .map_err(|_| std::io::Error::other("invalid session lease descriptor"))
             })
             .transpose()?;
-        Ok(Some(mush_supervisor::admission::session_lock(
-            &self.base_dir,
-            id.as_str(),
-            inherited,
-        )?))
+        let Some(inherited) = inherited else {
+            return Err(StoreError::Busy(id.clone()));
+        };
+        let file =
+            mush_supervisor::admission::session_lock(&self.base_dir, id.as_str(), Some(inherited))
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        StoreError::Busy(id.clone())
+                    } else {
+                        StoreError::Io(error)
+                    }
+                })?;
+        Ok(SessionLease {
+            _file: file,
+            id: id.clone(),
+        })
     }
 
     pub fn default_dir() -> PathBuf {
@@ -173,6 +223,7 @@ impl SessionStore {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        let _ = std::fs::remove_file(self.lease_path(id));
         Ok(())
     }
 }

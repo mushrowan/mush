@@ -411,11 +411,9 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
 async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
-    let mut _session_lease = None;
     let mut session = match cli.session_target()? {
         SessionTarget::Resume(id) => {
             let meta = store.resolve(&id)?;
-            _session_lease = store.lease(&meta.id)?;
             store.load(&meta.id)?
         }
         SessionTarget::Fork(id) => {
@@ -430,6 +428,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             };
             Session::new(&model_id, &cwd.display().to_string())
         }
+    };
+    let _lease = if cli.no_session {
+        None
+    } else {
+        Some(store.acquire(&session.meta.id)?)
     };
     if let Some(model) = &cli.model {
         session.meta.model_id = model.clone().into();
@@ -817,7 +820,7 @@ struct Prepared {
 
 struct OpenedSession {
     session: Session,
-    _lease: Option<std::fs::File>,
+    lease: Option<mush_session::SessionLease>,
     saver: Option<SaverThread>,
 }
 
@@ -853,8 +856,8 @@ async fn worker_mode(
         setup,
         kernel_signals,
     } = prepare(&cli).await?;
-    let opened = open_session(&cli.session_target()?, &setup, cli.no_session).await?;
-    let worker = worker_config(&cli, &setup, &opened, kernel_signals);
+    let mut opened = open_session(&cli.session_target()?, &setup, cli.no_session).await?;
+    let worker = worker_config(&cli, &setup, &mut opened, kernel_signals);
     eprintln!(
         "{}",
         Style::Dim.stderr(format_args!("worker listening on {}", socket.display()))
@@ -942,8 +945,8 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 kernel_signals,
             } = prepare(&cli).await?;
             let discovery_rx = spawn_discovery_refresh(setup.client.http_client.clone());
-            let opened = open_session(&target, &setup, cli.no_session).await?;
-            let worker = worker_config(&cli, &setup, &opened, kernel_signals);
+            let mut opened = open_session(&target, &setup, cli.no_session).await?;
+            let worker = worker_config(&cli, &setup, &mut opened, kernel_signals);
             let mut tui_config = client_config(
                 &cli,
                 &setup.client,
@@ -1006,12 +1009,10 @@ async fn open_session(
     no_session: bool,
 ) -> Result<OpenedSession> {
     let cwd_str = setup.client.cwd.display().to_string();
-    let mut lease = None;
+    let store = SessionStore::new(SessionStore::default_dir());
     let session = match target {
         SessionTarget::Resume(id) => {
-            let store = SessionStore::new(SessionStore::default_dir());
             let meta = store.resolve(id)?;
-            lease = store.lease(&meta.id)?;
             if let Some(kernel) = &setup.kernel_state {
                 kernel
                     .restore_from(&SessionStore::kernel_state_path(&meta.id))
@@ -1020,7 +1021,6 @@ async fn open_session(
             store.load(&meta.id)?
         }
         SessionTarget::Fork(id) => {
-            let store = SessionStore::new(SessionStore::default_dir());
             let meta = store.resolve(id)?;
             fork_session(store.load(&meta.id)?, &cwd_str)
         }
@@ -1028,12 +1028,17 @@ async fn open_session(
             Session::new(setup.client.model.id.as_str(), &cwd_str)
         }
     };
+    let lease = if no_session {
+        None
+    } else {
+        Some(store.acquire(&session.meta.id)?)
+    };
     let saver = (!no_session)
         .then(|| SaverThread::spawn(cwd_str))
         .transpose()?;
     Ok(OpenedSession {
         session,
-        _lease: lease,
+        lease,
         saver,
     })
 }
@@ -1189,7 +1194,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
 fn worker_config(
     cli: &Cli,
     setup: &AppSetup,
-    opened: &OpenedSession,
+    opened: &mut OpenedSession,
     kernel_signals: mush_runtime::KernelSignals,
 ) -> mush_runtime::WorkerConfig {
     let session = &opened.session;
@@ -1257,6 +1262,7 @@ fn worker_config(
         .normalize_visible();
     worker.rlm_depth = setup::rlm_depth();
     worker.rlm_max_depth = seed.rlm_max_depth;
+    worker.lease = opened.lease.take();
     worker.kernel_state = setup.kernel_state.clone();
     worker.saver = seed.saver.clone();
     worker.injections = mush_agent::AgentInjections {

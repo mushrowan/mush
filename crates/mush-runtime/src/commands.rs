@@ -87,7 +87,9 @@ impl SessionRuntime {
                 if let Some(kernel) = &self.kernel_state {
                     kernel.reset().await;
                 }
-                self.replace_session(SessionId::new(), ConversationState::new(), None);
+                let id = SessionId::new();
+                let lease = self.next_lease(&id);
+                self.replace_session(id, ConversationState::new(), None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
                     reason: Replaced::New,
@@ -101,11 +103,14 @@ impl SessionRuntime {
             }
             SessionCommand::Resume { id } => {
                 let store = SessionStore::new(SessionStore::default_dir());
-                if store.is_leased(&id) {
-                    return vec![SessionEvent::Failed(
-                        "resume this supervised session from the cli".into(),
-                    )];
-                }
+                let lease = if self.lease.is_some() {
+                    match store.acquire(&id) {
+                        Ok(lease) => Some(lease),
+                        Err(error) => return vec![SessionEvent::Failed(error.to_string())],
+                    }
+                } else {
+                    None
+                };
                 let loaded = match store.load(&id) {
                     Ok(session) => session,
                     Err(error) => {
@@ -127,7 +132,7 @@ impl SessionRuntime {
                     self.system_prompt = Some(prompt);
                 }
                 let title = loaded.meta.title.clone();
-                self.replace_session(id, loaded.conversation, title.clone());
+                self.replace_session(id, loaded.conversation, title.clone(), lease);
                 self.title_generated = title.is_some();
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::SystemPromptChanged(
@@ -162,11 +167,9 @@ impl SessionRuntime {
                 let prefix = messages[..position].to_vec();
                 self.save_now();
                 self.snapshot_kernel(&self.session_id.clone()).await;
-                self.replace_session(
-                    SessionId::new(),
-                    ConversationState::from_messages(prefix),
-                    None,
-                );
+                let id = SessionId::new();
+                let lease = self.next_lease(&id);
+                self.replace_session(id, ConversationState::from_messages(prefix), None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
                     reason: Replaced::Forked,
@@ -182,11 +185,9 @@ impl SessionRuntime {
                 let branch = self.conversation.context();
                 self.save_now();
                 self.snapshot_kernel(&self.session_id.clone()).await;
-                self.replace_session(
-                    SessionId::new(),
-                    ConversationState::from_messages(branch),
-                    None,
-                );
+                let id = SessionId::new();
+                let lease = self.next_lease(&id);
+                self.replace_session(id, ConversationState::from_messages(branch), None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
                     reason: Replaced::Cloned,
@@ -347,12 +348,21 @@ impl SessionRuntime {
         }
     }
 
+    fn next_lease(&self, id: &SessionId) -> Option<mush_session::SessionLease> {
+        self.lease.as_ref()?;
+        SessionStore::new(SessionStore::default_dir())
+            .acquire(id)
+            .ok()
+    }
+
     fn replace_session(
         &mut self,
         id: SessionId,
         conversation: ConversationState,
         title: Option<String>,
+        lease: Option<mush_session::SessionLease>,
     ) {
+        self.lease = lease;
         self.session_id = id;
         self.conversation = conversation;
         self.title = title;

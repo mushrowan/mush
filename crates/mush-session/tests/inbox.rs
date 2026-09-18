@@ -210,7 +210,27 @@ fn supervised_session_lease_excludes_another_launcher() {
     let lock = mush_supervisor::admission::session_lock(dir.path(), session.meta.id.as_str(), None)
         .unwrap();
     assert!(store.is_leased(&session.meta.id));
-    assert!(store.lease(&session.meta.id).is_err());
+    assert!(matches!(
+        store.acquire(&session.meta.id),
+        Err(mush_session::store::StoreError::Busy(_))
+    ));
     drop(lock);
-    assert!(store.lease(&session.meta.id).unwrap().is_some());
+    let lease = store.acquire(&session.meta.id).unwrap();
+    assert!(store.is_leased(&session.meta.id));
+    drop(lease);
+    assert!(!store.is_leased(&session.meta.id));
+}
+
+#[test]
+fn a_fresh_session_is_not_leased_until_someone_holds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().to_owned());
+    let id = mush_ai::types::SessionId::new();
+    assert!(!store.is_leased(&id));
+    let first = store.acquire(&id).unwrap();
+    assert_eq!(first.id(), &id);
+    assert!(matches!(
+        store.acquire(&id),
+        Err(mush_session::store::StoreError::Busy(_))
+    ));
 }
