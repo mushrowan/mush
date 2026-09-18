@@ -48,6 +48,27 @@ impl Daemon {
         .unwrap()
     }
 
+    fn open_saved(&self, target: OpenTarget) -> SupervisorRequest {
+        let SupervisorRequest::Open {
+            target,
+            args,
+            cwd,
+            env,
+        } = self.open(target)
+        else {
+            unreachable!()
+        };
+        SupervisorRequest::Open {
+            target,
+            args: args
+                .into_iter()
+                .filter(|arg| arg != "--no-session")
+                .collect(),
+            cwd,
+            env,
+        }
+    }
+
     fn open(&self, target: OpenTarget) -> SupervisorRequest {
         SupervisorRequest::Open {
             target,
@@ -115,7 +136,7 @@ async fn the_daemon_spawns_lists_reuses_and_stops_workers() {
     let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
         panic!("expected a roster")
     };
-    assert_eq!(workers, vec![descriptor.clone()]);
+    assert_eq!(workers, vec![*descriptor.clone()]);
 
     let SupervisorReply::Worker {
         descriptor: again,
@@ -152,6 +173,15 @@ async fn the_daemon_spawns_lists_reuses_and_stops_workers() {
         panic!("expected a roster")
     };
     assert!(workers.is_empty());
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
+        panic!("expected a roster")
+    };
+    assert!(
+        workers.is_empty(),
+        "a stopped worker came back: {workers:?}"
+    );
 }
 
 #[tokio::test]
@@ -455,7 +485,7 @@ async fn doctor_reports_a_live_worker_and_clears_a_dead_one() {
         pid: 0x7fff_fffe,
         start_id: Some("proc:never".into()),
         socket: workers.join("deadbeefdeadbeef.sock"),
-        ..descriptor.clone()
+        ..*descriptor.clone()
     };
     std::fs::write(
         workers.join("deadbeefdeadbeef.json"),
@@ -511,4 +541,96 @@ async fn shutdown_needs_a_force_flag_when_agents_are_running() {
     let forced = daemon.cli().args(["shutdown", "--force"]).output().unwrap();
     assert!(forced.status.success(), "{forced:?}");
     assert!(!alive(descriptor.pid));
+}
+
+#[tokio::test]
+async fn a_killed_worker_comes_back_on_the_same_socket() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    assert!(alive(descriptor.pid));
+
+    let pid = rustix::process::Pid::from_raw(i32::try_from(descriptor.pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let recovered = loop {
+        let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await
+        else {
+            panic!("expected a roster")
+        };
+        if let Some(worker) = workers
+            .iter()
+            .find(|worker| worker.pid != descriptor.pid && worker.failed.is_none())
+        {
+            break worker.clone();
+        }
+        assert!(Instant::now() < deadline, "the worker never came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(recovered.socket, descriptor.socket);
+    assert_eq!(recovered.session_id, descriptor.session_id);
+    assert!(alive(recovered.pid));
+
+    let mut client = mush_daemon::DaemonConnection::connect(&recovered.socket)
+        .await
+        .unwrap();
+    let transcript = client.transcript().await;
+    assert!(
+        transcript.iter().any(|message| matches!(
+            message,
+            mush_ai::types::Message::Event(event)
+                if event.kind == mush_ai::types::EventKind::Recovery
+        )),
+        "{transcript:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_worker_that_cannot_restart_is_marked_failed() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+
+    let pid = rustix::process::Pid::from_raw(i32::try_from(descriptor.pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let failed = loop {
+        let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await
+        else {
+            panic!("expected a roster")
+        };
+        if let Some(worker) = workers.iter().find(|worker| worker.failed.is_some()) {
+            break worker.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker was never marked failed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(failed.session_id, descriptor.session_id);
+    assert_eq!(failed.pid, 0);
+
+    let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows[0]["status"], "failed");
+
+    let stopped = daemon
+        .cli()
+        .args(["stop", &descriptor.session_id[..8]])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
+        panic!("expected a roster")
+    };
+    assert!(workers.is_empty());
 }

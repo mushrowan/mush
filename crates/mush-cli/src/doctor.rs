@@ -17,6 +17,7 @@ pub enum Health {
     Idle,
     Unreachable,
     Stale,
+    Failed,
 }
 
 impl Health {
@@ -26,6 +27,7 @@ impl Health {
             Self::Idle => "idle",
             Self::Unreachable => "unreachable",
             Self::Stale => "stale",
+            Self::Failed => "failed",
         }
     }
 
@@ -35,6 +37,7 @@ impl Health {
             Self::Idle => Style::Dim,
             Self::Unreachable => Style::Red,
             Self::Stale => Style::Yellow,
+            Self::Failed => Style::Red,
         }
     }
 }
@@ -145,6 +148,15 @@ pub async fn findings(fix: bool) -> Result<Vec<Finding>> {
     for (path, descriptor) in descriptors {
         known.push(descriptor.socket.clone());
         let what = format!("worker {}", short_id(&descriptor.session_id));
+        if let Some(reason) = &descriptor.failed {
+            findings.push(Finding {
+                what,
+                health: Health::Failed,
+                detail: format!("gave up restarting: {reason}"),
+                fixed: false,
+            });
+            continue;
+        }
         if !descriptor.alive() {
             let fixed = fix && remove_if_present(&path) && remove_if_present(&descriptor.socket);
             findings.push(Finding {

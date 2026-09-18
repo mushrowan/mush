@@ -97,7 +97,7 @@ pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescrip
         env: std::env::vars().collect(),
     };
     match mush_daemon::supervisor::request(&socket, &request).await? {
-        SupervisorReply::Worker { descriptor, .. } => Ok(descriptor),
+        SupervisorReply::Worker { descriptor, .. } => Ok(*descriptor),
         SupervisorReply::Error(error) => Err(eyre!("{error}")),
         other => Err(eyre!("unexpected daemon reply: {other:?}")),
     }

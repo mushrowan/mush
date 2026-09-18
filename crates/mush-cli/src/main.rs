@@ -116,6 +116,9 @@ struct Cli {
     #[arg(long)]
     no_session: bool,
 
+    #[arg(long, hide = true)]
+    recovered: bool,
+
     #[arg(long)]
     status_file: Option<std::path::PathBuf>,
 
@@ -1455,6 +1458,10 @@ fn worker_config(
     worker.autonomous = Some(std::sync::Arc::new(mush_runtime::Autonomous::new(
         setup.client.cwd.clone(),
     )));
+    if cli.recovered {
+        worker.recovery_notice =
+            Some("the worker restarted after a crash. an unfinished turn was not resumed".into());
+    }
     worker
 }
 

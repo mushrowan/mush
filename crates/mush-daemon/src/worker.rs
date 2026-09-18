@@ -49,6 +49,7 @@ impl Descriptor {
                 messages: 0,
                 updated_at: started_at,
                 clients: 0,
+                failed: None,
             },
         }
     }

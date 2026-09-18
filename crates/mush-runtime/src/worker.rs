@@ -36,6 +36,7 @@ pub struct WorkerConfig {
     pub parent: Option<SessionId>,
     pub autonomous: Option<Arc<crate::autonomous::Autonomous>>,
     pub host_commands: Option<Arc<crate::connection::HostCommands>>,
+    pub recovery_notice: Option<String>,
 }
 
 impl WorkerConfig {
@@ -66,6 +67,7 @@ impl WorkerConfig {
             parent: None,
             autonomous: None,
             host_commands: None,
+            recovery_notice: None,
         }
     }
 
@@ -83,6 +85,20 @@ impl WorkerConfig {
         runtime.thinking_level = self.thinking_level;
         runtime.parent = self.parent;
         runtime.set_kernel_state(self.kernel_state);
+        runtime.save_now();
+        if let Some(notice) = self.recovery_notice {
+            runtime
+                .conversation
+                .append_message(mush_ai::types::Message::Event(
+                    mush_ai::types::EventMessage {
+                        content: notice,
+                        timestamp_ms: mush_ai::types::Timestamp::now(),
+                        kind: mush_ai::types::EventKind::Recovery,
+                        receipts: Vec::new(),
+                    },
+                ));
+            runtime.save_now();
+        }
         let mut connection = InProcessConnection::new(
             runtime,
             tools.clone(),

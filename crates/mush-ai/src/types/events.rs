@@ -11,6 +11,7 @@ pub enum EventKind {
     Wake,
     Legacy,
     Summary,
+    Recovery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

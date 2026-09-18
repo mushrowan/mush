@@ -11,6 +11,7 @@ use crate::output::Style;
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Working,
+    Failed,
     Idle,
     Saved,
 }
@@ -19,6 +20,7 @@ impl AgentStatus {
     fn label(self) -> &'static str {
         match self {
             Self::Working => "working",
+            Self::Failed => "failed",
             Self::Idle => "idle",
             Self::Saved => "saved",
         }
@@ -27,6 +29,7 @@ impl AgentStatus {
     fn style(self) -> Style {
         match self {
             Self::Working => Style::Yellow,
+            Self::Failed => Style::Red,
             Self::Idle => Style::Cyan,
             Self::Saved => Style::Dim,
         }
@@ -45,6 +48,7 @@ pub struct AgentRow {
     pub cwd: String,
     pub stale: bool,
     pub clients: usize,
+    pub failed: Option<String>,
 }
 
 const NAME_WIDTH: usize = 32;
@@ -75,10 +79,10 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
         .map(|worker| AgentRow {
             name: worker.title.clone().unwrap_or_default(),
             id: short_id(&worker.session_id),
-            status: if worker.turn_active {
-                AgentStatus::Working
-            } else {
-                AgentStatus::Idle
+            status: match (&worker.failed, worker.turn_active) {
+                (Some(_), _) => AgentStatus::Failed,
+                (None, true) => AgentStatus::Working,
+                (None, false) => AgentStatus::Idle,
             },
             model: worker.model_id.clone(),
             messages: worker.messages,
@@ -87,6 +91,7 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
             cwd: worker.cwd.display().to_string(),
             stale: worker.build != mush_daemon::build_id(),
             clients: worker.clients,
+            failed: worker.failed.clone(),
         })
         .collect();
     for meta in saved {
@@ -107,6 +112,7 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
             cwd: meta.cwd.clone(),
             stale: false,
             clients: 0,
+            failed: None,
         });
     }
     rows.sort_by(|left, right| {
@@ -134,7 +140,7 @@ pub fn table(rows: &[AgentRow]) -> String {
                 row.model.clone(),
                 row.messages.to_string(),
                 row.clients.to_string(),
-                row.cwd.clone(),
+                row.failed.clone().unwrap_or_else(|| row.cwd.clone()),
             ]
         })
         .collect();
@@ -289,6 +295,7 @@ mod tests {
             socket: "/tmp/a.sock".into(),
             started_at: 1,
             clients: 1,
+            failed: None,
             title: Some(format!("agent {id}")),
             turn_active,
             messages: 7,
