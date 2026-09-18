@@ -60,6 +60,7 @@ pub enum ClientCommand {
     CompactionFallback,
     AnswerKernelBusy(mush_tools::ipython::BusyKernelChoice),
     SideQuestion(String),
+    Goal(crate::goal::GoalCommand),
     Shutdown,
 }
 
@@ -101,6 +102,7 @@ pub enum ClientEvent {
         answer: Result<String, String>,
     },
     ChildUpdated(Box<crate::family::ChildSummary>),
+    GoalChanged(Option<Box<crate::goal::Goal>>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -133,6 +135,8 @@ pub enum ConnectionError {
     NothingToRecover,
     #[error("connection closed")]
     Closed,
+    #[error("{0}")]
+    Refused(String),
     #[error("transport: {0}")]
     Transport(String),
 }
@@ -172,6 +176,8 @@ pub struct InProcessConnection {
     deferred_deliveries: VecDeque<crate::family::Delivery>,
     family: Option<std::sync::Arc<crate::family::Family>>,
     known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
+    goal: Option<std::sync::Arc<crate::goal::GoalStore>>,
+    known_goal: Option<crate::goal::Goal>,
     closed: bool,
 }
 
@@ -213,7 +219,45 @@ impl InProcessConnection {
             deferred_deliveries: VecDeque::new(),
             family: None,
             known_children: std::collections::HashMap::new(),
+            goal: None,
+            known_goal: None,
             closed: false,
+        }
+    }
+
+    pub fn set_goal_store(&mut self, goal: Option<std::sync::Arc<crate::goal::GoalStore>>) {
+        self.known_goal = goal.as_ref().and_then(|goal| goal.get());
+        self.goal = goal;
+    }
+
+    fn try_poll_goal(&mut self) -> Option<ClientEvent> {
+        let goal = self.goal.as_ref()?.get();
+        if goal == self.known_goal {
+            return None;
+        }
+        self.known_goal = goal.clone();
+        Some(ClientEvent::GoalChanged(goal.map(Box::new)))
+    }
+
+    fn children_running(&self) -> bool {
+        self.family
+            .as_ref()
+            .is_some_and(|family| family.all().iter().any(|child| !child.status.settled()))
+    }
+
+    async fn continue_goal(&mut self) {
+        let Some(goal) = self.goal.clone() else {
+            return;
+        };
+        if self.runtime.turn_active()
+            || self.compaction.is_some()
+            || self.runtime.pending_prompt.is_some()
+            || self.children_running()
+        {
+            return;
+        }
+        if let Some(prompt) = goal.take_due_prompt() {
+            self.queue_prompt(&prompt, Vec::new());
         }
     }
 
@@ -418,6 +462,7 @@ impl InProcessConnection {
         self.poll_control().await;
         self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
+        self.continue_goal().await;
         if std::mem::take(&mut self.fork_compaction_due) {
             let _ = self
                 .start_compaction(CompactionFocus::default(), true)
@@ -508,6 +553,9 @@ impl InProcessConnection {
             return Some(event);
         }
         if let Some(event) = self.try_poll_family() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_goal() {
             return Some(event);
         }
         self.try_poll_compaction()
@@ -913,6 +961,9 @@ impl InProcessConnection {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
+                if let Some(goal) = &self.goal {
+                    goal.record_usage(message.usage.total_tokens().get());
+                }
                 self.runtime.save_debounced();
             }
             AgentEvent::ToolExecEnd { .. } | AgentEvent::ContextCompacted { .. } => {
@@ -928,6 +979,9 @@ impl InProcessConnection {
                 self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
                 self.fork_compaction_due = !cancelled && self.fork_compaction_due();
+                if !cancelled && let Some(goal) = &self.goal {
+                    goal.turn_ended();
+                }
             }
             _ => {}
         }
@@ -972,6 +1026,16 @@ impl AgentConnection for InProcessConnection {
                 }
             }
             ClientCommand::SideQuestion(question) => self.ask_side_question(question),
+            ClientCommand::Goal(command) => {
+                let goal = self
+                    .goal
+                    .clone()
+                    .ok_or_else(|| ConnectionError::Refused("goals are not available".into()))?;
+                let updated = goal.apply(command).map_err(ConnectionError::Refused)?;
+                self.known_goal = updated.clone();
+                self.queued
+                    .push_back(ClientEvent::GoalChanged(updated.map(Box::new)));
+            }
             ClientCommand::SetModel(id) => self.runtime.model_id = id,
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
@@ -1504,6 +1568,52 @@ mod tests {
             &events[..],
             [ClientEvent::Session(SessionEvent::SystemPromptChanged(Some(prompt)))]
                 if prompt == "prompt v1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_goal_keeps_prompting_until_the_kernel_completes_it() {
+        let (mut connection, requests) = connection();
+        let goal = Arc::new(crate::goal::GoalStore::new(None));
+        connection.set_goal_store(Some(Arc::clone(&goal)));
+
+        let events = connection
+            .send(ClientCommand::Goal(crate::goal::GoalCommand::Create {
+                objective: "answer twice".into(),
+                token_budget: None,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            &events[..],
+            [ClientEvent::GoalChanged(Some(goal))] if goal.objective == "answer twice"
+        ));
+
+        connection.start_pending().await;
+        assert!(connection.state().turn_active);
+        drain_turn(&mut connection).await;
+        assert!(matches!(
+            &requests.lock().unwrap()[0][0],
+            Message::User(user) if user.text().starts_with("[goal: continuation 1]")
+        ));
+
+        connection.start_pending().await;
+        assert!(
+            connection.state().turn_active,
+            "the goal continues after a turn"
+        );
+        drain_turn(&mut connection).await;
+        assert_eq!(goal.get().unwrap().continuations, 2);
+
+        goal.apply(crate::goal::GoalCommand::Complete {
+            summary: Some("both answered".into()),
+        })
+        .unwrap();
+        connection.start_pending().await;
+        assert!(!connection.state().turn_active);
+        assert!(matches!(
+            connection.try_next_event(),
+            Some(ClientEvent::GoalChanged(Some(goal))) if goal.status == crate::goal::GoalStatus::Complete
         ));
     }
 }

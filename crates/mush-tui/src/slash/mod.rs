@@ -38,6 +38,8 @@ pub enum SlashParseError {
     LoginCodeUsage,
     #[error("usage: /btw <question>")]
     SideUsage,
+    #[error("usage: /goal [--budget N] <objective> | /goal status|pause|resume|complete|clear")]
+    GoalUsage,
     #[error("usage: /rlm-max-depth [<non-negative integer>]")]
     RlmMaxDepthUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
@@ -102,6 +104,7 @@ pub enum SlashAction {
     Side {
         question: String,
     },
+    Goal(GoalAction),
     Endpoints {
         model_id: Option<String>,
     },
@@ -154,6 +157,50 @@ impl SlashAction {
                 | Self::Reload
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GoalAction {
+    Status,
+    Set {
+        objective: String,
+        token_budget: Option<u64>,
+    },
+    Pause,
+    Resume,
+    Clear,
+    Complete,
+}
+
+fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
+    let args = args.trim();
+    match args {
+        "" | "status" => return Ok(GoalAction::Status),
+        "pause" => return Ok(GoalAction::Pause),
+        "resume" => return Ok(GoalAction::Resume),
+        "clear" => return Ok(GoalAction::Clear),
+        "complete" | "done" => return Ok(GoalAction::Complete),
+        _ => {}
+    }
+    let mut token_budget = None;
+    let mut rest = args;
+    if let Some(after) = rest.strip_prefix("--budget") {
+        let after = after.trim_start();
+        let (number, tail) = after.split_once(char::is_whitespace).unwrap_or((after, ""));
+        let parsed: u64 = number
+            .replace(['_', ','], "")
+            .parse()
+            .map_err(|_| SlashParseError::GoalUsage)?;
+        token_budget = Some(parsed);
+        rest = tail.trim();
+    }
+    if rest.is_empty() {
+        return Err(SlashParseError::GoalUsage);
+    }
+    Ok(GoalAction::Set {
+        objective: rest.to_string(),
+        token_budget,
+    })
 }
 
 pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
@@ -221,6 +268,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
                 max_depth: Some(max_depth),
             })
             .map_err(|_| SlashParseError::RlmMaxDepthUsage),
+        "goal" => parse_goal(args).map(SlashAction::Goal),
         "btw" | "side" if args.is_empty() => Err(SlashParseError::SideUsage),
         "btw" | "side" => Ok(SlashAction::Side {
             question: args.to_string(),

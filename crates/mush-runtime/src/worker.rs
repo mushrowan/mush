@@ -28,6 +28,7 @@ pub struct WorkerConfig {
     pub system_prompt_builder: Option<crate::connection::SystemPromptBuilder>,
     pub agent_inbox: Option<crate::family::AgentInbox>,
     pub family: Option<Arc<crate::family::Family>>,
+    pub goal: Option<Arc<crate::goal::GoalStore>>,
 }
 
 impl WorkerConfig {
@@ -50,6 +51,7 @@ impl WorkerConfig {
             system_prompt_builder: None,
             agent_inbox: None,
             family: None,
+            goal: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl WorkerConfig {
             connection.attach_agent_inbox(inbox);
         }
         connection.set_family(self.family);
+        connection.set_goal_store(self.goal);
         connection
     }
 }

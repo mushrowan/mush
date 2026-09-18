@@ -2,6 +2,7 @@ pub mod commands;
 pub mod compaction;
 pub mod connection;
 pub mod family;
+pub mod goal;
 pub mod inbox;
 pub mod kernel_channels;
 pub mod session;
@@ -25,6 +26,7 @@ pub use family::{
     ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
     DeliveryMode, Family, Identity, Receipt, RlmHandler,
 };
+pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use session::{
     ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,

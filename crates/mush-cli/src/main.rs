@@ -1044,10 +1044,11 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 name: spec.name.clone(),
                 depth: spec.depth,
             };
+            let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(None));
             if let Some(host) = ipython.mush_host() {
-                host.set_extension(std::sync::Arc::new(mush_runtime::RlmHandler::new(
-                    family, identity,
-                )));
+                host.set_extension(std::sync::Arc::new(
+                    mush_runtime::RlmHandler::new(family, identity).with_goal(goal.clone()),
+                ));
             }
             let project =
                 mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
@@ -1081,6 +1082,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 control_endpoint: None,
             };
             worker.kernel_signals = Some(signals);
+            worker.goal = Some(goal);
             Ok(mush_runtime::ChildParts {
                 config: worker,
                 tools: mush_agent::tool::ToolRegistry::from_shared(vec![
@@ -1201,23 +1203,26 @@ fn worker_config(
                 .clone()
                 .unwrap_or_else(|| "parent".to_string()),
         );
-        let registry_path = (!cli.no_session)
-            .then(|| SessionStore::default_artifact_dir(&session.meta.id).join("subagents.json"));
+        let artifacts =
+            (!cli.no_session).then(|| SessionStore::default_artifact_dir(&session.meta.id));
         let family = mush_runtime::Family::new(
             root.clone(),
             session.meta.id.to_string(),
             seed.rlm_max_depth,
             Some(child_factory(seed)),
-            registry_path,
+            artifacts.as_ref().map(|dir| dir.join("subagents.json")),
         );
+        let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(
+            artifacts.as_ref().map(|dir| dir.join("goal.json")),
+        ));
         if let Some(host) = ipython.mush_host() {
-            host.set_extension(std::sync::Arc::new(mush_runtime::RlmHandler::new(
-                family.clone(),
-                root,
-            )));
+            host.set_extension(std::sync::Arc::new(
+                mush_runtime::RlmHandler::new(family.clone(), root).with_goal(goal.clone()),
+            ));
         }
         worker.agent_inbox = Some(family.root_inbox());
         worker.family = Some(family);
+        worker.goal = Some(goal);
     }
     worker
 }

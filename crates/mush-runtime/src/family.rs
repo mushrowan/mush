@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::{AgentConnection, ClientCommand, ClientEvent, InProcessConnection};
+use crate::goal::Goal;
 use crate::worker::WorkerConfig;
 
 pub const MAX_CHILDREN: usize = 32;
@@ -855,12 +856,31 @@ async fn drive_child(
 pub struct RlmHandler {
     family: Arc<Family>,
     identity: Identity,
+    goal: Option<Arc<crate::goal::GoalStore>>,
 }
 
 impl RlmHandler {
     #[must_use]
     pub fn new(family: Arc<Family>, identity: Identity) -> Self {
-        Self { family, identity }
+        Self {
+            family,
+            identity,
+            goal: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_goal(mut self, goal: Arc<crate::goal::GoalStore>) -> Self {
+        self.goal = Some(goal);
+        self
+    }
+
+    fn goal_reply(&self) -> serde_json::Value {
+        let goal = self.goal.as_ref().and_then(|goal| goal.get());
+        serde_json::json!({
+            "goal": goal,
+            "remaining_tokens": goal.as_ref().and_then(Goal::remaining_tokens),
+        })
     }
 
     #[must_use]
@@ -989,6 +1009,31 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
                         .collect::<Vec<_>>()
                 }))
+            }
+            "goal.get" => Ok(self.goal_reply()),
+            "goal.create" | "goal.complete" | "goal.pause" | "goal.resume" | "goal.clear" => {
+                let store = self
+                    .goal
+                    .as_ref()
+                    .ok_or_else(|| mush_kernel::HostError("goals are not available here".into()))?;
+                let command = match kind {
+                    "goal.create" => crate::goal::GoalCommand::Create {
+                        objective: str_field("objective").ok_or_else(|| {
+                            mush_kernel::HostError("objective is required".into())
+                        })?,
+                        token_budget: payload
+                            .get("token_budget")
+                            .and_then(serde_json::Value::as_u64),
+                    },
+                    "goal.complete" => crate::goal::GoalCommand::Complete {
+                        summary: str_field("summary"),
+                    },
+                    "goal.pause" => crate::goal::GoalCommand::Pause,
+                    "goal.resume" => crate::goal::GoalCommand::Resume,
+                    _ => crate::goal::GoalCommand::Clear,
+                };
+                store.apply(command).map_err(mush_kernel::HostError)?;
+                Ok(self.goal_reply())
             }
             other => Err(mush_kernel::HostError(format!(
                 "unknown host request {other}"

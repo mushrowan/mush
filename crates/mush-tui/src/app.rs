@@ -135,6 +135,7 @@ pub struct App {
     pub session_title: Option<String>,
     pub detail: ChatDetail,
     pub children: Vec<mush_runtime::ChildSummary>,
+    pub goal: Option<mush_runtime::Goal>,
 }
 
 mod modals;
@@ -197,7 +198,38 @@ impl App {
             session_title: None,
             detail: ChatDetail::default(),
             children: Vec::new(),
+            goal: None,
         }
+    }
+
+    pub fn note_goal(&mut self, goal: Option<mush_runtime::Goal>) {
+        let before = self
+            .goal
+            .as_ref()
+            .map(|goal| (goal.id.clone(), goal.status));
+        let after = goal.as_ref().map(|goal| (goal.id.clone(), goal.status));
+        self.goal = goal;
+        if before == after {
+            return;
+        }
+        let note = match &self.goal {
+            None => "goal cleared".to_string(),
+            Some(goal) => match goal.status {
+                mush_runtime::GoalStatus::Active if goal.continuations == 0 => {
+                    format!("goal set: {}", goal.objective)
+                }
+                mush_runtime::GoalStatus::Active => "goal resumed".to_string(),
+                mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
+                mush_runtime::GoalStatus::BudgetLimited => {
+                    "goal hit its token budget, /goal resume lifts it".to_string()
+                }
+                mush_runtime::GoalStatus::Complete => match &goal.summary {
+                    Some(summary) => format!("goal complete: {summary}"),
+                    None => "goal complete".to_string(),
+                },
+            },
+        };
+        self.status = Some(note.into());
     }
 
     pub fn note_child(&mut self, child: mush_runtime::ChildSummary) {

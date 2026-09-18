@@ -268,8 +268,35 @@ class _AgentMessage:
         return await host_request("agent_message.send", payload)
 
 
+class _Goal:
+    async def get(self) -> dict:
+        return await host_request("goal.get", {})
+
+    async def create(self, objective: str, *, token_budget: int | None = None) -> dict:
+        payload = {"objective": objective}
+        if token_budget is not None:
+            payload["token_budget"] = int(token_budget)
+        return await host_request("goal.create", payload)
+
+    async def complete(self, summary: str | None = None) -> dict:
+        payload = {}
+        if summary is not None:
+            payload["summary"] = summary
+        return await host_request("goal.complete", payload)
+
+    async def pause(self) -> dict:
+        return await host_request("goal.pause", {})
+
+    async def resume(self) -> dict:
+        return await host_request("goal.resume", {})
+
+    async def clear(self) -> dict:
+        return await host_request("goal.clear", {})
+
+
 rlm = _Rlm()
 agent_message = _AgentMessage()
+goal = _Goal()
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -343,6 +370,7 @@ def _install_preload() -> None:
             "HostError": HostError,
             "rlm": rlm,
             "agent_message": agent_message,
+            "goal": goal,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,
         }

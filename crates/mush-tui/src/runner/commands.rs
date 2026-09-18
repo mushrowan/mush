@@ -48,6 +48,23 @@ async fn run_session_command(
     changed
 }
 
+pub(crate) fn format_goal(goal: Option<&mush_runtime::Goal>) -> String {
+    let Some(goal) = goal else {
+        return "no goal set. /goal [--budget N] <objective>".into();
+    };
+    let mut text = format!(
+        "goal {} ({:?}): {}\ncontinuations: {}, tokens used: {}",
+        goal.id, goal.status, goal.objective, goal.continuations, goal.tokens_used
+    );
+    if let Some(budget) = goal.token_budget {
+        text.push_str(&format!(" of {budget}"));
+    }
+    if let Some(summary) = &goal.summary {
+        text.push_str(&format!("\nsummary: {summary}"));
+    }
+    text
+}
+
 pub(super) async fn handle_slash_action(
     session: &mut Session,
     action: SlashAction,
@@ -105,6 +122,39 @@ pub(super) async fn handle_slash_action(
                 .connection
                 .send(mush_runtime::ClientCommand::SideQuestion(question))
                 .await;
+        }
+        SlashAction::Goal(action) => {
+            let command = match action {
+                slash::GoalAction::Status => {
+                    session
+                        .app
+                        .push_system_message(format_goal(session.app.goal.as_ref()));
+                    return false;
+                }
+                slash::GoalAction::Set {
+                    objective,
+                    token_budget,
+                } => mush_runtime::GoalCommand::Create {
+                    objective,
+                    token_budget,
+                },
+                slash::GoalAction::Pause => mush_runtime::GoalCommand::Pause,
+                slash::GoalAction::Resume => mush_runtime::GoalCommand::Resume,
+                slash::GoalAction::Clear => mush_runtime::GoalCommand::Clear,
+                slash::GoalAction::Complete => {
+                    mush_runtime::GoalCommand::Complete { summary: None }
+                }
+            };
+            match session
+                .connection
+                .send(mush_runtime::ClientCommand::Goal(command))
+                .await
+            {
+                Ok(events) => {
+                    super::looping::apply_command_events(session, tui_config, events).await;
+                }
+                Err(error) => session.app.push_system_message(error.to_string()),
+            }
         }
         SlashAction::Export { path } => {
             let pane = &mut *session;

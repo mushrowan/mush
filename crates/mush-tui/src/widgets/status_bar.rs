@@ -251,6 +251,19 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         b.push_inline(Span::styled(alert.clone(), app.theme.alert));
     }
 
+    if let Some(goal) = &app.goal
+        && goal.status != mush_runtime::GoalStatus::Complete
+    {
+        b.section_break();
+        let label = match goal.status {
+            mush_runtime::GoalStatus::Active => format!("goal #{}", goal.continuations),
+            mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
+            mush_runtime::GoalStatus::BudgetLimited => "goal over budget".to_string(),
+            mush_runtime::GoalStatus::Complete => String::new(),
+        };
+        b.push_inline(Span::styled(label, app.theme.status_model));
+    }
+
     if !app.children.is_empty() {
         let running = app.running_children();
         let total = app.children.len();
