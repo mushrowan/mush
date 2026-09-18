@@ -12,6 +12,7 @@ mush-supervisor = { path = "../mush-supervisor" }
 derive_more.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 miette.workspace = true

@@ -1,6 +1,7 @@
 pub mod compact;
 pub mod conversation;
 pub mod file_ops;
+pub mod harness;
 pub mod inbox;
 pub mod session;
 pub mod store;
