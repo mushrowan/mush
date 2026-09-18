@@ -46,6 +46,11 @@ impl TurnActivity {
             .max(self.completed_output_tokens + estimate_tokens(streamed_chars))
     }
 
+    #[cfg(test)]
+    pub fn backdate(&mut self, by: Duration) {
+        self.started_at = self.started_at.map(|started| started - by);
+    }
+
     #[must_use]
     pub fn elapsed(&self) -> Option<Duration> {
         self.started_at.map(|started| started.elapsed())

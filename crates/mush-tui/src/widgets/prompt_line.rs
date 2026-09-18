@@ -23,26 +23,37 @@ pub fn question(app: &App) -> Option<String> {
 
 #[must_use]
 pub fn height(app: &App) -> u16 {
-    u16::from(question(app).is_some())
+    u16::from(question(app).is_some() || app.feature_hint().is_some())
 }
 
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) {
-    let Some(text) = question(app) else {
-        return;
-    };
     if area.height == 0 {
         return;
     }
-    Paragraph::new(Line::from(vec![
-        Span::styled(
-            " ? ",
-            app.theme
-                .confirm
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::styled(text, app.theme.confirm),
-    ]))
-    .render(area, buf);
+    if let Some(text) = question(app) {
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ? ",
+                app.theme
+                    .confirm
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled(text, app.theme.confirm),
+        ]))
+        .render(area, buf);
+        return;
+    }
+    if let Some(hint) = app.feature_hint() {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(crate::widgets::shimmer::shimmer_spans(
+            "hint:",
+            &app.theme.shimmer,
+            app.shimmer_phase(),
+            app.theme.dim,
+        ));
+        spans.push(Span::styled(format!(" {hint}"), app.theme.dim));
+        Paragraph::new(Line::from(spans)).render(area, buf);
+    }
 }
 
 #[cfg(test)]
@@ -69,6 +80,29 @@ mod tests {
                 .unwrap()
                 .starts_with("interrupted python cell")
         );
+    }
+
+    #[test]
+    fn the_hint_row_takes_the_slot_when_no_question_is_open() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.begin_turn();
+        app.start_streaming();
+        app.turn.backdate(std::time::Duration::from_secs(6));
+        app.tick_animation();
+        assert_eq!(height(&app), 1);
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+        let text = crate::test_support::buffer_to_string(&buf);
+        assert!(text.starts_with(" hint: "), "{text}");
+
+        app.interaction.mode = AppMode::ToolConfirm;
+        app.interaction.confirm_prompt = Some("read a.txt".into());
+        let mut buf = Buffer::empty(area);
+        render(&app, area, &mut buf);
+        let text = crate::test_support::buffer_to_string(&buf);
+        assert!(text.contains("run read a.txt? y/n"), "{text}");
+        assert!(!text.contains("hint:"), "{text}");
     }
 
     #[test]

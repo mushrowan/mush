@@ -1240,6 +1240,41 @@ fn activity_label_shows_the_turn_clock_while_it_runs() {
 }
 
 #[test]
+fn a_feature_hint_appears_five_seconds_into_a_busy_turn_and_leaves_with_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.begin_turn();
+    app.start_streaming();
+    app.tick_animation();
+    assert_eq!(app.feature_hint(), None);
+
+    app.turn.backdate(std::time::Duration::from_secs(6));
+    app.tick_animation();
+    let hint = app
+        .feature_hint()
+        .expect("a hint once the turn has run a while");
+    assert!(crate::feature_hints::FEATURE_HINTS.contains(&hint));
+    app.tick_animation();
+    assert_eq!(app.feature_hint(), Some(hint));
+
+    app.push_queued_message("later");
+    assert_eq!(app.feature_hint(), None);
+    app.take_queued_messages();
+    assert_eq!(app.feature_hint(), Some(hint));
+
+    app.end_turn();
+    assert_eq!(app.feature_hint(), None);
+}
+
+#[test]
+fn an_idle_app_never_shows_a_hint_even_after_the_delay() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.begin_turn();
+    app.turn.backdate(std::time::Duration::from_secs(6));
+    app.tick_animation();
+    assert_eq!(app.feature_hint(), None);
+}
+
+#[test]
 fn activity_label_uses_tool_name_when_one_running() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.active_tools

@@ -132,6 +132,8 @@ pub struct App {
     pub confirm_quit_pending: bool,
     pub compacting: bool,
     pub turn: crate::turn_activity::TurnActivity,
+    hint_deck: crate::feature_hints::FeatureHintDeck,
+    feature_hint: Option<&'static str>,
     pub compaction_model_id: Option<ModelId>,
     pub session_title: Option<String>,
     pub detail: ChatDetail,
@@ -199,6 +201,8 @@ impl App {
             confirm_quit_pending: false,
             compacting: false,
             turn: crate::turn_activity::TurnActivity::default(),
+            hint_deck: crate::feature_hints::FeatureHintDeck::default(),
+            feature_hint: None,
             compaction_model_id: None,
             session_title: None,
             detail: ChatDetail::default(),
@@ -322,6 +326,34 @@ impl App {
     pub fn tick_animation(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
         self.tick_streaming_text();
+        if self.feature_hint.is_none() && self.feature_hint_due() {
+            self.feature_hint = Some(self.hint_deck.draw());
+        }
+    }
+
+    pub fn begin_turn(&mut self) {
+        self.turn.begin();
+        self.feature_hint = None;
+    }
+
+    pub fn end_turn(&mut self) {
+        self.turn.end();
+        self.feature_hint = None;
+    }
+
+    fn feature_hint_due(&self) -> bool {
+        self.turn
+            .elapsed()
+            .is_some_and(|elapsed| elapsed >= crate::feature_hints::FEATURE_HINT_DELAY)
+            && self.is_busy()
+    }
+
+    #[must_use]
+    pub fn feature_hint(&self) -> Option<&'static str> {
+        if !self.feature_hint_due() || self.has_queued_messages() {
+            return None;
+        }
+        self.feature_hint
     }
 
     #[cfg(test)]
