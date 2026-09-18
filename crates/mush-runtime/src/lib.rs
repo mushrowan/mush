@@ -23,7 +23,7 @@ use mush_session::ConversationState;
 pub use autonomous::{Autonomous, AutonomousCommand, AutonomousStatus, Gates, Limits};
 pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
-    AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
+    AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState, HostCommands,
     InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
 };
 pub use family::{

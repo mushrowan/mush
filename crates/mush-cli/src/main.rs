@@ -1296,11 +1296,13 @@ fn worker_config(
                 .map(|dir| dir.join("scheduled-jobs.json")),
         ));
         let notes = mush_runtime::Notes::new(artifacts.as_ref().map(|dir| dir.join("notes.md")));
+        let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
         if let Some(host) = ipython.mush_host() {
             let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
                 .with_goal(goal.clone())
                 .with_scheduler(scheduler.clone())
-                .with_notes(notes.clone());
+                .with_notes(notes.clone())
+                .with_host_commands(host_commands.clone());
             if !cli.no_session {
                 handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
             }
@@ -1311,6 +1313,7 @@ fn worker_config(
         worker.goal = Some(goal);
         worker.scheduler = Some(scheduler);
         worker.notes = Some(notes);
+        worker.host_commands = Some(host_commands);
     }
     worker.autonomous = Some(std::sync::Arc::new(mush_runtime::Autonomous::new(
         setup.client.cwd.clone(),

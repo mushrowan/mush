@@ -190,7 +190,38 @@ pub struct InProcessConnection {
     notes: Option<std::sync::Arc<crate::notes::Notes>>,
     autonomous: Option<std::sync::Arc<crate::autonomous::Autonomous>>,
     gate_task: Option<tokio::task::JoinHandle<Vec<crate::autonomous::GateRun>>>,
+    host_commands: Option<std::sync::Arc<HostCommands>>,
     closed: bool,
+}
+
+#[derive(Default)]
+pub struct HostCommands {
+    queue: std::sync::Mutex<VecDeque<ClientCommand>>,
+}
+
+impl HostCommands {
+    pub fn push(&self, command: ClientCommand) {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(command);
+    }
+
+    fn drain(&self) -> Vec<ClientCommand> {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
 }
 
 pub type SystemPromptBuilder = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
@@ -239,7 +270,32 @@ impl InProcessConnection {
             notes: None,
             autonomous: None,
             gate_task: None,
+            host_commands: None,
             closed: false,
+        }
+    }
+
+    pub fn set_host_commands(&mut self, commands: Option<std::sync::Arc<HostCommands>>) {
+        self.host_commands = commands;
+    }
+
+    async fn run_host_commands(&mut self) {
+        let Some(commands) = self.host_commands.clone() else {
+            return;
+        };
+        if self.runtime.turn_active() || self.compaction.is_some() {
+            return;
+        }
+        for command in commands.drain() {
+            match self.send(command).await {
+                Ok(events) => self.queued.extend(events),
+                Err(error) => {
+                    self.queued
+                        .push_back(ClientEvent::Session(SessionEvent::Status(
+                            error.to_string(),
+                        )));
+                }
+            }
         }
     }
 
@@ -641,6 +697,7 @@ impl InProcessConnection {
         self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
         self.poll_schedule().await;
+        self.run_host_commands().await;
         self.continue_goal().await;
         self.continue_autonomous().await;
         if std::mem::take(&mut self.fork_compaction_due) {
@@ -2193,5 +2250,36 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(!connection.state().turn_active);
+    }
+
+    #[tokio::test]
+    async fn a_host_command_runs_once_the_turn_is_over() {
+        let (mut connection, _requests) = connection();
+        let commands = Arc::new(HostCommands::default());
+        connection.set_host_commands(Some(Arc::clone(&commands)));
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        commands.push(ClientCommand::Compact {
+            focus: CompactionFocus::default(),
+            auto: false,
+        });
+        connection.start_pending().await;
+        assert_eq!(commands.pending(), 1, "held while the turn runs");
+
+        drain_turn(&mut connection).await;
+        connection.start_pending().await;
+
+        assert_eq!(commands.pending(), 0);
+        let status =
+            std::iter::from_fn(|| connection.try_next_event()).find_map(|event| match event {
+                ClientEvent::Session(SessionEvent::Status(text)) => Some(text),
+                _ => None,
+            });
+        assert_eq!(status.as_deref(), Some("conversation too short to compact"));
     }
 }

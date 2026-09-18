@@ -33,6 +33,7 @@ pub struct WorkerConfig {
     pub notes: Option<Arc<crate::notes::Notes>>,
     pub parent: Option<SessionId>,
     pub autonomous: Option<Arc<crate::autonomous::Autonomous>>,
+    pub host_commands: Option<Arc<crate::connection::HostCommands>>,
 }
 
 impl WorkerConfig {
@@ -60,6 +61,7 @@ impl WorkerConfig {
             notes: None,
             parent: None,
             autonomous: None,
+            host_commands: None,
         }
     }
 
@@ -93,6 +95,7 @@ impl WorkerConfig {
         connection.set_scheduler(self.scheduler);
         connection.set_notes(self.notes);
         connection.set_autonomous(self.autonomous);
+        connection.set_host_commands(self.host_commands);
         connection
     }
 }

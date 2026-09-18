@@ -311,6 +311,14 @@ class _Goal:
         return await host_request("goal.clear", {})
 
 
+class _Compact:
+    async def run(self, hint: str | None = None) -> dict:
+        payload = {}
+        if hint is not None:
+            payload["hint"] = hint
+        return await host_request("compact.run", payload)
+
+
 class _RlmHeartbeat:
     async def create(self, prompt: str, *, interval: str = "5m", label: str | None = None) -> dict:
         payload = {"prompt": prompt, "interval": interval}
@@ -329,6 +337,7 @@ rlm = _Rlm()
 agent_message = _AgentMessage()
 goal = _Goal()
 rlm_heartbeat = _RlmHeartbeat()
+compact = _Compact()
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -404,6 +413,7 @@ def _install_preload() -> None:
             "agent_message": agent_message,
             "goal": goal,
             "rlm_heartbeat": rlm_heartbeat,
+            "compact": compact,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,
         }

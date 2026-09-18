@@ -918,6 +918,7 @@ pub struct RlmHandler {
     scheduler: Option<Arc<crate::schedule::Scheduler>>,
     notes: Option<Arc<crate::notes::Notes>>,
     sessions: Option<SessionSpawner>,
+    host_commands: Option<Arc<crate::connection::HostCommands>>,
 }
 
 impl RlmHandler {
@@ -930,7 +931,14 @@ impl RlmHandler {
             scheduler: None,
             notes: None,
             sessions: None,
+            host_commands: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_host_commands(mut self, commands: Arc<crate::connection::HostCommands>) -> Self {
+        self.host_commands = Some(commands);
+        self
     }
 
     #[must_use]
@@ -1107,6 +1115,19 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
                         .collect::<Vec<_>>()
                 }))
+            }
+            "compact.run" => {
+                let commands = self.host_commands.as_ref().ok_or_else(|| {
+                    mush_kernel::HostError("compaction is not available here".into())
+                })?;
+                let focus = mush_session::compact::CompactionFocus {
+                    context_budget: None,
+                    instructions: str_field("hint").filter(|hint| !hint.trim().is_empty()),
+                };
+                commands.push(ClientCommand::Compact { focus, auto: false });
+                Ok(
+                    serde_json::json!({ "scheduled": true, "note": "compaction runs after this turn ends" }),
+                )
             }
             "rlm.create_session" => {
                 if self.identity.depth > 0 {

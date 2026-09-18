@@ -668,6 +668,9 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          - `attach_image(path, ...)` puts a png, jpeg, gif or webp in front of you as pixels. \
          Use it to look at a screenshot, chart or diagram; use a library when you need to \
          compute over the image.\n\
+         - `await compact.run(hint=None)` schedules a context compaction for after this turn, \
+         with an optional hint on what the summary must keep. Use it when the conversation has \
+         grown past what the task needs.\n\
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \
          during long work so they can see where you are.\n\
          - `await rlm.note(text)` keeps a short note that survives compaction and kernel \
