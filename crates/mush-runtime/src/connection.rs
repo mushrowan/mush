@@ -772,15 +772,19 @@ impl InProcessConnection {
             control.finish(mush_agent::ipc::control::Outcome::Cancelled);
             self.runtime.pending_prompt = None;
         }
+        let was_active = self.turn_active();
         let cancelled = self.runtime.record_cancelled_tools();
         self.runtime.turns.abort(PRIMARY_PANE);
         self.runtime.steering_queue.lock().await.clear();
         self.runtime.save_debounced();
-        if cancelled.is_empty() {
-            Vec::new()
-        } else {
-            vec![ClientEvent::ToolsCancelled(cancelled)]
+        let mut events = Vec::new();
+        if !cancelled.is_empty() {
+            events.push(ClientEvent::ToolsCancelled(cancelled));
         }
+        if was_active {
+            events.push(ClientEvent::TurnEnded { cancelled: true });
+        }
+        events
     }
 
     fn try_poll_confirm(&mut self) -> Option<ClientEvent> {
@@ -1793,5 +1797,143 @@ mod tests {
             "the new session starts without a goal"
         );
         assert!(dir.path().join("a/goal.json").exists());
+    }
+
+    struct ToolCaller;
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for ToolCaller {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &mush_ai::types::Model,
+            context: &mush_ai::registry::LlmContext,
+            _options: &mush_ai::types::StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            let already_called = context
+                .messages
+                .iter()
+                .any(|message| matches!(message, Message::ToolResult(_)));
+            let content = if already_called {
+                vec![mush_ai::types::AssistantContentPart::Text(
+                    mush_ai::types::TextContent {
+                        text: "done".into(),
+                    },
+                )]
+            } else {
+                vec![mush_ai::types::AssistantContentPart::ToolCall(
+                    mush_ai::types::ToolCall {
+                        id: mush_ai::types::ToolCallId::from("call_block"),
+                        name: mush_ai::types::ToolName::from("block"),
+                        arguments: serde_json::json!({}),
+                    },
+                )]
+            };
+            let message = AssistantMessage::builder()
+                .content(content)
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .stop_reason(if already_called {
+                    StopReason::Stop
+                } else {
+                    StopReason::ToolUse
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build();
+            Ok(Box::pin(futures::stream::iter([
+                mush_ai::stream::StreamEvent::Done {
+                    reason: message.stop_reason,
+                    message,
+                },
+            ])))
+        }
+    }
+
+    struct Blocker;
+
+    #[async_trait::async_trait]
+    impl mush_agent::tool::AgentTool for Blocker {
+        fn name(&self) -> &str {
+            "block"
+        }
+        fn label(&self) -> &str {
+            "block"
+        }
+        fn description(&self) -> &str {
+            "never returns"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(&self, _args: serde_json::Value) -> mush_agent::tool::ToolResult {
+            std::future::pending().await
+        }
+        fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+            mush_agent::tool::OutputLimit::Head
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_returns_while_a_tool_is_still_running() {
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ToolCaller));
+        let model = crate::testing::echo_model();
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.model_id = model.id.to_string();
+        let mut connection = InProcessConnection::new(
+            runtime,
+            ToolRegistry::from_shared(vec![Arc::new(Blocker) as mush_agent::tool::SharedTool]),
+            registry,
+            crate::testing::echo_config(model),
+            mush_agent::AgentInjections::default(),
+        );
+        connection
+            .send(ClientCommand::Prompt {
+                text: "block".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match connection.next_event().await {
+                    Some(ClientEvent::Agent {
+                        event: AgentEvent::ToolExecStart { .. },
+                        ..
+                    }) => break,
+                    Some(_) => {}
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .expect("the tool starts");
+
+        let aborted = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connection.send(ClientCommand::Abort),
+        )
+        .await
+        .expect("abort returns while the tool blocks")
+        .unwrap();
+        assert!(matches!(
+            &aborted[..],
+            [ClientEvent::ToolsCancelled(ids), ClientEvent::TurnEnded { cancelled: true }] if ids.len() == 1
+        ));
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while connection.state().turn_active {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    connection.next_event(),
+                )
+                .await;
+            }
+        })
+        .await;
+        assert!(settled.is_ok(), "the aborted turn winds down");
     }
 }
