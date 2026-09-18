@@ -1045,9 +1045,12 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 depth: spec.depth,
             };
             let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(None));
+            let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(None));
             if let Some(host) = ipython.mush_host() {
                 host.set_extension(std::sync::Arc::new(
-                    mush_runtime::RlmHandler::new(family, identity).with_goal(goal.clone()),
+                    mush_runtime::RlmHandler::new(family, identity)
+                        .with_goal(goal.clone())
+                        .with_scheduler(scheduler.clone()),
                 ));
             }
             let project =
@@ -1083,6 +1086,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             };
             worker.kernel_signals = Some(signals);
             worker.goal = Some(goal);
+            worker.scheduler = Some(scheduler);
             Ok(mush_runtime::ChildParts {
                 config: worker,
                 tools: mush_agent::tool::ToolRegistry::from_shared(vec![
@@ -1215,14 +1219,22 @@ fn worker_config(
         let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(
             artifacts.as_ref().map(|dir| dir.join("goal.json")),
         ));
+        let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(
+            artifacts
+                .as_ref()
+                .map(|dir| dir.join("scheduled-jobs.json")),
+        ));
         if let Some(host) = ipython.mush_host() {
             host.set_extension(std::sync::Arc::new(
-                mush_runtime::RlmHandler::new(family.clone(), root).with_goal(goal.clone()),
+                mush_runtime::RlmHandler::new(family.clone(), root)
+                    .with_goal(goal.clone())
+                    .with_scheduler(scheduler.clone()),
             ));
         }
         worker.agent_inbox = Some(family.root_inbox());
         worker.family = Some(family);
         worker.goal = Some(goal);
+        worker.scheduler = Some(scheduler);
     }
     worker
 }

@@ -313,7 +313,7 @@ impl Family {
             .factory
             .clone()
             .ok_or_else(|| "subagents are not available in this session".to_string())?;
-        let id = format!("sub-{}", &mush_ai::types::SessionId::new().to_string()[..8]);
+        let id = format!("sub-{}", crate::schedule::short_id());
         {
             let inner = self.lock();
             let live = inner
@@ -857,6 +857,7 @@ pub struct RlmHandler {
     family: Arc<Family>,
     identity: Identity,
     goal: Option<Arc<crate::goal::GoalStore>>,
+    scheduler: Option<Arc<crate::schedule::Scheduler>>,
 }
 
 impl RlmHandler {
@@ -866,6 +867,7 @@ impl RlmHandler {
             family,
             identity,
             goal: None,
+            scheduler: None,
         }
     }
 
@@ -873,6 +875,28 @@ impl RlmHandler {
     pub fn with_goal(mut self, goal: Arc<crate::goal::GoalStore>) -> Self {
         self.goal = Some(goal);
         self
+    }
+
+    #[must_use]
+    pub fn with_scheduler(mut self, scheduler: Arc<crate::schedule::Scheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    fn rlm_heartbeats(
+        &self,
+    ) -> Result<(&Arc<crate::schedule::Scheduler>, Vec<crate::schedule::Job>), mush_kernel::HostError>
+    {
+        let scheduler = self
+            .scheduler
+            .as_ref()
+            .ok_or_else(|| mush_kernel::HostError("heartbeats are not available here".into()))?;
+        let jobs = scheduler
+            .jobs()
+            .into_iter()
+            .filter(|job| job.source == crate::schedule::JobSource::RlmHeartbeat)
+            .collect();
+        Ok((scheduler, jobs))
     }
 
     fn goal_reply(&self) -> serde_json::Value {
@@ -1009,6 +1033,62 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
                         .collect::<Vec<_>>()
                 }))
+            }
+            "rlm_heartbeat.list" => {
+                let (_, jobs) = self.rlm_heartbeats()?;
+                Ok(serde_json::to_value(jobs).unwrap_or(serde_json::Value::Null))
+            }
+            "rlm_heartbeat.create" => {
+                let (scheduler, _) = self.rlm_heartbeats()?;
+                let prompt = str_field("prompt")
+                    .ok_or_else(|| mush_kernel::HostError("prompt is required".into()))?;
+                let expression = str_field("interval").unwrap_or_else(|| "every 5m".into());
+                let expression = if expression.trim_start().starts_with("every ") {
+                    expression
+                } else {
+                    format!("every {expression}")
+                };
+                let jobs = scheduler
+                    .apply(crate::schedule::ScheduleCommand::Add {
+                        expression,
+                        prompt,
+                        label: str_field("label"),
+                        source: crate::schedule::JobSource::RlmHeartbeat,
+                    })
+                    .map_err(mush_kernel::HostError)?;
+                let created = jobs
+                    .iter()
+                    .rev()
+                    .find(|job| job.source == crate::schedule::JobSource::RlmHeartbeat)
+                    .cloned();
+                Ok(serde_json::to_value(created).unwrap_or(serde_json::Value::Null))
+            }
+            "rlm_heartbeat.update" => {
+                let (scheduler, jobs) = self.rlm_heartbeats()?;
+                let id = str_field("id")
+                    .ok_or_else(|| mush_kernel::HostError("id is required".into()))?;
+                if !jobs.iter().any(|job| job.id == id) {
+                    return Err(mush_kernel::HostError(format!("no rlm heartbeat {id}")));
+                }
+                let command = match str_field("status").as_deref() {
+                    Some("pause") | Some("paused") => {
+                        crate::schedule::ScheduleCommand::Pause(id.clone())
+                    }
+                    Some("resume") | Some("active") => {
+                        crate::schedule::ScheduleCommand::Resume(id.clone())
+                    }
+                    Some("cancel") | Some("cancelled") | Some("clear") => {
+                        crate::schedule::ScheduleCommand::Cancel(id.clone())
+                    }
+                    other => {
+                        return Err(mush_kernel::HostError(format!(
+                            "status must be pause, resume or cancel, not {other:?}"
+                        )));
+                    }
+                };
+                let jobs = scheduler.apply(command).map_err(mush_kernel::HostError)?;
+                let updated = jobs.into_iter().find(|job| job.id == id);
+                Ok(serde_json::to_value(updated).unwrap_or(serde_json::Value::Null))
             }
             "goal.get" => Ok(self.goal_reply()),
             "goal.create" | "goal.complete" | "goal.pause" | "goal.resume" | "goal.clear" => {

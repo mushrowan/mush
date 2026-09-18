@@ -40,6 +40,14 @@ pub enum SlashParseError {
     SideUsage,
     #[error("usage: /goal [--budget N] <objective> | /goal status|pause|resume|complete|clear")]
     GoalUsage,
+    #[error(
+        "usage: /heartbeat [every 10m] [--follow-up] <instruction> | /heartbeat status|pause|resume|clear"
+    )]
+    HeartbeatUsage,
+    #[error(
+        "usage: /schedule add \"in 30m\"|\"every 10m\" [--label name] <prompt> | /schedule list|pause|resume|cancel <id>"
+    )]
+    ScheduleUsage,
     #[error("usage: /rlm-max-depth [<non-negative integer>]")]
     RlmMaxDepthUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
@@ -105,6 +113,8 @@ pub enum SlashAction {
         question: String,
     },
     Goal(GoalAction),
+    Heartbeat(HeartbeatAction),
+    Schedule(ScheduleAction),
     Endpoints {
         model_id: Option<String>,
     },
@@ -170,6 +180,127 @@ pub enum GoalAction {
     Resume,
     Clear,
     Complete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatAction {
+    Status,
+    Set {
+        expression: String,
+        prompt: String,
+        follow_up: bool,
+    },
+    Pause,
+    Resume,
+    Clear,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleAction {
+    List,
+    Add {
+        expression: String,
+        prompt: String,
+        label: Option<String>,
+    },
+    Pause(String),
+    Resume(String),
+    Cancel(String),
+}
+
+fn parse_heartbeat(args: &str) -> Result<HeartbeatAction, SlashParseError> {
+    let mut rest = args.trim();
+    match rest {
+        "" | "status" => return Ok(HeartbeatAction::Status),
+        "pause" => return Ok(HeartbeatAction::Pause),
+        "resume" => return Ok(HeartbeatAction::Resume),
+        "clear" | "stop" => return Ok(HeartbeatAction::Clear),
+        _ => {}
+    }
+    let mut expression = "every 5m".to_string();
+    let mut follow_up = false;
+    loop {
+        if let Some(after) = rest.strip_prefix("--every") {
+            let after = after.trim_start();
+            let (amount, tail) = after
+                .split_once(char::is_whitespace)
+                .ok_or(SlashParseError::HeartbeatUsage)?;
+            expression = format!("every {amount}");
+            rest = tail.trim();
+        } else if let Some(after) = rest.strip_prefix("every ") {
+            let after = after.trim_start();
+            let (amount, tail) = after
+                .split_once(char::is_whitespace)
+                .ok_or(SlashParseError::HeartbeatUsage)?;
+            expression = format!("every {amount}");
+            rest = tail.trim();
+        } else if let Some(after) = rest.strip_prefix("--follow-up") {
+            follow_up = true;
+            rest = after.trim();
+        } else if let Some(after) = rest.strip_prefix("--steer") {
+            follow_up = false;
+            rest = after.trim();
+        } else {
+            break;
+        }
+    }
+    if rest.is_empty() {
+        return Err(SlashParseError::HeartbeatUsage);
+    }
+    Ok(HeartbeatAction::Set {
+        expression,
+        prompt: rest.to_string(),
+        follow_up,
+    })
+}
+
+fn parse_schedule(args: &str) -> Result<ScheduleAction, SlashParseError> {
+    let args = args.trim();
+    let (verb, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let rest = rest.trim();
+    match verb {
+        "" | "list" | "ls" => Ok(ScheduleAction::List),
+        "pause" if !rest.is_empty() => Ok(ScheduleAction::Pause(rest.to_string())),
+        "resume" if !rest.is_empty() => Ok(ScheduleAction::Resume(rest.to_string())),
+        "cancel" | "rm" if !rest.is_empty() => Ok(ScheduleAction::Cancel(rest.to_string())),
+        "add" => {
+            let quoted = rest
+                .strip_prefix('"')
+                .and_then(|after| after.split_once('"'))
+                .map(|(expression, tail)| (expression.to_string(), tail.trim()));
+            let (expression, prompt) = match quoted {
+                Some(parts) => parts,
+                None => {
+                    let mut words = rest.splitn(3, char::is_whitespace);
+                    let first = words.next().ok_or(SlashParseError::ScheduleUsage)?;
+                    let second = words.next().ok_or(SlashParseError::ScheduleUsage)?;
+                    (
+                        format!("{first} {second}"),
+                        words.next().unwrap_or("").trim(),
+                    )
+                }
+            };
+            let (label, prompt) = match prompt.strip_prefix("--label") {
+                Some(after) => {
+                    let after = after.trim_start();
+                    let (label, tail) = after
+                        .split_once(char::is_whitespace)
+                        .ok_or(SlashParseError::ScheduleUsage)?;
+                    (Some(label.to_string()), tail.trim())
+                }
+                None => (None, prompt),
+            };
+            if prompt.is_empty() {
+                return Err(SlashParseError::ScheduleUsage);
+            }
+            Ok(ScheduleAction::Add {
+                expression,
+                prompt: prompt.to_string(),
+                label,
+            })
+        }
+        _ => Err(SlashParseError::ScheduleUsage),
+    }
 }
 
 fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
@@ -269,6 +400,8 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             })
             .map_err(|_| SlashParseError::RlmMaxDepthUsage),
         "goal" => parse_goal(args).map(SlashAction::Goal),
+        "heartbeat" => parse_heartbeat(args).map(SlashAction::Heartbeat),
+        "schedule" => parse_schedule(args).map(SlashAction::Schedule),
         "btw" | "side" if args.is_empty() => Err(SlashParseError::SideUsage),
         "btw" | "side" => Ok(SlashAction::Side {
             question: args.to_string(),
@@ -608,6 +741,66 @@ mod tests {
             SlashAction::Resume {
                 session_id: SessionId::from("abc123"),
             }
+        );
+    }
+
+    #[test]
+    fn heartbeat_and_schedule_commands_parse() {
+        assert_eq!(
+            parse("/heartbeat every 10m check the build").unwrap(),
+            SlashAction::Heartbeat(HeartbeatAction::Set {
+                expression: "every 10m".into(),
+                prompt: "check the build".into(),
+                follow_up: false,
+            })
+        );
+        assert_eq!(
+            parse("/heartbeat --follow-up look around").unwrap(),
+            SlashAction::Heartbeat(HeartbeatAction::Set {
+                expression: "every 5m".into(),
+                prompt: "look around".into(),
+                follow_up: true,
+            })
+        );
+        assert_eq!(
+            parse("/heartbeat pause").unwrap(),
+            SlashAction::Heartbeat(HeartbeatAction::Pause)
+        );
+        assert!(parse("/heartbeat every 10m").is_err());
+        assert_eq!(
+            parse("/schedule add \"in 30m\" --label tests run the tests").unwrap(),
+            SlashAction::Schedule(ScheduleAction::Add {
+                expression: "in 30m".into(),
+                prompt: "run the tests".into(),
+                label: Some("tests".into()),
+            })
+        );
+        assert_eq!(
+            parse("/schedule add every 10m poke the log").unwrap(),
+            SlashAction::Schedule(ScheduleAction::Add {
+                expression: "every 10m".into(),
+                prompt: "poke the log".into(),
+                label: None,
+            })
+        );
+        assert_eq!(
+            parse("/schedule cancel ab12").unwrap(),
+            SlashAction::Schedule(ScheduleAction::Cancel("ab12".into()))
+        );
+        assert_eq!(
+            parse("/schedule").unwrap(),
+            SlashAction::Schedule(ScheduleAction::List)
+        );
+        assert_eq!(
+            parse("/goal --budget 50_000 finish the daemon").unwrap(),
+            SlashAction::Goal(GoalAction::Set {
+                objective: "finish the daemon".into(),
+                token_budget: Some(50_000),
+            })
+        );
+        assert_eq!(
+            parse("/goal").unwrap(),
+            SlashAction::Goal(GoalAction::Status)
         );
     }
 

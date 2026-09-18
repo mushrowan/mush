@@ -15,6 +15,8 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("subagents", "show or register session supervisors"),
     ("agents", "list the child agents of this session"),
     ("goal", "set a goal the harness keeps working toward"),
+    ("heartbeat", "prompt this session every so often"),
+    ("schedule", "run a prompt later or on an interval"),
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),

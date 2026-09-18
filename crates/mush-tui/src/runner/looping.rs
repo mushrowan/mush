@@ -338,6 +338,7 @@ pub(super) async fn apply_command_events(
             }
             ClientEvent::ChildUpdated(child) => session.app.note_child(*child),
             ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
+            ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {

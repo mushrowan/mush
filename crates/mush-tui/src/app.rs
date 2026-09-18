@@ -136,6 +136,7 @@ pub struct App {
     pub detail: ChatDetail,
     pub children: Vec<mush_runtime::ChildSummary>,
     pub goal: Option<mush_runtime::Goal>,
+    pub jobs: Vec<mush_runtime::Job>,
 }
 
 mod modals;
@@ -199,7 +200,27 @@ impl App {
             detail: ChatDetail::default(),
             children: Vec::new(),
             goal: None,
+            jobs: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn heartbeat(&self) -> Option<&mush_runtime::Job> {
+        self.jobs.iter().find(|job| {
+            job.source == mush_runtime::JobSource::Heartbeat
+                && matches!(
+                    job.status,
+                    mush_runtime::JobStatus::Active | mush_runtime::JobStatus::Paused
+                )
+        })
+    }
+
+    #[must_use]
+    pub fn active_jobs(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| job.status == mush_runtime::JobStatus::Active)
+            .count()
     }
 
     pub fn note_goal(&mut self, goal: Option<mush_runtime::Goal>) {

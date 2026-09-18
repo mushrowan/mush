@@ -127,7 +127,7 @@ impl GoalStore {
                     return Err("a goal needs an objective".into());
                 }
                 inner.goal = Some(Goal {
-                    id: mush_ai::types::SessionId::new().to_string()[..8].to_string(),
+                    id: crate::schedule::short_id(),
                     objective,
                     status: GoalStatus::Active,
                     token_budget,

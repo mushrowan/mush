@@ -294,9 +294,24 @@ class _Goal:
         return await host_request("goal.clear", {})
 
 
+class _RlmHeartbeat:
+    async def create(self, prompt: str, *, interval: str = "5m", label: str | None = None) -> dict:
+        payload = {"prompt": prompt, "interval": interval}
+        if label is not None:
+            payload["label"] = label
+        return await host_request("rlm_heartbeat.create", payload)
+
+    async def list(self) -> list:
+        return await host_request("rlm_heartbeat.list", {})
+
+    async def update(self, id: str, *, status: str) -> dict:
+        return await host_request("rlm_heartbeat.update", {"id": id, "status": status})
+
+
 rlm = _Rlm()
 agent_message = _AgentMessage()
 goal = _Goal()
+rlm_heartbeat = _RlmHeartbeat()
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -371,6 +386,7 @@ def _install_preload() -> None:
             "rlm": rlm,
             "agent_message": agent_message,
             "goal": goal,
+            "rlm_heartbeat": rlm_heartbeat,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,
         }

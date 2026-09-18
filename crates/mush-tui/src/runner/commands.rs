@@ -48,6 +48,80 @@ async fn run_session_command(
     changed
 }
 
+async fn send_schedule(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    command: mush_runtime::ScheduleCommand,
+) -> bool {
+    match session
+        .connection
+        .send(mush_runtime::ClientCommand::Schedule(command))
+        .await
+    {
+        Ok(events) => {
+            super::looping::apply_command_events(session, tui_config, events).await;
+            true
+        }
+        Err(error) => {
+            session.app.push_system_message(error.to_string());
+            false
+        }
+    }
+}
+
+pub(crate) fn format_heartbeat(heartbeat: Option<&mush_runtime::Job>) -> String {
+    match heartbeat {
+        None => "no heartbeat. /heartbeat [every 10m] <instruction>".into(),
+        Some(job) => format!(
+            "heartbeat {} ({:?}, {:?}): {}\nruns: {}{}",
+            job.expression,
+            job.status,
+            job.delivery,
+            job.prompt,
+            job.runs,
+            job.next_at()
+                .map(|at| {
+                    let now = mush_ai::types::Timestamp::now().as_ms();
+                    format!(", next in {}s", at.saturating_sub(now) / 1000)
+                })
+                .unwrap_or_default()
+        ),
+    }
+}
+
+pub(crate) fn format_jobs(jobs: &[mush_runtime::Job]) -> String {
+    let live: Vec<&mush_runtime::Job> = jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.status,
+                mush_runtime::JobStatus::Active | mush_runtime::JobStatus::Paused
+            )
+        })
+        .collect();
+    if live.is_empty() {
+        return "nothing scheduled. /schedule add \"in 30m\" <prompt>".into();
+    }
+    let now = mush_ai::types::Timestamp::now().as_ms();
+    live.iter()
+        .map(|job| {
+            let next = job
+                .next_at()
+                .map(|at| format!("next in {}s", at.saturating_sub(now) / 1000))
+                .unwrap_or_else(|| format!("{:?}", job.status));
+            format!(
+                "{} {} · {} · {} · {}",
+                job.id,
+                job.label.as_deref().unwrap_or("-"),
+                job.expression,
+                next,
+                job.prompt.lines().next().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub(crate) fn format_goal(goal: Option<&mush_runtime::Goal>) -> String {
     let Some(goal) = goal else {
         return "no goal set. /goal [--budget N] <objective>".into();
@@ -122,6 +196,64 @@ pub(super) async fn handle_slash_action(
                 .connection
                 .send(mush_runtime::ClientCommand::SideQuestion(question))
                 .await;
+        }
+        SlashAction::Heartbeat(action) => {
+            let command = match action {
+                slash::HeartbeatAction::Status => {
+                    session
+                        .app
+                        .push_system_message(format_heartbeat(session.app.heartbeat()));
+                    return false;
+                }
+                slash::HeartbeatAction::Set {
+                    expression,
+                    prompt,
+                    follow_up,
+                } => mush_runtime::ScheduleCommand::Heartbeat {
+                    expression,
+                    prompt,
+                    delivery: if follow_up {
+                        mush_runtime::Delivery::FollowUp
+                    } else {
+                        mush_runtime::Delivery::Steer
+                    },
+                },
+                slash::HeartbeatAction::Pause => mush_runtime::ScheduleCommand::HeartbeatPause,
+                slash::HeartbeatAction::Resume => mush_runtime::ScheduleCommand::HeartbeatResume,
+                slash::HeartbeatAction::Clear => mush_runtime::ScheduleCommand::HeartbeatClear,
+            };
+            send_schedule(session, tui_config, command).await;
+            session
+                .app
+                .push_system_message(format_heartbeat(session.app.heartbeat()));
+        }
+        SlashAction::Schedule(action) => {
+            let command = match action {
+                slash::ScheduleAction::List => {
+                    session
+                        .app
+                        .push_system_message(format_jobs(&session.app.jobs));
+                    return false;
+                }
+                slash::ScheduleAction::Add {
+                    expression,
+                    prompt,
+                    label,
+                } => mush_runtime::ScheduleCommand::Add {
+                    expression,
+                    prompt,
+                    label,
+                    source: mush_runtime::JobSource::Schedule,
+                },
+                slash::ScheduleAction::Pause(id) => mush_runtime::ScheduleCommand::Pause(id),
+                slash::ScheduleAction::Resume(id) => mush_runtime::ScheduleCommand::Resume(id),
+                slash::ScheduleAction::Cancel(id) => mush_runtime::ScheduleCommand::Cancel(id),
+            };
+            if send_schedule(session, tui_config, command).await {
+                session
+                    .app
+                    .push_system_message(format_jobs(&session.app.jobs));
+            }
         }
         SlashAction::Goal(action) => {
             let command = match action {

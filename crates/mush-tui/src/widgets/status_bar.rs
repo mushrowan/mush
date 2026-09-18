@@ -264,6 +264,27 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         b.push_inline(Span::styled(label, app.theme.status_model));
     }
 
+    if let Some(heartbeat) = app.heartbeat() {
+        b.section_break();
+        let label = match heartbeat.status {
+            mush_runtime::JobStatus::Paused => "heartbeat paused".to_string(),
+            _ => format!("heartbeat {}", heartbeat.expression),
+        };
+        b.push_inline(Span::styled(label, dim));
+    }
+    let scheduled = app
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.status == mush_runtime::JobStatus::Active
+                && job.source != mush_runtime::JobSource::Heartbeat
+        })
+        .count();
+    if scheduled > 0 {
+        b.section_break();
+        b.push_inline(Span::styled(format!("{scheduled} scheduled"), dim));
+    }
+
     if !app.children.is_empty() {
         let running = app.running_children();
         let total = app.children.len();

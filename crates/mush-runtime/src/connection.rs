@@ -61,6 +61,7 @@ pub enum ClientCommand {
     AnswerKernelBusy(mush_tools::ipython::BusyKernelChoice),
     SideQuestion(String),
     Goal(crate::goal::GoalCommand),
+    Schedule(crate::schedule::ScheduleCommand),
     Shutdown,
 }
 
@@ -103,6 +104,7 @@ pub enum ClientEvent {
     },
     ChildUpdated(Box<crate::family::ChildSummary>),
     GoalChanged(Option<Box<crate::goal::Goal>>),
+    ScheduleChanged(Vec<crate::schedule::Job>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -178,6 +180,9 @@ pub struct InProcessConnection {
     known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
     goal: Option<std::sync::Arc<crate::goal::GoalStore>>,
     known_goal: Option<crate::goal::Goal>,
+    scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>,
+    known_jobs: Vec<crate::schedule::Job>,
+    deferred_jobs: VecDeque<String>,
     closed: bool,
 }
 
@@ -221,7 +226,51 @@ impl InProcessConnection {
             known_children: std::collections::HashMap::new(),
             goal: None,
             known_goal: None,
+            scheduler: None,
+            known_jobs: Vec::new(),
+            deferred_jobs: VecDeque::new(),
             closed: false,
+        }
+    }
+
+    pub fn set_scheduler(&mut self, scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>) {
+        self.known_jobs = scheduler
+            .as_ref()
+            .map(|scheduler| scheduler.jobs())
+            .unwrap_or_default();
+        self.scheduler = scheduler;
+    }
+
+    fn try_poll_schedule(&mut self) -> Option<ClientEvent> {
+        let jobs = self.scheduler.as_ref()?.jobs();
+        if jobs == self.known_jobs {
+            return None;
+        }
+        self.known_jobs = jobs.clone();
+        Some(ClientEvent::ScheduleChanged(jobs))
+    }
+
+    async fn poll_schedule(&mut self) {
+        let Some(scheduler) = self.scheduler.clone() else {
+            return;
+        };
+        let now = mush_ai::types::Timestamp::now().as_ms();
+        for job in scheduler.take_due(now) {
+            let text = job.prompt_text();
+            if self.turn_active() {
+                match job.delivery {
+                    crate::schedule::Delivery::Steer => self.steer(text, Vec::new()).await,
+                    crate::schedule::Delivery::FollowUp => self.deferred_jobs.push_back(text),
+                }
+            } else {
+                self.deferred_jobs.push_back(text);
+            }
+        }
+        if self.turn_active() || self.compaction.is_some() {
+            return;
+        }
+        while let Some(text) = self.deferred_jobs.pop_front() {
+            self.queue_prompt(&text, Vec::new());
         }
     }
 
@@ -462,6 +511,7 @@ impl InProcessConnection {
         self.poll_control().await;
         self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
+        self.poll_schedule().await;
         self.continue_goal().await;
         if std::mem::take(&mut self.fork_compaction_due) {
             let _ = self
@@ -556,6 +606,9 @@ impl InProcessConnection {
             return Some(event);
         }
         if let Some(event) = self.try_poll_goal() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_schedule() {
             return Some(event);
         }
         self.try_poll_compaction()
@@ -1026,6 +1079,14 @@ impl AgentConnection for InProcessConnection {
                 }
             }
             ClientCommand::SideQuestion(question) => self.ask_side_question(question),
+            ClientCommand::Schedule(command) => {
+                let scheduler = self.scheduler.clone().ok_or_else(|| {
+                    ConnectionError::Refused("schedules are not available".into())
+                })?;
+                let jobs = scheduler.apply(command).map_err(ConnectionError::Refused)?;
+                self.known_jobs = jobs.clone();
+                self.queued.push_back(ClientEvent::ScheduleChanged(jobs));
+            }
             ClientCommand::Goal(command) => {
                 let goal = self
                     .goal
@@ -1614,6 +1675,55 @@ mod tests {
         assert!(matches!(
             connection.try_next_event(),
             Some(ClientEvent::GoalChanged(Some(goal))) if goal.status == crate::goal::GoalStatus::Complete
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_due_heartbeat_becomes_a_prompt_when_idle_and_a_steer_when_busy() {
+        let (mut connection, requests) = connection();
+        let scheduler = Arc::new(crate::schedule::Scheduler::new(None));
+        connection.set_scheduler(Some(Arc::clone(&scheduler)));
+        let events = connection
+            .send(ClientCommand::Schedule(
+                crate::schedule::ScheduleCommand::Heartbeat {
+                    expression: "every 10s".into(),
+                    prompt: "check the build".into(),
+                    delivery: crate::schedule::Delivery::Steer,
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(&events[..], [ClientEvent::ScheduleChanged(jobs)] if jobs.len() == 1));
+
+        connection.start_pending().await;
+        assert!(!connection.state().turn_active, "nothing is due yet");
+
+        let far = mush_ai::types::Timestamp::now().as_ms() + 11_000;
+        let due = scheduler.take_due(far);
+        assert_eq!(due.len(), 1);
+        connection.queue_prompt(&due[0].prompt_text(), Vec::new());
+        connection.start_pending().await;
+        assert!(connection.state().turn_active);
+        drain_turn(&mut connection).await;
+        assert!(matches!(
+            &requests.lock().unwrap()[0][0],
+            Message::User(user) if user.text() == "[heartbeat: heartbeat]\n\ncheck the build"
+        ));
+
+        connection
+            .send(ClientCommand::Schedule(
+                crate::schedule::ScheduleCommand::HeartbeatClear,
+            ))
+            .await
+            .unwrap();
+        assert!(scheduler.heartbeat().is_none());
+        assert!(matches!(
+            connection
+                .send(ClientCommand::Schedule(
+                    crate::schedule::ScheduleCommand::HeartbeatPause
+                ))
+                .await,
+            Err(ConnectionError::Refused(_))
         ));
     }
 }

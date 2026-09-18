@@ -200,7 +200,10 @@ pub async fn handle(
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
             None
         }
-        SlashAction::Side { .. } | SlashAction::Goal(_) => None,
+        SlashAction::Side { .. }
+        | SlashAction::Goal(_)
+        | SlashAction::Heartbeat(_)
+        | SlashAction::Schedule(_) => None,
         SlashAction::SessionInfo => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
             let path = store.session_path(&tui_config.session_id);

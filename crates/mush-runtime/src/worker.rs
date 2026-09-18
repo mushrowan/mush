@@ -29,6 +29,7 @@ pub struct WorkerConfig {
     pub agent_inbox: Option<crate::family::AgentInbox>,
     pub family: Option<Arc<crate::family::Family>>,
     pub goal: Option<Arc<crate::goal::GoalStore>>,
+    pub scheduler: Option<Arc<crate::schedule::Scheduler>>,
 }
 
 impl WorkerConfig {
@@ -52,6 +53,7 @@ impl WorkerConfig {
             agent_inbox: None,
             family: None,
             goal: None,
+            scheduler: None,
         }
     }
 
@@ -81,6 +83,7 @@ impl WorkerConfig {
         }
         connection.set_family(self.family);
         connection.set_goal_store(self.goal);
+        connection.set_scheduler(self.scheduler);
         connection
     }
 }
