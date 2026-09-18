@@ -96,6 +96,7 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
     .any(|pat| lower.contains(pat))
 }
 
+#[derive(Debug, Clone)]
 pub struct LlmContext {
     pub system_prompt: Option<String>,
     pub messages: Vec<crate::types::Message>,

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
-    Api, AssistantContentPart, AssistantMessage, Message, Model, StopReason, StreamOptions,
-    TextContent, Timestamp,
+    Api, AssistantContentPart, AssistantMessage, Model, StopReason, StreamOptions, TextContent,
+    Timestamp,
 };
 use mush_session::ConversationState;
 
@@ -13,7 +13,7 @@ use crate::connection::InProcessConnection;
 use crate::session::SessionRuntime;
 use crate::turn::TurnConfig;
 
-pub type Requests = Arc<Mutex<Vec<Vec<Message>>>>;
+pub type Requests = Arc<Mutex<Vec<mush_ai::registry::LlmContext>>>;
 
 pub struct Echo {
     pub requests: Requests,
@@ -33,7 +33,7 @@ impl mush_ai::registry::ApiProvider for Echo {
         _options: &StreamOptions,
     ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
         if let Ok(mut requests) = self.requests.lock() {
-            requests.push(context.messages.clone());
+            requests.push(context.clone());
         }
         let message = AssistantMessage::builder()
             .content(vec![AssistantContentPart::Text(TextContent {

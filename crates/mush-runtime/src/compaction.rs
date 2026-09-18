@@ -64,6 +64,7 @@ pub fn start_compaction(
     lifecycle_hooks: Option<mush_agent::LifecycleHooks>,
     cwd: Option<PathBuf>,
     focus: CompactionFocus,
+    live: Option<mush_session::compact::LiveContext>,
 ) -> tokio::task::JoinHandle<CompactionTaskResult> {
     let before_count = messages.len();
     let model_id = model.id.to_string();
@@ -76,6 +77,7 @@ pub fn start_compaction(
             lifecycle_hooks.as_ref(),
             cwd.as_deref(),
             focus,
+            live.as_ref(),
         )
         .await;
         match run {
@@ -135,13 +137,16 @@ pub async fn run_compaction(
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&Path>,
     focus: CompactionFocus,
+    live: Option<&mush_session::compact::LiveContext>,
 ) -> RunCompactionResult {
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
     let instructions = focus.instructions.clone();
     let result =
-        match compact::try_llm_compact(messages, registry, model, options, Some(10), focus).await {
+        match compact::try_llm_compact(messages, registry, model, options, Some(10), focus, live)
+            .await
+        {
             Ok(result) => result,
             Err(failure) => {
                 return RunCompactionResult::Failed {

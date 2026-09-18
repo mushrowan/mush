@@ -89,6 +89,18 @@ pub trait AgentTool: Send + Sync {
 
 pub type SharedTool = Arc<dyn AgentTool>;
 
+#[must_use]
+pub fn tool_definitions(tools: &ToolRegistry, api: Api) -> Vec<mush_ai::registry::ToolDefinition> {
+    tools
+        .iter()
+        .map(|tool| mush_ai::registry::ToolDefinition {
+            name: tool.name().to_string(),
+            description: tool.description_for(api).to_string(),
+            parameters: tool.parameters_schema_for(api),
+        })
+        .collect()
+}
+
 const PREVIEW_VALUE_CHARS: usize = 40;
 
 pub(crate) fn preview_args(args: &serde_json::Value) -> String {

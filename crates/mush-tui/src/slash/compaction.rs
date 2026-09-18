@@ -98,6 +98,7 @@ pub async fn handle_compact(
         lifecycle_hooks.cloned(),
         cwd.map(std::path::Path::to_path_buf),
         focus,
+        None,
     );
     let Ok(result) = task.await else {
         app.push_system_message("compaction task failed");
@@ -311,6 +312,7 @@ mod tests {
             None,
             None,
             mush_session::compact::CompactionFocus::default(),
+            None,
         );
         let result = task.await.expect("compaction task panicked");
 

@@ -1026,6 +1026,7 @@ pub async fn auto_compact(
     options: &StreamOptions,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    live: Option<&compact::LiveContext>,
 ) -> compact::AutoCompactResult {
     let result = compact::auto_compact(
         messages,
@@ -1034,6 +1035,7 @@ pub async fn auto_compact(
         registry,
         model,
         options,
+        live,
     )
     .await;
 

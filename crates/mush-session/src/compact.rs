@@ -42,6 +42,12 @@ pub struct CompactionFocus {
     pub instructions: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LiveContext {
+    pub system_prompt: Option<String>,
+    pub tools: Vec<mush_ai::registry::ToolDefinition>,
+}
+
 impl CompactionFocus {
     #[must_use]
     pub fn budget(context_budget: Option<TokenCount>) -> Self {
@@ -572,6 +578,7 @@ pub async fn auto_compact(
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
+    live: Option<&LiveContext>,
 ) -> AutoCompactResult {
     if !needs_compaction_for_messages(context_tokens, context_window, &messages) {
         return AutoCompactResult {
@@ -606,6 +613,7 @@ pub async fn auto_compact(
         options,
         Some(DEFAULT_KEEP_RECENT),
         CompactionFocus::default(),
+        live,
     )
     .await;
 
@@ -625,8 +633,9 @@ pub async fn llm_compact(
     options: &StreamOptions,
     keep_recent: Option<usize>,
     focus: CompactionFocus,
+    live: Option<&LiveContext>,
 ) -> CompactionResult {
-    match try_llm_compact(messages, registry, model, options, keep_recent, focus).await {
+    match try_llm_compact(messages, registry, model, options, keep_recent, focus, live).await {
         Ok(result) => result,
         Err(failure) => failure.into_fallback_result(),
     }
@@ -640,6 +649,7 @@ pub async fn try_llm_compact(
     options: &StreamOptions,
     keep_recent: Option<usize>,
     focus: CompactionFocus,
+    live: Option<&LiveContext>,
 ) -> Result<CompactionResult, CompactionFailureReport> {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
@@ -657,7 +667,7 @@ pub async fn try_llm_compact(
 
     let split_at = messages.len() - keep;
 
-    let compact_options = compaction_stream_options(model, options);
+    let compact_options = compaction_stream_options(model, options, live.is_some());
     let mut old_start = 0;
     let mut diagnostics = CompactionDiagnostics {
         model_id: model.id.to_string(),
@@ -665,7 +675,7 @@ pub async fn try_llm_compact(
     };
     let summary = loop {
         let old_slice = &messages[..split_at][old_start..];
-        let context = compaction_context(old_slice, &messages[split_at..], &focus);
+        let context = compaction_context(old_slice, &messages[split_at..], &focus, live);
 
         match call_for_text(registry, model, &context, &compact_options).await {
             Ok(outcome) => {
@@ -706,6 +716,12 @@ pub async fn try_llm_compact(
 
 pub fn compaction_system_prompt(focus: &CompactionFocus) -> String {
     let mut prompt = COMPACTION_PROMPT.to_string();
+    prompt.push_str(&focus_tail(focus));
+    prompt
+}
+
+fn focus_tail(focus: &CompactionFocus) -> String {
+    let mut prompt = String::new();
     if let Some(budget) = focus.context_budget {
         let _ = write!(
             prompt,
@@ -731,11 +747,55 @@ pub fn compaction_system_prompt(focus: &CompactionFocus) -> String {
     prompt
 }
 
+pub fn checkpoint_instruction(keep_recent: usize, focus: &CompactionFocus) -> String {
+    let kept = match keep_recent {
+        0 => "Everything in this conversation is about to be replaced by your summary.".to_string(),
+        1 => "Everything before the most recent message is about to be replaced by your summary; \
+              that message stays in the conversation verbatim, so use it for the current state \
+              but do not restate it."
+            .to_string(),
+        n => format!(
+            "Everything before the most recent {n} messages is about to be replaced by your \
+             summary; those {n} messages stay in the conversation verbatim, so use them for the \
+             current state but do not restate them."
+        ),
+    };
+    format!(
+        "[context checkpoint]\n\nStop working on the task for this one reply. Write a handoff \
+         summary of this conversation for another model that will continue it with the same \
+         tools and the same kernel state. {kept} Do not call any tool. Reply with the summary \
+         only.\n\n{SUMMARISATION_INSTRUCTIONS}{}",
+        focus_tail(focus)
+    )
+}
+
 fn compaction_context(
     old_messages: &[Message],
     recent_messages: &[Message],
     focus: &CompactionFocus,
+    live: Option<&LiveContext>,
 ) -> LlmContext {
+    if let Some(live) = live {
+        let mut messages: Vec<Message> = old_messages
+            .iter()
+            .chain(recent_messages)
+            .cloned()
+            .collect();
+        messages.push(Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(checkpoint_instruction(
+                    recent_messages.len(),
+                    focus,
+                )))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        ));
+        return LlmContext {
+            system_prompt: live.system_prompt.clone(),
+            messages,
+            tools: live.tools.clone(),
+        };
+    }
     let request_body = build_compaction_request(old_messages, recent_messages);
     let system_prompt = compaction_system_prompt(focus);
 
@@ -962,10 +1022,12 @@ fn tool_result_text(result: &ToolResultMessage) -> String {
         .join(" ")
 }
 
-fn compaction_stream_options(model: &Model, options: &StreamOptions) -> StreamOptions {
+fn compaction_stream_options(model: &Model, options: &StreamOptions, live: bool) -> StreamOptions {
     let mut compact_options = options.clone();
     compact_options.max_tokens = Some(TokenCount::new(COMPACTION_MAX_OUTPUT_TOKENS));
-    compact_options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    if !live {
+        compact_options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    }
     compact_options
 }
 
@@ -1109,7 +1171,7 @@ mod tests {
             "prompt_id":"orchestrator-event-run.worker.1"
         }))
         .unwrap();
-        let context = compaction_context(&[human, event], &[], &CompactionFocus::default());
+        let context = compaction_context(&[human, event], &[], &CompactionFocus::default(), None);
         assert_eq!(context.messages.len(), 1);
         let Message::Event(input) = &context.messages[0] else {
             panic!()
@@ -1130,7 +1192,7 @@ mod tests {
             "prompt_id":"orchestrator-event-run.worker.1"
         }))
         .unwrap();
-        let context = compaction_context(&[legacy], &[], &CompactionFocus::default());
+        let context = compaction_context(&[legacy], &[], &CompactionFocus::default(), None);
         let Message::Event(event) = &context.messages[0] else {
             panic!()
         };
@@ -1529,6 +1591,7 @@ mod tests {
             &options,
             Some(5),
             CompactionFocus::default(),
+            None,
         )
         .await;
         assert_eq!(result.summarised_count, 15);
@@ -1558,6 +1621,7 @@ mod tests {
             &options,
             Some(5),
             CompactionFocus::default(),
+            None,
         )
         .await;
         let Err(failure) = outcome else {
@@ -1592,6 +1656,7 @@ mod tests {
             &options,
             Some(5),
             CompactionFocus::default(),
+            None,
         )
         .await;
 
@@ -1631,6 +1696,7 @@ mod tests {
             &options,
             Some(2),
             CompactionFocus::default(),
+            None,
         )
         .await;
 
@@ -1727,6 +1793,7 @@ mod tests {
             &options,
             Some(5),
             CompactionFocus::default(),
+            None,
         )
         .await;
 
@@ -1801,6 +1868,7 @@ mod tests {
             &options,
             Some(5),
             CompactionFocus::default(),
+            None,
         )
         .await;
 
@@ -1825,7 +1893,7 @@ mod tests {
             ..StreamOptions::default()
         };
 
-        let compact_options = compaction_stream_options(&model, &options);
+        let compact_options = compaction_stream_options(&model, &options, false);
 
         assert_eq!(compact_options.max_tokens, Some(TokenCount::new(8192)));
         assert_eq!(compact_options.thinking, Some(ThinkingLevel::Low));

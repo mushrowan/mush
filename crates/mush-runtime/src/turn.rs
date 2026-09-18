@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mush_agent::tool::ToolRegistry;
@@ -9,6 +10,7 @@ use mush_ai::types::{
     ImageContent, Message, Model, PaneId, StreamOptions, TextContent, Timestamp, TokenCount,
     ToolCallId, UserContent, UserContentPart, UserMessage,
 };
+use mush_session::compact::LiveContext;
 use tokio::sync::Mutex;
 
 use crate::session::{ConfirmRequest, PendingImage, PendingPrompt, SessionRuntime, StreamMeta};
@@ -189,6 +191,14 @@ impl SessionRuntime {
         let context_tokens_shared =
             Arc::new(std::sync::atomic::AtomicU64::new(context_tokens.get()));
         let cwd = injections.cwd.clone().unwrap_or_default();
+        let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
+        let live = (target.model.id == model.id).then(|| LiveContext {
+            system_prompt: mush_agent::effective_system_prompt(
+                self.system_prompt.as_deref(),
+                injections.dynamic_system_context.as_ref(),
+            ),
+            tools: mush_agent::tool_definitions(&tool_registry, model.api),
+        });
         let transform = build_context_transform(
             target.model,
             target.options,
@@ -199,6 +209,7 @@ impl SessionRuntime {
             initial_estimated_tokens,
             injections.lifecycle_hooks.clone(),
             cwd.clone(),
+            live,
         );
 
         let steering = build_steering_callback(steering_queue.clone());
@@ -210,17 +221,6 @@ impl SessionRuntime {
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.thinking = Some(thinking_level);
-
-        let mut tool_registry = tools.clone();
-        mush_tools::align_for_model(
-            &mut tool_registry,
-            &model,
-            Arc::from(cwd),
-            config.forbidden_chars.clone(),
-        );
-        if let Some(allowed) = &config.tool_allowlist {
-            tool_registry.retain_named(allowed);
-        }
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let generation = self.turns.register_active(
@@ -274,6 +274,7 @@ pub fn build_context_transform(
     initial_estimated_tokens: u64,
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
+    live: Option<mush_session::compact::LiveContext>,
 ) -> Option<mush_agent::TransformFn> {
     if !do_auto_compact {
         return None;
@@ -283,6 +284,7 @@ pub fn build_context_transform(
     let hooks = Arc::new(lifecycle_hooks);
     let cwd = Arc::new(cwd);
     let registry = Arc::new(registry);
+    let live = Arc::new(live);
 
     Some(Box::new(move |messages| {
         let owned_messages = messages.to_vec();
@@ -293,6 +295,7 @@ pub fn build_context_transform(
         let hooks = hooks.clone();
         let cwd = cwd.clone();
         let registry = registry.clone();
+        let live = live.clone();
         Box::pin(async move {
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
@@ -326,6 +329,7 @@ pub fn build_context_transform(
                 &options,
                 Some(&hooks),
                 Some(cwd.as_path()),
+                live.as_ref().as_ref(),
             )
             .await;
             let tokens_after = estimated_tokens_u64(&result.messages);
@@ -404,6 +408,26 @@ fn build_confirm_callback(
     (confirm_req_rx, Some(confirm))
 }
 
+#[must_use]
+pub fn aligned_tools(
+    tools: &ToolRegistry,
+    model: &Model,
+    config: &TurnConfig,
+    cwd: PathBuf,
+) -> ToolRegistry {
+    let mut tool_registry = tools.clone();
+    mush_tools::align_for_model(
+        &mut tool_registry,
+        model,
+        Arc::from(cwd),
+        config.forbidden_chars.clone(),
+    );
+    if let Some(allowed) = &config.tool_allowlist {
+        tool_registry.retain_named(allowed);
+    }
+    tool_registry
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
@@ -414,6 +438,7 @@ pub async fn auto_compact(
     options: &StreamOptions,
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
+    live: Option<&mush_session::compact::LiveContext>,
 ) -> mush_session::compact::AutoCompactResult {
     let result = mush_session::compact::auto_compact(
         messages,
@@ -422,6 +447,7 @@ pub async fn auto_compact(
         registry,
         model,
         options,
+        live,
     )
     .await;
 
@@ -577,6 +603,7 @@ mod tests {
             0,
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
+            None,
         )
         .expect("auto-compaction enabled should build a transform");
 
@@ -620,6 +647,7 @@ mod tests {
             estimated_tokens_u64(&messages),
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
+            None,
         )
         .expect("auto-compaction enabled should build a transform");
 

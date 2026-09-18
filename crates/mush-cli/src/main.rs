@@ -521,6 +521,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let ctx_tokens_for_transform = context_tokens_shared.clone();
     let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
     let cwd = std::sync::Arc::new(setup.client.cwd.clone());
+    let live = std::sync::Arc::new((compact_model.id == setup.client.model.id).then(|| {
+        mush_session::compact::LiveContext {
+            system_prompt: Some(setup.system_prompt.clone()),
+            tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
+        }
+    }));
     let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.auto_compact {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
@@ -530,6 +536,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             let hooks = lifecycle_hooks.clone();
             let cwd = cwd.clone();
             let reg = reg_ref.clone();
+            let live = live.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
                 let result = auto_compact(
@@ -541,6 +548,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     &o,
                     Some(&hooks),
                     Some(cwd.as_path()),
+                    live.as_ref().as_ref(),
                 )
                 .await;
                 if result.summarised_count > 0 {

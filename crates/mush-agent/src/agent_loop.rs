@@ -186,6 +186,18 @@ pub type FileRuleCallback =
 pub type DiagnosticCallback =
     std::sync::Arc<dyn Fn(&std::path::Path) -> BoxFuture<'_, Option<String>> + Send + Sync>;
 
+#[must_use]
+pub fn effective_system_prompt(
+    base: Option<&str>,
+    dynamic: Option<&DynamicContext>,
+) -> Option<String> {
+    let base = base?;
+    match dynamic.and_then(|suffix| suffix()) {
+        Some(suffix) => Some(format!("{base}\n\n{suffix}")),
+        None => Some(base.to_string()),
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct AgentInjections {
     pub lifecycle_hooks: crate::hooks::LifecycleHooks,
@@ -278,23 +290,13 @@ pub fn agent_loop(
                     }
                 };
 
-                let tool_defs: Vec<ToolDefinition> = config.tools.iter()
-                    .map(|t| ToolDefinition {
-                        name: t.name().to_string(),
-                        description: t.description_for(config.model.api).to_string(),
-                        parameters: t.parameters_schema_for(config.model.api),
-                    }).collect();
+                let tool_defs: Vec<ToolDefinition> =
+                    crate::tool::tool_definitions(&config.tools, config.model.api);
 
-                let system_prompt = match (&config.system_prompt, &config.injections.dynamic_system_context) {
-                    (Some(base), Some(suffix_fn)) => {
-                        if let Some(suffix) = suffix_fn() {
-                            Some(format!("{base}\n\n{suffix}"))
-                        } else {
-                            Some(base.clone())
-                        }
-                    }
-                    (base, _) => base.clone(),
-                };
+                let system_prompt = effective_system_prompt(
+                    config.system_prompt.as_deref(),
+                    config.injections.dynamic_system_context.as_ref(),
+                );
 
                 let context = LlmContext {
                     system_prompt,

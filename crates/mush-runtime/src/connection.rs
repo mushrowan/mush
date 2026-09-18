@@ -1163,6 +1163,22 @@ impl InProcessConnection {
         }
         self.compaction_auto = false;
         let target = self.runtime.compaction_target(&self.config).await;
+        let pane_model = self.runtime.model(&self.config.default_model);
+        let live = (target.model.id == pane_model.id).then(|| {
+            let tools = crate::turn::aligned_tools(
+                &self.tools,
+                &pane_model,
+                &self.config,
+                self.injections.cwd.clone().unwrap_or_default(),
+            );
+            mush_session::compact::LiveContext {
+                system_prompt: mush_agent::effective_system_prompt(
+                    self.runtime.system_prompt.as_deref(),
+                    self.injections.dynamic_system_context.as_ref(),
+                ),
+                tools: mush_agent::tool_definitions(&tools, pane_model.api),
+            }
+        });
         let task = crate::compaction::start_compaction(
             messages,
             target.model,
@@ -1171,6 +1187,7 @@ impl InProcessConnection {
             Some(self.injections.lifecycle_hooks.clone()),
             self.injections.cwd.clone(),
             focus,
+            live,
         );
         self.compaction = Some(task);
         self.queued.push_back(ClientEvent::Compacting);
@@ -1460,7 +1477,7 @@ mod tests {
     use mush_session::ConversationState;
     use std::sync::{Arc, Mutex};
 
-    fn connection() -> (InProcessConnection, Arc<Mutex<Vec<Vec<Message>>>>) {
+    fn connection() -> (InProcessConnection, crate::testing::Requests) {
         crate::testing::echo_connection()
     }
 
@@ -1586,6 +1603,87 @@ mod tests {
         assert!(!connection.state().compacting);
         assert!(connection.transcript().await.len() < 30);
         assert_eq!(*saved.lock().unwrap(), 1);
+    }
+
+    struct NoteTool;
+
+    #[async_trait::async_trait]
+    impl mush_agent::AgentTool for NoteTool {
+        fn name(&self) -> &str {
+            "note"
+        }
+        fn label(&self) -> &str {
+            "Note"
+        }
+        fn description(&self) -> &str {
+            "keeps a note"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(&self, _args: serde_json::Value) -> mush_agent::ToolResult {
+            mush_agent::ToolResult::text("noted")
+        }
+        fn output_limit(&self) -> mush_agent::OutputLimit {
+            mush_agent::OutputLimit::Head
+        }
+    }
+
+    #[tokio::test]
+    async fn a_compaction_request_shares_the_prefix_of_the_live_turn() {
+        let (mut connection, requests) = connection();
+        connection.runtime.system_prompt = Some("you are terse".into());
+        let mut tools = ToolRegistry::new();
+        tools.register_shared(Arc::new(NoteTool));
+        let registry = std::mem::replace(&mut connection.registry, ApiRegistry::new());
+        connection.set_deps(tools, registry);
+        connection.runtime.conversation =
+            ConversationState::from_messages((0..30).map(|i| user(&format!("turn {i}"))).collect());
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        connection
+            .send(ClientCommand::Compact {
+                focus: CompactionFocus::default(),
+                auto: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(ClientEvent::Compacted(_)) = connection.next_event().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let asked = requests.lock().unwrap();
+        let [turn, compaction] = &asked[..] else {
+            panic!("{}", asked.len());
+        };
+        assert_eq!(compaction.system_prompt, turn.system_prompt);
+        assert_eq!(
+            compaction.tools.iter().map(|t| &t.name).collect::<Vec<_>>(),
+            turn.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        assert_eq!(compaction.tools[0].name, "note");
+        assert_eq!(compaction.messages.len(), turn.messages.len() + 2);
+        assert_eq!(
+            &compaction.messages[..turn.messages.len()],
+            &turn.messages[..]
+        );
+        assert!(matches!(
+            compaction.messages.last(),
+            Some(Message::User(user)) if user.text().starts_with("[context checkpoint]")
+        ));
     }
 
     #[tokio::test]
@@ -1833,7 +1931,7 @@ mod tests {
         assert_eq!(answer.1, Ok("hi back".into()));
         assert_eq!(connection.state().context_len, before);
         let asked = requests.lock().unwrap();
-        let last = asked.last().unwrap();
+        let last = &asked.last().unwrap().messages;
         assert!(matches!(last.last(), Some(Message::User(user)) if user.text() == "why slow?"));
         assert_eq!(last.len(), before + 1);
     }
@@ -1888,7 +1986,7 @@ mod tests {
         assert!(connection.state().turn_active);
         drain_turn(&mut connection).await;
         assert!(matches!(
-            &requests.lock().unwrap()[0][0],
+            &requests.lock().unwrap()[0].messages[0],
             Message::User(user) if user.text().starts_with("[goal: continuation 1]")
         ));
 
@@ -1940,7 +2038,7 @@ mod tests {
         assert!(connection.state().turn_active);
         drain_turn(&mut connection).await;
         assert!(matches!(
-            &requests.lock().unwrap()[0][0],
+            &requests.lock().unwrap()[0].messages[0],
             Message::User(user) if user.text() == "[heartbeat: heartbeat]\n\ncheck the build"
         ));
 
@@ -2175,7 +2273,7 @@ mod tests {
         );
         drain_turn(&mut connection).await;
         assert!(matches!(
-            &requests.lock().unwrap()[1].last(),
+            &requests.lock().unwrap()[1].messages.last(),
             Some(Message::User(user)) if user.text().starts_with("[autonomous-continuation 1]")
         ));
 
@@ -2233,7 +2331,7 @@ mod tests {
         }
         drain_turn(&mut connection).await;
         assert!(matches!(
-            &requests.lock().unwrap()[1].last(),
+            &requests.lock().unwrap()[1].messages.last(),
             Some(Message::User(user)) if user.text().starts_with("[autonomous-continuation: gate failed]")
                 && user.text().contains("`test -f done` exited with 1")
         ));

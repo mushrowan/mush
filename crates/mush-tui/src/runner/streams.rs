@@ -505,6 +505,7 @@ mod tests {
                 estimated_tokens_u64(&messages),
                 mush_agent::LifecycleHooks::default(),
                 std::path::PathBuf::from("/tmp"),
+                None,
             );
             let config = AgentConfig {
                 model: model.clone(),

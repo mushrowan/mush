@@ -1338,7 +1338,7 @@ mod tests {
         assert_eq!(child.depth, 1);
         let asked = requests.lock().unwrap();
         assert!(matches!(
-            &asked[0][0],
+            &asked[0].messages[0],
             Message::User(user) if user.text().starts_with("[task from parent]\n\nreview the auth flow")
         ));
     }
