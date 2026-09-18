@@ -414,6 +414,9 @@ fn push_thinking_lines(
     }
 }
 
+const QUEUED_LABEL: &str = "steering \u{b7} ";
+const QUEUED_HINT: &str = "\u{2570}\u{2500} up or alt+k to edit the queued message";
+
 fn push_queued_lines(
     msg: &DisplayMessage,
     theme: &Theme,
@@ -421,10 +424,18 @@ fn push_queued_lines(
     lines: &mut Vec<Line<'static>>,
 ) {
     let cw = message_content_width(width as usize);
-    for text_line in msg.content.lines() {
+    let mut text_lines = msg.content.lines();
+    let first = text_lines.next().unwrap_or_default();
+    let head = Line::from(vec![
+        Span::styled(QUEUED_LABEL, theme.user_label),
+        Span::styled(first.to_string(), theme.dim),
+    ]);
+    lines.extend(indent_line(head, cw));
+    for text_line in text_lines {
         let styled = Line::styled(text_line.to_string(), theme.dim);
         lines.extend(indent_line(styled, cw));
     }
+    lines.extend(indent_line(Line::styled(QUEUED_HINT, theme.dim), cw));
 }
 
 fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut Vec<Line<'static>>) {

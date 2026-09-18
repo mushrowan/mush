@@ -1299,10 +1299,15 @@ fn a_queued_message_renders_dim() {
     let mut msg = DisplayMessage::new(MessageRole::User, "steer me");
     msg.queued = true;
     let lines = message_lines(&msg, &plain_style(&theme), 60);
-    assert!(rendered_text(&lines).contains("steer me"));
+    let text = rendered_text(&lines);
+    assert!(text.contains("steering \u{b7} steer me"), "{text}");
+    assert!(text.contains("to edit the queued message"), "{text}");
     assert!(
-        lines.iter().any(|l| l.style == theme.dim),
-        "a queued bubble is dimmed, not boxed"
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .any(|span| span.content == "steer me" && span.style == theme.dim),
+        "the queued text is dim, the label is not"
     );
 }
 

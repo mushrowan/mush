@@ -268,3 +268,42 @@ async fn a_malformed_request_is_answered_with_an_error() {
         "{reply}"
     );
 }
+
+#[tokio::test]
+async fn a_steer_over_the_socket_during_a_tool_call_is_injected_and_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let (connection, requests, gate) = mush_runtime::testing::tool_then_text_connection();
+    let _task = tokio::spawn(serve(connection, listener, None, Default::default()));
+    let mut client = DaemonConnection::connect(&socket).await.unwrap();
+
+    client.send(prompt("start")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(client.state().turn_active);
+    client
+        .send(ClientCommand::Steer {
+            text: "actually, stop and do y".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    gate.notify_one();
+
+    let events = drain_turn(&mut client).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Agent {
+                event: mush_agent::AgentEvent::SteeringInjected { .. },
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    let asked = requests.lock().unwrap();
+    assert_eq!(asked.len(), 2);
+    assert!(
+        matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "actually, stop and do y")
+    );
+}

@@ -107,6 +107,111 @@ pub fn echo_connection() -> (InProcessConnection, Requests) {
     (connection, requests)
 }
 
+pub struct ToolThenText {
+    pub requests: Requests,
+    pub gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for ToolThenText {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &mush_ai::registry::LlmContext,
+        _options: &StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        let first = {
+            let mut requests = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+            requests.push(context.clone());
+            requests.len() == 1
+        };
+        let content = if first {
+            vec![AssistantContentPart::ToolCall(mush_ai::types::ToolCall {
+                id: mush_ai::types::ToolCallId::from("call_1"),
+                name: mush_ai::types::ToolName::from("note"),
+                arguments: serde_json::json!({}),
+            })]
+        } else {
+            vec![AssistantContentPart::Text(TextContent {
+                text: "done".into(),
+            })]
+        };
+        let message = AssistantMessage::builder()
+            .content(content)
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(if first {
+                StopReason::ToolUse
+            } else {
+                StopReason::Stop
+            })
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        if first {
+            self.gate.notified().await;
+        }
+        Ok(Box::pin(futures::stream::iter([
+            mush_ai::stream::StreamEvent::Done {
+                reason: message.stop_reason,
+                message,
+            },
+        ])))
+    }
+}
+
+pub struct NoteTool;
+
+#[async_trait::async_trait]
+impl mush_agent::AgentTool for NoteTool {
+    fn name(&self) -> &str {
+        "note"
+    }
+    fn label(&self) -> &str {
+        "Note"
+    }
+    fn description(&self) -> &str {
+        "keeps a note"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    async fn execute(&self, _args: serde_json::Value) -> mush_agent::ToolResult {
+        mush_agent::ToolResult::text("noted")
+    }
+    fn output_limit(&self) -> mush_agent::OutputLimit {
+        mush_agent::OutputLimit::Head
+    }
+}
+
+#[must_use]
+pub fn tool_then_text_connection() -> (InProcessConnection, Requests, Arc<tokio::sync::Notify>) {
+    let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(ToolThenText {
+        requests: requests.clone(),
+        gate: gate.clone(),
+    }));
+    let model = echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register_shared(Arc::new(NoteTool));
+    let connection = InProcessConnection::new(
+        runtime,
+        tools,
+        registry,
+        echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    (connection, requests, gate)
+}
+
 pub struct Stall {
     pub release: Arc<tokio::sync::Notify>,
 }

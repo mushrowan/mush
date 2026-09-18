@@ -1348,7 +1348,11 @@ impl InProcessConnection {
 
     async fn steer(&mut self, text: String, images: Vec<PendingImage>) {
         let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) else {
-            self.runtime.pending_prompt = Some(PendingPrompt::with_images(text, images));
+            tracing::info!(
+                turn_active = self.runtime.turn_active(),
+                "steer arrived with no active turn, queued as the next prompt"
+            );
+            self.queue_prompt(&text, images);
             return;
         };
         meta.steering_queue.lock().await.push(Message::User(
@@ -2249,6 +2253,80 @@ mod tests {
         fn output_limit(&self) -> mush_agent::OutputLimit {
             mush_agent::OutputLimit::Head
         }
+    }
+
+    #[tokio::test]
+    async fn a_steer_with_no_turn_joins_the_pending_prompt() {
+        let (mut connection, _) = connection();
+        connection.runtime.pending_prompt = Some(PendingPrompt::text("first"));
+        connection.compaction_auto = false;
+
+        connection.steer("second".into(), Vec::new()).await;
+
+        let pending = connection.runtime.pending_prompt.as_ref().unwrap();
+        assert!(pending.text.contains("first"), "{}", pending.text);
+        assert!(pending.text.contains("second"), "{}", pending.text);
+    }
+
+    #[tokio::test]
+    async fn a_steer_sent_during_a_tool_call_reaches_the_next_request() {
+        let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(crate::testing::ToolThenText {
+            requests: requests.clone(),
+            gate: gate.clone(),
+        }));
+        let model = crate::testing::echo_model();
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.model_id = model.id.to_string();
+        let mut tools = ToolRegistry::new();
+        tools.register_shared(Arc::new(NoteTool));
+        let mut connection = InProcessConnection::new(
+            runtime,
+            tools,
+            registry,
+            crate::testing::echo_config(model),
+            mush_agent::AgentInjections::default(),
+        );
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(connection.state().turn_active);
+        connection
+            .send(ClientCommand::Steer {
+                text: "actually, stop and do y".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        gate.notify_one();
+
+        let events = drain_turn(&mut connection).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ClientEvent::Agent {
+                    event: AgentEvent::SteeringInjected { .. },
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        let asked = requests.lock().unwrap();
+        assert_eq!(asked.len(), 2);
+        let second = &asked[1].messages;
+        assert!(
+            matches!(second.last(), Some(Message::User(u)) if u.text() == "actually, stop and do y"),
+            "{second:?}"
+        );
+        assert!(matches!(&second[second.len() - 2], Message::ToolResult(_)));
     }
 
     #[tokio::test]
