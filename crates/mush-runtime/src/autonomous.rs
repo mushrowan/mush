@@ -12,6 +12,7 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 pub const DEFAULT_GATE_RETRIES: u32 = 3;
 pub const DEFAULT_GATE_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 pub const GATE_OUTPUT_CHARS: usize = 4_000;
+pub const DEFAULT_SUBAGENT_KEEP_ALIVE_MS: u64 = 25 * 60 * 1000;
 
 pub const CONTINUATION_PROMPT: &str = "No human is available in autonomous mode. Keep working until \
 the configured gates pass or a limit stops the run. If you were going to ask the user something, make \
@@ -81,8 +82,17 @@ pub struct GateFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum AutonomousCommand {
-    On { limits: Limits, gates: Gates },
+    On {
+        limits: Limits,
+        gates: Gates,
+        #[serde(default = "default_keep_alive")]
+        subagent_keep_alive_ms: u64,
+    },
     Off,
+}
+
+fn default_keep_alive() -> u64 {
+    DEFAULT_SUBAGENT_KEEP_ALIVE_MS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +128,8 @@ struct Inner {
     last_failure: Option<GateFailure>,
     gate_attempts: HashMap<String, u32>,
     due: bool,
+    keep_alive_ms: u64,
+    last_decision_at: Option<Instant>,
 }
 
 pub struct Autonomous {
@@ -167,12 +179,18 @@ impl Autonomous {
         {
             let mut inner = self.lock();
             match command {
-                AutonomousCommand::On { limits, gates } => {
+                AutonomousCommand::On {
+                    limits,
+                    gates,
+                    subagent_keep_alive_ms,
+                } => {
                     *inner = Inner {
                         enabled: true,
                         limits,
                         gates,
                         started_at: Some(Instant::now()),
+                        keep_alive_ms: subagent_keep_alive_ms,
+                        last_decision_at: Some(Instant::now()),
                         ..Inner::default()
                     };
                 }
@@ -267,12 +285,46 @@ impl Autonomous {
         })
     }
 
+    pub fn keep_alive_due(&self) -> bool {
+        let inner = self.lock();
+        inner.enabled
+            && inner.due
+            && inner.keep_alive_ms > 0
+            && inner
+                .last_decision_at
+                .is_some_and(|at| at.elapsed() >= Duration::from_millis(inner.keep_alive_ms))
+    }
+
+    pub fn keep_alive(&self) -> Decision {
+        let mut inner = self.lock();
+        if !inner.enabled || !inner.due {
+            return Decision::Idle;
+        }
+        inner.last_decision_at = Some(Instant::now());
+        if let Some(reason) = Self::limit_reached(&inner) {
+            inner.enabled = false;
+            inner.due = false;
+            inner.stopped = Some(reason.clone());
+            return Decision::Stop(reason);
+        }
+        inner.continuations += 1;
+        Decision::Continue(format!(
+            "[autonomous-continuation: subagents still running]\n\nYour child agents have been \
+             running for over {} minutes without a reply. Check whether they are stuck (a \
+             stopped process, a question nobody answers) with `await rlm.list_subagents()` and \
+             unblock them, or carry on with your own work. Their replies still arrive as agent \
+             messages.",
+            inner.keep_alive_ms / 60_000
+        ))
+    }
+
     pub fn decide(&self, gate_results: Vec<GateRun>) -> Decision {
         let mut inner = self.lock();
         if !inner.enabled || !inner.due {
             return Decision::Idle;
         }
         inner.due = false;
+        inner.last_decision_at = Some(Instant::now());
         if let Some(reason) = Self::limit_reached(&inner) {
             inner.enabled = false;
             inner.stopped = Some(reason.clone());
@@ -445,7 +497,11 @@ mod tests {
 
     fn on(limits: Limits, gates: Gates) -> Autonomous {
         let autonomous = Autonomous::new(std::env::temp_dir());
-        autonomous.apply(AutonomousCommand::On { limits, gates });
+        autonomous.apply(AutonomousCommand::On {
+            limits,
+            gates,
+            subagent_keep_alive_ms: DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
+        });
         autonomous
     }
 
@@ -552,6 +608,32 @@ mod tests {
         let slow = run_gate("sleep 5", dir.path(), Duration::from_millis(100)).await;
         assert!(!slow.passed);
         assert!(slow.exit_text.starts_with("timed out"));
+    }
+
+    #[test]
+    fn the_keep_alive_valve_opens_after_the_window_while_children_run() {
+        let autonomous = Autonomous::new(std::env::temp_dir());
+        autonomous.apply(AutonomousCommand::On {
+            limits: Limits::unlimited(),
+            gates: Gates::default(),
+            subagent_keep_alive_ms: 1,
+        });
+        assert!(
+            !autonomous.keep_alive_due(),
+            "nothing is due before a turn ends"
+        );
+        autonomous.turn_ended();
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(autonomous.keep_alive_due());
+        assert!(matches!(
+            autonomous.keep_alive(),
+            Decision::Continue(prompt) if prompt.starts_with("[autonomous-continuation: subagents still running]")
+        ));
+        assert!(
+            autonomous.due(),
+            "the real decision is still owed once the children settle"
+        );
+        assert_eq!(autonomous.status().continuations, 1);
     }
 
     #[test]

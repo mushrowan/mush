@@ -189,7 +189,12 @@ impl Cli {
             }
             match mush_tui::slash::parse_autonomous_options(&words) {
                 Ok((limits, gates)) => commands.push(mush_runtime::ClientCommand::Autonomous(
-                    mush_runtime::AutonomousCommand::On { limits, gates },
+                    mush_runtime::AutonomousCommand::On {
+                        limits,
+                        gates,
+                        subagent_keep_alive_ms:
+                            mush_runtime::autonomous::DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
+                    },
                 )),
                 Err(error) => eprintln!("{}", Style::Dim.stderr(format_args!("{error}"))),
             }

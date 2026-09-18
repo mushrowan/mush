@@ -315,8 +315,13 @@ impl InProcessConnection {
             || self.runtime.turn_active()
             || self.compaction.is_some()
             || self.runtime.pending_prompt.is_some()
-            || self.children_running()
         {
+            return;
+        }
+        if self.children_running() {
+            if autonomous.keep_alive_due() {
+                self.apply_autonomous_decision(autonomous.keep_alive());
+            }
             return;
         }
         let commands = autonomous.gate_commands();
@@ -2146,6 +2151,7 @@ mod tests {
                         ..crate::autonomous::Limits::unlimited()
                     },
                     gates: crate::autonomous::Gates::default(),
+                    subagent_keep_alive_ms: 0,
                 },
             ))
             .await
@@ -2198,6 +2204,7 @@ mod tests {
                         max_retries: 3,
                         timeout_ms: 5_000,
                     },
+                    subagent_keep_alive_ms: 0,
                 },
             ))
             .await
