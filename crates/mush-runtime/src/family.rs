@@ -21,6 +21,7 @@ pub const MAX_CHILDREN: usize = 32;
 pub const PROGRESS_NOTE_CHARS: usize = 512;
 pub const PROGRESS_NOTE_INTERVAL: Duration = Duration::from_secs(10);
 pub const MESSAGE_MAX_CHARS: usize = 16 * 1024;
+pub const MAX_PENDING_MESSAGES: usize = 20;
 pub const TASK_LABEL: &str = "[task from parent]";
 const TICK: Duration = Duration::from_millis(50);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -116,6 +117,7 @@ pub struct ChildHandle {
 pub enum Receipt {
     Delivered,
     Queued,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,6 +716,11 @@ impl Family {
             let receipt = self
                 .deliver(caller, target.as_deref(), &sender, text, mode)
                 .await?;
+            if receipt == Receipt::Rejected {
+                return Err(format!(
+                    "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
+                ));
+            }
             receipts.push((target_name, receipt));
         }
         Ok(receipts)
