@@ -29,6 +29,18 @@ pub fn apply_control_environment(command: &mut tokio::process::Command) {
             .env("MUSH_CONTROL_SESSION", endpoint.target.session)
             .env("MUSH_CONTROL_ACTIVATION", endpoint.target.activation);
     }
+    if let Some(path) = path_with_own_bin() {
+        command.env("PATH", path);
+    }
+}
+
+fn path_with_own_bin() -> Option<std::ffi::OsString> {
+    let bin = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let rest: Vec<_> = std::env::split_paths(&current)
+        .filter(|dir| *dir != bin)
+        .collect();
+    std::env::join_paths(std::iter::once(bin).chain(rest)).ok()
 }
 
 #[must_use]
@@ -48,4 +60,25 @@ pub fn batch_sub_index(exec_id: &str, batch_id: &str) -> Option<usize> {
 #[must_use]
 pub fn current_exec_id() -> String {
     TOOL_EXEC_ID.try_with(String::clone).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn the_running_binary_leads_the_path_of_a_child() {
+        let mut command = tokio::process::Command::new("sh");
+        super::apply_control_environment(&mut command);
+        let output = command
+            .args(["-c", "printf '%s' \"$PATH\""])
+            .output()
+            .await
+            .unwrap();
+        let path = String::from_utf8(output.stdout).unwrap();
+        let bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(std::env::split_paths(&path).next(), Some(bin));
+    }
 }
