@@ -44,6 +44,7 @@ pub struct AgentRow {
     pub pid: Option<u32>,
     pub cwd: String,
     pub stale: bool,
+    pub clients: usize,
 }
 
 const NAME_WIDTH: usize = 32;
@@ -85,6 +86,7 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
             pid: Some(worker.pid),
             cwd: worker.cwd.display().to_string(),
             stale: worker.build != mush_daemon::build_id(),
+            clients: worker.clients,
         })
         .collect();
     for meta in saved {
@@ -104,6 +106,7 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
             pid: None,
             cwd: meta.cwd.clone(),
             stale: false,
+            clients: 0,
         });
     }
     rows.sort_by(|left, right| {
@@ -116,7 +119,7 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
 
 #[must_use]
 pub fn table(rows: &[AgentRow]) -> String {
-    let cells: Vec<[String; 7]> = rows
+    let cells: Vec<[String; 8]> = rows
         .iter()
         .map(|row| {
             [
@@ -130,11 +133,14 @@ pub fn table(rows: &[AgentRow]) -> String {
                 age(row.updated_at),
                 row.model.clone(),
                 row.messages.to_string(),
+                row.clients.to_string(),
                 row.cwd.clone(),
             ]
         })
         .collect();
-    let headers = ["name", "id", "status", "age", "model", "msgs", "cwd"];
+    let headers = [
+        "name", "id", "status", "age", "model", "msgs", "clients", "cwd",
+    ];
     let mut widths = headers.map(str::len);
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -158,7 +164,7 @@ pub fn table(rows: &[AgentRow]) -> String {
                 let padded = format!("{value:<width$}");
                 match column {
                     2 => row.status.style().stdout(padded).to_string(),
-                    6 => Style::Dim.stdout(padded).to_string(),
+                    7 => Style::Dim.stdout(padded).to_string(),
                     _ => padded,
                 }
             })
@@ -282,6 +288,7 @@ mod tests {
             cwd: "/tmp".into(),
             socket: "/tmp/a.sock".into(),
             started_at: 1,
+            clients: 1,
             title: Some(format!("agent {id}")),
             turn_active,
             messages: 7,

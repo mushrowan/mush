@@ -43,12 +43,16 @@ pub enum Replaced {
     Branched,
     Undone,
     Cleared,
+    Resynced,
 }
 
 impl Replaced {
     #[must_use]
     pub fn keeps_live_stats(self) -> bool {
-        matches!(self, Self::Branched | Self::Undone | Self::Cleared)
+        matches!(
+            self,
+            Self::Branched | Self::Undone | Self::Cleared | Self::Resynced
+        )
     }
 }
 

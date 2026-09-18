@@ -4,10 +4,23 @@ use mush_session::tree::SessionTree;
 use serde::{Deserialize, Serialize};
 
 pub type RequestId = u64;
+pub type ClientId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cursor {
+    pub generation: String,
+    pub sequence: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
+    Attach {
+        id: RequestId,
+        client: ClientId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<Cursor>,
+    },
     Command {
         id: RequestId,
         command: ClientCommand,
@@ -30,7 +43,8 @@ impl Request {
     #[must_use]
     pub fn id(&self) -> RequestId {
         match self {
-            Self::Command { id, .. }
+            Self::Attach { id, .. }
+            | Self::Command { id, .. }
             | Self::Transcript { id }
             | Self::History { id }
             | Self::Tree { id }
@@ -42,6 +56,7 @@ impl Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
+    Attached { cursor: Cursor, snapshot: bool },
     Events { events: Vec<ClientEvent> },
     Transcript { messages: Vec<Message> },
     History { messages: Vec<Message> },
@@ -56,11 +71,14 @@ pub enum Frame {
         state: ConnectionState,
         #[serde(default)]
         build: String,
+        cursor: Cursor,
     },
     Event {
         event: ClientEvent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         state: Option<ConnectionState>,
+        #[serde(default)]
+        sequence: u64,
     },
     Response {
         id: RequestId,
@@ -145,6 +163,7 @@ mod tests {
     #[test]
     fn a_streaming_agent_event_survives_the_wire() {
         let frame = Frame::Event {
+            sequence: 9,
             event: ClientEvent::Agent {
                 generation: StreamGeneration(3),
                 event: AgentEvent::StreamEvent {
@@ -172,6 +191,7 @@ mod tests {
                     applied: Applied::Nothing,
                 },
                 state: None,
+                sequence: 9,
             } if delta == "multi\nline"
         ));
     }

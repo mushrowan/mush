@@ -11,12 +11,15 @@ use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc;
 
-use crate::protocol::{CodecError, Frame, Reply, Request, RequestId, decode, encode};
+use crate::protocol::{
+    ClientId, CodecError, Cursor, Frame, Reply, Request, RequestId, decode, encode,
+};
 
 const FRAME_BUFFER: usize = 256;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn timeout_for(command: &ClientCommand) -> Duration {
     match command {
@@ -41,6 +44,8 @@ pub enum ConnectError {
     NoHello,
     #[error("the worker did not answer within {0:?}")]
     TimedOut(Duration),
+    #[error("the worker refused the attach: {0}")]
+    Attach(String),
     #[error("the worker's first frame was not a hello")]
     BadHello,
     #[error(transparent)]
@@ -48,9 +53,10 @@ pub enum ConnectError {
 }
 
 pub struct DaemonConnection {
-    writer: OwnedWriteHalf,
-    frames: mpsc::Receiver<Result<Frame, CodecError>>,
-    reader: tokio::task::JoinHandle<()>,
+    path: std::path::PathBuf,
+    client: ClientId,
+    cursor: Cursor,
+    link: Link,
     buffered: VecDeque<ClientEvent>,
     state: ConnectionState,
     worker_build: String,
@@ -58,7 +64,13 @@ pub struct DaemonConnection {
     closed: bool,
 }
 
-impl Drop for DaemonConnection {
+struct Link {
+    writer: OwnedWriteHalf,
+    frames: mpsc::Receiver<Result<Frame, CodecError>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Link {
     fn drop(&mut self) {
         self.reader.abort();
     }
@@ -70,39 +82,77 @@ impl DaemonConnection {
     }
 
     pub async fn connect_within(path: &Path, timeout: Duration) -> Result<Self, ConnectError> {
-        let stream = tokio::time::timeout(timeout, UnixStream::connect(path))
-            .await
-            .map_err(|_| ConnectError::TimedOut(timeout))??;
-        tokio::time::timeout(timeout, Self::from_stream(stream))
-            .await
-            .map_err(|_| ConnectError::TimedOut(timeout))?
-    }
-
-    pub async fn from_stream(stream: UnixStream) -> Result<Self, ConnectError> {
-        let (reader, writer) = stream.into_split();
-        let (tx, mut frames) = mpsc::channel(FRAME_BUFFER);
-        let reader = tokio::spawn(read_frames(reader, tx));
-        let (state, worker_build) = match frames.recv().await {
-            Some(Ok(Frame::Hello { state, build })) => (state, build),
-            Some(Ok(_)) => return Err(ConnectError::BadHello),
-            Some(Err(error)) => return Err(ConnectError::Codec(error)),
-            None => return Err(ConnectError::NoHello),
-        };
-        Ok(Self {
-            writer,
-            frames,
-            reader,
+        let (link, state, worker_build, cursor) = dial(path, timeout).await?;
+        let mut connection = Self {
+            path: path.to_path_buf(),
+            client: mush_ai::types::SessionId::new().to_string(),
+            cursor,
+            link,
             buffered: VecDeque::new(),
             state,
             worker_build,
             next_id: 1,
             closed: false,
-        })
+        };
+        tokio::time::timeout(timeout, connection.attach(None))
+            .await
+            .map_err(|_| ConnectError::TimedOut(timeout))?
+            .map_err(|error| ConnectError::Attach(error.to_string()))?;
+        Ok(connection)
+    }
+
+    async fn attach(&mut self, from: Option<Cursor>) -> Result<bool, ConnectionError> {
+        let id = self.next_request_id();
+        let request = Request::Attach {
+            id,
+            client: self.client.clone(),
+            from,
+        };
+        match self.exchange(request).await? {
+            Reply::Attached { cursor, snapshot } => {
+                self.cursor = cursor;
+                Ok(snapshot)
+            }
+            other => Err(ConnectionError::Transport(format!(
+                "unexpected reply to attach: {other:?}"
+            ))),
+        }
+    }
+
+    async fn reconnect(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        let deadline = tokio::time::Instant::now() + RECONNECT_TIMEOUT;
+        let mut backoff = Duration::from_millis(50);
+        loop {
+            if let Ok((link, state, worker_build, _)) = dial(&self.path, CONNECT_TIMEOUT).await {
+                self.link = link;
+                self.state = state;
+                self.worker_build = worker_build;
+                let from = Some(self.cursor.clone());
+                if self.attach(from).await.is_ok() {
+                    tracing::info!(cursor = self.cursor.sequence, "reattached to the worker");
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.closed = true;
+                return false;
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_millis(500));
+        }
     }
 
     #[must_use]
     pub fn worker_build(&self) -> &str {
         &self.worker_build
+    }
+
+    #[must_use]
+    pub fn cursor(&self) -> &Cursor {
+        &self.cursor
     }
 
     fn absorb_state(&mut self, state: Option<ConnectionState>) {
@@ -113,8 +163,13 @@ impl DaemonConnection {
 
     fn absorb(&mut self, frame: Frame) -> Option<(RequestId, Result<Reply, ConnectionError>)> {
         match frame {
-            Frame::Event { event, state } => {
+            Frame::Event {
+                event,
+                state,
+                sequence,
+            } => {
                 self.absorb_state(state);
+                self.cursor.sequence = self.cursor.sequence.max(sequence);
                 self.buffered.push_back(event);
                 None
             }
@@ -122,8 +177,9 @@ impl DaemonConnection {
                 self.absorb_state(state);
                 Some((id, result))
             }
-            Frame::Hello { state, .. } => {
+            Frame::Hello { state, cursor, .. } => {
                 self.state = state;
+                self.cursor = cursor;
                 None
             }
             Frame::Closed => {
@@ -145,24 +201,35 @@ impl DaemonConnection {
     }
 
     async fn request_forever(&mut self, request: Request) -> Result<Reply, ConnectionError> {
+        match self.exchange(request).await {
+            Err(ConnectionError::Closed) if !self.closed => {
+                if self.reconnect().await {
+                    Err(ConnectionError::Reconnected)
+                } else {
+                    Err(ConnectionError::Closed)
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn exchange(&mut self, request: Request) -> Result<Reply, ConnectionError> {
         if self.closed {
             return Err(ConnectionError::Closed);
         }
         let id = request.id();
         let bytes =
             encode(&request).map_err(|error| ConnectionError::Transport(error.to_string()))?;
-        self.writer
+        self.link
+            .writer
             .write_all(&bytes)
             .await
             .map_err(|error| ConnectionError::Transport(error.to_string()))?;
         loop {
-            let frame = match self.frames.recv().await {
+            let frame = match self.link.frames.recv().await {
                 Some(Ok(frame)) => frame,
                 Some(Err(error)) => return Err(ConnectionError::Transport(error.to_string())),
-                None => {
-                    self.closed = true;
-                    return Err(ConnectionError::Closed);
-                }
+                None => return Err(ConnectionError::Closed),
             };
             match self.absorb(frame) {
                 Some((reply_id, result)) if reply_id == id => return result,
@@ -180,6 +247,41 @@ impl DaemonConnection {
         self.next_id += 1;
         id
     }
+}
+
+async fn dial(
+    path: &Path,
+    timeout: Duration,
+) -> Result<(Link, ConnectionState, String, Cursor), ConnectError> {
+    let stream = tokio::time::timeout(timeout, UnixStream::connect(path))
+        .await
+        .map_err(|_| ConnectError::TimedOut(timeout))??;
+    let (reader, writer) = stream.into_split();
+    let (tx, mut frames) = mpsc::channel(FRAME_BUFFER);
+    let reader = tokio::spawn(read_frames(reader, tx));
+    let hello = tokio::time::timeout(timeout, frames.recv())
+        .await
+        .map_err(|_| ConnectError::TimedOut(timeout))?;
+    let (state, build, cursor) = match hello {
+        Some(Ok(Frame::Hello {
+            state,
+            build,
+            cursor,
+        })) => (state, build, cursor),
+        Some(Ok(_)) => return Err(ConnectError::BadHello),
+        Some(Err(error)) => return Err(ConnectError::Codec(error)),
+        None => return Err(ConnectError::NoHello),
+    };
+    Ok((
+        Link {
+            writer,
+            frames,
+            reader,
+        },
+        state,
+        build,
+        cursor,
+    ))
 }
 
 async fn read_frames(
@@ -218,13 +320,16 @@ impl AgentConnection for DaemonConnection {
             if self.closed {
                 return None;
             }
-            let frame = match self.frames.recv().await {
+            let frame = match self.link.frames.recv().await {
                 Some(Ok(frame)) => frame,
                 Some(Err(error)) => {
                     tracing::warn!(%error, "dropping a malformed frame");
                     continue;
                 }
                 None => {
+                    if self.reconnect().await {
+                        continue;
+                    }
                     self.closed = true;
                     return None;
                 }
@@ -243,7 +348,7 @@ impl AgentConnection for DaemonConnection {
             if self.closed {
                 return None;
             }
-            let frame = match self.frames.try_recv().ok()? {
+            let frame = match self.link.frames.try_recv().ok()? {
                 Ok(frame) => frame,
                 Err(error) => {
                     tracing::warn!(%error, "dropping a malformed frame");

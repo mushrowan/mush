@@ -150,6 +150,8 @@ pub enum ConnectionError {
     Closed,
     #[error("the worker did not answer in time")]
     TimedOut,
+    #[error("reattached to the worker, the command was not applied")]
+    Reconnected,
     #[error("{0}")]
     Refused(String),
     #[error("transport: {0}")]

@@ -82,6 +82,8 @@ pub struct WorkerDescriptor {
     pub messages: usize,
     #[serde(default)]
     pub updated_at: u64,
+    #[serde(default)]
+    pub clients: usize,
 }
 
 impl WorkerDescriptor {

@@ -442,3 +442,226 @@ async fn a_worker_that_never_says_hello_times_the_client_out() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn two_clients_share_a_worker_and_both_see_the_turn() {
+    let worker = spawn_worker();
+    let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
+    let mut second = DaemonConnection::connect(&worker.socket).await.unwrap();
+
+    let started = first.send(prompt("hello")).await.unwrap();
+    assert!(matches!(started[..], [ClientEvent::TurnStarted]));
+
+    let seen = drain_turn(&mut second).await;
+    assert!(matches!(seen.first(), Some(ClientEvent::TurnStarted)));
+    assert!(seen.iter().any(|event| matches!(
+        event,
+        ClientEvent::Agent {
+            event: mush_agent::AgentEvent::MessageEnd { .. },
+            ..
+        }
+    )));
+    drain_turn(&mut first).await;
+    assert_eq!(first.state().context_len, 2);
+    assert_eq!(second.state().context_len, 2);
+}
+
+#[tokio::test]
+async fn a_command_is_answered_to_its_sender_once() {
+    let worker = spawn_worker();
+    let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
+    let mut second = DaemonConnection::connect(&worker.socket).await.unwrap();
+
+    let events = first
+        .send(ClientCommand::Session(SessionCommand::Name {
+            title: Some("scout".into()),
+        }))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Session(mush_runtime::SessionEvent::Title(Some(title))) if title == "scout"
+    )));
+
+    let echoed = tokio::time::timeout(Duration::from_secs(5), second.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        echoed,
+        ClientEvent::Session(mush_runtime::SessionEvent::Title(Some(title))) if title == "scout"
+    ));
+    assert!(first.try_next_event().is_none());
+}
+
+struct RawClient {
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl RawClient {
+    async fn connect(socket: &std::path::Path) -> (Self, mush_daemon::Cursor) {
+        use tokio::io::AsyncBufReadExt;
+        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let (reader, writer) = stream.into_split();
+        let mut client = Self {
+            lines: tokio::io::BufReader::new(reader).lines(),
+            writer,
+        };
+        let mush_daemon::Frame::Hello { cursor, .. } = client.read().await else {
+            panic!("expected a hello")
+        };
+        (client, cursor)
+    }
+
+    async fn read(&mut self) -> mush_daemon::Frame {
+        let line = tokio::time::timeout(Duration::from_secs(5), self.lines.next_line())
+            .await
+            .expect("a frame before the timeout")
+            .unwrap()
+            .expect("the worker keeps the link open");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn attach(&mut self, from: Option<mush_daemon::Cursor>) {
+        use tokio::io::AsyncWriteExt;
+        let request = serde_json::json!({
+            "type": "attach",
+            "id": 1,
+            "client": "raw",
+            "from": from,
+        });
+        let line = format!("{request}\n");
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_cursor_replay_delivers_only_what_was_missed() {
+    let worker = spawn_worker();
+    let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
+    first.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut first).await;
+    let cursor = first.cursor().clone();
+    assert!(cursor.sequence > 2, "{cursor:?}");
+
+    let (mut raw, hello) = RawClient::connect(&worker.socket).await;
+    assert_eq!(hello, cursor);
+    raw.attach(Some(mush_daemon::Cursor {
+        generation: cursor.generation.clone(),
+        sequence: cursor.sequence - 2,
+    }))
+    .await;
+
+    let mut replayed = Vec::new();
+    loop {
+        match raw.read().await {
+            mush_daemon::Frame::Event { sequence, .. } => replayed.push(sequence),
+            mush_daemon::Frame::Response { result, .. } => {
+                assert!(matches!(
+                    result,
+                    Ok(mush_daemon::Reply::Attached {
+                        snapshot: false,
+                        ..
+                    })
+                ));
+                break;
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    assert_eq!(replayed, vec![cursor.sequence - 1, cursor.sequence]);
+}
+
+#[tokio::test]
+async fn a_cursor_from_another_worker_gets_a_fresh_snapshot() {
+    let worker = spawn_worker();
+    let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
+    first.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut first).await;
+
+    let (mut raw, _) = RawClient::connect(&worker.socket).await;
+    raw.attach(Some(mush_daemon::Cursor {
+        generation: "a worker that is gone".into(),
+        sequence: 3,
+    }))
+    .await;
+
+    let mush_daemon::Frame::Event { event, .. } = raw.read().await else {
+        panic!("expected a snapshot")
+    };
+    let ClientEvent::Session(mush_runtime::SessionEvent::TranscriptReplaced {
+        reason,
+        messages,
+        ..
+    }) = event
+    else {
+        panic!("expected a transcript")
+    };
+    assert_eq!(reason, mush_runtime::Replaced::Resynced);
+    assert_eq!(messages.len(), 2);
+    let mush_daemon::Frame::Response { result, .. } = raw.read().await else {
+        panic!("expected the attach response")
+    };
+    assert!(matches!(
+        result,
+        Ok(mush_daemon::Reply::Attached { snapshot: true, .. })
+    ));
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_is_forgotten_and_the_worker_lives_on() {
+    let worker = spawn_worker();
+    let stalled = tokio::net::UnixStream::connect(&worker.socket)
+        .await
+        .unwrap();
+    let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    client.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut client).await;
+    drop(stalled);
+
+    client.send(prompt("again")).await.unwrap();
+    drain_turn(&mut client).await;
+    assert_eq!(client.state().context_len, 4);
+    assert!(!worker.task.is_finished());
+}
+
+#[tokio::test]
+async fn a_client_reattaches_when_the_worker_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let (connection, _requests) = mush_runtime::testing::echo_connection();
+    let first = tokio::spawn(serve(connection, listener, None, Default::default()));
+
+    let mut client = DaemonConnection::connect(&socket).await.unwrap();
+    client.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut client).await;
+    assert_eq!(client.state().context_len, 2);
+
+    first.abort();
+    let _ = first.await;
+    std::fs::remove_file(&socket).unwrap();
+    let listener = bind(&socket).unwrap();
+    let (replacement, _also) = mush_runtime::testing::echo_connection();
+    let second = tokio::spawn(serve(replacement, listener, None, Default::default()));
+
+    let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())
+        .await
+        .expect("the client reattaches")
+        .expect("the connection survives");
+    assert!(
+        matches!(
+            event,
+            ClientEvent::Session(mush_runtime::SessionEvent::TranscriptReplaced {
+                reason: mush_runtime::Replaced::Resynced,
+                ..
+            })
+        ),
+        "{event:?}"
+    );
+    assert!(!client.closed());
+    client.send(prompt("again")).await.unwrap();
+    drain_turn(&mut client).await;
+    assert!(!second.is_finished());
+}
