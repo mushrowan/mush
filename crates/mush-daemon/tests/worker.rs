@@ -233,3 +233,38 @@ async fn a_client_attaching_mid_turn_replays_the_turn_so_far() {
     assert!(!third.state().turn_active);
     assert_eq!(third.history().await.len(), 2);
 }
+
+#[tokio::test]
+async fn a_malformed_request_is_answered_with_an_error() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let worker = spawn_worker();
+    let stream = tokio::net::UnixStream::connect(&worker.socket)
+        .await
+        .unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let hello = lines.next_line().await.unwrap().unwrap();
+    assert!(hello.contains("\"hello\""));
+
+    writer.write_all(b"{\"type\":\"tree\"}\n").await.unwrap();
+
+    let reply = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(frame["type"], "response");
+    assert_eq!(frame["id"], 0);
+    assert!(
+        frame["result"]["Err"]["data"]
+            .as_str()
+            .unwrap()
+            .starts_with("transport: malformed request")
+            || frame["result"]["Err"]["data"]
+                .as_str()
+                .unwrap()
+                .starts_with("malformed request"),
+        "{reply}"
+    );
+}

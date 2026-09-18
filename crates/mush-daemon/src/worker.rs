@@ -219,7 +219,19 @@ impl Worker {
                     let request = match crate::protocol::decode::<Request>(&line) {
                         Ok(request) => request,
                         Err(error) => {
-                            tracing::warn!(%error, "dropping a malformed request");
+                            let id = serde_json::from_str::<serde_json::Value>(&line)
+                                .ok()
+                                .and_then(|value| value.get("id")?.as_u64());
+                            let frame = Frame::Response {
+                                id: id.unwrap_or(0),
+                                result: Err(ConnectionError::Transport(format!(
+                                    "malformed request: {error}"
+                                ))),
+                                state: None,
+                            };
+                            if client.write(&frame).await.is_err() {
+                                return Attached::Detached;
+                            }
                             continue;
                         }
                     };
