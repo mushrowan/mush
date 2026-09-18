@@ -195,6 +195,7 @@ pub struct Config {
     #[serde(default)]
     pub favourite_models: Vec<String>,
     pub compaction_model: Option<String>,
+    pub subagent_model: Option<String>,
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
@@ -260,6 +261,7 @@ impl Default for Config {
             model_tiers: HashMap::default(),
             favourite_models: Vec::new(),
             compaction_model: None,
+            subagent_model: None,
             settings: Settings::default(),
             keys: mush_tui::KeysConfig::default(),
             forbidden_chars: Vec::new(),
@@ -1290,6 +1292,14 @@ strong = "claude-opus-4-7"
     fn model_tiers_default_empty() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.model_tiers.is_empty());
+    }
+
+    #[test]
+    fn subagent_model_defaults_to_none_and_takes_an_id() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.subagent_model.is_none());
+        let config: Config = toml::from_str(r#"subagent_model = "claude-haiku-4-5""#).unwrap();
+        assert_eq!(config.subagent_model.as_deref(), Some("claude-haiku-4-5"));
     }
 
     #[test]

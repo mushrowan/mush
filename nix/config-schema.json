@@ -1241,6 +1241,13 @@
         "show_thinking": true
       }
     },
+    "subagent_model": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "system_prompt": {
       "default": null,
       "type": [

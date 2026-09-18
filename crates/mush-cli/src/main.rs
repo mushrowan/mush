@@ -1097,6 +1097,7 @@ struct ChildSeed {
     lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     saver: Option<mush_runtime::SessionSaver>,
     rlm_max_depth: u32,
+    subagent_model: Option<String>,
 }
 
 fn turn_config(
@@ -1129,7 +1130,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
         Box::pin(async move {
-            let model = match &spec.model {
+            let model = match spec.model.as_deref().or(seed.subagent_model.as_deref()) {
                 Some(id) => mush_ai::discovery::resolve_model_by_id(id)
                     .ok_or_else(|| format!("unknown model {id}"))?,
                 None => seed.model.clone(),
@@ -1244,6 +1245,7 @@ fn worker_config(
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         saver: opened.saver.as_ref().map(|saver| saver.handle()),
         rlm_max_depth: setup::rlm_max_depth(&setup.client.cfg),
+        subagent_model: setup.client.cfg.subagent_model.clone(),
     };
     let mut turn = turn_config(
         &seed,
