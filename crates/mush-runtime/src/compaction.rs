@@ -143,8 +143,12 @@ pub async fn run_compaction(
 
     let tokens_before = compact::estimate_tokens(&messages);
     let instructions = focus.instructions.clone();
+    let keep = compact::keep_recent_for_budget(
+        &messages,
+        compact::keep_recent_budget(model.compaction_window()),
+    );
     let result =
-        match compact::try_llm_compact(messages, registry, model, options, Some(10), focus, live)
+        match compact::try_llm_compact(messages, registry, model, options, Some(keep), focus, live)
             .await
         {
             Ok(result) => result,

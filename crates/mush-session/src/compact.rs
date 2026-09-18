@@ -524,6 +524,33 @@ pub fn compaction_threshold(context_window: TokenCount) -> TokenCount {
     }
 }
 
+pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
+
+#[must_use]
+pub fn keep_recent_budget(context_window: TokenCount) -> usize {
+    DEFAULT_KEEP_RECENT_TOKENS.min(context_window.get() / 10) as usize
+}
+
+#[must_use]
+pub fn keep_recent_for_budget(messages: &[Message], budget_tokens: usize) -> usize {
+    let mut accumulated = 0;
+    let mut cut = 0;
+    for (index, message) in messages.iter().enumerate().rev() {
+        accumulated += estimate_message_tokens(message);
+        if accumulated >= budget_tokens {
+            cut = index;
+            break;
+        }
+    }
+    let cut = messages[cut..]
+        .iter()
+        .position(|message| !matches!(message, Message::ToolResult(_)))
+        .map_or(messages.len(), |offset| cut + offset);
+    (messages.len() - cut)
+        .clamp(1, DEFAULT_KEEP_RECENT)
+        .min(messages.len())
+}
+
 pub fn needs_compaction_at(
     context_tokens: TokenCount,
     context_window: TokenCount,
@@ -614,12 +641,13 @@ pub async fn auto_compact(
         };
     }
 
+    let keep = keep_recent_for_budget(&messages, keep_recent_budget(context_window));
     let result = llm_compact(
         messages,
         registry,
         model,
         options,
-        Some(DEFAULT_KEEP_RECENT),
+        Some(keep),
         CompactionFocus::default(),
         live,
     )
@@ -1509,6 +1537,32 @@ mod tests {
             TokenCount::new(200_000),
             20,
         ));
+    }
+
+    #[test]
+    fn the_kept_tail_shrinks_to_the_token_budget_and_starts_off_a_tool_result() {
+        let mut msgs: Vec<Message> = (0..10)
+            .map(|i| user_msg(&format!("{i}: {}", "x".repeat(400))))
+            .collect();
+        msgs.push(assistant_msg("calling"));
+        msgs.push(Message::ToolResult(ToolResultMessage {
+            tool_call_id: "tc".into(),
+            tool_name: "ipython".into(),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "x".repeat(400),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+            details: None,
+        }));
+        msgs.push(user_msg(&"x".repeat(400)));
+
+        assert_eq!(keep_recent_for_budget(&msgs, 250), 4);
+        assert_eq!(keep_recent_for_budget(&msgs, 150), 1);
+        assert_eq!(keep_recent_for_budget(&msgs, 100_000), DEFAULT_KEEP_RECENT);
+        assert_eq!(keep_recent_for_budget(&msgs, 0), 1);
+        assert_eq!(keep_recent_budget(TokenCount::new(200_000)), 20_000);
+        assert_eq!(keep_recent_budget(TokenCount::new(10_000)), 1_000);
     }
 
     #[test]

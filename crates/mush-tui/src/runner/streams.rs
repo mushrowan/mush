@@ -565,15 +565,15 @@ mod tests {
                             .unwrap()
                             .primary
                             .context_len(),
-                        11
+                        3
                     );
                 }
             }
 
-            assert_eq!(conversation.context_len(), 12 + turn * 2);
+            assert_eq!(conversation.context_len(), 4 + turn * 2);
             let saved = serde_json::to_string(&conversation).unwrap();
             conversation = serde_json::from_str(&saved).unwrap();
-            assert_eq!(conversation.context_len(), 12 + turn * 2);
+            assert_eq!(conversation.context_len(), 4 + turn * 2);
             assert!(conversation.display_history().iter().any(
                 |message| matches!(message, Message::User(user) if user.text().starts_with("turn 0:"))
             ));
@@ -584,8 +584,8 @@ mod tests {
 
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
-        assert_eq!(requests[1].len(), 11);
-        assert_eq!(requests[2].len(), 13);
+        assert_eq!(requests[1].len(), 3);
+        assert_eq!(requests[2].len(), 5);
         assert!(matches!(
             &requests[2][0],
             Message::User(user) if user.text().contains("<summary>\nwaiting for val push\n</summary>")
