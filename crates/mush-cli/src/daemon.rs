@@ -236,3 +236,45 @@ pub async fn send(session: &str, text: &str) -> Result<()> {
         other => Err(eyre!("unexpected reply: {other:?}")),
     }
 }
+
+pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner {
+    std::sync::Arc::new(move |request: mush_runtime::CreateSessionRequest| {
+        let mut args = worker_args.clone();
+        Box::pin(async move {
+            if let Some(model) = &request.model {
+                args.retain(|arg| arg != "--model");
+                args.push("--model".into());
+                args.push(model.clone());
+            }
+            let descriptor = open(OpenTarget::New, args)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut connection = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+                .await
+                .map_err(|error| error.to_string())?;
+            use mush_runtime::AgentConnection;
+            if let Some(name) = &request.name {
+                connection
+                    .send(mush_runtime::ClientCommand::Session(
+                        mush_runtime::SessionCommand::Name {
+                            title: Some(name.clone()),
+                        },
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            connection
+                .send(mush_runtime::ClientCommand::Prompt {
+                    text: request.prompt,
+                    images: Vec::new(),
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(mush_runtime::CreatedSession {
+                session_id: descriptor.session_id,
+                name: request.name,
+                model: descriptor.model_id,
+            })
+        })
+    })
+}

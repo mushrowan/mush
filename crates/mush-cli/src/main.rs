@@ -1236,12 +1236,14 @@ fn worker_config(
         ));
         let notes = mush_runtime::Notes::new(artifacts.as_ref().map(|dir| dir.join("notes.md")));
         if let Some(host) = ipython.mush_host() {
-            host.set_extension(std::sync::Arc::new(
-                mush_runtime::RlmHandler::new(family.clone(), root)
-                    .with_goal(goal.clone())
-                    .with_scheduler(scheduler.clone())
-                    .with_notes(notes.clone()),
-            ));
+            let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
+                .with_goal(goal.clone())
+                .with_scheduler(scheduler.clone())
+                .with_notes(notes.clone());
+            if !cli.no_session {
+                handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
+            }
+            host.set_extension(std::sync::Arc::new(handler));
         }
         worker.agent_inbox = Some(family.root_inbox());
         worker.family = Some(family);

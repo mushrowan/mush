@@ -26,7 +26,8 @@ pub use connection::{
 };
 pub use family::{
     ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
-    DeliveryMode, Family, Identity, Receipt, RlmHandler,
+    CreateSessionRequest, CreatedSession, DeliveryMode, Family, Identity, Receipt, RlmHandler,
+    SessionSpawner,
 };
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};

@@ -612,7 +612,10 @@ a timeout, waits until they settle. `await rlm.delete_subagent(child)` stops one
 its context.\n\
 - `await agent_message.send(text, receiver_role=\"child\", receiver_name=...)` sends a child \
 more instructions. A busy child is steered mid-turn; an idle one gets it as a new prompt.\n\
-- Give a child one clear task with the context it needs; it starts from an empty conversation.";
+- Give a child one clear task with the context it needs; it starts from an empty conversation.\n\
+- `await rlm.create_session(prompt, name=...)` starts a separate top-level session in its own \
+worker for work that should outlive this conversation; it runs on its own and reports \
+nothing back. `mush send <id> ...` from bash reaches it.";
 
 fn child_doctrine(name: &str, depth: u32) -> String {
     format!(

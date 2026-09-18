@@ -67,6 +67,25 @@ pub type ChildFactory = Arc<
     dyn Fn(ChildSpec, Arc<Family>) -> BoxFuture<'static, Result<ChildParts, String>> + Send + Sync,
 >;
 
+pub struct CreateSessionRequest {
+    pub prompt: String,
+    pub name: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatedSession {
+    pub session_id: String,
+    pub name: Option<String>,
+    pub model: String,
+}
+
+pub type SessionSpawner = Arc<
+    dyn Fn(CreateSessionRequest) -> BoxFuture<'static, Result<CreatedSession, String>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildStatus {
@@ -898,6 +917,7 @@ pub struct RlmHandler {
     goal: Option<Arc<crate::goal::GoalStore>>,
     scheduler: Option<Arc<crate::schedule::Scheduler>>,
     notes: Option<Arc<crate::notes::Notes>>,
+    sessions: Option<SessionSpawner>,
 }
 
 impl RlmHandler {
@@ -909,7 +929,14 @@ impl RlmHandler {
             goal: None,
             scheduler: None,
             notes: None,
+            sessions: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_session_spawner(mut self, spawner: SessionSpawner) -> Self {
+        self.sessions = Some(spawner);
+        self
     }
 
     #[must_use]
@@ -1080,6 +1107,26 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
                         .collect::<Vec<_>>()
                 }))
+            }
+            "rlm.create_session" => {
+                if self.identity.depth > 0 {
+                    return Err(mush_kernel::HostError(
+                        "only the root agent starts new sessions; ask your parent".into(),
+                    ));
+                }
+                let spawner = self.sessions.as_ref().ok_or_else(|| {
+                    mush_kernel::HostError("new sessions are not available here".into())
+                })?;
+                let prompt = str_field("prompt")
+                    .ok_or_else(|| mush_kernel::HostError("prompt is required".into()))?;
+                let created = (spawner)(CreateSessionRequest {
+                    prompt,
+                    name: str_field("name"),
+                    model: str_field("model"),
+                })
+                .await
+                .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::to_value(created).unwrap_or(serde_json::Value::Null))
             }
             "rlm.note" | "rlm.notes" | "rlm.clear_notes" => {
                 let notes = self
@@ -1610,5 +1657,52 @@ mod tests {
         assert!(sent.outcome.is_success(), "{text}");
         assert_eq!(text.trim(), "root delivered");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn create_session_goes_through_the_spawner_and_only_from_the_root() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let spawner: SessionSpawner = Arc::new(|request: CreateSessionRequest| {
+            Box::pin(async move {
+                Ok(CreatedSession {
+                    session_id: "deadbeef".into(),
+                    name: request.name,
+                    model: request.model.unwrap_or_else(|| "default".into()),
+                })
+            })
+        });
+        let root = RlmHandler::new(Arc::clone(&family), Identity::root("root"))
+            .with_session_spawner(Arc::clone(&spawner));
+        let child = RlmHandler::new(
+            Arc::clone(&family),
+            Identity {
+                id: Some("sub-1".into()),
+                name: "kid".into(),
+                depth: 1,
+            },
+        )
+        .with_session_spawner(spawner);
+        use mush_kernel::HostRequestHandler;
+
+        let created = root
+            .handle(
+                "rlm.create_session",
+                serde_json::json!({ "prompt": "audit the deps", "name": "deps" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["session_id"], "deadbeef");
+        assert_eq!(created["name"], "deps");
+        assert_eq!(created["model"], "default");
+
+        let refused = child
+            .handle(
+                "rlm.create_session",
+                serde_json::json!({ "prompt": "audit the deps" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.0.contains("only the root agent"));
     }
 }
