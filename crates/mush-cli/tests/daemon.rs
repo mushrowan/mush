@@ -439,3 +439,76 @@ async fn the_cli_lists_and_renames_a_live_agent() {
     assert_eq!(rows[0]["id"], descriptor.session_id[..8]);
     assert_eq!(rows[0]["status"], "idle");
 }
+
+#[tokio::test]
+async fn doctor_reports_a_live_worker_and_clears_a_dead_one() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+
+    let workers = daemon.dir.path().join("mush").join("workers");
+    let dead = mush_daemon::WorkerDescriptor {
+        session_id: "deadbeefdeadbeef".into(),
+        pid: 0x7fff_fffe,
+        start_id: Some("proc:never".into()),
+        socket: workers.join("deadbeefdeadbeef.sock"),
+        ..descriptor.clone()
+    };
+    std::fs::write(
+        workers.join("deadbeefdeadbeef.json"),
+        serde_json::to_vec(&dead).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&dead.socket, b"").unwrap();
+
+    let looked = daemon
+        .cli()
+        .args(["doctor", "--fix", "--json"])
+        .output()
+        .unwrap();
+    assert!(looked.status.success(), "{looked:?}");
+    let findings: serde_json::Value = serde_json::from_slice(&looked.stdout).unwrap();
+    let by = |what: &str| -> serde_json::Value {
+        findings
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["what"] == what)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(by("daemon")["health"], "ok");
+    assert_eq!(
+        by(&format!("worker {}", &descriptor.session_id[..8]))["health"],
+        "ok"
+    );
+    assert_eq!(by("worker deadbeef")["health"], "stale");
+    assert_eq!(by("worker deadbeef")["fixed"], true);
+    assert!(!workers.join("deadbeefdeadbeef.json").exists());
+    assert!(!dead.socket.exists());
+}
+
+#[tokio::test]
+async fn shutdown_needs_a_force_flag_when_agents_are_running() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+
+    let refused = daemon.cli().arg("shutdown").output().unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("pass --force"),
+        "{refused:?}"
+    );
+    assert!(alive(descriptor.pid));
+
+    let forced = daemon.cli().args(["shutdown", "--force"]).output().unwrap();
+    assert!(forced.status.success(), "{forced:?}");
+    assert!(!alive(descriptor.pid));
+}

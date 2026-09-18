@@ -119,10 +119,14 @@ pub async fn stop(session_id: &str) -> Result<()> {
     }
 }
 
-pub async fn shutdown() -> Result<()> {
+pub async fn shutdown(force: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
     if !answers(&socket) {
         println!("no daemon running");
+        return Ok(());
+    }
+    if !force && !confirm_shutdown(&socket).await? {
+        println!("left running");
         return Ok(());
     }
     match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await? {
@@ -130,6 +134,26 @@ pub async fn shutdown() -> Result<()> {
         SupervisorReply::Error(error) => Err(eyre!("{error}")),
         other => Err(eyre!("unexpected daemon reply: {other:?}")),
     }
+}
+
+async fn confirm_shutdown(socket: &Path) -> Result<bool> {
+    let workers = match mush_daemon::supervisor::request(socket, &SupervisorRequest::List).await? {
+        SupervisorReply::Workers(workers) => workers.len(),
+        _ => 0,
+    };
+    if workers == 0 {
+        return Ok(true);
+    }
+    if !atty::is(atty::Stream::Stdin) {
+        return Err(eyre!(
+            "{workers} agent(s) are running, pass --force to stop them"
+        ));
+    }
+    eprint!("stop {workers} running agent(s)? [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())?;
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
 pub async fn send(session: &str, text: &str) -> Result<()> {

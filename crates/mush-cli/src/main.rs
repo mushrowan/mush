@@ -10,7 +10,7 @@ use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_cli::output::Style;
-use mush_cli::{agents, commands, config, daemon, logging, schedule, setup, timing};
+use mush_cli::{agents, commands, config, daemon, doctor, logging, schedule, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -330,7 +330,16 @@ enum Command {
         #[arg(num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
     },
-    Shutdown,
+    Shutdown {
+        #[arg(long)]
+        force: bool,
+    },
+    Doctor {
+        #[arg(long)]
+        fix: bool,
+        #[arg(long)]
+        json: bool,
+    },
     Login {
         provider: Option<String>,
     },
@@ -422,11 +431,12 @@ async fn main() -> Result<()> {
         Some(Command::Send { session, text }) => {
             return daemon::send(&session, &text.join(" ")).await;
         }
-        Some(Command::Shutdown) => return daemon::shutdown().await,
+        Some(Command::Shutdown { force }) => return daemon::shutdown(force).await,
+        Some(Command::Doctor { fix, json }) => return doctor::doctor(fix, json).await,
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
-        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()),
+        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()).await,
         Some(Command::Delete { id }) => return commands::delete_session(&id),
         Some(Command::Config) => return commands::open_config(),
         None => {}

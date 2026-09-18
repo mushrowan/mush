@@ -376,7 +376,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
         .env("MUSH_DATA_DIR", dir.path().join("data"))
         .env("MUSH_CONFIG_DIR", &config)
         .env("XDG_RUNTIME_DIR", dir.path())
-        .arg("shutdown")
+        .args(["shutdown", "--force"])
         .status()
         .unwrap();
     assert!(shutdown.success());

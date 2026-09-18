@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod control;
 pub mod daemon;
+pub mod doctor;
 pub mod logging;
 pub mod output;
 pub mod schedule;

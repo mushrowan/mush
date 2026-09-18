@@ -95,7 +95,7 @@ pub fn open_config() -> Result<()> {
     Ok(())
 }
 
-pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<()> {
+pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<()> {
     let cfg = config::load_config();
     let terminal = cfg.terminal.with_overrides(terminal_overrides);
 
@@ -211,6 +211,11 @@ pub fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Result<(
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);
     println!("\n{}\n", Style::Bold.stdout("sessions"));
     println!("  {session_count} saved");
+
+    println!("\n{}\n", Style::Bold.stdout("daemon"));
+    for line in crate::doctor::report(&crate::doctor::findings(false).await?).lines() {
+        println!("  {line}");
+    }
 
     Ok(())
 }
