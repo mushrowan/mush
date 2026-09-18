@@ -2,6 +2,7 @@ pub mod autonomous;
 pub mod commands;
 pub mod compaction;
 pub mod connection;
+pub mod cron;
 pub mod family;
 pub mod goal;
 pub mod inbox;

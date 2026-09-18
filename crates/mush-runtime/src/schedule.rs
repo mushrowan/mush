@@ -12,6 +12,7 @@ pub const MAX_JOBS: usize = 64;
 pub enum ScheduleKind {
     Once { at: u64 },
     Every { interval_ms: u64, next_at: u64 },
+    Cron { expression: String, next_at: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +60,9 @@ impl Job {
         match (&self.schedule, self.status) {
             (_, JobStatus::Completed | JobStatus::Cancelled | JobStatus::Paused) => None,
             (ScheduleKind::Once { at }, _) => Some(*at),
-            (ScheduleKind::Every { next_at, .. }, _) => Some(*next_at),
+            (ScheduleKind::Every { next_at, .. } | ScheduleKind::Cron { next_at, .. }, _) => {
+                Some(*next_at)
+            }
         }
     }
 
@@ -149,9 +152,19 @@ pub fn parse_expression(text: &str, now_ms: u64) -> Result<ScheduleKind, String>
         }
         return Ok(ScheduleKind::Once { at });
     }
-    Err(format!(
-        "cannot read a schedule in {text:?}. use `in 30m`, `every 10m` or `at <rfc3339>`"
-    ))
+    let cron = crate::cron::Cron::parse(text).map_err(|error| {
+        format!(
+            "cannot read a schedule in {text:?}: {error}. use `in 30m`, `every 10m`, \
+             `at <rfc3339>` or a cron expression"
+        )
+    })?;
+    let next_at = cron
+        .next_after(now_ms)
+        .ok_or_else(|| format!("{text:?} never comes round"))?;
+    Ok(ScheduleKind::Cron {
+        expression: text.to_string(),
+        next_at,
+    })
 }
 
 pub struct Scheduler {
@@ -381,6 +394,16 @@ impl Scheduler {
                     interval_ms,
                     next_at,
                 } => *next_at = now_ms + *interval_ms,
+                ScheduleKind::Cron {
+                    expression,
+                    next_at,
+                } => match crate::cron::Cron::parse(expression)
+                    .ok()
+                    .and_then(|cron| cron.next_after(now_ms))
+                {
+                    Some(at) => *next_at = at,
+                    None => job.status = JobStatus::Completed,
+                },
             }
             due.push(job.clone());
         }
@@ -433,11 +456,46 @@ mod tests {
                 .unwrap_err()
                 .contains("at least")
         );
-        assert!(parse_expression("tomorrow", 0).is_err());
+        let tomorrow = parse_expression("tomorrow", 0).unwrap_err();
+        assert!(tomorrow.contains("five fields"), "{tomorrow}");
         assert!(matches!(
             parse_expression("at 2999-01-01T00:00:00Z", 0).unwrap(),
             ScheduleKind::Once { .. }
         ));
+    }
+
+    #[test]
+    fn a_cron_job_reschedules_itself_after_every_run() {
+        let scheduler = Scheduler::new(None);
+        let now = Timestamp::now().as_ms();
+        let jobs = scheduler
+            .apply(ScheduleCommand::Add {
+                expression: "*/30 * * * *".into(),
+                prompt: "check the build".into(),
+                label: None,
+                source: JobSource::Schedule,
+            })
+            .unwrap();
+        let ScheduleKind::Cron {
+            ref expression,
+            next_at,
+        } = jobs[0].schedule
+        else {
+            panic!("{:?}", jobs[0].schedule);
+        };
+        assert_eq!(expression, "*/30 * * * *");
+        assert!(next_at > now, "{next_at} should be after {now}");
+
+        assert!(scheduler.take_due(next_at - 1).is_empty());
+        let due = scheduler.take_due(next_at);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].runs, 1);
+        assert_eq!(due[0].status, JobStatus::Active);
+        let ScheduleKind::Cron { next_at: again, .. } = due[0].schedule else {
+            unreachable!()
+        };
+        assert!(again > next_at, "{again} should be after {next_at}");
+        assert_eq!(again - next_at, 30 * 60_000);
     }
 
     #[test]

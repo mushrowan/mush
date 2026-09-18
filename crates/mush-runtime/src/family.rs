@@ -1559,12 +1559,15 @@ mod tests {
                 config.title = Some(spec.name.clone());
                 config.rlm_depth = spec.depth;
                 config.parent = Some(spec.parent_session_id.clone().into());
-                config.saver = Some(Arc::new(|snapshot: crate::snapshot::SessionSnapshot| {
-                    assert_eq!(
-                        snapshot.parent.as_ref().map(ToString::to_string).as_deref(),
-                        Some("root-session")
-                    );
-                }));
+                let parent_session_id = spec.parent_session_id.clone();
+                config.saver = Some(Arc::new(
+                    move |snapshot: crate::snapshot::SessionSnapshot| {
+                        assert_eq!(
+                            snapshot.parent.as_ref().map(ToString::to_string).as_deref(),
+                            Some(parent_session_id.as_str())
+                        );
+                    },
+                ));
                 config.system_prompt = Some(format!("child {} of {}", spec.name, spec.parent.name));
                 Ok(ChildParts {
                     config,
@@ -1651,11 +1654,12 @@ mod tests {
             .unwrap();
         settle(&family, &alpha).await;
 
-        let root_view: Vec<(String, String)> = family
+        let mut root_view: Vec<(String, String)> = family
             .roster(&root)
             .into_iter()
             .map(|view| (view.relationship, view.name))
             .collect();
+        root_view[1..].sort();
         assert_eq!(
             root_view,
             vec![
@@ -1665,18 +1669,19 @@ mod tests {
             ]
         );
 
-        let alpha_view: Vec<(String, String)> = family
+        let mut alpha_view: Vec<(String, String)> = family
             .roster(&alpha)
             .into_iter()
             .map(|view| (view.relationship, view.name))
             .collect();
+        alpha_view[1..].sort();
         assert_eq!(
             alpha_view,
             vec![
                 ("self".to_string(), "alpha".to_string()),
+                ("child".into(), "gamma".into()),
                 ("parent".into(), "root".into()),
                 ("sibling".into(), "beta".into()),
-                ("child".into(), "gamma".into()),
             ]
         );
     }

@@ -55,7 +55,7 @@ pub enum SlashParseError {
     )]
     AutonomousUsage,
     #[error(
-        "usage: /schedule add \"in 30m\"|\"every 10m\" [--label name] <prompt> | /schedule list|pause|resume|cancel <id>"
+        "usage: /schedule add \"in 30m\"|\"every 10m\"|\"0 9 * * *\" [--label name] <prompt> | /schedule list|pause|resume|cancel <id>"
     )]
     ScheduleUsage,
     #[error("usage: /rlm-max-depth [<non-negative integer>]")]
