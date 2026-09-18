@@ -161,7 +161,7 @@ impl<'de> Deserialize<'de> for ConversationState {
         D: Deserializer<'de>,
     {
         let repr = ConversationStateRepr::deserialize(deserializer)?;
-        if repr.tree.is_empty() {
+        if repr.tree.is_empty() && repr.tree.leaf_id().is_none() {
             Ok(Self::from_messages(repr.messages))
         } else {
             Ok(Self::from_tree(repr.tree))

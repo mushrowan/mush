@@ -84,18 +84,12 @@ pub struct SessionTree {
     leaf_id: Option<EntryId>,
 }
 
-impl<'de> Deserialize<'de> for SessionTree {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Stored {
-            entries: Vec<SessionEntry>,
-            leaf_id: Option<EntryId>,
+impl SessionTree {
+    pub fn rebuild(entries: Vec<SessionEntry>, leaf_id: Option<EntryId>) -> Result<Self, String> {
+        if entries.is_empty() {
+            return Ok(Self { entries, leaf_id });
         }
-        let stored = Stored::deserialize(deserializer)?;
-        let mut tree = Self {
-            entries: stored.entries,
-            leaf_id: stored.leaf_id,
-        };
+        let mut tree = Self { entries, leaf_id };
         let mut seen = std::collections::HashSet::new();
         for entry in &tree.entries {
             if entry
@@ -103,21 +97,21 @@ impl<'de> Deserialize<'de> for SessionTree {
                 .as_ref()
                 .is_some_and(|parent| !seen.contains(parent))
             {
-                return Err(serde::de::Error::custom(
+                return Err(String::from(
                     "session history parent missing or out of order",
                 ));
             }
             match &entry.kind {
                 EntryKind::BranchSummary { from_id, .. } if !seen.contains(from_id) => {
-                    return Err(serde::de::Error::custom("branch summary history missing"));
+                    return Err(String::from("branch summary history missing"));
                 }
                 EntryKind::Compaction { first_kept_id, .. } if !seen.contains(first_kept_id) => {
-                    return Err(serde::de::Error::custom("compaction history missing"));
+                    return Err(String::from("compaction history missing"));
                 }
                 _ => {}
             }
             if !seen.insert(entry.id.clone()) {
-                return Err(serde::de::Error::custom("duplicate session history id"));
+                return Err(String::from("duplicate session history id"));
             }
         }
         if tree
@@ -125,7 +119,7 @@ impl<'de> Deserialize<'de> for SessionTree {
             .as_ref()
             .is_some_and(|leaf| !seen.contains(leaf))
         {
-            return Err(serde::de::Error::custom("session history leaf missing"));
+            return Err(String::from("session history leaf missing"));
         }
         for index in 0..tree.entries.len() {
             let messages = match &tree.entries[index].kind {
@@ -138,9 +132,7 @@ impl<'de> Deserialize<'de> for SessionTree {
                     let branch = tree.branch_ending_at(tree.entries[index].parent_id.as_ref());
                     let Some(kept) = branch.iter().position(|entry| entry.id == *first_kept_id)
                     else {
-                        return Err(serde::de::Error::custom(
-                            "compaction boundary outside history",
-                        ));
+                        return Err(String::from("compaction boundary outside history"));
                     };
                     branch[..kept]
                         .iter()
@@ -162,7 +154,7 @@ impl<'de> Deserialize<'de> for SessionTree {
                         .iter()
                         .any(|receipt| !receipts.contains(receipt))
                     {
-                        return Err(serde::de::Error::custom(
+                        return Err(String::from(
                             "event summary receipt has no matching history",
                         ));
                     }
@@ -176,7 +168,7 @@ impl<'de> Deserialize<'de> for SessionTree {
                 EntryKind::BranchSummary { event_receipts, .. }
                 | EntryKind::Compaction { event_receipts, .. } => {
                     if receipts.is_empty() && !event_receipts.is_empty() {
-                        return Err(serde::de::Error::custom(
+                        return Err(String::from(
                             "summary receipts have no retained event history",
                         ));
                     }
@@ -186,6 +178,19 @@ impl<'de> Deserialize<'de> for SessionTree {
             }
         }
         Ok(tree)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionTree {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Stored {
+            #[serde(default)]
+            entries: Vec<SessionEntry>,
+            leaf_id: Option<EntryId>,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        Self::rebuild(stored.entries, stored.leaf_id).map_err(serde::de::Error::custom)
     }
 }
 

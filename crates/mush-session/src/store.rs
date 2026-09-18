@@ -39,6 +39,13 @@ impl SessionLease {
 
 pub struct SessionStore {
     base_dir: PathBuf,
+    logged: std::sync::Mutex<std::collections::HashMap<SessionId, Logged>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Logged {
+    entries: usize,
+    bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +58,34 @@ pub struct SessionListReport {
 pub struct IgnoredSessionFile {
     pub path: PathBuf,
     pub reason: String,
+}
+
+#[derive(serde::Serialize)]
+struct StoredSession<'a> {
+    meta: &'a SessionMeta,
+    tree: StoredTree<'a>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    panes: &'a [crate::session::PaneSession],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_prompt: &'a Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct StoredTree<'a> {
+    leaf_id: Option<&'a crate::tree::EntryId>,
+}
+
+impl<'a> From<&'a Session> for StoredSession<'a> {
+    fn from(session: &'a Session) -> Self {
+        Self {
+            meta: &session.meta,
+            tree: StoredTree {
+                leaf_id: session.conversation.leaf_id(),
+            },
+            panes: &session.panes,
+            system_prompt: &session.system_prompt,
+        }
+    }
 }
 
 impl SessionStore {
@@ -127,7 +162,10 @@ impl SessionStore {
     }
 
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dir,
+            logged: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     pub fn init(&self) -> Result<(), StoreError> {
@@ -139,10 +177,70 @@ impl SessionStore {
         self.base_dir.join(format!("{id}.json"))
     }
 
+    pub fn history_path(&self, id: &SessionId) -> PathBuf {
+        self.base_dir.join(format!("{id}.history.jsonl"))
+    }
+
+    fn logged(&self, id: &SessionId) -> Option<Logged> {
+        let logged = self
+            .logged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .copied()?;
+        let on_disk = std::fs::metadata(self.history_path(id)).ok()?.len();
+        (on_disk == logged.bytes).then_some(logged)
+    }
+
+    fn remember(&self, id: &SessionId, logged: Logged) {
+        self.logged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), logged);
+    }
+
+    fn append_history(&self, session: &Session) -> Result<(), StoreError> {
+        let id = &session.meta.id;
+        let entries = session.conversation.tree().entries();
+        let path = self.history_path(id);
+        let known = self
+            .logged(id)
+            .filter(|logged| logged.entries <= entries.len());
+        let start = known.map_or(0, |logged| logged.entries);
+        let mut appended = Vec::new();
+        for entry in &entries[start..] {
+            serde_json::to_writer(&mut appended, entry)?;
+            appended.push(b'\n');
+        }
+        let bytes = match known {
+            Some(logged) => {
+                if !appended.is_empty() {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+                    file.write_all(&appended)?;
+                }
+                logged.bytes + appended.len() as u64
+            }
+            None => {
+                mush_ai::private_io::write_private(&path, &appended)?;
+                appended.len() as u64
+            }
+        };
+        self.remember(
+            id,
+            Logged {
+                entries: entries.len(),
+                bytes,
+            },
+        );
+        Ok(())
+    }
+
     pub fn save(&self, session: &Session) -> Result<(), StoreError> {
         self.init()?;
+        self.append_history(session)?;
         let path = self.session_path(&session.meta.id);
-        let json = serde_json::to_string_pretty(session)?;
+        let json = serde_json::to_string_pretty(&StoredSession::from(session))?;
         mush_ai::private_io::write_private(&path, json)?;
         Ok(())
     }
@@ -153,7 +251,27 @@ impl SessionStore {
             return Err(StoreError::NotFound(id.to_string()));
         }
         let json = std::fs::read_to_string(path)?;
-        let session: Session = serde_json::from_str(&json)?;
+        let mut session: Session = serde_json::from_str(&json)?;
+        let history = self.history_path(id);
+        let Ok(bytes) = std::fs::read(&history) else {
+            return Ok(session);
+        };
+        let mut entries = Vec::new();
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            entries.push(serde_json::from_slice(line)?);
+        }
+        let logged = Logged {
+            entries: entries.len(),
+            bytes: bytes.len() as u64,
+        };
+        let tree =
+            crate::tree::SessionTree::rebuild(entries, session.conversation.leaf_id().cloned())
+                .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+        session.conversation = crate::ConversationState::from_tree(tree);
+        self.remember(id, logged);
         Ok(session)
     }
 
@@ -224,6 +342,11 @@ impl SessionStore {
             std::fs::remove_file(path)?;
         }
         let _ = std::fs::remove_file(self.lease_path(id));
+        let _ = std::fs::remove_file(self.history_path(id));
+        self.logged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         Ok(())
     }
 }
@@ -277,6 +400,15 @@ mod tests {
         (dir, store)
     }
 
+    fn user(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::from_ms(1000))
+                .build(),
+        )
+    }
+
     #[test]
     fn resolve_accepts_an_unambiguous_id_prefix() {
         let (_dir, store) = temp_store();
@@ -314,6 +446,84 @@ mod tests {
             }
             other => panic!("expected AmbiguousId, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_session_saved_twice_appends_only_the_new_history() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        store.save(&session).unwrap();
+        let first = std::fs::metadata(store.history_path(&session.meta.id))
+            .unwrap()
+            .len();
+
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        let second = std::fs::metadata(store.history_path(&session.meta.id))
+            .unwrap()
+            .len();
+
+        assert!(second > first, "{second} should be past {first}");
+        let history = std::fs::read_to_string(store.history_path(&session.meta.id)).unwrap();
+        assert_eq!(history.lines().count(), 2);
+        assert!(history.starts_with(&history[..first as usize]));
+
+        let loaded = store.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 2);
+    }
+
+    #[test]
+    fn the_session_file_carries_no_history() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("a message that only lives in the history log"));
+        store.save(&session).unwrap();
+
+        let json = std::fs::read_to_string(store.session_path(&session.meta.id)).unwrap();
+        assert!(!json.contains("a message that only lives in the history log"));
+        assert!(json.contains("leaf_id"));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("messages").is_none());
+        assert!(value["tree"].get("entries").is_none());
+    }
+
+    #[test]
+    fn an_old_session_file_keeps_working_and_migrates_on_save() {
+        let (dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("from the old format"));
+        let legacy = serde_json::to_string_pretty(&session).unwrap();
+        assert!(legacy.contains("from the old format"));
+        let _ = dir;
+        store.init().unwrap();
+        std::fs::write(store.session_path(&session.meta.id), &legacy).unwrap();
+
+        let loaded = store.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 1);
+        assert!(!store.history_path(&session.meta.id).exists());
+
+        store.save(&loaded).unwrap();
+        assert!(store.history_path(&session.meta.id).exists());
+        let json = std::fs::read_to_string(store.session_path(&session.meta.id)).unwrap();
+        assert!(!json.contains("from the old format"));
+        assert_eq!(store.load(&session.meta.id).unwrap().context().len(), 1);
+    }
+
+    #[test]
+    fn a_history_log_that_does_not_match_its_record_is_rewritten() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        store.save(&session).unwrap();
+
+        std::fs::write(store.history_path(&session.meta.id), b"").unwrap();
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+
+        let history = std::fs::read_to_string(store.history_path(&session.meta.id)).unwrap();
+        assert_eq!(history.lines().count(), 2);
+        assert_eq!(store.load(&session.meta.id).unwrap().context().len(), 2);
     }
 
     #[test]

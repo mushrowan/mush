@@ -120,8 +120,12 @@ fn cross_process_saved_prefix_and_acknowledgment() {
     );
     assert_eq!(saved.context().len(), 3);
     assert!(inbox.pending().unwrap().is_empty());
-    let files: Vec<_> = fs::read_dir(dir.path().join("sessions")).unwrap().collect();
-    assert_eq!(files.len(), 1);
+    let mut files: Vec<_> = fs::read_dir(dir.path().join("sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, [format!("{id}.history.jsonl"), format!("{id}.json")]);
 }
 
 #[test]
