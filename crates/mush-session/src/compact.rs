@@ -709,9 +709,16 @@ pub async fn try_llm_compact(
         }
     };
 
+    let summary = with_file_operations(summary, &messages[..split_at]);
     let mut result = compact_with_summary(messages, &summary, keep_recent);
     result.diagnostics = diagnostics;
     Ok(result)
+}
+
+fn with_file_operations(mut summary: String, summarised: &[Message]) -> String {
+    let ops = crate::file_ops::FileOperations::from_messages(summarised);
+    summary.push_str(&ops.render());
+    summary
 }
 
 pub async fn summarise_branch(
@@ -725,7 +732,7 @@ pub async fn summarise_branch(
     let compact_options = compaction_stream_options(model, options, false);
     call_for_text(registry, model, &context, &compact_options)
         .await
-        .map(|outcome| outcome.text)
+        .map(|outcome| with_file_operations(outcome.text, abandoned))
         .map_err(|error| error.failure.to_string())
 }
 
@@ -1889,6 +1896,79 @@ mod tests {
 
         assert_eq!(result.summary, "summary after trim");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_summary_ends_with_the_files_the_summarised_stretch_touched() {
+        struct FixedProvider;
+
+        #[async_trait::async_trait]
+        impl ApiProvider for FixedProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<EventStream, ProviderError> {
+                let message = AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                Ok(Box::pin(futures::stream::iter(vec![
+                    StreamEvent::TextDelta {
+                        content_index: 0,
+                        delta: "## Goal\nship it".into(),
+                    },
+                    StreamEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    },
+                ])))
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(FixedProvider));
+        let mut msgs: Vec<Message> = vec![user_msg("edit the thing"), assistant_msg("on it")];
+        msgs.push(Message::ToolResult(ToolResultMessage {
+            tool_call_id: "tc".into(),
+            tool_name: "ipython".into(),
+            content: vec![],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+            details: Some(serde_json::json!({
+                "diffs": [{ "path": "src/thing.rs", "diff": "" }]
+            })),
+        }));
+        for i in 0..6 {
+            msgs.push(user_msg(&format!("later {i}")));
+        }
+
+        let result = llm_compact(
+            msgs,
+            &registry,
+            &test_model(),
+            &StreamOptions::default(),
+            Some(4),
+            CompactionFocus::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            result.summary,
+            "## Goal\nship it\n\n<modified-files>\nsrc/thing.rs\n</modified-files>"
+        );
+        let Message::User(first) = &result.messages[0] else {
+            panic!("{:?}", result.messages[0]);
+        };
+        assert!(first.text().contains("<modified-files>"));
     }
 
     #[test]
