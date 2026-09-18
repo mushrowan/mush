@@ -1,0 +1,149 @@
+#![expect(clippy::unwrap_used)]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let (mut socket, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "no request arrived");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("fixture accept: {error}"),
+            }
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let start = loop {
+            if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                break index + 4;
+            }
+            let mut buffer = [0u8; 8192];
+            let n = socket.read(&mut buffer).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buffer[..n]);
+        };
+        let headers = String::from_utf8_lossy(&bytes[..start]).to_ascii_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        while bytes.len() < start + length {
+            let mut buffer = [0u8; 8192];
+            let n = socket.read(&mut buffer).unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&buffer[..n]);
+        }
+        let body = concat!(
+            "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"done\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":50,\"output_tokens\":1}}}\n\n",
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    })
+}
+
+#[test]
+fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "rlm = false\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let model = mush_ai::types::Model::builder()
+        .id("gpt-fixture".into())
+        .name("fixture".into())
+        .provider(mush_ai::types::Provider::Custom("fixture".into()))
+        .api(mush_ai::types::Api::OpenaiResponses)
+        .base_url(format!("http://{}", listener.local_addr().unwrap()).into())
+        .context_window(mush_ai::types::TokenCount::new(1_000_000))
+        .max_output_tokens(mush_ai::types::TokenCount::new(64))
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    let server = serve_one_reply(listener);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", dir.path())
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("data"))
+        .env("MUSH_CONFIG_DIR", &config)
+        .current_dir(dir.path())
+        .args([
+            "--no-tools",
+            "--no-session",
+            "--no-skills",
+            "--no-context-files",
+            "--model",
+            "gpt-fixture",
+            "--mode",
+            "json",
+            "-p",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
+        .collect();
+    assert_eq!(lines[0]["type"], "session");
+    assert_eq!(lines[0]["model"], "gpt-fixture");
+    let types: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line["type"].as_str())
+        .collect();
+    assert!(types.contains(&"message_end"), "{types:?}");
+    assert!(types.contains(&"stream_event"), "{types:?}");
+    assert_eq!(types.last(), Some(&"agent_end"), "{types:?}");
+    assert!(
+        lines.iter().any(|line| line["event"]["delta"] == "done"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn json_mode_needs_a_prompt() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .env_clear()
+        .args(["--mode", "json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--prompt"), "{stderr}");
+}

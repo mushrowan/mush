@@ -18,6 +18,12 @@ use setup::{
     format_error,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum OutputMode {
+    Text,
+    Json,
+}
+
 #[derive(Parser)]
 #[command(
     name = "mush",
@@ -31,6 +37,9 @@ struct Cli {
 
     #[arg(short, long, alias = "print", num_args = 1.., trailing_var_arg = true)]
     prompt: Vec<String>,
+
+    #[arg(long, value_enum, default_value_t = OutputMode::Text, requires = "prompt")]
+    mode: OutputMode,
 
     #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "fork"])]
     continue_recent: bool,
@@ -602,6 +611,18 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         .cancel
         .clone()
         .ok_or_else(|| eyre!("missing cancellation token"))?;
+    let json = cli.mode == OutputMode::Json;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "session",
+                "id": session.meta.id,
+                "model": session.meta.model_id,
+                "cwd": setup.client.cwd,
+            })
+        );
+    }
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
     let mut in_text = false;
     let mut transcript = headless::Transcript::default();
@@ -636,8 +657,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         if transcript.apply(&mut session, &event) && !cli.no_session {
             store.save(&session)?;
         }
+        if json {
+            println!("{}", serde_json::to_string(&event)?);
+        }
         match event {
             AgentEvent::AgentEnd => ended = true,
+            AgentEvent::StreamEvent { .. } if json => {}
             AgentEvent::StreamEvent { event } => match event {
                 StreamEvent::TextDelta { delta, .. } => {
                     if !in_text {
