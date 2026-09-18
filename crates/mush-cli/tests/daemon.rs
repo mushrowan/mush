@@ -16,7 +16,7 @@ struct Daemon {
 impl Daemon {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("daemon.sock");
+        let socket = dir.path().join("mush").join("daemon.sock");
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
         command.env_clear();
         for (key, value) in env(dir.path()) {
@@ -58,6 +58,16 @@ impl Daemon {
             cwd: self.dir.path().to_path_buf(),
             env: env(self.dir.path()),
         }
+    }
+
+    fn cli(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+        command.env_clear();
+        for (key, value) in env(self.dir.path()) {
+            command.env(key, value);
+        }
+        command.current_dir(self.dir.path()).stdin(Stdio::null());
+        command
     }
 }
 
@@ -403,4 +413,29 @@ async fn a_session_owned_by_a_worker_refuses_a_second_opener() {
         SupervisorReply::Done
     ));
     assert!(!store.is_leased(&id));
+}
+
+#[tokio::test]
+async fn the_cli_lists_and_renames_a_live_agent() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+
+    let renamed = daemon
+        .cli()
+        .args(["rename", &descriptor.session_id[..8], "scout", "one"])
+        .output()
+        .unwrap();
+    assert!(renamed.status.success(), "{renamed:?}");
+    assert!(String::from_utf8_lossy(&renamed.stdout).contains("renamed"));
+
+    let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
+    assert!(listed.status.success(), "{listed:?}");
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows[0]["name"], "scout one");
+    assert_eq!(rows[0]["id"], descriptor.session_id[..8]);
+    assert_eq!(rows[0]["status"], "idle");
 }

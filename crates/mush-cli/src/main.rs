@@ -294,6 +294,11 @@ enum Command {
     Attach {
         agent: String,
     },
+    Rename {
+        agent: String,
+        #[arg(num_args = 1.., trailing_var_arg = true)]
+        name: Vec<String>,
+    },
     Stop {
         id: String,
     },
@@ -374,6 +379,9 @@ async fn main() -> Result<()> {
             | Command::Attach { .. },
         ) => unreachable!(),
         Some(Command::List { all, json }) => return agents::list(all, json).await,
+        Some(Command::Rename { agent, name }) => {
+            return agents::rename(&agent, &name.join(" ")).await;
+        }
         Some(Command::Stop { id }) => return daemon::stop(&id).await,
         Some(Command::Send { session, text }) => {
             return daemon::send(&session, &text.join(" ")).await;

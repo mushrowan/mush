@@ -196,6 +196,56 @@ fn saved_sessions() -> Vec<SessionMeta> {
         .collect()
 }
 
+fn matching<'a>(
+    workers: &'a [WorkerDescriptor],
+    selector: &str,
+) -> Result<Option<&'a WorkerDescriptor>> {
+    let mut found = workers
+        .iter()
+        .filter(|worker| worker.session_id.starts_with(selector));
+    let first = found.next();
+    if found.next().is_some() {
+        return Err(eyre!("{selector} matches more than one agent"));
+    }
+    Ok(first)
+}
+
+pub async fn rename(selector: &str, name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(eyre!("a name cannot be empty"));
+    }
+    let workers = live().await?;
+    if let Some(worker) = matching(&workers, selector)? {
+        let mut connection = mush_daemon::DaemonConnection::connect(&worker.socket).await?;
+        mush_runtime::AgentConnection::send(
+            &mut connection,
+            mush_runtime::ClientCommand::Session(mush_runtime::SessionCommand::Name {
+                title: Some(name.to_string()),
+            }),
+        )
+        .await?;
+        println!("renamed {} to {name}", short_id(&worker.session_id));
+        return Ok(());
+    }
+    let store = SessionStore::new(SessionStore::default_dir());
+    let meta = store
+        .resolve(selector)
+        .map_err(|error| eyre!("failed to resolve session: {error}"))?;
+    if store.is_leased(&meta.id) {
+        return Err(eyre!("{} is open elsewhere", short_id(meta.id.as_str())));
+    }
+    let mut session = store
+        .load(&meta.id)
+        .map_err(|error| eyre!("failed to load session: {error}"))?;
+    session.meta.title = Some(name.to_string());
+    store
+        .save(&session)
+        .map_err(|error| eyre!("failed to save session: {error}"))?;
+    println!("renamed {} to {name}", short_id(meta.id.as_str()));
+    Ok(())
+}
+
 pub async fn list(all: bool, json: bool) -> Result<()> {
     let workers = live().await?;
     let saved = if all { saved_sessions() } else { Vec::new() };
