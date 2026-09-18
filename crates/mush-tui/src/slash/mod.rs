@@ -115,6 +115,7 @@ pub enum SlashAction {
         query: String,
     },
     Cost,
+    Context,
     Credits,
     Name {
         title: Option<String>,
@@ -556,6 +557,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             query: args.to_string(),
         }),
         "cost" => Ok(SlashAction::Cost),
+        "context" | "usage" => Ok(SlashAction::Context),
         "skills" => Ok(SlashAction::Skills),
         "session" => Ok(SlashAction::SessionInfo),
         "rlm-max-depth" if args.is_empty() => Ok(SlashAction::RlmMaxDepth { max_depth: None }),
@@ -787,6 +789,12 @@ mod tests {
                 instructions: instructions.map(str::to_string),
             },
         }
+    }
+
+    #[test]
+    fn context_and_usage_are_the_same_command() {
+        assert_eq!(parse("/context").unwrap(), SlashAction::Context);
+        assert_eq!(parse("/usage").unwrap(), SlashAction::Context);
     }
 
     #[test]

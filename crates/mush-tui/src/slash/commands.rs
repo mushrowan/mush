@@ -47,6 +47,9 @@ pub async fn handle(
             help.push_str("  /undo          - revert last turn\n");
             help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
             help.push_str("  /cost          - show session cost\n");
+            help.push_str(
+                "  /context       - tokens, cost and context for this agent and its children\n",
+            );
             help.push_str("  /name [title]  - show or set the session title\n");
             help.push_str("  /session       - show the session id, file and message counts\n");
             help.push_str("  /rlm-max-depth - show or set how deep subagents may nest\n");
@@ -223,6 +226,21 @@ pub async fn handle(
         SlashAction::Cost => {
             app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
+            None
+        }
+        SlashAction::Context => {
+            let title = app.session_title.clone().unwrap_or_else(|| {
+                let id = tui_config.session_id.to_string();
+                format!("session {}", &id[..8.min(id.len())])
+            });
+            let tree = crate::context_view::agent_tree(
+                &title,
+                app.model_id.as_str(),
+                &app.stats,
+                &app.children,
+            );
+            let text = crate::context_view::format_context(&tree, &app.stats);
+            app.push_system_message(text);
             None
         }
         SlashAction::Agents => {

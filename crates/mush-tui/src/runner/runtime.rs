@@ -42,6 +42,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("export", "save conversation as markdown"),
     ("undo", "revert last turn"),
     ("search", "search conversation"),
+    (
+        "context",
+        "token, cost and context usage for this agent and its children",
+    ),
     ("cost", "show session cost"),
     ("name", "show or set the session title"),
     ("session", "show the session id, file and message counts"),
