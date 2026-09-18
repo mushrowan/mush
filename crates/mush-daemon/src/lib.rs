@@ -1,5 +1,6 @@
 pub mod build;
 pub mod client;
+pub mod election;
 pub mod protocol;
 pub mod supervisor;
 pub mod worker;

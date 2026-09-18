@@ -300,6 +300,8 @@ enum Command {
         socket: std::path::PathBuf,
         #[arg(long, value_name = "FILE")]
         descriptor: Option<std::path::PathBuf>,
+        #[arg(long, value_name = "SOCKET")]
+        daemon_socket: Option<std::path::PathBuf>,
     },
     Daemon {
         #[arg(long, value_name = "SOCKET")]
@@ -394,10 +396,16 @@ async fn main() -> Result<()> {
 
     mush_agent::truncation::cleanup();
 
-    if let Some(Command::Worker { socket, descriptor }) = &cli.command {
+    if let Some(Command::Worker {
+        socket,
+        descriptor,
+        daemon_socket,
+    }) = &cli.command
+    {
         let socket = socket.clone();
         let descriptor = descriptor.clone();
-        return worker_mode(cli, socket, descriptor).await;
+        let daemon_socket = daemon_socket.clone();
+        return worker_mode(cli, socket, descriptor, daemon_socket).await;
     }
     if let Some(Command::Daemon { socket }) = &cli.command {
         let socket = socket
@@ -937,6 +945,7 @@ async fn daemon_mode(socket: &std::path::Path) -> Result<()> {
     let program = std::env::current_exe()?;
     let supervisor = mush_daemon::Supervisor::new(
         program,
+        socket.to_path_buf(),
         mush_daemon::workers_dir(),
         mush_session::data_dir().join("workers"),
     );
@@ -952,6 +961,7 @@ async fn worker_mode(
     cli: Cli,
     socket: std::path::PathBuf,
     descriptor: Option<std::path::PathBuf>,
+    daemon_socket: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let listener = mush_daemon::bind(&socket)?;
     let descriptor = descriptor.map(|path| {
@@ -983,6 +993,14 @@ async fn worker_mode(
             shutdown.cancel();
         }
     });
+    if let Some(daemon_socket) = daemon_socket {
+        tokio::spawn(mush_daemon::election::watch(
+            daemon_socket,
+            std::env::current_exe()?,
+            mush_session::data_dir().join("workers"),
+            shutdown.clone(),
+        ));
+    }
     let served = mush_daemon::serve(connection, listener, descriptor, shutdown).await;
     let _ = std::fs::remove_file(&socket);
     served?;

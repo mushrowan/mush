@@ -11,6 +11,7 @@ use crate::protocol::{decode, encode};
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const ADOPTION_POLL: Duration = Duration::from_millis(500);
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(250),
     Duration::from_secs(1),
@@ -116,12 +117,13 @@ pub struct Supervisor {
 
 struct Nursery {
     program: PathBuf,
+    socket: PathBuf,
     workers_dir: PathBuf,
     log_dir: PathBuf,
     residents: std::sync::Mutex<std::collections::HashMap<String, Resident>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Recipe {
     args: Vec<String>,
     cwd: PathBuf,
@@ -137,10 +139,11 @@ struct Resident {
 
 impl Supervisor {
     #[must_use]
-    pub fn new(program: PathBuf, workers_dir: PathBuf, log_dir: PathBuf) -> Self {
+    pub fn new(program: PathBuf, socket: PathBuf, workers_dir: PathBuf, log_dir: PathBuf) -> Self {
         Self {
             nursery: std::sync::Arc::new(Nursery {
                 program,
+                socket,
                 workers_dir,
                 log_dir,
                 residents: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -246,6 +249,73 @@ impl Nursery {
         self.log_dir.join(format!("{name}.log"))
     }
 
+    fn recipe_path(&self, name: &str) -> PathBuf {
+        self.workers_dir.join(format!("{name}.recipe"))
+    }
+
+    fn write_recipe(&self, name: &str, recipe: &Recipe) {
+        if let Ok(bytes) = serde_json::to_vec(recipe) {
+            let _ = mush_ai::private_io::write_private(&self.recipe_path(name), bytes);
+        }
+    }
+
+    fn read_recipe(&self, name: &str) -> Option<Recipe> {
+        let bytes = std::fs::read(self.recipe_path(name)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn adopt(self: &std::sync::Arc<Self>) {
+        for (name, descriptor) in self.descriptors() {
+            if self.residents().contains_key(&name) || descriptor.failed.is_some() {
+                continue;
+            }
+            match (descriptor.alive(), self.read_recipe(&name)) {
+                (true, Some(recipe)) => {
+                    tracing::info!(name, pid = descriptor.pid, "adopted a running worker");
+                    self.remember(&name, recipe, descriptor.pid);
+                    let nursery = std::sync::Arc::clone(self);
+                    tokio::spawn(async move {
+                        nursery.watch_adopted(name, descriptor).await;
+                    });
+                }
+                (false, Some(recipe)) => {
+                    tracing::warn!(name, "a worker died while no daemon was running");
+                    let _ = std::fs::remove_file(&descriptor.socket);
+                    self.remember(&name, recipe.clone(), descriptor.pid);
+                    let nursery = std::sync::Arc::clone(self);
+                    tokio::spawn(async move {
+                        nursery
+                            .recover(name, recipe, "no daemon was watching".into())
+                            .await;
+                    });
+                }
+                (false, None) => self.forget(&name, &descriptor),
+                (true, None) => {}
+            }
+        }
+    }
+
+    async fn watch_adopted(self: std::sync::Arc<Self>, name: String, descriptor: WorkerDescriptor) {
+        while descriptor.alive() {
+            tokio::time::sleep(ADOPTION_POLL).await;
+            let known = {
+                let residents = self.residents();
+                residents
+                    .get(&name)
+                    .is_some_and(|resident| !resident.stopping)
+            };
+            if !known {
+                return;
+            }
+        }
+        if !self.descriptor_path(&name).exists() {
+            self.residents().remove(&name);
+            return;
+        }
+        self.worker_exited(&name, Err(io::Error::other("an adopted worker vanished")))
+            .await;
+    }
+
     fn residents(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Resident>> {
         self.residents
             .lock()
@@ -253,6 +323,7 @@ impl Nursery {
     }
 
     fn remember(&self, name: &str, recipe: Recipe, pid: u32) {
+        self.write_recipe(name, &recipe);
         self.residents().insert(
             name.to_string(),
             Resident {
@@ -263,34 +334,46 @@ impl Nursery {
         );
     }
 
-    fn roster(&self) -> Vec<WorkerDescriptor> {
+    fn descriptors(&self) -> Vec<(String, WorkerDescriptor)> {
         let Ok(entries) = std::fs::read_dir(&self.workers_dir) else {
             return Vec::new();
         };
-        let mut workers = Vec::new();
+        let mut found = Vec::new();
         for path in entries
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
         {
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string);
             let descriptor = std::fs::read(&path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<WorkerDescriptor>(&bytes).ok());
-            match descriptor {
-                Some(descriptor) if descriptor.alive() || descriptor.failed.is_some() => {
-                    workers.push(descriptor);
-                }
-                Some(descriptor) => {
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(&descriptor.socket);
-                }
-                None => {
+            match (name, descriptor) {
+                (Some(name), Some(descriptor)) => found.push((name, descriptor)),
+                _ => {
                     let _ = std::fs::remove_file(&path);
                 }
             }
         }
-        workers.sort_by_key(|worker| worker.started_at);
-        workers
+        found.sort_by_key(|(_, worker)| worker.started_at);
+        found
+    }
+
+    fn roster(&self) -> Vec<WorkerDescriptor> {
+        self.descriptors()
+            .into_iter()
+            .map(|(_, descriptor)| descriptor)
+            .filter(|descriptor| descriptor.alive() || descriptor.failed.is_some())
+            .collect()
+    }
+
+    fn forget(&self, name: &str, descriptor: &WorkerDescriptor) {
+        let _ = std::fs::remove_file(self.descriptor_path(name));
+        let _ = std::fs::remove_file(self.recipe_path(name));
+        let _ = std::fs::remove_file(&descriptor.socket);
     }
 
     fn name_of(&self, session_id: &str) -> Option<String> {
@@ -306,6 +389,9 @@ impl Nursery {
             if let Some(resident) = residents.get_mut(&name) {
                 resident.stopping = true;
             }
+        }
+        if let Some(name) = worker.socket.file_stem().and_then(|stem| stem.to_str()) {
+            let _ = std::fs::remove_file(self.recipe_path(name));
         }
         if worker.failed.is_some() || worker.pid == 0 {
             let _ = std::fs::remove_file(descriptor_of(worker));
@@ -354,6 +440,8 @@ impl Nursery {
             .arg(&socket)
             .arg("--descriptor")
             .arg(&descriptor_path)
+            .arg("--daemon-socket")
+            .arg(&self.socket)
             .current_dir(cwd)
             .env_clear()
             .envs(env.iter().map(|(key, value)| (key, value)))
@@ -401,6 +489,7 @@ impl Nursery {
             match residents.get(name) {
                 Some(resident) if resident.stopping => {
                     residents.remove(name);
+                    let _ = std::fs::remove_file(self.recipe_path(name));
                     None
                 }
                 Some(resident) => Some((resident.recipe.clone(), resident.pid)),
@@ -410,6 +499,7 @@ impl Nursery {
             return;
         };
         if matches!(&status, Ok(status) if status.success()) {
+            let _ = std::fs::remove_file(self.recipe_path(name));
             self.residents().remove(name);
             return;
         }
@@ -470,6 +560,7 @@ impl Nursery {
         }
         tracing::error!(name, %last, "worker gave up after three restarts");
         self.mark_failed(name, recipe, &last);
+        let _ = std::fs::remove_file(self.recipe_path(name));
         self.residents().remove(name);
     }
 
@@ -566,6 +657,7 @@ pub fn bind_or_reclaim(path: &Path) -> io::Result<UnixListener> {
 
 pub async fn run(socket: &Path, supervisor: Supervisor) -> io::Result<()> {
     let listener = bind_or_reclaim(socket)?;
+    supervisor.nursery.adopt();
     let result = serve(&listener, &supervisor).await;
     let _ = std::fs::remove_file(socket);
     result

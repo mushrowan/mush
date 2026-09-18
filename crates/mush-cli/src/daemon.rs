@@ -1,7 +1,5 @@
 use std::io;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, eyre};
@@ -41,8 +39,12 @@ pub async fn ensure_running() -> io::Result<PathBuf> {
             }
         }
     }
-    let _ = std::fs::remove_file(&socket);
-    spawn(&socket)?;
+    mush_daemon::election::elect(
+        &socket,
+        &std::env::current_exe()?,
+        &mush_session::data_dir(),
+    )
+    .await?;
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
         if answers(&socket) {
@@ -67,25 +69,6 @@ async fn wait_until_gone(socket: &Path) {
     while answers(socket) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-fn spawn(socket: &Path) -> io::Result<()> {
-    let log_dir = mush_session::data_dir();
-    std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("daemon.log"))?;
-    std::process::Command::new(std::env::current_exe()?)
-        .arg("daemon")
-        .arg("--socket")
-        .arg(socket)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log))
-        .process_group(0)
-        .spawn()?;
-    Ok(())
 }
 
 pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescriptor> {

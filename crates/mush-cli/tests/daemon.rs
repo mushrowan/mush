@@ -94,6 +94,22 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        let socket = self.socket.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown),
+                )
+                .await;
+            });
+        })
+        .join()
+        .ok();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -633,4 +649,59 @@ async fn a_worker_that_cannot_restart_is_marked_failed() {
         panic!("expected a roster")
     };
     assert!(workers.is_empty());
+}
+
+#[tokio::test]
+async fn a_worker_elects_a_replacement_daemon_and_it_adopts_the_worker() {
+    let mut daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    let _ = std::fs::remove_file(&daemon.socket);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(SupervisorReply::Status { workers, .. }) = tokio::time::timeout(
+            Duration::from_secs(5),
+            mush_daemon::supervisor::request(&daemon.socket, &SupervisorRequest::Status),
+        )
+        .await
+        .unwrap_or(Err(std::io::Error::other("no daemon")))
+        {
+            assert_eq!(workers, 1);
+            break;
+        }
+        assert!(Instant::now() < deadline, "no replacement daemon appeared");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    assert!(alive(descriptor.pid));
+    let pid = rustix::process::Pid::from_raw(i32::try_from(descriptor.pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await
+        else {
+            panic!("expected a roster")
+        };
+        if workers
+            .iter()
+            .any(|worker| worker.pid != descriptor.pid && worker.failed.is_none())
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the adopted worker was never restarted: {workers:?}\n{}",
+            std::fs::read_to_string(daemon.dir.path().join("data/workers/daemon.log"))
+                .unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
