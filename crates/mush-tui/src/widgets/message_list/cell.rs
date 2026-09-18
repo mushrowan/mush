@@ -75,6 +75,7 @@ pub(super) fn render_cell(
 
     if let Some(cell) = cell {
         render_diffs(cell, width, lines, style, &mut gutter);
+        render_sent_messages(cell, width, lines, style, &mut gutter);
         if cell.images > 0 {
             let plural = if cell.images == 1 { "" } else { "s" };
             let gutter_text = gutter.next(lines);
@@ -202,6 +203,7 @@ impl CellOutputView {
                 push(&cell.stderr, theme.dim, &mut blocks);
                 if let Some(result) = &cell.result
                     && !is_edit_confirmation(result, cell)
+                    && !is_send_receipt(result, cell)
                 {
                     push(result, theme.tool_output, &mut blocks);
                 }
@@ -237,6 +239,46 @@ fn is_edit_confirmation(result: &str, cell: &mush_tools::ipython::CellDetails) -
     cell.diffs
         .iter()
         .any(|diff| stripped == format!("edited {}", diff.path))
+}
+
+fn is_send_receipt(result: &str, cell: &mush_tools::ipython::CellDetails) -> bool {
+    !cell.sent_messages.is_empty() && result.trim_start().starts_with("{'receipts'")
+}
+
+fn render_sent_messages(
+    cell: &mush_tools::ipython::CellDetails,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+    style: &MessageStyle<'_>,
+    gutter: &mut OutputGutter,
+) {
+    let theme = style.theme;
+    for sent in &cell.sent_messages {
+        let gutter_text = gutter.next(lines);
+        push_gutter(
+            lines,
+            gutter_text,
+            theme.dim,
+            vec![
+                Span::styled("agent message sent", theme.tool_output),
+                Span::styled(format!(" {HEADER_SEPARATOR} {}", sent.receiver), theme.dim),
+                Span::styled(format!(" ({})", sent.status), theme.dim),
+            ],
+            width,
+        );
+        if style.detail.shows_full_output() {
+            for text_line in sent.text.lines() {
+                let gutter_text = gutter.next(lines);
+                push_gutter(
+                    lines,
+                    gutter_text,
+                    theme.dim,
+                    vec![Span::styled(text_line.to_string(), theme.dim)],
+                    width,
+                );
+            }
+        }
+    }
 }
 
 fn render_diffs(

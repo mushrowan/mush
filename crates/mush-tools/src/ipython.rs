@@ -30,6 +30,13 @@ pub struct CellDiff {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentMessage {
+    pub receiver: String,
+    pub status: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellErrorDetails {
     pub ename: String,
     pub evalue: String,
@@ -47,6 +54,7 @@ pub struct CellDetails {
     pub diffs: Vec<CellDiff>,
     pub images: usize,
     pub kernel_restarted: bool,
+    pub sent_messages: Vec<SentMessage>,
 }
 
 impl CellDetails {
@@ -84,6 +92,7 @@ pub struct MushHost {
     jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
     diffs: std::sync::Mutex<std::collections::HashMap<String, Vec<CellDiff>>>,
+    sent: std::sync::Mutex<std::collections::HashMap<String, Vec<SentMessage>>>,
     extension: std::sync::RwLock<Option<Arc<dyn HostRequestHandler>>>,
 }
 
@@ -94,7 +103,50 @@ impl MushHost {
             jobs: crate::kernel_jobs::KernelJobs::default(),
             cwd,
             diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sent: std::sync::Mutex::new(std::collections::HashMap::new()),
             extension: std::sync::RwLock::new(None),
+        }
+    }
+
+    pub fn take_sent_messages(&self, origin: &str) -> Vec<SentMessage> {
+        self.sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(origin)
+            .unwrap_or_default()
+    }
+
+    fn record_sent(&self, origin: Option<&str>, payload: &Value, reply: &Value) {
+        let Some(origin) = origin else { return };
+        let text = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let receipts = reply
+            .get("receipts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut sent = self
+            .sent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = sent.entry(origin.to_string()).or_default();
+        for receipt in receipts {
+            entry.push(SentMessage {
+                receiver: receipt
+                    .get("receiver")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                status: receipt
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                text: text.clone(),
+            });
         }
     }
 
@@ -221,7 +273,17 @@ impl HostRequestHandler for MushHost {
                 Ok(json!({ "summary": summary }))
             }
             other => match self.extension() {
-                Some(extension) => extension.handle(other, payload).await,
+                Some(extension) => {
+                    let reply = extension.handle(other, payload.clone()).await?;
+                    if other == "agent_message.send" {
+                        self.record_sent(
+                            payload.get("origin").and_then(Value::as_str),
+                            &payload,
+                            &reply,
+                        );
+                    }
+                    Ok(reply)
+                }
                 None => Err(HostError(format!("unknown host request {other}"))),
             },
         }
@@ -600,6 +662,11 @@ impl AgentTool for IpythonTool {
                         .unwrap_or_default(),
                     images: 0,
                     kernel_restarted: run.kernel_restarted,
+                    sent_messages: self
+                        .mush_host
+                        .as_ref()
+                        .map(|host| host.take_sent_messages(&exec_id))
+                        .unwrap_or_default(),
                 };
                 let images = attached_images(&run.output.attachments, &mut text);
                 let mut details = details;

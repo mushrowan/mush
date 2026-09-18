@@ -263,6 +263,8 @@ class _AgentMessage:
         payload = {"message": message, "receiver_role": receiver_role, "mode": mode}
         if receiver_name is not None:
             payload["receiver_name"] = receiver_name
+        if _current_origin.get() is not None:
+            payload["origin"] = _current_origin.get()
         return await host_request("agent_message.send", payload)
 
 

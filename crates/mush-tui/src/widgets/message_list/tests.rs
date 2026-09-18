@@ -1724,6 +1724,7 @@ fn cell_details() -> mush_tools::ipython::CellDetails {
         }],
         images: 2,
         kernel_restarted: false,
+        sent_messages: vec![],
     }
 }
 
@@ -1772,6 +1773,38 @@ fn a_structured_cell_shows_duration_output_and_the_edit_summary_by_detail_level(
 }
 
 #[test]
+fn a_sent_agent_message_shows_as_a_row_and_hides_the_receipt_dict() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let cell = mush_tools::ipython::CellDetails {
+        duration_ms: 40,
+        stdout: String::new(),
+        stderr: String::new(),
+        result: Some("{'receipts': [{'receiver': 'auth', 'status': 'delivered'}]}".into()),
+        error: None,
+        diffs: vec![],
+        images: 0,
+        kernel_restarted: false,
+        sent_messages: vec![mush_tools::ipython::SentMessage {
+            receiver: "auth".into(),
+            status: "delivered".into(),
+            text: "check the regression test too".into(),
+        }],
+    };
+    app.messages.push(cell_message(cell, ToolCallStatus::Done));
+
+    app.detail = ChatDetail::Details;
+    let details = rendered_text(&all_lines(&app, 90));
+    assert!(details.contains("agent message sent"), "{details}");
+    assert!(details.contains("auth (delivered)"), "{details}");
+    assert!(!details.contains("receipts"), "{details}");
+    assert!(!details.contains("regression test"), "{details}");
+
+    app.detail = ChatDetail::All;
+    let all = rendered_text(&all_lines(&app, 90));
+    assert!(all.contains("check the regression test too"), "{all}");
+}
+
+#[test]
 fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let cell = mush_tools::ipython::CellDetails {
@@ -1791,6 +1824,7 @@ fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
         diffs: vec![],
         images: 0,
         kernel_restarted: false,
+        sent_messages: vec![],
     };
     app.messages.push(cell_message(cell, ToolCallStatus::Error));
 
