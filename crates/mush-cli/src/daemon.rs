@@ -103,43 +103,6 @@ pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescrip
     }
 }
 
-pub async fn ps() -> Result<()> {
-    let socket = mush_daemon::daemon_socket_path();
-    if !answers(&socket) {
-        println!("no daemon running");
-        return Ok(());
-    }
-    let workers = match mush_daemon::supervisor::request(&socket, &SupervisorRequest::List).await? {
-        SupervisorReply::Workers(workers) => workers,
-        SupervisorReply::Error(error) => return Err(eyre!("{error}")),
-        other => return Err(eyre!("unexpected daemon reply: {other:?}")),
-    };
-    if workers.is_empty() {
-        println!("no workers");
-        return Ok(());
-    }
-    let build = mush_daemon::build_id();
-    for worker in &workers {
-        let stale = if worker.build == build {
-            ""
-        } else {
-            ", other build"
-        };
-        println!(
-            "  {}  {} {}",
-            Style::Dim.stdout(&worker.session_id[..8.min(worker.session_id.len())]),
-            worker.model_id,
-            Style::Dim.stdout(format_args!(
-                "(pid {}, {}{stale})",
-                worker.pid,
-                worker.cwd.display()
-            )),
-        );
-    }
-    println!("\nattach with: mush --resume <id>, stop with: mush stop <id>");
-    Ok(())
-}
-
 pub async fn stop(session_id: &str) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
     if !answers(&socket) {

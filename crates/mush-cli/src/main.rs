@@ -10,7 +10,7 @@ use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_cli::output::Style;
-use mush_cli::{commands, config, daemon, logging, setup, timing};
+use mush_cli::{agents, commands, config, daemon, logging, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -283,7 +283,17 @@ enum Command {
         #[arg(long, value_name = "SOCKET")]
         socket: Option<std::path::PathBuf>,
     },
-    Ps,
+    #[command(alias = "ps", alias = "sessions")]
+    List {
+        #[arg(short, long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Agents,
+    Attach {
+        agent: String,
+    },
     Stop {
         id: String,
     },
@@ -300,7 +310,6 @@ enum Command {
         provider: Option<String>,
     },
     Models,
-    Sessions,
     Status,
     Delete {
         id: String,
@@ -309,6 +318,14 @@ enum Command {
 }
 
 impl Cli {
+    fn absorb_attach(&mut self) {
+        match self.command.take() {
+            Some(Command::Agents) => self.resume = Some(None),
+            Some(Command::Attach { agent }) => self.resume = Some(Some(agent)),
+            command => self.command = command,
+        }
+    }
+
     fn terminal_policy_overrides(&self) -> mush_tui::TerminalPolicyOverrides {
         mush_tui::TerminalPolicyOverrides {
             keyboard_enhancement: self.tui_keyboard_enhancement,
@@ -326,7 +343,8 @@ async fn main() -> Result<()> {
             color_eyre::config::Theme::new()
         })
         .install()?;
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    cli.absorb_attach();
     if let Some(Command::Control(args)) = cli.command {
         return mush_cli::control::run(args).await;
     }
@@ -348,10 +366,14 @@ async fn main() -> Result<()> {
         return daemon_mode(&socket).await;
     }
     match cli.command {
-        Some(Command::Control(_) | Command::Worker { .. } | Command::Daemon { .. }) => {
-            unreachable!()
-        }
-        Some(Command::Ps) => return daemon::ps().await,
+        Some(
+            Command::Control(_)
+            | Command::Worker { .. }
+            | Command::Daemon { .. }
+            | Command::Agents
+            | Command::Attach { .. },
+        ) => unreachable!(),
+        Some(Command::List { all, json }) => return agents::list(all, json).await,
         Some(Command::Stop { id }) => return daemon::stop(&id).await,
         Some(Command::Send { session, text }) => {
             return daemon::send(&session, &text.join(" ")).await;
@@ -360,7 +382,6 @@ async fn main() -> Result<()> {
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
         Some(Command::Models) => return commands::list_models(),
-        Some(Command::Sessions) => return commands::list_sessions(),
         Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()),
         Some(Command::Delete { id }) => return commands::delete_session(&id),
         Some(Command::Config) => return commands::open_config(),
@@ -1588,6 +1609,26 @@ mod tests {
         assert!(Cli::try_parse_from(["mush", "-c", "abc123"]).is_err());
         assert!(Cli::try_parse_from(["mush", "-c", "--resume", "abc"]).is_err());
         assert!(Cli::try_parse_from(["mush", "--resume", "a", "--fork", "b"]).is_err());
+    }
+
+    #[test]
+    fn attach_and_agents_become_a_resume_target() {
+        let mut attach = Cli::try_parse_from(["mush", "attach", "abc123"]).unwrap();
+        attach.absorb_attach();
+        assert!(attach.command.is_none());
+        assert!(matches!(attach.resume, Some(Some(id)) if id == "abc123"));
+
+        let mut agents = Cli::try_parse_from(["mush", "agents"]).unwrap();
+        agents.absorb_attach();
+        assert!(agents.command.is_none());
+        assert!(matches!(agents.resume, Some(None)));
+
+        let mut list = Cli::try_parse_from(["mush", "list", "--all"]).unwrap();
+        list.absorb_attach();
+        assert!(matches!(
+            list.command,
+            Some(Command::List { all: true, .. })
+        ));
     }
 
     fn snapshot(title: Option<&str>) -> mush_tui::SessionSnapshot {

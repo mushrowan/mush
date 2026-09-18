@@ -368,3 +368,56 @@ async fn a_prompt_after_aborting_a_hung_tool_over_the_socket_starts_a_new_turn()
     assert_eq!(asked.len(), 2);
     assert!(matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "again"));
 }
+
+#[tokio::test]
+async fn the_descriptor_follows_the_title_and_the_message_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let path = dir.path().join("worker.json");
+    let listener = bind(&socket).unwrap();
+    let (connection, _requests) = mush_runtime::testing::echo_connection();
+    let descriptor =
+        mush_daemon::Descriptor::new(path.clone(), socket.clone(), dir.path().to_path_buf());
+    let task = tokio::spawn(serve(
+        connection,
+        listener,
+        Some(descriptor),
+        Default::default(),
+    ));
+
+    let mut client = DaemonConnection::connect(&socket).await.unwrap();
+    client
+        .send(ClientCommand::Session(SessionCommand::Name {
+            title: Some("scout".into()),
+        }))
+        .await
+        .unwrap();
+    client.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut client).await;
+
+    let written = read_descriptor(&path, |written| written.messages == 2).await;
+    assert_eq!(written.title.as_deref(), Some("scout"));
+    assert!(!written.turn_active);
+    assert!(written.updated_at >= written.started_at);
+    assert!(!task.is_finished());
+}
+
+async fn read_descriptor(
+    path: &std::path::Path,
+    ready: impl Fn(&mush_daemon::WorkerDescriptor) -> bool,
+) -> mush_daemon::WorkerDescriptor {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(bytes) = std::fs::read(path)
+            && let Ok(written) = serde_json::from_slice::<mush_daemon::WorkerDescriptor>(&bytes)
+            && ready(&written)
+        {
+            return written;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the descriptor never caught up"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

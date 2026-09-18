@@ -20,42 +20,6 @@ pub fn list_models() -> Result<()> {
     Ok(())
 }
 
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
-pub fn list_sessions() -> Result<()> {
-    let store = SessionStore::new(SessionStore::default_dir());
-    let sessions: Vec<_> = store
-        .list()
-        .map_err(|e| eyre!("failed to list sessions: {e}"))?
-        .into_iter()
-        .filter(|meta| meta.parent.is_none())
-        .collect();
-
-    if sessions.is_empty() {
-        println!("no saved sessions");
-        return Ok(());
-    }
-
-    for meta in &sessions {
-        let title = meta.title.as_deref().unwrap_or("(untitled)");
-        let age = format_age(&meta.updated_at);
-        let id = short_id(&meta.id);
-        println!(
-            "  {}  {} {}",
-            Style::Dim.stdout(id),
-            title,
-            Style::Dim.stdout(format_args!(
-                "({}, {} msgs, {})",
-                meta.model_id, meta.message_count, age
-            )),
-        );
-    }
-    println!("\nresume with: mush --resume <id>");
-    Ok(())
-}
-
 pub fn delete_session(id: &str) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let session = store
@@ -371,13 +335,4 @@ pub fn logout(provider_id: Option<String>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn format_age(ts: &mush_ai::types::Timestamp) -> String {
-    let age = ts.age_display();
-    if age == "now" {
-        "just now".into()
-    } else {
-        format!("{age} ago")
-    }
 }

@@ -74,6 +74,14 @@ pub struct WorkerDescriptor {
     pub cwd: PathBuf,
     pub socket: PathBuf,
     pub started_at: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub turn_active: bool,
+    #[serde(default)]
+    pub messages: usize,
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 impl WorkerDescriptor {

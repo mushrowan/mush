@@ -145,7 +145,7 @@ fn status_file_resume_does_not_read_stdin_or_append_empty_prompt() {
 #[test]
 fn subcommands_do_not_read_stdin() {
     let dir = tempfile::tempdir().unwrap();
-    for subcommand in ["models", "sessions"] {
+    for subcommand in ["models", "list"] {
         let mut child = command(dir.path()).arg(subcommand).spawn().unwrap();
         assert!(wait(&mut child).unwrap().success());
     }

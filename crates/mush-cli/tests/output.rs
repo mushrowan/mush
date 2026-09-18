@@ -514,7 +514,7 @@ fn commands_and_config_warnings_detect_each_stream() {
         let session = mush_session::Session::new("fixture", "/fixture");
         store.save(&session).unwrap();
         let mut list = command(dir.path());
-        list.arg("sessions");
+        list.args(["list", "--all"]);
         let (status, stdout, _) = capture(list, out_tty, err_tty);
         assert!(status.success());
         assert_eq!(stdout.contains('\x1b'), out_tty);

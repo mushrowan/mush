@@ -29,6 +29,7 @@ impl Descriptor {
         cwd: std::path::PathBuf,
     ) -> Self {
         let pid = std::process::id();
+        let started_at = now_secs();
         Self {
             path,
             written: WorkerDescriptor {
@@ -39,20 +40,31 @@ impl Descriptor {
                 start_id: mush_tools::orphans::process_start_id(pid),
                 cwd,
                 socket,
-                started_at: now_secs(),
+                started_at,
+                title: None,
+                turn_active: false,
+                messages: 0,
+                updated_at: started_at,
             },
         }
     }
 
     fn refresh(&mut self, state: &ConnectionState) {
-        if self.written.session_id == state.session_id.as_str()
-            && self.written.model_id == state.model_id
-            && self.path.exists()
-        {
+        let next = WorkerDescriptor {
+            session_id: state.session_id.to_string(),
+            model_id: state.model_id.clone(),
+            title: state.title.clone(),
+            turn_active: state.turn_active,
+            messages: state.context_len,
+            ..self.written.clone()
+        };
+        if next == self.written && self.path.exists() {
             return;
         }
-        self.written.session_id = state.session_id.to_string();
-        self.written.model_id.clone_from(&state.model_id);
+        self.written = WorkerDescriptor {
+            updated_at: now_secs(),
+            ..next
+        };
         if let Ok(bytes) = serde_json::to_vec(&self.written) {
             let _ = mush_ai::private_io::write_private(&self.path, bytes);
         }
