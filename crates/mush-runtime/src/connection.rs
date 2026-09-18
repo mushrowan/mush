@@ -167,6 +167,9 @@ pub struct InProcessConnection {
     busy_reply: Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
     side_questions: Vec<(String, tokio::task::JoinHandle<Result<String, String>>)>,
     system_prompt_builder: Option<SystemPromptBuilder>,
+    agent_inbox: Option<crate::family::AgentInbox>,
+    deferred_deliveries: VecDeque<crate::family::Delivery>,
+    family: Option<std::sync::Arc<crate::family::Family>>,
     closed: bool,
 }
 
@@ -204,8 +207,67 @@ impl InProcessConnection {
             busy_reply: None,
             side_questions: Vec::new(),
             system_prompt_builder: None,
+            agent_inbox: None,
+            deferred_deliveries: VecDeque::new(),
+            family: None,
             closed: false,
         }
+    }
+
+    pub fn set_family(&mut self, family: Option<std::sync::Arc<crate::family::Family>>) {
+        self.family = family;
+    }
+
+    #[must_use]
+    pub fn family(&self) -> Option<&std::sync::Arc<crate::family::Family>> {
+        self.family.as_ref()
+    }
+
+    pub fn attach_agent_inbox(&mut self, inbox: crate::family::AgentInbox) {
+        self.agent_inbox = Some(inbox);
+    }
+
+    #[must_use]
+    pub fn default_model(&self) -> mush_ai::types::Model {
+        self.config.default_model.clone()
+    }
+
+    async fn poll_agent_inbox(&mut self) {
+        if let Some(inbox) = self.agent_inbox.as_mut() {
+            while let Ok(delivery) = inbox.try_recv() {
+                self.deferred_deliveries.push_back(delivery);
+            }
+        }
+        if self.deferred_deliveries.is_empty() {
+            return;
+        }
+        let busy = self.turn_active();
+        let mut held = VecDeque::new();
+        while let Some(mut delivery) = self.deferred_deliveries.pop_front() {
+            use crate::family::{DeliveryMode, Receipt};
+            match (busy, delivery.mode) {
+                (true, DeliveryMode::Auto | DeliveryMode::Steer) => {
+                    self.steer(delivery.event.text(), Vec::new()).await;
+                    delivery.ack(Receipt::Delivered);
+                }
+                (true, DeliveryMode::FollowUp) => {
+                    delivery.ack(Receipt::Queued);
+                    held.push_back(delivery);
+                }
+                (false, _) => {
+                    if self.runtime.pending_prompt.is_some() {
+                        delivery.ack(Receipt::Queued);
+                        held.push_back(delivery);
+                        continue;
+                    }
+                    self.runtime.accept_event(delivery.event.clone());
+                    self.queued
+                        .push_back(ClientEvent::MessageInjected(delivery.event.clone()));
+                    delivery.ack(Receipt::Delivered);
+                }
+            }
+        }
+        self.deferred_deliveries = held;
     }
 
     pub fn set_system_prompt_builder(&mut self, builder: Option<SystemPromptBuilder>) {
@@ -336,6 +398,7 @@ impl InProcessConnection {
             return false;
         }
         self.poll_control().await;
+        self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
         if std::mem::take(&mut self.fork_compaction_due) {
             let _ = self
@@ -920,6 +983,9 @@ impl AgentConnection for InProcessConnection {
                 self.queued.push_back(event);
             }
             ClientCommand::Shutdown => {
+                if let Some(family) = self.family.clone() {
+                    family.shutdown().await;
+                }
                 self.abort().await;
                 let id = self.runtime.session_id.clone();
                 self.runtime.snapshot_kernel(&id).await;

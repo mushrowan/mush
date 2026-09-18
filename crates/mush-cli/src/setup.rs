@@ -44,6 +44,74 @@ pub struct AppSetup {
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub kernel_packages: Vec<String>,
+    pub ipython_tool: Option<Arc<mush_tools::ipython::IpythonTool>>,
+}
+
+#[derive(Default, Clone)]
+pub struct KernelSinks {
+    pub output: Option<mush_tools::bash::OutputSink>,
+    pub notices: Option<mush_tools::kernel_jobs::NoticeSink>,
+    pub busy_prompt: Option<mush_tools::ipython::BusyKernelPrompt>,
+}
+
+#[must_use]
+pub fn env_depth(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.trim().parse().ok()
+}
+
+#[must_use]
+pub fn rlm_depth() -> u32 {
+    env_depth("RLM_DEPTH").unwrap_or(0)
+}
+
+#[must_use]
+pub fn rlm_max_depth(cfg: &config::Config) -> u32 {
+    cfg.rlm_max_depth
+        .or_else(|| env_depth("RLM_MAX_DEPTH"))
+        .unwrap_or(mush_runtime::session::DEFAULT_RLM_MAX_DEPTH)
+}
+
+pub fn kernel_plan(cfg: &config::Config) -> Result<mush_kernel::PythonPlan> {
+    let managed = managed_venv(cfg);
+    Ok(mush_kernel::PythonPlan::resolve(
+        cfg.kernel.python.as_deref(),
+        managed.as_ref(),
+    )?)
+}
+
+fn managed_venv(cfg: &config::Config) -> Option<mush_kernel::ManagedVenv> {
+    cfg.kernel.managed.then(|| {
+        let mut venv = mush_kernel::ManagedVenv::at(mush_session::data_dir().join("kernel-venv"));
+        venv.packages
+            .extend(cfg.kernel.extra_packages.iter().cloned());
+        venv
+    })
+}
+
+pub fn build_ipython_tool(
+    cfg: &config::Config,
+    cwd: &std::path::Path,
+    sinks: KernelSinks,
+    orphans: Option<mush_tools::orphans::OrphanJournal>,
+) -> mush_tools::ipython::IpythonTool {
+    let cwd_arc: Arc<std::path::Path> = Arc::from(cwd);
+    let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
+    if let Some(orphans) = orphans {
+        host.jobs().set_orphan_journal(orphans);
+    }
+    if let Some(sink) = sinks.notices {
+        host.jobs().set_notice_sink(sink);
+    }
+    let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
+    ipython.kernel_config_mut().python = cfg.kernel.python.clone();
+    ipython.kernel_config_mut().managed_venv = managed_venv(cfg);
+    if let Some(sink) = sinks.output {
+        ipython = ipython.with_output_sink(sink);
+    }
+    if let Some(prompt) = sinks.busy_prompt {
+        ipython = ipython.with_busy_prompt(prompt);
+    }
+    ipython
 }
 
 pub struct SetupArgs {
@@ -164,34 +232,22 @@ impl AppSetup {
             tracing::info!(pids = ?reaped.killed, "killed bash jobs left by an earlier mush");
         }
         let mut kernel_packages = Vec::new();
+        let mut ipython_tool = None;
         let mut tools = if rlm && !args.no_tools {
-            let cwd_arc: Arc<std::path::Path> = Arc::from(cwd.as_path());
-            let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
-            host.jobs().set_orphan_journal(orphans);
-            if let Some(sink) = args.kernel_notice_sink.clone() {
-                host.jobs().set_notice_sink(sink);
-            }
-            let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
-            let managed = cfg.kernel.managed.then(|| {
-                let mut venv =
-                    mush_kernel::ManagedVenv::at(mush_session::data_dir().join("kernel-venv"));
-                venv.packages
-                    .extend(cfg.kernel.extra_packages.iter().cloned());
-                venv
-            });
-            let plan =
-                mush_kernel::PythonPlan::resolve(cfg.kernel.python.as_deref(), managed.as_ref())?;
+            let plan = kernel_plan(cfg)?;
             kernel_packages = kernel_package_labels(&plan, &cfg.kernel.extra_packages).await;
-            ipython.kernel_config_mut().python = cfg.kernel.python.clone();
-            ipython.kernel_config_mut().managed_venv = managed;
-            if let Some(sink) = args.output_sink.clone() {
-                ipython = ipython.with_output_sink(sink);
-            }
-            if let Some(prompt) = args.kernel_busy_prompt.clone() {
-                ipython = ipython.with_busy_prompt(prompt);
-            }
-            let ipython = Arc::new(ipython);
+            let ipython = Arc::new(build_ipython_tool(
+                cfg,
+                cwd,
+                KernelSinks {
+                    output: args.output_sink.clone(),
+                    notices: args.kernel_notice_sink.clone(),
+                    busy_prompt: args.kernel_busy_prompt.clone(),
+                },
+                Some(orphans),
+            ));
             kernel_state = Some(ipython.clone());
+            ipython_tool = Some(ipython.clone());
             mush_agent::tool::ToolRegistry::from_shared(vec![
                 ipython as mush_agent::tool::SharedTool,
             ])
@@ -226,7 +282,12 @@ impl AppSetup {
             .or(cfg.system_prompt.clone())
             .unwrap_or_else(|| {
                 if rlm {
-                    build_rlm_system_prompt(project_context, cwd, &kernel_packages)
+                    build_rlm_system_prompt(
+                        project_context,
+                        cwd,
+                        &kernel_packages,
+                        &RlmRole::root(rlm_max_depth(cfg)),
+                    )
                 } else {
                     build_system_prompt_from_context(project_context, cwd)
                 }
@@ -287,6 +348,7 @@ impl AppSetup {
                 mcp,
                 kernel_state,
                 kernel_packages,
+                ipython_tool,
             },
             report,
         ))
@@ -536,6 +598,33 @@ async fn kernel_package_labels(plan: &mush_kernel::PythonPlan, extra: &[String])
     labels
 }
 
+const SUBAGENTS_PROMPT: &str = "\
+Subagents:\n\
+- `await rlm.spawn(prompt, name=...)` starts a child agent with its own context and kernel \
+and returns a handle at once (`rlm_child_id`, `name`, `session_id`, `model`). It never waits \
+for the child. Pass `model=` to use another model. Spawn independent pieces of work as \
+separate children in one cell, then end your turn.\n\
+- A child's answer arrives in your conversation as a message labelled `[agent-message from \
+child:<name>]`. Do not poll for it. Files the child writes are also yours to read.\n\
+- `await rlm.list_subagents()` lists your children (name, status, latest progress note, last \
+answer). `await rlm.collect(targets=None, timeout_ms=0)` returns the same snapshots and, with \
+a timeout, waits until they settle. `await rlm.delete_subagent(child)` stops one and drops \
+its context.\n\
+- `await agent_message.send(text, receiver_role=\"child\", receiver_name=...)` sends a child \
+more instructions. A busy child is steered mid-turn; an idle one gets it as a new prompt.\n\
+- Give a child one clear task with the context it needs; it starts from an empty conversation.";
+
+fn child_doctrine(name: &str, depth: u32) -> String {
+    format!(
+        "You are a child agent named `{name}` (depth {depth}), spawned by your parent agent. Task \
+         prompts from it are labelled `[task from parent]`. When the task calls for an answer, \
+         send it with `await agent_message.send(message, receiver_role=\"parent\")`; the parent \
+         only sees what you send or write to disk, never your transcript. Not every message \
+         needs a reply; finish up and go idle when you are done. For long work, report brief \
+         progress with `await rlm.progress_note('...')` (512 characters, one per ten seconds)."
+    )
+}
+
 fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
     let packages = if packages.is_empty() {
         "Third-party packages: none are guaranteed. Check with `importlib.util.find_spec` \
@@ -589,16 +678,52 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
     )
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RlmRole {
+    pub depth: u32,
+    pub max_depth: u32,
+    pub child_name: Option<String>,
+}
+
+impl RlmRole {
+    #[must_use]
+    pub fn root(max_depth: u32) -> Self {
+        Self {
+            depth: 0,
+            max_depth,
+            child_name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn child(name: &str, depth: u32, max_depth: u32) -> Self {
+        Self {
+            depth,
+            max_depth,
+            child_name: Some(name.to_string()),
+        }
+    }
+}
+
 pub fn build_rlm_system_prompt(
     context: &loader::ProjectContext,
     cwd: &std::path::Path,
     packages: &[String],
+    role: &RlmRole,
 ) -> String {
     let cwd_str = cwd.display().to_string();
     let mut prompt = match &context.system_prompt {
         Some(file) => file.content.trim_end().to_string(),
         None => rlm_base_prompt(&cwd_str, packages),
     };
+    if role.depth < role.max_depth {
+        prompt.push_str("\n\n");
+        prompt.push_str(SUBAGENTS_PROMPT);
+    }
+    if let Some(name) = &role.child_name {
+        prompt.push_str("\n\n");
+        prompt.push_str(&child_doctrine(name, role.depth));
+    }
     if let Some(extra) = &context.append_system_prompt {
         prompt.push_str("\n\n");
         prompt.push_str(extra.content.trim_end());
@@ -1010,9 +1135,12 @@ mod tests {
             &context,
             std::path::Path::new("/repo"),
             &["requests".into(), "numpy".into()],
+            &RlmRole::root(2),
         );
 
         assert!(prompt.contains("the `ipython` tool is your only tool"));
+        assert!(prompt.contains("await rlm.spawn(prompt, name=...)"));
+        assert!(!prompt.contains("You are a child agent"));
         assert!(prompt.contains("Pre-installed Python packages: requests, numpy."));
         assert!(prompt.contains("`bash(command, timeout=None)` starts a command"));
         assert!(prompt.contains("end your turn"));
@@ -1023,6 +1151,22 @@ mod tests {
         assert!(prompt.contains("<name>nix</name>"));
         assert!(!prompt.contains("Use the skill tool"));
         assert!(!prompt.contains("Batch tool"));
+    }
+
+    #[test]
+    fn a_child_at_the_depth_limit_gets_the_doctrine_and_no_spawn_section() {
+        let context = ProjectContext::default();
+
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::child("auth", 2, 2),
+        );
+
+        assert!(prompt.contains("You are a child agent named `auth` (depth 2)"));
+        assert!(prompt.contains("[task from parent]"));
+        assert!(!prompt.contains("await rlm.spawn("));
     }
 
     #[test]

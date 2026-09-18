@@ -30,7 +30,7 @@ enum ThinkingConfigWire {
 pub use mush_tui::StatusBarConfig;
 pub use mush_tui::TerminalPolicy;
 
-#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
 pub struct KernelConfig {
     pub python: Option<std::path::PathBuf>,

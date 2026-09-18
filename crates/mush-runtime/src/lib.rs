@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod compaction;
 pub mod connection;
+pub mod family;
 pub mod inbox;
 pub mod kernel_channels;
 pub mod session;
@@ -19,6 +20,10 @@ pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
     AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState,
     InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
+};
+pub use family::{
+    ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
+    DeliveryMode, Family, Identity, Receipt, RlmHandler,
 };
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use session::{

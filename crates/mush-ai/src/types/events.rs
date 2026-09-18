@@ -30,6 +30,11 @@ pub enum EventOrigin {
         round: u32,
         session_id: Option<String>,
     },
+    Agent {
+        session_id: String,
+        name: String,
+        relationship: String,
+    },
     Legacy,
 }
 

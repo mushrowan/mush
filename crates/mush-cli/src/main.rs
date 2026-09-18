@@ -959,6 +959,131 @@ fn agent_card(setup: &AppSetup) -> mush_agent::AgentCard {
     card
 }
 
+#[derive(Clone)]
+struct ChildSeed {
+    model: Model,
+    options: StreamOptions,
+    max_turns: usize,
+    provider_api_keys: std::collections::HashMap<String, mush_ai::ApiKey>,
+    confirm_tools: bool,
+    forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
+    kernel: config::KernelConfig,
+    kernel_packages: Vec<String>,
+    cwd: std::path::PathBuf,
+    discovery: mush_ext::DiscoveryOptions,
+    registry: mush_ai::registry::ApiRegistry,
+    lifecycle_hooks: mush_agent::LifecycleHooks,
+    file_rules: Option<mush_agent::FileRuleCallback>,
+    lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
+    saver: Option<mush_runtime::SessionSaver>,
+    rlm_max_depth: u32,
+}
+
+fn turn_config(
+    seed: &ChildSeed,
+    session_id: &SessionId,
+    model: Model,
+    options: StreamOptions,
+) -> mush_runtime::TurnConfig {
+    let mut options = options;
+    options.session_id = Some(session_id.clone());
+    mush_runtime::TurnConfig {
+        default_model: model,
+        options,
+        max_turns: seed.max_turns,
+        provider_api_keys: seed.provider_api_keys.clone(),
+        confirm_tools: seed.confirm_tools,
+        auto_compact: false,
+        auto_fork_compact: false,
+        compaction_model: None,
+        forbidden_chars: seed.forbidden_chars.clone(),
+        tool_allowlist: Some(vec!["ipython".into()]),
+        generate_title: false,
+    }
+}
+
+fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
+    std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
+        let seed = seed.clone();
+        Box::pin(async move {
+            let model = match &spec.model {
+                Some(id) => mush_ai::discovery::resolve_model_by_id(id)
+                    .ok_or_else(|| format!("unknown model {id}"))?,
+                None => seed.model.clone(),
+            };
+            let mut options = seed.options.clone();
+            if let Some(thinking) = &spec.thinking {
+                options.thinking = Some(thinking.clone());
+            }
+            let session = Session::new(model.id.as_str(), &seed.cwd.display().to_string());
+            let (sinks, signals) = mush_runtime::kernel_channels();
+            let cfg = config::Config {
+                kernel: seed.kernel.clone(),
+                ..config::Config::default()
+            };
+            let ipython = std::sync::Arc::new(setup::build_ipython_tool(
+                &cfg,
+                &seed.cwd,
+                setup::KernelSinks {
+                    output: Some(sinks.output),
+                    notices: Some(sinks.notices),
+                    busy_prompt: Some(sinks.busy_prompt),
+                },
+                None,
+            ));
+            let identity = mush_runtime::Identity {
+                id: Some(spec.id.clone()),
+                name: spec.name.clone(),
+                depth: spec.depth,
+            };
+            if let Some(host) = ipython.mush_host() {
+                host.set_extension(std::sync::Arc::new(mush_runtime::RlmHandler::new(
+                    family, identity,
+                )));
+            }
+            let project =
+                mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
+            let role = setup::RlmRole::child(&spec.name, spec.depth, seed.rlm_max_depth);
+            let system_prompt =
+                setup::build_rlm_system_prompt(&project, &seed.cwd, &seed.kernel_packages, &role);
+            let mut worker = mush_runtime::WorkerConfig::new(turn_config(
+                &seed,
+                &session.meta.id,
+                model,
+                options.clone(),
+            ));
+            worker.session_id = session.meta.id.clone();
+            worker.title = Some(spec.name.clone());
+            worker.system_prompt = Some(system_prompt);
+            worker.thinking_level = options
+                .thinking
+                .clone()
+                .unwrap_or(ThinkingLevel::Off)
+                .normalize_visible();
+            worker.rlm_depth = spec.depth;
+            worker.rlm_max_depth = seed.rlm_max_depth;
+            worker.kernel_state = Some(ipython.clone());
+            worker.saver = seed.saver.clone();
+            worker.injections = mush_agent::AgentInjections {
+                lifecycle_hooks: seed.lifecycle_hooks.clone(),
+                cwd: Some(seed.cwd.clone()),
+                dynamic_system_context: None,
+                file_rules: seed.file_rules.clone(),
+                lsp_diagnostics: seed.lsp_diagnostics.clone(),
+                control_endpoint: None,
+            };
+            worker.kernel_signals = Some(signals);
+            Ok(mush_runtime::ChildParts {
+                config: worker,
+                tools: mush_agent::tool::ToolRegistry::from_shared(vec![
+                    ipython as mush_agent::tool::SharedTool,
+                ]),
+                registry: seed.registry.clone(),
+            })
+        })
+    })
+}
+
 fn worker_config(
     cli: &Cli,
     setup: &AppSetup,
@@ -966,9 +1091,36 @@ fn worker_config(
     kernel_signals: mush_runtime::KernelSignals,
 ) -> mush_runtime::WorkerConfig {
     let session = &opened.session;
-    let mut options = setup.client.options.clone();
-    options.session_id = Some(session.meta.id.clone());
-    let compaction_model = setup
+    let seed = ChildSeed {
+        model: setup.client.model.clone(),
+        options: setup.client.options.clone(),
+        max_turns: setup.max_turns,
+        provider_api_keys: setup.client.cfg.api_keys.to_map(),
+        confirm_tools: setup.client.cfg.confirm_tools,
+        forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
+            setup.client.cfg.forbidden_chars.iter().copied(),
+            setup.client.cfg.forbidden_char_classes.iter().copied(),
+        ),
+        kernel: setup.client.cfg.kernel.clone(),
+        kernel_packages: setup.kernel_packages.clone(),
+        cwd: setup.client.cwd.clone(),
+        discovery: cli.discovery(),
+        registry: setup.registry.clone(),
+        lifecycle_hooks: setup.lifecycle_hooks.clone(),
+        file_rules: setup.file_rules.clone(),
+        lsp_diagnostics: setup.lsp_diagnostics.clone(),
+        saver: opened.saver.as_ref().map(|saver| saver.handle()),
+        rlm_max_depth: setup::rlm_max_depth(&setup.client.cfg),
+    };
+    let mut turn = turn_config(
+        &seed,
+        &session.meta.id,
+        setup.client.model.clone(),
+        setup.client.options.clone(),
+    );
+    turn.auto_compact = setup.client.cfg.auto_compact;
+    turn.auto_fork_compact = setup.client.cfg.auto_fork_compact;
+    turn.compaction_model = setup
         .client
         .compaction_model
         .clone()
@@ -976,26 +1128,13 @@ fn worker_config(
             opts.session_id = Some(session.meta.id.clone());
             (model, opts)
         });
-    let mut worker = mush_runtime::WorkerConfig::new(mush_runtime::TurnConfig {
-        default_model: setup.client.model.clone(),
-        options,
-        max_turns: setup.max_turns,
-        provider_api_keys: setup.client.cfg.api_keys.to_map(),
-        confirm_tools: setup.client.cfg.confirm_tools,
-        auto_compact: setup.client.cfg.auto_compact,
-        auto_fork_compact: setup.client.cfg.auto_fork_compact,
-        compaction_model,
-        forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
-            setup.client.cfg.forbidden_chars.iter().copied(),
-            setup.client.cfg.forbidden_char_classes.iter().copied(),
-        ),
-        tool_allowlist: if setup.client.rlm {
-            Some(vec!["ipython".into()])
-        } else {
-            cli.tools.clone()
-        },
-        generate_title: !cli.no_session,
-    });
+    turn.tool_allowlist = if setup.client.rlm {
+        Some(vec!["ipython".into()])
+    } else {
+        cli.tools.clone()
+    };
+    turn.generate_title = !cli.no_session;
+    let mut worker = mush_runtime::WorkerConfig::new(turn);
     worker.conversation = session.conversation.clone();
     worker.session_id = session.meta.id.clone();
     worker.title = session.meta.title.clone();
@@ -1012,15 +1151,10 @@ fn worker_config(
         .clone()
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
-    worker.rlm_depth = env_depth("RLM_DEPTH").unwrap_or(0);
-    worker.rlm_max_depth = setup
-        .client
-        .cfg
-        .rlm_max_depth
-        .or_else(|| env_depth("RLM_MAX_DEPTH"))
-        .unwrap_or(mush_tui::DEFAULT_RLM_MAX_DEPTH);
+    worker.rlm_depth = setup::rlm_depth();
+    worker.rlm_max_depth = seed.rlm_max_depth;
     worker.kernel_state = setup.kernel_state.clone();
-    worker.saver = opened.saver.as_ref().map(|saver| saver.handle());
+    worker.saver = seed.saver.clone();
     worker.injections = mush_agent::AgentInjections {
         lifecycle_hooks: setup.lifecycle_hooks.clone(),
         cwd: Some(std::env::current_dir().unwrap_or_default()),
@@ -1031,20 +1165,52 @@ fn worker_config(
     };
     worker.agent_card = Some(agent_card(setup));
     worker.kernel_signals = Some(kernel_signals);
+    let role = setup::RlmRole {
+        depth: worker.rlm_depth,
+        max_depth: worker.rlm_max_depth,
+        child_name: None,
+    };
     worker.system_prompt_builder = Some(std::sync::Arc::new({
         let discovery = cli.discovery();
         let rlm = setup.client.rlm;
         let kernel_packages = setup.kernel_packages.clone();
         let cwd = setup.client.cwd.clone();
+        let role = role.clone();
         move || {
             let project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
             if rlm {
-                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages)
+                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages, &role)
             } else {
                 build_system_prompt_from_context(&project, &cwd)
             }
         }
     }));
+    if let Some(ipython) = &setup.ipython_tool {
+        let root = mush_runtime::Identity::root(
+            session
+                .meta
+                .title
+                .clone()
+                .unwrap_or_else(|| "parent".to_string()),
+        );
+        let registry_path = (!cli.no_session)
+            .then(|| SessionStore::default_artifact_dir(&session.meta.id).join("subagents.json"));
+        let family = mush_runtime::Family::new(
+            root.clone(),
+            session.meta.id.to_string(),
+            seed.rlm_max_depth,
+            Some(child_factory(seed)),
+            registry_path,
+        );
+        if let Some(host) = ipython.mush_host() {
+            host.set_extension(std::sync::Arc::new(mush_runtime::RlmHandler::new(
+                family.clone(),
+                root,
+            )));
+        }
+        worker.agent_inbox = Some(family.root_inbox());
+        worker.family = Some(family);
+    }
     worker
 }
 
@@ -1219,10 +1385,6 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
         .collect();
     session.auto_title();
     session
-}
-
-fn env_depth(name: &str) -> Option<u32> {
-    std::env::var(name).ok()?.trim().parse().ok()
 }
 
 #[cfg(test)]

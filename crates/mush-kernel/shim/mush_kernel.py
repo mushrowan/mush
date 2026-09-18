@@ -190,6 +190,86 @@ def bash(command: str, timeout: int | None = None) -> BashHandle:
     return BashHandle(command, timeout)
 
 
+class ChildHandle:
+    def __init__(self, reply: dict):
+        self.rlm_child_id = str(reply.get("rlm_child_id", ""))
+        self.name = str(reply.get("name", ""))
+        self.session_id = str(reply.get("session_id", ""))
+        self.model = str(reply.get("model", ""))
+
+    def __repr__(self) -> str:
+        return f"ChildHandle(rlm_child_id={self.rlm_child_id!r}, name={self.name!r}, model={self.model!r})"
+
+
+class ChildSummary:
+    def __init__(self, reply: dict):
+        self.id = str(reply.get("id", ""))
+        self.rlm_child_id = self.id
+        self.name = str(reply.get("name", ""))
+        self.session_id = str(reply.get("session_id", ""))
+        self.model = str(reply.get("model_id", ""))
+        self.status = str(reply.get("status", ""))
+        self.answer = reply.get("answer")
+        self.error = reply.get("error")
+        self.progress_note = reply.get("progress_note")
+        self.turns = int(reply.get("turns", 0))
+        self.usage = reply.get("usage") or {}
+        self.cost = reply.get("cost") or {}
+
+    @property
+    def settled(self) -> bool:
+        return self.status not in ("starting", "running")
+
+    def __repr__(self) -> str:
+        note = f", note={self.progress_note!r}" if self.progress_note else ""
+        return f"ChildSummary(name={self.name!r}, status={self.status!r}, turns={self.turns}{note})"
+
+
+def _child_target(target) -> str:
+    if isinstance(target, (ChildHandle, ChildSummary)):
+        return target.rlm_child_id
+    return str(target)
+
+
+class _Rlm:
+    async def spawn(self, prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> ChildHandle:
+        payload = {"prompt": prompt, "name": name}
+        if model is not None:
+            payload["model"] = model
+        if thinking is not None:
+            payload["thinking"] = thinking
+        return ChildHandle(await host_request("rlm.spawn", payload))
+
+    async def list_subagents(self) -> list:
+        return [ChildSummary(entry) for entry in await host_request("rlm.list_subagents", {})]
+
+    async def collect(self, targets=None, *, timeout_ms: int = 0) -> list:
+        if targets is None:
+            targets = []
+        elif isinstance(targets, (str, ChildHandle, ChildSummary)):
+            targets = [targets]
+        payload = {"targets": [_child_target(t) for t in targets], "timeout_ms": int(timeout_ms)}
+        return [ChildSummary(entry) for entry in await host_request("rlm.collect", payload)]
+
+    async def delete_subagent(self, target) -> ChildSummary:
+        return ChildSummary(await host_request("rlm.delete_subagent", {"target": _child_target(target)}))
+
+    async def progress_note(self, text: str) -> None:
+        await host_request("rlm.progress_note", {"text": text})
+
+
+class _AgentMessage:
+    async def send(self, message: str, *, receiver_role: str = "parent", receiver_name: str | None = None, mode: str = "auto") -> dict:
+        payload = {"message": message, "receiver_role": receiver_role, "mode": mode}
+        if receiver_name is not None:
+            payload["receiver_name"] = receiver_name
+        return await host_request("agent_message.send", payload)
+
+
+rlm = _Rlm()
+agent_message = _AgentMessage()
+
+
 async def edit(path: str, old: str, new: str) -> str:
     payload = {"path": path, "old": old, "new": new}
     if _current_origin.get() is not None:
@@ -259,6 +339,10 @@ def _install_preload() -> None:
             "BashResult": BashResult,
             "BashHandle": BashHandle,
             "HostError": HostError,
+            "rlm": rlm,
+            "agent_message": agent_message,
+            "ChildHandle": ChildHandle,
+            "ChildSummary": ChildSummary,
         }
     )
 

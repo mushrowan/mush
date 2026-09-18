@@ -84,6 +84,7 @@ pub struct MushHost {
     jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
     diffs: std::sync::Mutex<std::collections::HashMap<String, Vec<CellDiff>>>,
+    extension: std::sync::RwLock<Option<Arc<dyn HostRequestHandler>>>,
 }
 
 impl MushHost {
@@ -93,7 +94,22 @@ impl MushHost {
             jobs: crate::kernel_jobs::KernelJobs::default(),
             cwd,
             diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            extension: std::sync::RwLock::new(None),
         }
+    }
+
+    pub fn set_extension(&self, extension: Arc<dyn HostRequestHandler>) {
+        *self
+            .extension
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(extension);
+    }
+
+    fn extension(&self) -> Option<Arc<dyn HostRequestHandler>> {
+        self.extension
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn take_diffs(&self, origin: &str) -> Vec<CellDiff> {
@@ -204,7 +220,10 @@ impl HostRequestHandler for MushHost {
                 );
                 Ok(json!({ "summary": summary }))
             }
-            other => Err(HostError(format!("unknown host request {other}"))),
+            other => match self.extension() {
+                Some(extension) => extension.handle(other, payload).await,
+                None => Err(HostError(format!("unknown host request {other}"))),
+            },
         }
     }
 }
@@ -287,6 +306,11 @@ impl IpythonTool {
 
     pub fn kernel_config_mut(&mut self) -> &mut KernelConfig {
         &mut self.config
+    }
+
+    #[must_use]
+    pub fn mush_host(&self) -> Option<&Arc<MushHost>> {
+        self.mush_host.as_ref()
     }
 
     fn kernel_config(&self) -> KernelConfig {

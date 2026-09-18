@@ -26,6 +26,8 @@ pub struct WorkerConfig {
     pub agent_card: Option<mush_agent::AgentCard>,
     pub kernel_signals: Option<crate::kernel_channels::KernelSignals>,
     pub system_prompt_builder: Option<crate::connection::SystemPromptBuilder>,
+    pub agent_inbox: Option<crate::family::AgentInbox>,
+    pub family: Option<Arc<crate::family::Family>>,
 }
 
 impl WorkerConfig {
@@ -46,6 +48,8 @@ impl WorkerConfig {
             agent_card: None,
             kernel_signals: None,
             system_prompt_builder: None,
+            agent_inbox: None,
+            family: None,
         }
     }
 
@@ -70,6 +74,10 @@ impl WorkerConfig {
         );
         connection.attach_kernel(self.kernel_signals);
         connection.set_system_prompt_builder(self.system_prompt_builder);
+        if let Some(inbox) = self.agent_inbox {
+            connection.attach_agent_inbox(inbox);
+        }
+        connection.set_family(self.family);
         connection
     }
 }
