@@ -1091,6 +1091,7 @@ fn turn_config(
         auto_compact: false,
         compaction: Default::default(),
         branch_summary: Default::default(),
+        auto_refine: Default::default(),
         auto_fork_compact: false,
         compaction_model: None,
         forbidden_chars: seed.forbidden_chars.clone(),
@@ -1228,6 +1229,7 @@ fn worker_config(
     turn.auto_compact = setup.client.cfg.compaction.enabled;
     turn.compaction = setup.client.cfg.compaction.settings();
     turn.branch_summary = setup.client.cfg.branch_summary.settings();
+    turn.auto_refine = setup.client.cfg.auto_refine.settings();
     turn.auto_fork_compact = setup.client.cfg.auto_fork_compact;
     turn.compaction_model = setup
         .client

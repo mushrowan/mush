@@ -115,6 +115,7 @@ impl TuiConfig {
             auto_compact: false,
             compaction: Default::default(),
             branch_summary: Default::default(),
+            auto_refine: Default::default(),
             auto_fork_compact: false,
             compaction_model: self.compaction_options(),
             forbidden_chars: Default::default(),

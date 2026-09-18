@@ -82,6 +82,31 @@
       },
       "type": "object"
     },
+    "AutoRefineConfig": {
+      "properties": {
+        "compact": {
+          "default": true,
+          "type": "boolean"
+        },
+        "cooldown_ms": {
+          "default": 1200000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "turn_interval": {
+          "default": 25,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "Base24Palette": {
       "properties": {
         "base00": {
@@ -972,6 +997,15 @@
     "auto_fork_compact": {
       "default": false,
       "type": "boolean"
+    },
+    "auto_refine": {
+      "$ref": "#/$defs/AutoRefineConfig",
+      "default": {
+        "compact": true,
+        "cooldown_ms": 1200000,
+        "enabled": true,
+        "turn_interval": 25
+      }
     },
     "branch_summary": {
       "$ref": "#/$defs/BranchSummaryConfig",

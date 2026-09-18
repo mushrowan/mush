@@ -185,6 +185,13 @@ pub struct InProcessConnection {
         tokio::task::JoinHandle<Result<String, String>>,
     )>,
     refine: Option<tokio::task::JoinHandle<Result<mush_session::refine::Plan, String>>>,
+    auto_review: Option<(
+        mush_session::refine::AutoRefineReason,
+        tokio::task::JoinHandle<Result<mush_session::refine::AutoRefineReview, String>>,
+    )>,
+    assistant_turns_since_review: u32,
+    last_auto_review: Option<std::time::Instant>,
+    compact_refine_pending: bool,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
     inbox: Option<crate::inbox::OrchestratorInbox>,
     kernel: Option<crate::kernel_channels::KernelSignals>,
@@ -285,6 +292,10 @@ impl InProcessConnection {
             failed_compaction: None,
             branch_summary: None,
             refine: None,
+            auto_review: None,
+            assistant_turns_since_review: 0,
+            last_auto_review: None,
+            compact_refine_pending: false,
             title: None,
             inbox: None,
             kernel: None,
@@ -631,6 +642,7 @@ impl InProcessConnection {
                 auto_compact: false,
                 compaction: Default::default(),
                 branch_summary: Default::default(),
+                auto_refine: Default::default(),
                 auto_fork_compact: false,
                 compaction_model: None,
                 forbidden_chars: Default::default(),
@@ -737,6 +749,7 @@ impl InProcessConnection {
         self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
         self.poll_schedule().await;
+        self.maybe_auto_refine().await;
         self.run_host_commands().await;
         self.continue_goal().await;
         self.continue_autonomous().await;
@@ -834,6 +847,9 @@ impl InProcessConnection {
             return Some(event);
         }
         if let Some(event) = self.try_poll_refine() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_auto_review() {
             return Some(event);
         }
         if let Some(event) = self.try_poll_family() {
@@ -957,6 +973,94 @@ impl InProcessConnection {
                 "refining the harness…".into()
             })));
         Ok(())
+    }
+
+    fn auto_refine_due(&self) -> Option<mush_session::refine::AutoRefineReason> {
+        use mush_session::refine::AutoRefineReason;
+        let settings = self.config.auto_refine;
+        if !settings.enabled
+            || !self.runtime.harness_enabled()
+            || self.runtime.turn_active()
+            || self.refine.is_some()
+            || self.auto_review.is_some()
+        {
+            return None;
+        }
+        let cooling = self
+            .last_auto_review
+            .is_some_and(|at| at.elapsed() < settings.cooldown());
+        if cooling {
+            return None;
+        }
+        if self.compact_refine_pending && settings.compact {
+            return Some(AutoRefineReason::Compact);
+        }
+        (self.assistant_turns_since_review >= settings.turn_interval)
+            .then_some(AutoRefineReason::TurnInterval)
+    }
+
+    async fn maybe_auto_refine(&mut self) {
+        let Some(reason) = self.auto_refine_due() else {
+            return;
+        };
+        self.compact_refine_pending = false;
+        self.last_auto_review = Some(std::time::Instant::now());
+        let turns = std::mem::take(&mut self.assistant_turns_since_review);
+        let target = self.runtime.compaction_target(&self.config).await;
+        let messages = self.runtime.conversation.context();
+        let history = self.runtime.refinement_history();
+        let merged = mush_session::harness::load_merged(&self.runtime.session_id);
+        let registry = self.registry.clone();
+        self.auto_review = Some((
+            reason,
+            tokio::spawn(async move {
+                mush_session::refine::review(
+                    &messages,
+                    &merged,
+                    &history,
+                    &registry,
+                    &target.model,
+                    &target.options,
+                    reason,
+                    turns,
+                )
+                .await
+            }),
+        ));
+    }
+
+    fn try_poll_auto_review(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        if !self
+            .auto_review
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            return None;
+        }
+        let (reason, task) = self.auto_review.take()?;
+        let review = match task.now_or_never()? {
+            Ok(Ok(review)) => review,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "auto-refine review failed");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "auto-refine review task failed");
+                return None;
+            }
+        };
+        if !review.should_refine {
+            tracing::info!(rationale = %review.rationale, "auto-refine review declined");
+            return None;
+        }
+        let request = review.refine_request(reason);
+        self.host_commands
+            .get_or_insert_with(Default::default)
+            .replace_refine(request);
+        Some(ClientEvent::Session(SessionEvent::Status(
+            "auto-refine review approved, refining after this turn…".into(),
+        )))
     }
 
     fn try_poll_refine(&mut self) -> Option<ClientEvent> {
@@ -1181,6 +1285,7 @@ impl InProcessConnection {
                     applied.messages.clone(),
                 );
                 self.runtime.save_now_and_settle();
+                self.compact_refine_pending = true;
                 ClientEvent::Compacted(applied)
             }
             CompactionTaskResult::Failed {
@@ -1409,9 +1514,14 @@ impl InProcessConnection {
                     autonomous.record_usage(message.usage.total_tokens().get());
                     autonomous.record_assistant_turn();
                 }
+                self.assistant_turns_since_review += 1;
                 self.runtime.save_debounced();
             }
-            AgentEvent::ToolExecEnd { .. } | AgentEvent::ContextCompacted { .. } => {
+            AgentEvent::ContextCompacted { .. } => {
+                self.compact_refine_pending = true;
+                self.runtime.save_debounced();
+            }
+            AgentEvent::ToolExecEnd { .. } => {
                 self.runtime.save_debounced();
             }
             AgentEvent::AgentEnd => {
@@ -1778,6 +1888,26 @@ mod tests {
         .unwrap()
     }
 
+    async fn pump_until(
+        connection: &mut InProcessConnection,
+        accept: impl Fn(&ClientEvent) -> bool,
+    ) -> ClientEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                connection.start_pending().await;
+                if let Some(event) = connection.try_next_event() {
+                    if accept(&event) {
+                        break event;
+                    }
+                    continue;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn refine_applies_the_planned_edits_and_the_next_turn_carries_the_digest() {
         let data = tempfile::tempdir().unwrap();
@@ -1875,6 +2005,87 @@ mod tests {
         };
         assert!(text.starts_with("refine:"), "{text}");
         assert!(mush_session::harness::load_merged(&connection.runtime.session_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_refine_reviews_after_the_interval_and_refines_when_approved() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let (mut connection, requests) =
+            connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+        connection.config.auto_refine = mush_session::refine::AutoRefineSettings {
+            enabled: true,
+            turn_interval: 1,
+            compact: true,
+            cooldown_ms: 0,
+        };
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        let approved = pump_until(&mut connection, |event| {
+            matches!(event, ClientEvent::Session(SessionEvent::Status(text)) if text.starts_with("auto-refine review approved"))
+        })
+        .await;
+        assert!(matches!(approved, ClientEvent::Session(_)));
+        let refined = pump_until(&mut connection, |event| {
+            matches!(event, ClientEvent::Refined(_))
+        })
+        .await;
+        let ClientEvent::Refined(result) = refined else {
+            unreachable!()
+        };
+        assert!(result.applied_edits.is_empty());
+        assert_eq!(connection.assistant_turns_since_review, 0);
+        let asked = requests.lock().unwrap();
+        assert_eq!(asked.len(), 3, "turn, review, plan");
+        let Message::User(review) = &asked[1].messages[0] else {
+            unreachable!()
+        };
+        assert!(
+            review
+                .text()
+                .contains("<trigger>\nturn_interval; 1 assistant turns"),
+            "{}",
+            review.text()
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_refine_stays_quiet_when_disabled() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let (mut connection, requests) =
+            connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+        connection.config.auto_refine = mush_session::refine::AutoRefineSettings {
+            enabled: false,
+            turn_interval: 1,
+            compact: true,
+            cooldown_ms: 0,
+        };
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        connection.start_pending().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        while connection.try_next_event().is_some() {}
+
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(connection.auto_review.is_none());
     }
 
     #[tokio::test]

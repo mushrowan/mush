@@ -95,6 +95,39 @@ impl BranchSummaryConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct AutoRefineConfig {
+    pub enabled: bool,
+    pub turn_interval: u32,
+    pub compact: bool,
+    pub cooldown_ms: u64,
+}
+
+impl Default for AutoRefineConfig {
+    fn default() -> Self {
+        let defaults = mush_session::refine::AutoRefineSettings::default();
+        Self {
+            enabled: defaults.enabled,
+            turn_interval: defaults.turn_interval,
+            compact: defaults.compact,
+            cooldown_ms: defaults.cooldown_ms,
+        }
+    }
+}
+
+impl AutoRefineConfig {
+    #[must_use]
+    pub fn settings(&self) -> mush_session::refine::AutoRefineSettings {
+        mush_session::refine::AutoRefineSettings {
+            enabled: self.enabled,
+            turn_interval: self.turn_interval.max(1),
+            compact: self.compact,
+            cooldown_ms: self.cooldown_ms,
+        }
+    }
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         Self {
@@ -127,6 +160,8 @@ pub struct Config {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub branch_summary: BranchSummaryConfig,
+    #[serde(default)]
+    pub auto_refine: AutoRefineConfig,
     #[serde(default)]
     pub auto_fork_compact: bool,
     #[serde(default = "default_rlm")]
@@ -203,6 +238,7 @@ impl Default for Config {
             force_budget_thinking: false,
             compaction: CompactionConfig::default(),
             branch_summary: BranchSummaryConfig::default(),
+            auto_refine: AutoRefineConfig::default(),
             auto_fork_compact: false,
             rlm: true,
             rlm_max_depth: None,
@@ -977,6 +1013,23 @@ mouse_scroll_lines = 5
         assert!(config.compaction.agent_callable);
         assert_eq!(config.branch_summary.reserve_tokens, 16_384);
         assert!(!config.branch_summary.skip_prompt);
+        assert!(config.auto_refine.enabled);
+        assert_eq!(config.auto_refine.turn_interval, 25);
+        assert!(config.auto_refine.compact);
+        assert_eq!(config.auto_refine.cooldown_ms, 1_200_000);
+    }
+
+    #[test]
+    fn auto_refine_table_overrides_and_clamps_the_interval() {
+        let config: Config = toml::from_str(
+            "[auto_refine]\nenabled = false\nturn_interval = 0\ncompact = false\ncooldown_ms = 5\n",
+        )
+        .unwrap();
+        let settings = config.auto_refine.settings();
+        assert!(!settings.enabled);
+        assert_eq!(settings.turn_interval, 1);
+        assert!(!settings.compact);
+        assert_eq!(settings.cooldown_ms, 5);
     }
 
     #[test]

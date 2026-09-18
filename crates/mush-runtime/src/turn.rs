@@ -25,6 +25,7 @@ pub struct TurnConfig {
     pub auto_compact: bool,
     pub compaction: mush_session::compact::CompactionSettings,
     pub branch_summary: mush_session::compact::CompactionSettings,
+    pub auto_refine: mush_session::refine::AutoRefineSettings,
     pub auto_fork_compact: bool,
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,

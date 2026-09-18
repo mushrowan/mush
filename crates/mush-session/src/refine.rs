@@ -69,6 +69,33 @@ Never edit source files directly. Output JSON only with this exact shape:
   ]
 }";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AutoRefineSettings {
+    pub enabled: bool,
+    pub turn_interval: u32,
+    pub compact: bool,
+    pub cooldown_ms: u64,
+}
+
+impl Default for AutoRefineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            turn_interval: 25,
+            compact: true,
+            cooldown_ms: 20 * 60_000,
+        }
+    }
+}
+
+impl AutoRefineSettings {
+    #[must_use]
+    pub fn cooldown(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.cooldown_ms)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RefineRequest {
     pub instructions: Option<String>,
@@ -203,6 +230,140 @@ fn user_prompt(
     parts.join("\n\n")
 }
 
+const REVIEW_SYSTEM_PROMPT: &str = "\
+You are mush's automatic /refine review gate.
+
+Decide whether this checkpoint should run /refine. Auto /refine writes local continual harness \
+state by default, so approve when the trajectory contains evidence useful to this session's \
+future turns. Reject one-off noise, unsupported hypotheses and transient tool output. Ask for \
+global refinement only for durable cross-session lessons or explicitly project-qualified lessons \
+likely to be reused in future sessions.
+
+Return JSON only:
+{
+  \"shouldRefine\": true|false,
+  \"rationale\": \"short reason\",
+  \"instructions\": \"optional concise instructions for /refine if shouldRefine is true\"
+}";
+
+const REVIEW_MAX_OUTPUT_TOKENS: u64 = 4_096;
+const REVIEW_CONVERSATION_CHARS: usize = 40_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoRefineReason {
+    TurnInterval,
+    Compact,
+}
+
+impl AutoRefineReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TurnInterval => "turn_interval",
+            Self::Compact => "compact",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AutoRefineReview {
+    #[serde(default, alias = "shouldRefine")]
+    pub should_refine: bool,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+impl AutoRefineReview {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let trimmed = text.trim();
+        let candidate = trimmed
+            .find('{')
+            .and_then(|start| trimmed.rfind('}').map(|end| &trimmed[start..=end]))
+            .ok_or_else(|| "the review returned no json object".to_string())?;
+        serde_json::from_str(candidate)
+            .map_err(|error| format!("review json did not parse: {error}"))
+    }
+
+    #[must_use]
+    pub fn refine_request(&self, reason: AutoRefineReason) -> RefineRequest {
+        let detail = self
+            .instructions
+            .as_deref()
+            .map(|text| format!("\nReviewer instructions: {text}"))
+            .unwrap_or_default();
+        RefineRequest {
+            instructions: Some(format!(
+                "Automatic refine review triggered by {}. Only create, update or delete local harness \
+                 entries if there is clear evidence that should help this session continue. Prefer an \
+                 empty edits array over speculative or one-off memories. Do not promote anything global \
+                 unless explicitly requested. Reviewer rationale: {}{detail}",
+                reason.as_str(),
+                self.rationale
+            )),
+            rollback: None,
+            global: false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn review(
+    messages: &[Message],
+    merged: &State,
+    history: &[RefinementResult],
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+    reason: AutoRefineReason,
+    turns_since_review: u32,
+) -> Result<AutoRefineReview, String> {
+    let conversation = tail(
+        &build_compaction_prompt(messages),
+        REVIEW_CONVERSATION_CHARS,
+    );
+    let prompt = [
+        format!(
+            "<trigger>\n{}; {turns_since_review} assistant turns since the last auto-refine review\n</trigger>",
+            reason.as_str()
+        ),
+        format!(
+            "<current_harness_state>\n{}\n</current_harness_state>",
+            merged.overview_for_plan()
+        ),
+        format!(
+            "<refinement_history>\n{}\n</refinement_history>",
+            harness::history_for_plan(history)
+        ),
+        format!("<conversation>\n{conversation}\n</conversation>"),
+        "Return shouldRefine=true when the trajectory contains evidence useful to this session's \
+         future turns. Prefer local harness edits for current task progress, temporary blockers and \
+         current-run coordination. Ask for global refinement only for durable cross-session lessons \
+         or explicitly project-qualified facts likely to be reused in future sessions."
+            .to_string(),
+    ]
+    .join("\n\n");
+    let context = LlmContext {
+        system_prompt: Some(REVIEW_SYSTEM_PROMPT.to_string()),
+        messages: vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(prompt))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )],
+        tools: Vec::new(),
+    };
+    let mut options = options.clone();
+    options.max_tokens = Some(TokenCount::new(
+        REVIEW_MAX_OUTPUT_TOKENS.min(model.max_output_tokens.get()),
+    ));
+    options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    let text = complete_text(registry, model, &context, &options).await?;
+    AutoRefineReview::parse(&text)
+}
+
 fn tail(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {
@@ -266,6 +427,31 @@ mod tests {
             prompt.contains("<user_refine_instructions>\nremember the port\n"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn a_review_parses_and_turns_into_a_local_refine_request() {
+        let review = AutoRefineReview::parse(
+            "{\"shouldRefine\": true, \"rationale\": \"the runner came up twice\", \"instructions\": \"remember nextest\"}",
+        )
+        .unwrap();
+        assert!(review.should_refine);
+        let request = review.refine_request(AutoRefineReason::TurnInterval);
+        assert!(!request.global);
+        let text = request.instructions.unwrap();
+        assert!(
+            text.starts_with("Automatic refine review triggered by turn_interval."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Reviewer rationale: the runner came up twice"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Reviewer instructions: remember nextest"),
+            "{text}"
+        );
+        assert!(AutoRefineReview::parse("nope").is_err());
     }
 
     #[test]

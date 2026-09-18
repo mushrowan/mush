@@ -711,6 +711,7 @@ async fn start_pending(
         auto_compact: false,
         compaction: Default::default(),
         branch_summary: Default::default(),
+        auto_refine: Default::default(),
         auto_fork_compact: false,
         compaction_model: None,
         forbidden_chars: Default::default(),
