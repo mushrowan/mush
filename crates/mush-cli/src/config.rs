@@ -128,6 +128,58 @@ impl AutoRefineConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct AutonomousConfig {
+    pub enabled: bool,
+    pub max_continuations: Option<u32>,
+    pub max_turns: Option<u32>,
+    pub max_tokens: Option<u64>,
+    pub timeout_ms: Option<u64>,
+    pub gates: Vec<String>,
+    pub gate_retries: u32,
+    pub gate_timeout_ms: u64,
+    pub subagent_keep_alive_ms: u64,
+}
+
+impl Default for AutonomousConfig {
+    fn default() -> Self {
+        let defaults = mush_runtime::AutonomousDefaults::default();
+        Self {
+            enabled: defaults.enabled,
+            max_continuations: defaults.limits.max_continuations,
+            max_turns: defaults.limits.max_turns,
+            max_tokens: defaults.limits.max_tokens,
+            timeout_ms: defaults.limits.timeout_ms,
+            gates: defaults.gates.commands,
+            gate_retries: defaults.gates.max_retries,
+            gate_timeout_ms: defaults.gates.timeout_ms,
+            subagent_keep_alive_ms: defaults.subagent_keep_alive_ms,
+        }
+    }
+}
+
+impl AutonomousConfig {
+    #[must_use]
+    pub fn settings(&self) -> mush_runtime::AutonomousDefaults {
+        mush_runtime::AutonomousDefaults {
+            enabled: self.enabled,
+            limits: mush_runtime::Limits {
+                max_continuations: self.max_continuations,
+                max_turns: self.max_turns,
+                max_tokens: self.max_tokens,
+                timeout_ms: self.timeout_ms,
+            },
+            gates: mush_runtime::Gates {
+                commands: self.gates.clone(),
+                max_retries: self.gate_retries,
+                timeout_ms: self.gate_timeout_ms,
+            },
+            subagent_keep_alive_ms: self.subagent_keep_alive_ms,
+        }
+    }
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         Self {
@@ -162,6 +214,8 @@ pub struct Config {
     pub branch_summary: BranchSummaryConfig,
     #[serde(default)]
     pub auto_refine: AutoRefineConfig,
+    #[serde(default)]
+    pub autonomous: AutonomousConfig,
     #[serde(default)]
     pub auto_fork_compact: bool,
     #[serde(default = "default_rlm")]
@@ -240,6 +294,7 @@ impl Default for Config {
             compaction: CompactionConfig::default(),
             branch_summary: BranchSummaryConfig::default(),
             auto_refine: AutoRefineConfig::default(),
+            autonomous: AutonomousConfig::default(),
             auto_fork_compact: false,
             rlm: true,
             rlm_max_depth: None,
@@ -1292,6 +1347,25 @@ strong = "claude-opus-4-7"
     fn model_tiers_default_empty() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.model_tiers.is_empty());
+    }
+
+    #[test]
+    fn autonomous_defaults_match_the_runtime_and_the_table_overrides_them() {
+        let config: Config = toml::from_str("").unwrap();
+        let defaults = config.autonomous.settings();
+        assert_eq!(defaults, mush_runtime::AutonomousDefaults::default());
+        assert!(!defaults.enabled);
+
+        let config: Config = toml::from_str(
+            "[autonomous]\nenabled = true\nmax_turns = 4\ngates = [\"cargo test\"]\ngate_retries = 1\nsubagent_keep_alive_ms = 0\n",
+        )
+        .unwrap();
+        let settings = config.autonomous.settings();
+        assert!(settings.enabled);
+        assert_eq!(settings.limits.max_turns, Some(4));
+        assert_eq!(settings.gates.commands, vec!["cargo test".to_string()]);
+        assert_eq!(settings.gates.max_retries, 1);
+        assert_eq!(settings.subagent_keep_alive_ms, 0);
     }
 
     #[test]

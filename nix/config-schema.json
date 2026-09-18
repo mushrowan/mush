@@ -107,6 +107,76 @@
       },
       "type": "object"
     },
+    "AutonomousConfig": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "gate_retries": {
+          "default": 3,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gate_timeout_ms": {
+          "default": 300000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_continuations": {
+          "default": 3,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_tokens": {
+          "default": 80000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_turns": {
+          "default": 12,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "subagent_keep_alive_ms": {
+          "default": 1500000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "default": 1800000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Base24Palette": {
       "properties": {
         "base00": {
@@ -1005,6 +1075,20 @@
         "cooldown_ms": 1200000,
         "enabled": true,
         "turn_interval": 25
+      }
+    },
+    "autonomous": {
+      "$ref": "#/$defs/AutonomousConfig",
+      "default": {
+        "enabled": false,
+        "gate_retries": 3,
+        "gate_timeout_ms": 300000,
+        "gates": [],
+        "max_continuations": 3,
+        "max_tokens": 80000,
+        "max_turns": 12,
+        "subagent_keep_alive_ms": 1500000,
+        "timeout_ms": 1800000
       }
     },
     "branch_summary": {

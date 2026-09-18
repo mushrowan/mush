@@ -22,7 +22,10 @@ use mush_agent::AgentEvent;
 use mush_ai::types::{Message, Timestamp, ToolResultMessage};
 use mush_session::ConversationState;
 
-pub use autonomous::{Autonomous, AutonomousCommand, AutonomousStatus, Gates, Limits};
+pub use autonomous::{
+    Autonomous, AutonomousCommand, AutonomousDefaults, AutonomousOverrides, AutonomousStatus,
+    Gates, Limits,
+};
 pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
     AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState, HostCommands,

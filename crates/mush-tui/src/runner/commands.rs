@@ -276,12 +276,13 @@ pub(super) async fn handle_slash_action(
                         .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
                     return false;
                 }
-                slash::AutonomousAction::On { limits, gates } => {
+                slash::AutonomousAction::On(overrides) => {
+                    let (limits, gates, subagent_keep_alive_ms) =
+                        overrides.resolve(&tui_config.autonomous);
                     mush_runtime::AutonomousCommand::On {
                         limits,
                         gates,
-                        subagent_keep_alive_ms:
-                            mush_runtime::autonomous::DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
+                        subagent_keep_alive_ms,
                     }
                 }
                 slash::AutonomousAction::Off => mush_runtime::AutonomousCommand::Off,

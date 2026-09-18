@@ -1169,6 +1169,7 @@ mod tests {
             reload_context: None,
             mcp: None,
             skills: Default::default(),
+            autonomous: Default::default(),
         }
     }
 

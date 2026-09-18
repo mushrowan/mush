@@ -20,7 +20,7 @@ a reasonable assumption and check it. If you think you are blocked, prove it wit
 observe from the shell, keep that evidence, and look for safe progress while budget remains. Do not \
 end the run yourself; the gates decide completion when they are configured.";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Limits {
     pub max_continuations: Option<u32>,
     pub max_turns: Option<u32>,
@@ -77,6 +77,55 @@ pub struct GateFailure {
     pub exit_text: String,
     pub output: String,
     pub snapshot: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutonomousDefaults {
+    pub enabled: bool,
+    pub limits: Limits,
+    pub gates: Gates,
+    pub subagent_keep_alive_ms: u64,
+}
+
+impl Default for AutonomousDefaults {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            limits: Limits::defaults(),
+            gates: Gates::default(),
+            subagent_keep_alive_ms: DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousOverrides {
+    pub limits: Option<Limits>,
+    pub gates: Vec<String>,
+    pub gate_retries: Option<u32>,
+    pub gate_timeout_ms: Option<u64>,
+    pub subagent_keep_alive_ms: Option<u64>,
+}
+
+impl AutonomousOverrides {
+    #[must_use]
+    pub fn resolve(self, defaults: &AutonomousDefaults) -> (Limits, Gates, u64) {
+        let mut gates = defaults.gates.clone();
+        gates.commands.extend(self.gates);
+        if let Some(retries) = self.gate_retries {
+            gates.max_retries = retries;
+        }
+        if let Some(timeout) = self.gate_timeout_ms {
+            gates.timeout_ms = timeout;
+        }
+        (
+            self.limits.unwrap_or(defaults.limits),
+            gates,
+            self.subagent_keep_alive_ms
+                .unwrap_or(defaults.subagent_keep_alive_ms),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +206,7 @@ impl Autonomous {
         let inner = self.lock();
         AutonomousStatus {
             enabled: inner.enabled,
-            limits: inner.limits.clone(),
+            limits: inner.limits,
             gates: inner.gates.clone(),
             continuations: inner.continuations,
             turns: inner.turns,
@@ -489,6 +538,69 @@ fn tail(text: &str, chars: usize) -> String {
     let skipped = count - chars;
     let kept: String = text.chars().skip(skipped).collect();
     format!("... ({skipped} characters before this)\n{kept}")
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+
+    fn defaults() -> AutonomousDefaults {
+        AutonomousDefaults {
+            enabled: true,
+            limits: Limits {
+                max_turns: Some(9),
+                ..Limits::defaults()
+            },
+            gates: Gates {
+                commands: vec!["cargo fmt --check".into()],
+                max_retries: 2,
+                timeout_ms: 1_000,
+            },
+            subagent_keep_alive_ms: 5_000,
+        }
+    }
+
+    #[test]
+    fn nothing_given_takes_the_configured_defaults() {
+        let (limits, gates, keep_alive) = AutonomousOverrides::default().resolve(&defaults());
+        assert_eq!(limits.max_turns, Some(9));
+        assert_eq!(gates.commands, vec!["cargo fmt --check".to_string()]);
+        assert_eq!(gates.max_retries, 2);
+        assert_eq!(keep_alive, 5_000);
+    }
+
+    #[test]
+    fn a_gate_on_the_command_line_adds_to_the_configured_ones() {
+        let overrides = AutonomousOverrides {
+            gates: vec!["cargo test".into()],
+            gate_retries: Some(0),
+            subagent_keep_alive_ms: Some(0),
+            ..AutonomousOverrides::default()
+        };
+        let (limits, gates, keep_alive) = overrides.resolve(&defaults());
+        assert_eq!(
+            gates.commands,
+            vec!["cargo fmt --check".to_string(), "cargo test".to_string()]
+        );
+        assert_eq!(gates.max_retries, 0);
+        assert_eq!(gates.timeout_ms, 1_000);
+        assert_eq!(keep_alive, 0);
+        assert_eq!(limits.max_turns, Some(9), "an untouched budget stays");
+    }
+
+    #[test]
+    fn a_named_budget_flag_replaces_the_whole_budget() {
+        let overrides = AutonomousOverrides {
+            limits: Some(Limits {
+                max_continuations: Some(3),
+                ..Limits::unlimited()
+            }),
+            ..AutonomousOverrides::default()
+        };
+        let (limits, _, _) = overrides.resolve(&defaults());
+        assert_eq!(limits.max_continuations, Some(3));
+        assert_eq!(limits.max_turns, None);
+    }
 }
 
 #[cfg(test)]

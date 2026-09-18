@@ -62,6 +62,7 @@ pub struct TuiConfig {
     pub reload_context: Option<ReloadCallback>,
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
+    pub autonomous: mush_runtime::AutonomousDefaults,
 }
 
 impl TuiConfig {
@@ -172,6 +173,7 @@ impl TuiConfig {
             reload_context: None,
             mcp: None,
             skills: SkillCatalogue::default(),
+            autonomous: Default::default(),
         }
     }
 }

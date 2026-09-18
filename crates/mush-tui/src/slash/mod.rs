@@ -229,10 +229,7 @@ pub enum ScheduleAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutonomousAction {
     Status,
-    On {
-        limits: mush_runtime::Limits,
-        gates: mush_runtime::Gates,
-    },
+    On(mush_runtime::AutonomousOverrides),
     Off,
 }
 
@@ -249,9 +246,9 @@ fn parse_budget_number(value: &str) -> Result<Option<u64>, SlashParseError> {
 
 pub fn parse_autonomous_options(
     words: &[String],
-) -> Result<(mush_runtime::Limits, mush_runtime::Gates), SlashParseError> {
+) -> Result<mush_runtime::AutonomousOverrides, SlashParseError> {
     let mut named_budget = false;
-    let mut gates = mush_runtime::Gates::default();
+    let mut overrides = mush_runtime::AutonomousOverrides::default();
     let mut budget = mush_runtime::Limits::unlimited();
     let mut index = 0;
     while index < words.len() {
@@ -306,27 +303,30 @@ pub fn parse_autonomous_options(
                 named_budget = true;
             }
             "--gate" => take(&mut |v| {
-                gates.commands.push(v.to_string());
+                overrides.gates.push(v.to_string());
                 Ok(())
             })?,
             "--gate-retries" => take(&mut |v| {
-                gates.max_retries = parse_budget_number(v)?.map_or(u32::MAX, |n| n as u32);
+                overrides.gate_retries =
+                    Some(parse_budget_number(v)?.map_or(u32::MAX, |n| n as u32));
                 Ok(())
             })?,
             "--gate-timeout-ms" => take(&mut |v| {
-                gates.timeout_ms = parse_budget_number(v)?.unwrap_or(u64::MAX);
+                overrides.gate_timeout_ms = Some(parse_budget_number(v)?.unwrap_or(u64::MAX));
+                Ok(())
+            })?,
+            "--subagent-keep-alive-ms" => take(&mut |v| {
+                overrides.subagent_keep_alive_ms = Some(parse_budget_number(v)?.unwrap_or(0));
                 Ok(())
             })?,
             _ => return Err(SlashParseError::AutonomousUsage),
         }
         index += 1;
     }
-    let limits = if named_budget {
-        budget
-    } else {
-        mush_runtime::Limits::defaults()
-    };
-    Ok((limits, gates))
+    if named_budget {
+        overrides.limits = Some(budget);
+    }
+    Ok(overrides)
 }
 
 fn parse_autonomous(args: &str) -> Result<AutonomousAction, SlashParseError> {
@@ -334,10 +334,7 @@ fn parse_autonomous(args: &str) -> Result<AutonomousAction, SlashParseError> {
     match words.first().map(String::as_str) {
         None | Some("status") => Ok(AutonomousAction::Status),
         Some("off") => Ok(AutonomousAction::Off),
-        Some("on") => {
-            let (limits, gates) = parse_autonomous_options(&words[1..])?;
-            Ok(AutonomousAction::On { limits, gates })
-        }
+        Some("on") => Ok(AutonomousAction::On(parse_autonomous_options(&words[1..])?)),
         _ => Err(SlashParseError::AutonomousUsage),
     }
 }
@@ -1050,14 +1047,18 @@ mod tests {
 
     #[test]
     fn autonomous_options_define_the_whole_budget_when_named() {
-        let (limits, gates) = parse_autonomous_options(&[]).unwrap();
+        let defaults = mush_runtime::AutonomousDefaults::default();
+        let (limits, gates, keep_alive) = parse_autonomous_options(&[]).unwrap().resolve(&defaults);
+        assert_eq!(keep_alive, defaults.subagent_keep_alive_ms);
         assert_eq!(limits, mush_runtime::Limits::defaults());
         assert!(gates.commands.is_empty());
 
         let words: Vec<String> = shell_words(
             "--max-tokens 100,000 --gate \"cargo test\" --gate 'cargo clippy' --gate-retries 2 --max-turns=unlimited",
         );
-        let (limits, gates) = parse_autonomous_options(&words).unwrap();
+        let (limits, gates, _) = parse_autonomous_options(&words)
+            .unwrap()
+            .resolve(&mush_runtime::AutonomousDefaults::default());
         assert_eq!(limits.max_tokens, Some(100_000));
         assert_eq!(limits.max_turns, None);
         assert_eq!(
@@ -1068,7 +1069,9 @@ mod tests {
         assert_eq!(gates.max_retries, 2);
 
         let cli_spelling: Vec<String> = shell_words("--autonomous-max-continuations 7");
-        let (limits, _) = parse_autonomous_options(&cli_spelling).unwrap();
+        let (limits, _, _) = parse_autonomous_options(&cli_spelling)
+            .unwrap()
+            .resolve(&mush_runtime::AutonomousDefaults::default());
         assert_eq!(limits.max_continuations, Some(7));
 
         assert!(parse_autonomous_options(&shell_words("--max-turns")).is_err());
@@ -1083,7 +1086,7 @@ mod tests {
         );
         assert!(matches!(
             parse("/autonomous on --gate \"just check\"").unwrap(),
-            SlashAction::Autonomous(AutonomousAction::On { gates, .. }) if gates.commands == ["just check"]
+            SlashAction::Autonomous(AutonomousAction::On(overrides)) if overrides.gates == ["just check"]
         ));
     }
 

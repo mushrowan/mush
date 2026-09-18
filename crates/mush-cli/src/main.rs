@@ -163,7 +163,10 @@ impl Cli {
         self.continue_recent || self.resume.is_some()
     }
 
-    fn startup_commands(&self) -> Vec<mush_runtime::ClientCommand> {
+    fn startup_commands(
+        &self,
+        defaults: &mush_runtime::AutonomousDefaults,
+    ) -> Vec<mush_runtime::ClientCommand> {
         let mut commands = Vec::new();
         if let Some(objective) = &self.goal {
             commands.push(mush_runtime::ClientCommand::Goal(
@@ -174,6 +177,7 @@ impl Cli {
             ));
         }
         let wants_autonomous = self.autonomous
+            || defaults.enabled
             || !self.autonomous_gate.is_empty()
             || self.autonomous_max_continuations.is_some()
             || self.autonomous_max_turns.is_some()
@@ -197,14 +201,16 @@ impl Cli {
                 }
             }
             match mush_tui::slash::parse_autonomous_options(&words) {
-                Ok((limits, gates)) => commands.push(mush_runtime::ClientCommand::Autonomous(
-                    mush_runtime::AutonomousCommand::On {
-                        limits,
-                        gates,
-                        subagent_keep_alive_ms:
-                            mush_runtime::autonomous::DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
-                    },
-                )),
+                Ok(overrides) => {
+                    let (limits, gates, subagent_keep_alive_ms) = overrides.resolve(defaults);
+                    commands.push(mush_runtime::ClientCommand::Autonomous(
+                        mush_runtime::AutonomousCommand::On {
+                            limits,
+                            gates,
+                            subagent_keep_alive_ms,
+                        },
+                    ));
+                }
                 Err(error) => eprintln!("{}", Style::Dim.stderr(format_args!("{error}"))),
             }
         }
@@ -1468,7 +1474,7 @@ fn client_config(
         open_session_picker: false,
         branch_summary_skip_prompt: client.cfg.branch_summary.skip_prompt,
         startup_notice: None,
-        startup_commands: cli.startup_commands(),
+        startup_commands: cli.startup_commands(&client.cfg.autonomous.settings()),
         reload_context: Some(std::sync::Arc::new({
             let discovery = cli.discovery();
             move |cwd: &std::path::Path| -> mush_tui::ReloadedContext {
@@ -1484,6 +1490,7 @@ fn client_config(
         })),
         mcp: worker.and_then(|worker| worker.mcp.clone()),
         skills: client.skills(),
+        autonomous: client.cfg.autonomous.settings(),
     }
 }
 
