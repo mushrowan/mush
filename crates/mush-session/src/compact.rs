@@ -512,15 +512,24 @@ mod focus_tests {
 }
 
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
-const COMPACTION_THRESHOLD: u64 = 95;
+pub const COMPACTION_RESERVE_TOKENS: u64 = 16_384;
+
+#[must_use]
+pub fn compaction_threshold(context_window: TokenCount) -> TokenCount {
+    let window = context_window.get();
+    if window >= 2 * COMPACTION_RESERVE_TOKENS {
+        TokenCount::new(window - COMPACTION_RESERVE_TOKENS)
+    } else {
+        TokenCount::new(window * 95 / 100)
+    }
+}
 
 pub fn needs_compaction_at(
     context_tokens: TokenCount,
     context_window: TokenCount,
     message_count: usize,
 ) -> bool {
-    message_count > DEFAULT_KEEP_RECENT
-        && context_tokens.exceeds_fraction(context_window, COMPACTION_THRESHOLD, 100)
+    message_count > DEFAULT_KEEP_RECENT && context_tokens > compaction_threshold(context_window)
 }
 
 pub fn needs_compaction_for_messages(
@@ -593,17 +602,16 @@ pub async fn auto_compact(
     let mut messages = messages;
     let mask_result = mask_observations(&mut messages, None);
 
-    if mask_result.masked_count > 0 {
-        let threshold = (context_window.get() as usize) * COMPACTION_THRESHOLD as usize / 100;
-        if estimate_tokens(&messages) < threshold {
-            return AutoCompactResult {
-                messages,
-                masked_count: mask_result.masked_count,
-                mask_tokens_saved: mask_result.tokens_saved,
-                summarised_count: 0,
-                summary: String::new(),
-            };
-        }
+    if mask_result.masked_count > 0
+        && estimate_tokens(&messages) < compaction_threshold(context_window).get() as usize
+    {
+        return AutoCompactResult {
+            messages,
+            masked_count: mask_result.masked_count,
+            mask_tokens_saved: mask_result.tokens_saved,
+            summarised_count: 0,
+            summary: String::new(),
+        };
     }
 
     let result = llm_compact(
@@ -1477,6 +1485,28 @@ mod tests {
         assert!(needs_compaction_at(
             TokenCount::new(9600),
             TokenCount::new(10_000),
+            20,
+        ));
+    }
+
+    #[test]
+    fn the_threshold_leaves_the_reserve_free_above_small_windows() {
+        assert_eq!(
+            compaction_threshold(TokenCount::new(200_000)),
+            TokenCount::new(200_000 - COMPACTION_RESERVE_TOKENS)
+        );
+        assert_eq!(
+            compaction_threshold(TokenCount::new(10_000)),
+            TokenCount::new(9_500)
+        );
+        assert!(needs_compaction_at(
+            TokenCount::new(184_000),
+            TokenCount::new(200_000),
+            20,
+        ));
+        assert!(!needs_compaction_at(
+            TokenCount::new(183_000),
+            TokenCount::new(200_000),
             20,
         ));
     }
