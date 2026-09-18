@@ -33,7 +33,7 @@ pub async fn handle(
             help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
             help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
             help.push_str("  /refresh-models - refresh discovered model catalogue\n");
-            help.push_str("  /branch [n]    - branch from nth user message\n");
+            help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
             help.push_str("  /tree          - show conversation tree\n");
             help.push_str(
                 "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
@@ -133,7 +133,7 @@ pub async fn handle(
             None
         }
         SlashAction::New
-        | SlashAction::Fork { .. }
+        | SlashAction::Fork { index: Some(_) }
         | SlashAction::Clone
         | SlashAction::Clear
         | SlashAction::Undo
@@ -146,9 +146,31 @@ pub async fn handle(
             show_tree(app, &connection.tree().await);
             None
         }
+        SlashAction::Fork { index: None } => {
+            let items = crate::message_picker::user_message_items(&connection.transcript().await);
+            open_message_picker(
+                app,
+                crate::message_picker::MessagePickerPurpose::Fork,
+                items,
+            );
+            None
+        }
         SlashAction::Branch { index: None } => {
-            app.push_system_message(
-                "usage: /branch <n> — branch from nth user message\ntry /tree to see messages",
+            let tree = connection.tree().await;
+            let items = crate::message_picker::user_message_items(
+                &tree
+                    .user_messages_in_branch()
+                    .into_iter()
+                    .filter_map(|entry| match &entry.kind {
+                        mush_session::tree::EntryKind::Message { message } => Some(message.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            open_message_picker(
+                app,
+                crate::message_picker::MessagePickerPurpose::Branch,
+                items,
             );
             None
         }
@@ -310,6 +332,18 @@ pub async fn handle(
         SlashAction::Other { name, args } => try_template(app, name, args),
         _ => None,
     }
+}
+
+fn open_message_picker(
+    app: &mut App,
+    purpose: crate::message_picker::MessagePickerPurpose,
+    items: Vec<crate::message_picker::MessagePickerItem>,
+) {
+    if items.is_empty() {
+        app.push_system_message(format!("no messages to {} from", purpose.verb()));
+        return;
+    }
+    app.open_message_picker(purpose, items);
 }
 
 pub fn open_sessions_picker(app: &mut App) {

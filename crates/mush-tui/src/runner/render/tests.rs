@@ -434,6 +434,29 @@ fn subagents_overlay_preserves_log_and_modal_across_live_frames() {
 }
 
 #[test]
+fn the_message_picker_lists_numbered_messages_with_the_newest_highlighted() {
+    let mut app = synthetic_app(false);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut screen = Screen::new();
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Fork,
+        crate::message_picker::user_message_items(&[
+            crate::test_support::user_message("fix the build"),
+            crate::test_support::user_message("ship it"),
+        ]),
+    );
+
+    draw(&mut terminal, &mut screen, &mut app);
+
+    let text = buffer_to_string(terminal.backend().buffer());
+    assert!(text.contains("fork from message"), "{text}");
+    assert!(text.contains("  1  fix the build"), "{text}");
+    assert!(text.contains("▸ 2  ship it"), "{text}");
+    assert!(text.contains("enter fork before it"), "{text}");
+    assert!(!terminal.backend().cursor_visible());
+}
+
+#[test]
 fn the_terminal_title_names_the_cwd() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.cwd = "~/dev/mush".into();

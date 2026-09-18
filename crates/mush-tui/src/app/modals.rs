@@ -48,6 +48,22 @@ impl App {
         self.interaction.mode = AppMode::Insert;
     }
 
+    pub fn open_message_picker(
+        &mut self,
+        purpose: crate::message_picker::MessagePickerPurpose,
+        items: Vec<crate::message_picker::MessagePickerItem>,
+    ) {
+        self.interaction.message_picker = Some(crate::message_picker::MessagePickerState::new(
+            purpose, items,
+        ));
+        self.interaction.mode = AppMode::MessagePicker;
+    }
+
+    pub fn close_message_picker(&mut self) {
+        self.interaction.message_picker = None;
+        self.interaction.mode = AppMode::Insert;
+    }
+
     pub fn selected_session(&self) -> Option<&SessionMeta> {
         let picker = self.interaction.session_picker.as_ref()?;
         let filtered = filtered_sessions(picker);

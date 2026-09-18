@@ -1334,6 +1334,74 @@ fn ctrl_bracket_closes_session_picker() {
     assert!(app.interaction.session_picker.is_none());
 }
 
+fn message_items() -> Vec<crate::message_picker::MessagePickerItem> {
+    ["fix the build", "add tests", "ship it"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| crate::message_picker::MessagePickerItem {
+            index: i + 1,
+            text: text.into(),
+        })
+        .collect()
+}
+
+#[test]
+fn message_picker_enter_forks_before_the_highlighted_message() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Fork,
+        message_items(),
+    );
+    assert_eq!(app.interaction.mode, AppMode::MessagePicker);
+
+    handle_key(&mut app, key(KeyCode::Up));
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+
+    assert!(matches!(
+        event,
+        Some(AppEvent::SlashCommand {
+            action: crate::slash::SlashAction::Fork { index: Some(2) }
+        })
+    ));
+    assert_eq!(app.interaction.mode, AppMode::Insert);
+    assert!(app.interaction.message_picker.is_none());
+}
+
+#[test]
+fn message_picker_filter_then_enter_branches_before_the_match() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Branch,
+        message_items(),
+    );
+
+    for c in "build".chars() {
+        handle_key(&mut app, key(KeyCode::Char(c)));
+    }
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+
+    assert!(matches!(
+        event,
+        Some(AppEvent::SlashCommand {
+            action: crate::slash::SlashAction::Branch { index: Some(1) }
+        })
+    ));
+}
+
+#[test]
+fn esc_closes_the_message_picker_without_forking() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Fork,
+        message_items(),
+    );
+
+    let event = handle_key(&mut app, key(KeyCode::Esc));
+
+    assert!(event.is_none());
+    assert_eq!(app.interaction.mode, AppMode::Insert);
+}
+
 #[test]
 fn session_picker_plain_j_k_filter_instead_of_navigate() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));

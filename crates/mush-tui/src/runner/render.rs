@@ -78,6 +78,9 @@ fn draw_frame(
     if let Some(ref picker) = app.interaction.model_picker {
         widgets::model_picker::render(frame, picker, &app.theme);
     }
+    if let Some(ref picker) = app.interaction.message_picker {
+        widgets::message_picker::render(frame, picker, &app.theme);
+    }
     if let Some(ref picker) = app.interaction.login_picker {
         widgets::login_picker::render(frame, picker, &app.theme);
     }
@@ -114,6 +117,7 @@ fn draw_frame(
             (!busy_empty_input).then_some(input_cursor)
         }
         AppMode::SessionPicker
+        | AppMode::MessagePicker
         | AppMode::ModelPicker
         | AppMode::LoginPicker
         | AppMode::AtPicker

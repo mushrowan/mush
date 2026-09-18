@@ -411,11 +411,6 @@ pub(super) async fn handle_slash_action(
             run_session_command(session, tui_config, mush_runtime::SessionCommand::New).await;
             state_changed = true;
         }
-        SlashAction::Fork { index: None } => {
-            session.app.push_system_message(
-                "usage: /fork <n>, a new session from before the nth user message. try /tree to see messages",
-            );
-        }
         SlashAction::Fork { index: Some(index) } => {
             state_changed = run_session_command(
                 session,
@@ -880,6 +875,44 @@ mod tests {
         );
         assert_eq!(session.app.input.text, "second");
         assert!(session.app.session_title.is_none());
+    }
+
+    #[test]
+    fn bare_fork_opens_a_picker_over_the_user_messages() {
+        let mut session = conversation_session(vec![user("first"), user("second")]);
+        let mut config = TuiConfig::for_test();
+
+        run(&mut session, &mut config, SlashAction::Fork { index: None });
+
+        assert_eq!(
+            session.app.interaction.mode,
+            crate::app::AppMode::MessagePicker
+        );
+        let picker = session.app.interaction.message_picker.as_ref().unwrap();
+        assert_eq!(
+            picker.purpose,
+            crate::message_picker::MessagePickerPurpose::Fork
+        );
+        assert_eq!(picker.items.len(), 2);
+        assert_eq!(picker.items[1].text, "second");
+        assert_eq!(picker.selected_item().unwrap().index, 2);
+    }
+
+    #[test]
+    fn bare_fork_on_an_empty_session_says_so() {
+        let mut session = conversation_session(vec![]);
+        let mut config = TuiConfig::for_test();
+
+        run(&mut session, &mut config, SlashAction::Fork { index: None });
+
+        assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+        assert!(
+            session
+                .app
+                .messages
+                .last()
+                .is_some_and(|m| m.content.contains("no messages to fork from"))
+        );
     }
 
     #[test]

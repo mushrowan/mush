@@ -37,6 +37,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::SessionPicker {
         return handle_picker_key(app, key);
     }
+    if app.interaction.mode == AppMode::MessagePicker {
+        return handle_message_picker_key(app, key);
+    }
     if app.interaction.mode == AppMode::ModelPicker {
         return handle_model_picker_key(app, key);
     }
@@ -1207,6 +1210,47 @@ fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ => None,
     }
+}
+
+fn handle_message_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    use crate::keybinds::{Action, KeyScope};
+    let picker = app.interaction.message_picker.as_mut()?;
+    if app.keymap.matches(Action::QuitOrAbort, key) || app.keymap.matches(Action::Cancel, key) {
+        app.close_message_picker();
+        return None;
+    }
+    if app.keymap.matches(Action::Confirm, key) {
+        let chosen = picker
+            .selected_item()
+            .map(|item| (picker.purpose, item.index));
+        app.close_message_picker();
+        let (purpose, index) = chosen?;
+        let action = match purpose {
+            crate::message_picker::MessagePickerPurpose::Fork => {
+                crate::slash::SlashAction::Fork { index: Some(index) }
+            }
+            crate::message_picker::MessagePickerPurpose::Branch => {
+                crate::slash::SlashAction::Branch { index: Some(index) }
+            }
+        };
+        return Some(AppEvent::SlashCommand { action });
+    }
+    if app
+        .keymap
+        .matches_in(KeyScope::SessionPicker, Action::PreviousItem, key)
+    {
+        picker.select_previous();
+    } else if app
+        .keymap
+        .matches_in(KeyScope::SessionPicker, Action::NextItem, key)
+    {
+        picker.select_next();
+    } else if crate::keybinds::is_backspace(key) {
+        picker.pop_filter();
+    } else if let Some(c) = crate::keybinds::typed_char(key) {
+        picker.push_filter(c);
+    }
+    None
 }
 
 fn handle_session_picker_delete_confirm_key(

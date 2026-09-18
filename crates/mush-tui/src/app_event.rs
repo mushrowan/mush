@@ -66,6 +66,7 @@ pub enum AppMode {
     Insert,
     Normal,
     SessionPicker,
+    MessagePicker,
     ModelPicker,
     LoginPicker,
     SlashComplete,

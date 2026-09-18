@@ -11,6 +11,15 @@ pub(crate) fn buffer_to_string(buf: &Buffer) -> String {
     out
 }
 
+pub(crate) fn user_message(text: &str) -> mush_ai::types::Message {
+    mush_ai::types::Message::User(
+        mush_ai::types::UserMessage::builder()
+            .content(mush_ai::types::UserContent::Text(text.into()))
+            .timestamp_ms(mush_ai::types::Timestamp::zero())
+            .build(),
+    )
+}
+
 pub(crate) fn draw_to_buffer(
     width: u16,
     height: u16,

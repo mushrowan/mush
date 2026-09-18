@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_event::AppMode;
 use crate::login_picker::LoginPickerState;
+use crate::message_picker::MessagePickerState;
 use crate::model_picker::ModelPickerState;
 use crate::session_picker::SessionPickerState;
 use crate::slash_menu::{ModelCompletion, SlashCommand, SlashMenuState, TabState};
@@ -164,6 +165,7 @@ pub struct InteractionState {
     pub mode: AppMode,
     pub focus: crate::app_event::Focus,
     pub session_picker: Option<SessionPickerState>,
+    pub message_picker: Option<MessagePickerState>,
     pub model_picker: Option<ModelPickerState>,
     pub login_picker: Option<LoginPickerState>,
     pub search: SearchState,
@@ -187,6 +189,7 @@ impl Default for InteractionState {
             mode: AppMode::Insert,
             focus: crate::app_event::Focus::default(),
             session_picker: None,
+            message_picker: None,
             model_picker: None,
             login_picker: None,
             search: SearchState::default(),

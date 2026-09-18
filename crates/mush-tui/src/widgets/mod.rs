@@ -6,6 +6,7 @@ pub mod input_box;
 pub mod login_entry_popup;
 pub mod login_picker;
 pub mod message_list;
+pub mod message_picker;
 pub mod model_picker;
 pub mod popup_layout;
 pub mod prompt_line;

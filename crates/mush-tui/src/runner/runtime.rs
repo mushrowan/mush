@@ -26,8 +26,8 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
     ("resume", "browse sessions, or resume one by id"),
-    ("branch", "branch from nth user message"),
-    ("fork", "new session from before the nth user message"),
+    ("branch", "branch from an earlier user message"),
+    ("fork", "new session from before an earlier user message"),
     ("clone", "copy the current branch into a new session"),
     ("tree", "show conversation tree"),
     (
