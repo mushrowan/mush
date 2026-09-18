@@ -478,7 +478,15 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or \"(none)\" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.";
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+
+If the conversation already starts with an earlier checkpoint summary, treat it as the base: \
+keep everything in it, add the new progress, decisions and context, move items from In Progress \
+to Done when they were completed, update Next Steps, and drop only what is no longer relevant.
+
+If a python kernel is in use it keeps running after this summary: every variable, import and \
+helper defined so far stays available, but the cells that defined them will not be visible. \
+Record any names worth remembering so they are reused instead of redefined.";
 
 #[cfg(test)]
 mod focus_tests {
