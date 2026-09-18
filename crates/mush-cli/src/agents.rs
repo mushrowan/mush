@@ -210,6 +210,12 @@ fn matching<'a>(
     Ok(first)
 }
 
+pub async fn connect(worker: &WorkerDescriptor) -> Result<mush_daemon::DaemonConnection> {
+    mush_daemon::DaemonConnection::connect(&worker.socket)
+        .await
+        .map_err(|error| eyre!("{}: {error}", short_id(&worker.session_id)))
+}
+
 pub async fn rename(selector: &str, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
@@ -217,7 +223,7 @@ pub async fn rename(selector: &str, name: &str) -> Result<()> {
     }
     let workers = live().await?;
     if let Some(worker) = matching(&workers, selector)? {
-        let mut connection = mush_daemon::DaemonConnection::connect(&worker.socket).await?;
+        let mut connection = connect(worker).await?;
         mush_runtime::AgentConnection::send(
             &mut connection,
             mush_runtime::ClientCommand::Session(mush_runtime::SessionCommand::Name {

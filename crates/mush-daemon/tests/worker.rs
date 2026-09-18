@@ -421,3 +421,24 @@ async fn read_descriptor(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[tokio::test]
+async fn a_worker_that_never_says_hello_times_the_client_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("silent.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let _accepting = tokio::spawn(async move {
+        let held = listener.accept().await;
+        std::future::pending::<()>().await;
+        drop(held);
+    });
+
+    let Err(error) = DaemonConnection::connect_within(&socket, Duration::from_millis(200)).await
+    else {
+        panic!("the client got in")
+    };
+    assert!(
+        matches!(error, mush_daemon::ConnectError::TimedOut(_)),
+        "{error:?}"
+    );
+}

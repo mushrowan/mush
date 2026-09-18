@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use mush_ai::types::Message;
 use mush_runtime::{AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState};
@@ -13,6 +14,24 @@ use tokio::sync::mpsc;
 use crate::protocol::{CodecError, Frame, Reply, Request, RequestId, decode, encode};
 
 const FRAME_BUFFER: usize = 256;
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn timeout_for(command: &ClientCommand) -> Duration {
+    match command {
+        ClientCommand::Prompt { .. }
+        | ClientCommand::QueuePrompt { .. }
+        | ClientCommand::Compact { .. }
+        | ClientCommand::CompactionRetry
+        | ClientCommand::CompactionFallback
+        | ClientCommand::SummariseAndNavigate { .. }
+        | ClientCommand::Refine(_)
+        | ClientCommand::SideQuestion(_)
+        | ClientCommand::Session(_) => PROVIDER_REQUEST_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
@@ -20,6 +39,8 @@ pub enum ConnectError {
     Io(#[from] io::Error),
     #[error("the worker closed before saying hello")]
     NoHello,
+    #[error("the worker did not answer within {0:?}")]
+    TimedOut(Duration),
     #[error("the worker's first frame was not a hello")]
     BadHello,
     #[error(transparent)]
@@ -45,8 +66,16 @@ impl Drop for DaemonConnection {
 
 impl DaemonConnection {
     pub async fn connect(path: &Path) -> Result<Self, ConnectError> {
-        let stream = UnixStream::connect(path).await?;
-        Self::from_stream(stream).await
+        Self::connect_within(path, CONNECT_TIMEOUT).await
+    }
+
+    pub async fn connect_within(path: &Path, timeout: Duration) -> Result<Self, ConnectError> {
+        let stream = tokio::time::timeout(timeout, UnixStream::connect(path))
+            .await
+            .map_err(|_| ConnectError::TimedOut(timeout))??;
+        tokio::time::timeout(timeout, Self::from_stream(stream))
+            .await
+            .map_err(|_| ConnectError::TimedOut(timeout))?
     }
 
     pub async fn from_stream(stream: UnixStream) -> Result<Self, ConnectError> {
@@ -105,6 +134,17 @@ impl DaemonConnection {
     }
 
     async fn request(&mut self, request: Request) -> Result<Reply, ConnectionError> {
+        let timeout = match &request {
+            Request::Command { command, .. } => timeout_for(command),
+            _ => REQUEST_TIMEOUT,
+        };
+        match tokio::time::timeout(timeout, self.request_forever(request)).await {
+            Ok(result) => result,
+            Err(_) => Err(ConnectionError::TimedOut),
+        }
+    }
+
+    async fn request_forever(&mut self, request: Request) -> Result<Reply, ConnectionError> {
         if self.closed {
             return Err(ConnectionError::Closed);
         }

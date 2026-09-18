@@ -148,6 +148,8 @@ pub enum ConnectionError {
     NothingToRecover,
     #[error("connection closed")]
     Closed,
+    #[error("the worker did not answer in time")]
+    TimedOut,
     #[error("{0}")]
     Refused(String),
     #[error("transport: {0}")]
