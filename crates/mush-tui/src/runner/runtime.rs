@@ -14,6 +14,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("keys", "show keyboard shortcuts"),
     ("subagents", "show or register session supervisors"),
     ("agents", "list the child agents of this session"),
+    ("system-prompt", "show the system prompt the model sees"),
     ("goal", "set a goal the harness keeps working toward"),
     ("heartbeat", "prompt this session every so often"),
     ("schedule", "run a prompt later or on an interval"),

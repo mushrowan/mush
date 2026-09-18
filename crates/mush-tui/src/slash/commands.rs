@@ -201,6 +201,7 @@ pub async fn handle(
             None
         }
         SlashAction::Side { .. }
+        | SlashAction::SystemPrompt
         | SlashAction::Goal(_)
         | SlashAction::Heartbeat(_)
         | SlashAction::Schedule(_) => None,

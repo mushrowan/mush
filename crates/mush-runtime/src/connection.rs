@@ -156,6 +156,7 @@ pub trait AgentConnection: Send + std::any::Any {
     async fn transcript(&mut self) -> Vec<Message>;
     async fn history(&mut self) -> Vec<Message>;
     async fn tree(&mut self) -> mush_session::tree::SessionTree;
+    async fn system_prompt(&mut self) -> Option<String>;
 }
 
 pub struct InProcessConnection {
@@ -1262,6 +1263,19 @@ impl AgentConnection for InProcessConnection {
     async fn tree(&mut self) -> mush_session::tree::SessionTree {
         self.runtime.conversation.tree().clone()
     }
+
+    async fn system_prompt(&mut self) -> Option<String> {
+        let base = self.runtime.system_prompt.clone()?;
+        let extra = self
+            .injections
+            .dynamic_system_context
+            .as_ref()
+            .and_then(|context| context());
+        Some(match extra {
+            Some(extra) => format!("{base}\n\n{extra}"),
+            None => base,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1935,5 +1949,20 @@ mod tests {
         })
         .await;
         assert!(settled.is_ok(), "the aborted turn winds down");
+    }
+
+    #[tokio::test]
+    async fn the_system_prompt_read_includes_the_notes() {
+        let (mut connection, _requests) = connection();
+        connection.runtime.system_prompt = Some("base".into());
+        let notes = crate::notes::Notes::new(None);
+        connection.set_notes(Some(Arc::clone(&notes)));
+        assert_eq!(connection.system_prompt().await.as_deref(), Some("base"));
+
+        notes.append("remember the socket path").unwrap();
+
+        let prompt = connection.system_prompt().await.unwrap();
+        assert!(prompt.starts_with("base\n\n# Notes"));
+        assert!(prompt.ends_with("- remember the socket path"));
     }
 }

@@ -197,6 +197,16 @@ pub(super) async fn handle_slash_action(
                 .send(mush_runtime::ClientCommand::SideQuestion(question))
                 .await;
         }
+        SlashAction::SystemPrompt => {
+            let text = match session.connection.system_prompt().await {
+                Some(prompt) => format!(
+                    "system prompt ({} chars):\n\n{prompt}",
+                    prompt.chars().count()
+                ),
+                None => "no system prompt is set".to_string(),
+            };
+            session.app.push_system_message(text);
+        }
         SlashAction::Heartbeat(action) => {
             let command = match action {
                 slash::HeartbeatAction::Status => {

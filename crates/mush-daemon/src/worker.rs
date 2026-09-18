@@ -308,5 +308,8 @@ async fn handle(
         Request::Tree { .. } => Ok(Reply::Tree {
             tree: connection.tree().await,
         }),
+        Request::SystemPrompt { .. } => Ok(Reply::SystemPrompt {
+            prompt: connection.system_prompt().await,
+        }),
     }
 }

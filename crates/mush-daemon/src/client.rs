@@ -247,4 +247,12 @@ impl AgentConnection for DaemonConnection {
             _ => SessionTree::default(),
         }
     }
+
+    async fn system_prompt(&mut self) -> Option<String> {
+        let id = self.next_request_id();
+        match self.request(Request::SystemPrompt { id }).await {
+            Ok(Reply::SystemPrompt { prompt }) => prompt,
+            _ => None,
+        }
+    }
 }

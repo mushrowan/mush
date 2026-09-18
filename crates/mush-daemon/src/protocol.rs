@@ -21,6 +21,9 @@ pub enum Request {
     Tree {
         id: RequestId,
     },
+    SystemPrompt {
+        id: RequestId,
+    },
 }
 
 impl Request {
@@ -30,7 +33,8 @@ impl Request {
             Self::Command { id, .. }
             | Self::Transcript { id }
             | Self::History { id }
-            | Self::Tree { id } => *id,
+            | Self::Tree { id }
+            | Self::SystemPrompt { id } => *id,
         }
     }
 }
@@ -42,6 +46,7 @@ pub enum Reply {
     Transcript { messages: Vec<Message> },
     History { messages: Vec<Message> },
     Tree { tree: SessionTree },
+    SystemPrompt { prompt: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
