@@ -251,6 +251,20 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         b.push_inline(Span::styled(alert.clone(), app.theme.alert));
     }
 
+    if !app.children.is_empty() {
+        let running = app.running_children();
+        let total = app.children.len();
+        b.section_break();
+        b.push_inline(Span::styled(
+            format!("{running}/{total} agents"),
+            if running > 0 {
+                app.theme.status_model
+            } else {
+                dim
+            },
+        ));
+    }
+
     LeftStatus {
         spans: b.into_spans(),
         cache_timer_text,

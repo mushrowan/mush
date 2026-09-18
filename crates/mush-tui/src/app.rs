@@ -134,6 +134,7 @@ pub struct App {
     pub compaction_model_id: Option<ModelId>,
     pub session_title: Option<String>,
     pub detail: ChatDetail,
+    pub children: Vec<mush_runtime::ChildSummary>,
 }
 
 mod modals;
@@ -195,7 +196,48 @@ impl App {
             compaction_model_id: None,
             session_title: None,
             detail: ChatDetail::default(),
+            children: Vec::new(),
         }
+    }
+
+    pub fn note_child(&mut self, child: mush_runtime::ChildSummary) {
+        let previous = match self.children.iter_mut().find(|known| known.id == child.id) {
+            Some(known) => Some(std::mem::replace(known, child.clone())),
+            None => {
+                self.children.push(child.clone());
+                None
+            }
+        };
+        let was = previous.map(|known| known.status);
+        if was != Some(child.status) && child.status.settled() {
+            let what = match child.status {
+                mush_runtime::ChildStatus::Idle => "finished".to_string(),
+                mush_runtime::ChildStatus::Failed => format!(
+                    "failed: {}",
+                    child.error.as_deref().unwrap_or("unknown error")
+                ),
+                mush_runtime::ChildStatus::Cancelled => "cancelled".to_string(),
+                mush_runtime::ChildStatus::Interrupted => "interrupted".to_string(),
+                mush_runtime::ChildStatus::Deleted => "deleted".to_string(),
+                mush_runtime::ChildStatus::Starting | mush_runtime::ChildStatus::Running => {
+                    return;
+                }
+            };
+            let note = format!("subagent {}: {what}", child.name);
+            self.status = Some(if child.status == mush_runtime::ChildStatus::Failed {
+                crate::app_state::Status::error(note)
+            } else {
+                note.into()
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn running_children(&self) -> usize {
+        self.children
+            .iter()
+            .filter(|child| !child.status.settled())
+            .count()
     }
 
     pub fn tick_streaming_text(&mut self) {

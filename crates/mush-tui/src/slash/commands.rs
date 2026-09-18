@@ -192,6 +192,10 @@ pub async fn handle(
             show_cost(app);
             None
         }
+        SlashAction::Agents => {
+            app.push_system_message(format_agents(&app.children));
+            None
+        }
         SlashAction::Skills => {
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
             None
@@ -629,7 +633,7 @@ pub(crate) fn show_cost(app: &mut App) {
         0
     };
 
-    app.push_system_message(format!(
+    let mut text = format!(
         "{}cumulative: ↑{} ↓{} R{} W{} | reuse {}% write {}% | {}tok, {}",
         ctx,
         s.input_tokens,
@@ -640,7 +644,63 @@ pub(crate) fn show_cost(app: &mut App) {
         write_pct,
         s.total_tokens,
         s.total_cost
-    ));
+    );
+    if !app.children.is_empty() {
+        let (tokens, cost, turns) = app.children.iter().fold(
+            (TokenCount::ZERO, Dollars::default(), 0u32),
+            |(tokens, cost, turns), child| {
+                (
+                    tokens + child.usage.total_tokens(),
+                    cost + child.cost.total(),
+                    turns + child.turns,
+                )
+            },
+        );
+        text.push_str(&format!(
+            "\nsubagents: {} across {} turn{}, {tokens}tok, {cost}",
+            app.children.len(),
+            turns,
+            if turns == 1 { "" } else { "s" }
+        ));
+    }
+    app.push_system_message(text);
+}
+
+pub(crate) fn format_agents(children: &[mush_runtime::ChildSummary]) -> String {
+    if children.is_empty() {
+        return "no child agents in this session".into();
+    }
+    let mut lines = Vec::new();
+    for child in children {
+        let mut line = format!(
+            "{} {} · {:?} · {} · {} turn{}, {}",
+            child.id,
+            child.name,
+            child.status,
+            child.model_id,
+            child.turns,
+            if child.turns == 1 { "" } else { "s" },
+            child.cost.total()
+        );
+        if let Some(note) = &child.progress_note {
+            line.push_str(&format!("\n  note: {note}"));
+        }
+        if let Some(error) = &child.error {
+            line.push_str(&format!("\n  error: {error}"));
+        }
+        if let Some(answer) = &child.answer {
+            let preview: String = answer
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            line.push_str(&format!("\n  last: {preview}"));
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
@@ -1089,6 +1149,69 @@ mod tests {
         let msg = app.messages.last().unwrap();
         assert!(msg.content.contains("reuse 50%"));
         assert!(msg.content.contains("write 16%"));
+    }
+
+    fn child(name: &str, status: mush_runtime::ChildStatus) -> mush_runtime::ChildSummary {
+        mush_runtime::ChildSummary {
+            id: format!("sub-{name}"),
+            name: name.into(),
+            parent: None,
+            depth: 1,
+            session_id: "s".into(),
+            model_id: "claude-opus-4-7".into(),
+            status,
+            spawned_at: mush_ai::types::Timestamp::zero(),
+            updated_at: mush_ai::types::Timestamp::zero(),
+            answer: Some("found two issues\nsecond line".into()),
+            error: None,
+            progress_note: Some("halfway".into()),
+            usage: mush_ai::types::Usage {
+                input_tokens: TokenCount::new(100),
+                output_tokens: TokenCount::new(50),
+                ..Default::default()
+            },
+            cost: mush_ai::types::Cost {
+                input: Dollars::new(0.01),
+                ..Default::default()
+            },
+            turns: 2,
+        }
+    }
+
+    #[test]
+    fn agents_lists_children_with_status_note_and_answer_preview() {
+        let listed = format_agents(&[child("auth", mush_runtime::ChildStatus::Running)]);
+
+        assert!(listed.starts_with("sub-auth auth · Running · claude-opus-4-7 · 2 turns"));
+        assert!(listed.contains("note: halfway"));
+        assert!(listed.contains("last: found two issues"));
+        assert!(!listed.contains("second line"));
+        assert_eq!(format_agents(&[]), "no child agents in this session");
+    }
+
+    #[test]
+    fn a_settled_child_leaves_a_status_line_once_and_cost_folds_it_in() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.note_child(child("auth", mush_runtime::ChildStatus::Running));
+        assert!(app.status.is_none());
+        assert_eq!(app.running_children(), 1);
+
+        app.note_child(child("auth", mush_runtime::ChildStatus::Idle));
+        assert_eq!(
+            app.status.as_ref().map(|s| s.text.as_str()),
+            Some("subagent auth: finished")
+        );
+        app.status = None;
+        app.note_child(child("auth", mush_runtime::ChildStatus::Idle));
+        assert!(app.status.is_none());
+        assert_eq!(app.running_children(), 0);
+
+        show_cost(&mut app);
+        let text = &app.messages.last().unwrap().content;
+        assert!(
+            text.contains("subagents: 1 across 2 turns, 150tok, $0.01"),
+            "{text}"
+        );
     }
 
     #[test]

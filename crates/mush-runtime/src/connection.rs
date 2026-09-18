@@ -100,6 +100,7 @@ pub enum ClientEvent {
         question: String,
         answer: Result<String, String>,
     },
+    ChildUpdated(Box<crate::family::ChildSummary>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -170,6 +171,7 @@ pub struct InProcessConnection {
     agent_inbox: Option<crate::family::AgentInbox>,
     deferred_deliveries: VecDeque<crate::family::Delivery>,
     family: Option<std::sync::Arc<crate::family::Family>>,
+    known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
     closed: bool,
 }
 
@@ -210,8 +212,24 @@ impl InProcessConnection {
             agent_inbox: None,
             deferred_deliveries: VecDeque::new(),
             family: None,
+            known_children: std::collections::HashMap::new(),
             closed: false,
         }
+    }
+
+    fn try_poll_family(&mut self) -> Option<ClientEvent> {
+        let family = self.family.clone()?;
+        for child in family.all() {
+            let changed = self
+                .known_children
+                .get(&child.id)
+                .is_none_or(|known| *known != child);
+            if changed {
+                self.known_children.insert(child.id.clone(), child.clone());
+                return Some(ClientEvent::ChildUpdated(Box::new(child)));
+            }
+        }
+        None
     }
 
     pub fn set_family(&mut self, family: Option<std::sync::Arc<crate::family::Family>>) {
@@ -487,6 +505,9 @@ impl InProcessConnection {
             return Some(event);
         }
         if let Some(event) = self.try_poll_side_questions() {
+            return Some(event);
+        }
+        if let Some(event) = self.try_poll_family() {
             return Some(event);
         }
         self.try_poll_compaction()

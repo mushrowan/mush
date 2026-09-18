@@ -336,6 +336,7 @@ pub(super) async fn apply_command_events(
             ClientEvent::SideAnswer { question, answer } => {
                 crate::slash::side_question::show_side_answer(&mut session.app, &question, answer);
             }
+            ClientEvent::ChildUpdated(child) => session.app.note_child(*child),
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {

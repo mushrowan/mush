@@ -55,6 +55,7 @@ pub enum SlashAction {
     Subagents {
         args: String,
     },
+    Agents,
     Help,
     Keys,
     Clear,
@@ -165,6 +166,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "subagents" => Ok(SlashAction::Subagents {
             args: args.to_string(),
         }),
+        "agents" => Ok(SlashAction::Agents),
         "help" => Ok(SlashAction::Help),
         "keys" => Ok(SlashAction::Keys),
         "new" => Ok(SlashAction::New),

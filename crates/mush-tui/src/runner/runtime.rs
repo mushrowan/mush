@@ -13,6 +13,7 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("help", "show available commands"),
     ("keys", "show keyboard shortcuts"),
     ("subagents", "show or register session supervisors"),
+    ("agents", "list the child agents of this session"),
     ("new", "save session, start fresh"),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
