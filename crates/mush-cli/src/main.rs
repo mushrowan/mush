@@ -120,7 +120,7 @@ impl Cli {
             return store
                 .list()?
                 .into_iter()
-                .find(|meta| meta.cwd == cwd)
+                .find(|meta| meta.cwd == cwd && meta.parent.is_none())
                 .map(|meta| SessionTarget::Resume(meta.id.to_string()))
                 .ok_or_else(|| eyre!("no session for this directory yet, run mush to start one"));
         }
@@ -1074,6 +1074,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             ));
             worker.session_id = session.meta.id.clone();
             worker.title = Some(spec.name.clone());
+            worker.parent = Some(spec.parent_session_id.clone().into());
             worker.system_prompt = Some(system_prompt);
             worker.thinking_level = options
                 .thinking
@@ -1420,6 +1421,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.meta.title = snapshot.title;
     session.conversation = snapshot.primary;
     session.system_prompt = snapshot.system_prompt;
+    session.meta.parent = snapshot.parent;
     session.meta.message_count = session.conversation.context_len();
     session.panes = snapshot
         .panes
@@ -1479,6 +1481,7 @@ mod tests {
             model_id: "test".into(),
             panes: Vec::new(),
             system_prompt: None,
+            parent: None,
         }
     }
 

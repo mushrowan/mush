@@ -8,6 +8,7 @@ pub struct SessionSnapshot {
     pub model_id: String,
     pub panes: Vec<PaneSnapshot>,
     pub system_prompt: Option<String>,
+    pub parent: Option<SessionId>,
 }
 
 pub struct PaneSnapshot {

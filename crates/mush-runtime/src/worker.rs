@@ -31,6 +31,7 @@ pub struct WorkerConfig {
     pub goal: Option<Arc<crate::goal::GoalStore>>,
     pub scheduler: Option<Arc<crate::schedule::Scheduler>>,
     pub notes: Option<Arc<crate::notes::Notes>>,
+    pub parent: Option<SessionId>,
 }
 
 impl WorkerConfig {
@@ -56,6 +57,7 @@ impl WorkerConfig {
             goal: None,
             scheduler: None,
             notes: None,
+            parent: None,
         }
     }
 
@@ -70,6 +72,7 @@ impl WorkerConfig {
         runtime.rlm_depth = self.rlm_depth;
         runtime.rlm_max_depth = self.rlm_max_depth;
         runtime.thinking_level = self.thinking_level;
+        runtime.parent = self.parent;
         runtime.set_kernel_state(self.kernel_state);
         let mut connection = InProcessConnection::new(
             runtime,

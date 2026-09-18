@@ -654,6 +654,7 @@ fn session_picker_open_close() {
         updated_at: Timestamp::now(),
         message_count: 5,
         cwd: "/tmp".into(),
+        parent: None,
     }];
 
     app.open_session_picker(sessions, "/tmp".into());
@@ -676,6 +677,7 @@ fn session_picker_filter() {
             updated_at: Timestamp::now(),
             message_count: 1,
             cwd: "/tmp".into(),
+            parent: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -685,6 +687,7 @@ fn session_picker_filter() {
             updated_at: Timestamp::now(),
             message_count: 2,
             cwd: "/tmp".into(),
+            parent: None,
         },
     ];
 
@@ -709,6 +712,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             updated_at: Timestamp::now(),
             message_count: 1,
             cwd: "/tmp".into(),
+            parent: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -718,6 +722,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             updated_at: Timestamp::now(),
             message_count: 2,
             cwd: "/tmp".into(),
+            parent: None,
         },
     ];
 
@@ -746,6 +751,7 @@ fn session_picker_scope_filter() {
             updated_at: Timestamp::now(),
             message_count: 1,
             cwd: "/home/user/project".into(),
+            parent: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -755,6 +761,7 @@ fn session_picker_scope_filter() {
             updated_at: Timestamp::now(),
             message_count: 2,
             cwd: "/home/user/other".into(),
+            parent: None,
         },
     ];
 

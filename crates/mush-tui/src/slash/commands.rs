@@ -324,6 +324,7 @@ pub fn open_sessions_picker(app: &mut App) {
             std::thread::spawn(move || {
                 for path in paths {
                     if let Ok(meta) = mush_session::load_meta(&path)
+                        && meta.parent.is_none()
                         && tx.send(meta).is_err()
                     {
                         break;

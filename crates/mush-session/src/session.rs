@@ -13,6 +13,8 @@ pub struct SessionMeta {
     pub updated_at: Timestamp,
     pub message_count: usize,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,6 +50,7 @@ impl Session {
                 updated_at: now,
                 message_count: 0,
                 cwd: cwd.into(),
+                parent: None,
             },
             conversation: ConversationState::new(),
             panes: vec![],

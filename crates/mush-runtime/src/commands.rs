@@ -270,6 +270,7 @@ impl SessionRuntime {
             model_id: self.model_id.clone(),
             panes: Vec::new(),
             system_prompt: self.system_prompt.clone(),
+            parent: self.parent.clone(),
         }
     }
 

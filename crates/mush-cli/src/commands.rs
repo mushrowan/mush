@@ -26,9 +26,12 @@ fn short_id(id: &str) -> String {
 
 pub fn list_sessions() -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
-    let sessions = store
+    let sessions: Vec<_> = store
         .list()
-        .map_err(|e| eyre!("failed to list sessions: {e}"))?;
+        .map_err(|e| eyre!("failed to list sessions: {e}"))?
+        .into_iter()
+        .filter(|meta| meta.parent.is_none())
+        .collect();
 
     if sessions.is_empty() {
         println!("no saved sessions");

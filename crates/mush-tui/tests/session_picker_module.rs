@@ -13,6 +13,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             updated_at: Timestamp::now(),
             message_count: 1,
             cwd: "/tmp/project".into(),
+            parent: None,
         },
         SessionMeta {
             id: SessionId::from("remote"),
@@ -22,6 +23,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             updated_at: Timestamp::now(),
             message_count: 2,
             cwd: "/tmp/other".into(),
+            parent: None,
         },
     ];
 
@@ -54,6 +56,7 @@ fn drain_incoming_appends_and_flips_loading() {
         updated_at: Timestamp::from_ms(100),
         message_count: 1,
         cwd: "/tmp/project".into(),
+        parent: None,
     };
     let newer = SessionMeta {
         id: SessionId::from("b"),
@@ -63,6 +66,7 @@ fn drain_incoming_appends_and_flips_loading() {
         updated_at: Timestamp::from_ms(200),
         message_count: 1,
         cwd: "/tmp/project".into(),
+        parent: None,
     };
     tx.send(older).unwrap();
     tx.send(newer).unwrap();
@@ -94,6 +98,7 @@ fn meta(id: &str, cwd: &str) -> SessionMeta {
         updated_at: Timestamp::now(),
         message_count: 1,
         cwd: cwd.into(),
+        parent: None,
     }
 }
 

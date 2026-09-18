@@ -54,6 +54,7 @@ pub struct ChildSpec {
     pub thinking: Option<ThinkingLevel>,
     pub depth: u32,
     pub parent: Identity,
+    pub parent_session_id: String,
 }
 
 pub struct ChildParts {
@@ -349,6 +350,17 @@ impl Family {
                 return Err(format!("you already have a child called {name}"));
             }
         }
+        let parent_session_id = {
+            let inner = self.lock();
+            match caller.id.as_deref() {
+                Some(id) => inner
+                    .children
+                    .get(id)
+                    .map(|node| node.summary.session_id.clone())
+                    .unwrap_or_default(),
+                None => inner.root_session_id.clone(),
+            }
+        };
         let spec = ChildSpec {
             id: id.clone(),
             name: name.clone(),
@@ -357,6 +369,7 @@ impl Family {
             thinking,
             depth: caller.depth + 1,
             parent: caller.clone(),
+            parent_session_id,
         };
         let parts = (factory)(spec, Arc::clone(this)).await?;
         let session_id = parts.config.session_id.to_string();
@@ -1194,6 +1207,13 @@ mod tests {
                 let mut config = WorkerConfig::new(echo_config(model));
                 config.title = Some(spec.name.clone());
                 config.rlm_depth = spec.depth;
+                config.parent = Some(spec.parent_session_id.clone().into());
+                config.saver = Some(Arc::new(|snapshot: crate::snapshot::SessionSnapshot| {
+                    assert_eq!(
+                        snapshot.parent.as_ref().map(ToString::to_string).as_deref(),
+                        Some("root-session")
+                    );
+                }));
                 config.system_prompt = Some(format!("child {} of {}", spec.name, spec.parent.name));
                 Ok(ChildParts {
                     config,
