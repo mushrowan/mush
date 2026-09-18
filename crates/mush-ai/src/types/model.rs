@@ -84,7 +84,9 @@ impl Model {
 
     #[must_use]
     pub fn supports_caching(&self) -> bool {
-        self.cost.cache_read > 0.0 || self.cost.cache_write > 0.0
+        self.provider == Provider::Anthropic
+            || self.cost.cache_read > 0.0
+            || self.cost.cache_write > 0.0
     }
 
     pub fn supports_native_parallel_calls(&self) -> bool {
@@ -438,8 +440,11 @@ mod tests {
     }
 
     #[test]
-    fn supports_caching_is_false_when_neither_rate_is_priced() {
-        assert!(!model_with_cost(0.0, 0.0).supports_caching());
+    fn an_unpriced_model_caches_only_when_it_is_anthropic() {
+        assert!(model_with_cost(0.0, 0.0).supports_caching());
+        let mut other = model_with_cost(0.0, 0.0);
+        other.provider = Provider::Custom("fixture".into());
+        assert!(!other.supports_caching());
     }
 
     #[test]

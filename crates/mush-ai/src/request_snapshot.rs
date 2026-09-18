@@ -12,12 +12,75 @@ pub struct RequestFingerprint {
     pub messages_tail: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestDigest {
+    pub fingerprint: RequestFingerprint,
+    pub context_management: bool,
+    pub cache_ttl_secs: u16,
+    pub snapshot: Option<PathBuf>,
+    pub previous_snapshot: Option<PathBuf>,
+}
+
+static LAST_BY_SESSION: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, RequestDigest>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[must_use]
+pub fn last_request(session: &str) -> Option<RequestDigest> {
+    LAST_BY_SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .cloned()
+}
+
+pub fn record_request(
+    session: &str,
+    fingerprint: RequestFingerprint,
+    context_management: bool,
+    cache_ttl_secs: u16,
+    snapshot: Option<PathBuf>,
+) {
+    let mut last = LAST_BY_SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous_snapshot = last.get(session).and_then(|digest| digest.snapshot.clone());
+    last.insert(
+        session.to_string(),
+        RequestDigest {
+            fingerprint,
+            context_management,
+            cache_ttl_secs,
+            snapshot,
+            previous_snapshot,
+        },
+    );
+}
+
+fn system_without_billing_header(system_json: &str) -> String {
+    let Ok(serde_json::Value::Array(blocks)) =
+        serde_json::from_str::<serde_json::Value>(system_json)
+    else {
+        return system_json.to_string();
+    };
+    let kept: Vec<&serde_json::Value> = blocks
+        .iter()
+        .filter(|block| {
+            !block
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|text| text.starts_with("x-anthropic-billing-header"))
+        })
+        .collect();
+    serde_json::to_string(&kept).unwrap_or_else(|_| system_json.to_string())
+}
+
 impl RequestFingerprint {
     #[must_use]
     pub fn from_json_sections(system_json: &str, tools_json: &str, messages_json: &str) -> Self {
         let (prefix_json, last_user_json, tail_json) = split_last_user(messages_json);
         Self {
-            system: hash_str(system_json),
+            system: hash_str(&system_without_billing_header(system_json)),
             tools: hash_str(tools_json),
             messages_prefix: hash_str(&prefix_json),
             last_user: hash_str(&last_user_json),
@@ -86,32 +149,6 @@ pub const SNAPSHOT_RETENTION: usize = 5;
 
 static SNAPSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
 
-static LAST_MESSAGES_PREFIX: AtomicU64 = AtomicU64::new(0);
-static LAST_MESSAGES_PREFIX_SET: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static LAST_USED_CONTEXT_MANAGEMENT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-static LAST_USED_CONTEXT_MANAGEMENT_SET: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[must_use]
-pub fn last_messages_prefix_fingerprint() -> Option<u64> {
-    if LAST_MESSAGES_PREFIX_SET.load(Ordering::Relaxed) {
-        Some(LAST_MESSAGES_PREFIX.load(Ordering::Relaxed))
-    } else {
-        None
-    }
-}
-
-#[must_use]
-pub fn last_used_context_management() -> Option<bool> {
-    if LAST_USED_CONTEXT_MANAGEMENT_SET.load(Ordering::Relaxed) {
-        Some(LAST_USED_CONTEXT_MANAGEMENT.load(Ordering::Relaxed))
-    } else {
-        None
-    }
-}
-
 const SENSITIVE_HEADERS: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -162,7 +199,7 @@ fn redact_snapshot_body(body_json: &str) -> serde_json::Value {
     }
 }
 
-fn body_uses_context_management(body_json: &str) -> bool {
+pub fn body_uses_context_management(body_json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body_json)
         .ok()
         .and_then(|body| body.get("context_management").cloned())
@@ -222,16 +259,32 @@ pub(crate) fn looks_like_secret(text: &str) -> bool {
 
 pub fn dump(
     provider: &str,
+    session: Option<&str>,
     fingerprint: &RequestFingerprint,
     body_json: &str,
     headers: &[(&str, &str)],
 ) -> Option<PathBuf> {
-    dump_in(&snapshot_dir(), provider, fingerprint, body_json, headers)
+    dump_in(
+        &snapshot_dir(),
+        provider,
+        session,
+        fingerprint,
+        body_json,
+        headers,
+    )
+}
+
+fn session_tag(session: Option<&str>) -> String {
+    match session {
+        Some(id) if !id.is_empty() => id.chars().take(8).collect(),
+        _ => "nosession".to_string(),
+    }
 }
 
 pub fn dump_in(
     dir: &Path,
     provider: &str,
+    session: Option<&str>,
     fingerprint: &RequestFingerprint,
     body_json: &str,
     headers: &[(&str, &str)],
@@ -243,7 +296,8 @@ pub fn dump_in(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let filename = format!("{provider}-{ts_ms:013}-{seq:04}.json");
+    let scope = format!("{provider}-{}", session_tag(session));
+    let filename = format!("{scope}-{ts_ms:013}-{seq:04}.json");
     let path = dir.join(&filename);
 
     let headers_json: serde_json::Map<String, serde_json::Value> = headers
@@ -257,8 +311,6 @@ pub fn dump_in(
             ((*name).to_string(), serde_json::Value::String(safe))
         })
         .collect();
-
-    let uses_context_management = body_uses_context_management(body_json);
 
     let envelope = serde_json::json!({
         "_snapshot": {
@@ -275,11 +327,7 @@ pub fn dump_in(
             if crate::private_io::write_private(&path, json).is_err() {
                 return None;
             }
-            LAST_MESSAGES_PREFIX.store(fingerprint.messages_prefix, Ordering::Relaxed);
-            LAST_MESSAGES_PREFIX_SET.store(true, Ordering::Relaxed);
-            LAST_USED_CONTEXT_MANAGEMENT.store(uses_context_management, Ordering::Relaxed);
-            LAST_USED_CONTEXT_MANAGEMENT_SET.store(true, Ordering::Relaxed);
-            prune_old_snapshots(dir, provider);
+            prune_old_snapshots(dir, &scope);
             Some(path)
         }
         Err(_) => None,
@@ -314,8 +362,8 @@ pub fn recent_snapshots_in(dir: &Path, provider: &str, limit: usize) -> Vec<Path
     matches.into_iter().take(limit).map(|(p, _)| p).collect()
 }
 
-fn prune_old_snapshots(dir: &Path, provider: &str) {
-    let prefix = format!("{provider}-");
+fn prune_old_snapshots(dir: &Path, scope: &str) {
+    let prefix = format!("{scope}-");
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -355,7 +403,7 @@ mod tests {
             ("Authorization", "Bearer also-redact-mixed-case"),
             ("x-api-key", "shhhh"),
         ];
-        let path = dump_in(dir.path(), "p", &fp, "{}", &headers).expect("dump succeeds");
+        let path = dump_in(dir.path(), "p", None, &fp, "{}", &headers).expect("dump succeeds");
         let parsed: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let recorded = parsed["_snapshot"]["headers"]
@@ -396,7 +444,8 @@ mod tests {
             "safe": "keep me"
         });
 
-        let path = dump_in(dir.path(), "p", &fp, &body.to_string(), &[]).expect("dump succeeds");
+        let path =
+            dump_in(dir.path(), "p", None, &fp, &body.to_string(), &[]).expect("dump succeeds");
         let dump_text = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -505,39 +554,100 @@ mod tests {
     }
 
     #[test]
-    fn dump_publishes_messages_prefix_fingerprint() {
-        let dir = tempfile::tempdir().unwrap();
-        let fp = RequestFingerprint::from_json_sections(
-            "[]",
-            "[]",
-            r#"[{"role":"user","content":[{"type":"text","text":"hi"}]}]"#,
+    fn a_recorded_request_is_read_back_per_session_with_its_previous_snapshot() {
+        let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
+        record_request(
+            "sess-a",
+            fp,
+            true,
+            3600,
+            Some(PathBuf::from("/tmp/a-1.json")),
         );
-        dump_in(dir.path(), "anthropic", &fp, "{}", &[]).expect("dump succeeds");
-        let observed = last_messages_prefix_fingerprint();
-        assert_eq!(
-            observed,
-            Some(fp.messages_prefix),
-            "dump should publish the prefix fingerprint atomically"
+        record_request(
+            "sess-b",
+            fp,
+            false,
+            300,
+            Some(PathBuf::from("/tmp/b-1.json")),
         );
+        record_request(
+            "sess-a",
+            fp,
+            true,
+            3600,
+            Some(PathBuf::from("/tmp/a-2.json")),
+        );
+
+        let a = last_request("sess-a").unwrap();
+        assert_eq!(a.snapshot, Some(PathBuf::from("/tmp/a-2.json")));
+        assert_eq!(a.previous_snapshot, Some(PathBuf::from("/tmp/a-1.json")));
+        assert!(a.context_management);
+        assert_eq!(a.cache_ttl_secs, 3600);
+        let b = last_request("sess-b").unwrap();
+        assert_eq!(b.snapshot, Some(PathBuf::from("/tmp/b-1.json")));
+        assert_eq!(b.previous_snapshot, None);
+        assert!(last_request("sess-c").is_none());
     }
 
     #[test]
-    fn dump_publishes_context_management_presence() {
+    fn the_billing_header_block_does_not_move_the_system_fingerprint() {
+        let with_a = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_1"},{"type":"text","text":"You are mush"}]"#;
+        let with_b = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_2"},{"type":"text","text":"You are mush"}]"#;
+        let other = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_2"},{"type":"text","text":"You are prime"}]"#;
+
+        let a = RequestFingerprint::from_json_sections(with_a, "[]", "[]");
+        let b = RequestFingerprint::from_json_sections(with_b, "[]", "[]");
+        let c = RequestFingerprint::from_json_sections(other, "[]", "[]");
+
+        assert_eq!(a.system, b.system);
+        assert_ne!(a.system, c.system);
+    }
+
+    #[test]
+    fn snapshots_are_pruned_per_session() {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
-
-        dump_in(
-            dir.path(),
-            "anthropic",
-            &fp,
-            r#"{"model":"test","context_management":{"edits":[]}}"#,
-            &[],
-        )
-        .expect("dump succeeds");
-        assert_eq!(last_used_context_management(), Some(true));
-
-        dump_in(dir.path(), "anthropic", &fp, r#"{"model":"test"}"#, &[]).expect("dump succeeds");
-        assert_eq!(last_used_context_management(), Some(false));
+        for i in 0..(SNAPSHOT_RETENTION + 2) {
+            dump_in(
+                dir.path(),
+                "anthropic",
+                Some("aaaaaaaa11"),
+                &fp,
+                &format!("{{\"a\":{i}}}"),
+                &[],
+            )
+            .unwrap();
+        }
+        for i in 0..2 {
+            dump_in(
+                dir.path(),
+                "anthropic",
+                Some("bbbbbbbb22"),
+                &fp,
+                &format!("{{\"b\":{i}}}"),
+                &[],
+            )
+            .unwrap();
+        }
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.starts_with("anthropic-aaaaaaaa-"))
+                .count(),
+            SNAPSHOT_RETENTION
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.starts_with("anthropic-bbbbbbbb-"))
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -545,7 +655,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         let body = r#"{"model":"test","messages":[]}"#;
-        let path = dump_in(dir.path(), "testprovider", &fp, body, &[]).expect("dump succeeds");
+        let path =
+            dump_in(dir.path(), "testprovider", None, &fp, body, &[]).expect("dump succeeds");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("_snapshot"));
         assert!(contents.contains("fingerprint"));
@@ -558,7 +669,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         for i in 0..3 {
-            dump_in(dir.path(), "p", &fp, &format!(r#"{{"call":{i}}}"#), &[]).unwrap();
+            dump_in(
+                dir.path(),
+                "p",
+                None,
+                &fp,
+                &format!(r#"{{"call":{i}}}"#),
+                &[],
+            )
+            .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let paths = recent_snapshots_in(dir.path(), "p", 2);
@@ -572,7 +691,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fp = RequestFingerprint::from_json_sections("[]", "[]", "[]");
         for i in 0..(SNAPSHOT_RETENTION + 3) {
-            dump_in(dir.path(), "pr", &fp, &format!(r#"{{"call":{i}}}"#), &[]).unwrap();
+            dump_in(
+                dir.path(),
+                "pr",
+                None,
+                &fp,
+                &format!(r#"{{"call":{i}}}"#),
+                &[],
+            )
+            .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let all = recent_snapshots_in(dir.path(), "pr", usize::MAX);

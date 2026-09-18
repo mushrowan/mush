@@ -273,7 +273,33 @@ impl ApiProvider for AnthropicProvider {
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            let _ = crate::request_snapshot::dump("anthropic", &fp, &body_json, &header_refs);
+            let session = options
+                .session_id
+                .as_ref()
+                .map(|id| id.as_str().to_string());
+            let snapshot = crate::request_snapshot::dump(
+                "anthropic",
+                session.as_deref(),
+                &fp,
+                &body_json,
+                &header_refs,
+            );
+            let ttl_secs =
+                anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth)
+                    .map_or(0, |cc| {
+                        if cc.ttl.as_deref() == Some("1h") {
+                            3600
+                        } else {
+                            300
+                        }
+                    });
+            crate::request_snapshot::record_request(
+                session.as_deref().unwrap_or(""),
+                fp,
+                crate::request_snapshot::body_uses_context_management(&body_json),
+                ttl_secs,
+                snapshot,
+            );
         }
 
         tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");

@@ -138,6 +138,7 @@ pub struct App {
     pub goal: Option<mush_runtime::Goal>,
     pub jobs: Vec<mush_runtime::Job>,
     pub autonomous: Option<mush_runtime::AutonomousStatus>,
+    pub last_request: Option<mush_ai::request_snapshot::RequestDigest>,
 }
 
 mod modals;
@@ -203,6 +204,7 @@ impl App {
             goal: None,
             jobs: Vec::new(),
             autonomous: None,
+            last_request: None,
         }
     }
 

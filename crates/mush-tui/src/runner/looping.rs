@@ -360,11 +360,9 @@ async fn dispatch_agent_event(
 ) {
     {
         let pane = &mut runtime.session;
-        let model = pane
-            .connection
-            .state()
-            .turn_model
-            .unwrap_or_else(|| tui_config.model.clone());
+        let state = pane.connection.state();
+        let model = state.turn_model.unwrap_or_else(|| tui_config.model.clone());
+        pane.app.last_request = state.last_request;
         let (app, image_protos) = pane.fields_mut();
         let mut ctx = event_handler::EventCtx { app, image_protos };
         event_handler::handle_agent_event(

@@ -127,6 +127,8 @@ pub struct ConnectionState {
     pub compacting: bool,
     pub pending_prompt: bool,
     pub controlled: bool,
+    #[serde(default)]
+    pub last_request: Option<mush_ai::request_snapshot::RequestDigest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -1421,6 +1423,7 @@ impl AgentConnection for InProcessConnection {
             compacting: self.compaction.is_some(),
             pending_prompt: self.runtime.pending_prompt.is_some(),
             controlled: self.runtime.control.is_some(),
+            last_request: mush_ai::request_snapshot::last_request(self.runtime.session_id.as_str()),
         }
     }
 

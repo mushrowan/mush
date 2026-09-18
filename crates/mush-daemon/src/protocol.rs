@@ -114,6 +114,7 @@ mod tests {
             compacting: false,
             pending_prompt: false,
             controlled: false,
+            last_request: None,
         }
     }
 

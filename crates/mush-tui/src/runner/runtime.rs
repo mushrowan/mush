@@ -497,6 +497,7 @@ mod tests {
     #[test]
     fn build_initial_app_zeroes_cache_ttl_when_model_lacks_caching() {
         let mut config = test_config();
+        config.model.provider = Provider::Custom("fixture".into());
         config.model.cost.cache_read = 0.0;
         config.model.cost.cache_write = 0.0;
         let app = build_initial_app(&config, Path::new("."));
