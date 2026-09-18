@@ -175,14 +175,22 @@ pub(crate) fn format_goal(goal: Option<&mush_runtime::Goal>) -> String {
         return "no goal set. /goal [--budget N] <objective>".into();
     };
     let mut text = format!(
-        "goal {} ({:?}): {}\ncontinuations: {}, tokens used: {}",
-        goal.id, goal.status, goal.objective, goal.continuations, goal.tokens_used
+        "goal {} ({:?}): {}\ncontinuations: {}, {} elapsed, tokens used: {}",
+        goal.id,
+        goal.status,
+        goal.objective,
+        goal.continuations,
+        crate::turn_activity::format_elapsed(std::time::Duration::from_secs(goal.elapsed_secs())),
+        goal.tokens_used
     );
     if let Some(budget) = goal.token_budget {
         text.push_str(&format!(" of {budget}"));
     }
     if let Some(summary) = &goal.summary {
         text.push_str(&format!("\nsummary: {summary}"));
+    }
+    if let Some(error) = &goal.error {
+        text.push_str(&format!("\nerror: {error}"));
     }
     text
 }
@@ -380,6 +388,7 @@ pub(super) async fn handle_slash_action(
                 slash::GoalAction::Complete => {
                     mush_runtime::GoalCommand::Complete { summary: None }
                 }
+                slash::GoalAction::Fail { error } => mush_runtime::GoalCommand::Fail { error },
             };
             match session
                 .connection

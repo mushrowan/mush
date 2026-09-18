@@ -11,6 +11,7 @@ pub enum GoalStatus {
     Paused,
     BudgetLimited,
     Complete,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +25,8 @@ pub struct Goal {
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl Goal {
@@ -31,6 +34,14 @@ impl Goal {
     pub fn remaining_tokens(&self) -> Option<u64> {
         self.token_budget
             .map(|budget| budget.saturating_sub(self.tokens_used))
+    }
+
+    #[must_use]
+    pub fn elapsed_secs(&self) -> u64 {
+        self.updated_at
+            .as_ms()
+            .saturating_sub(self.created_at.as_ms())
+            / 1_000
     }
 }
 
@@ -47,6 +58,9 @@ pub enum GoalCommand {
     Pause,
     Resume,
     Clear,
+    Fail {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,9 +170,17 @@ impl GoalStore {
                     created_at: now,
                     updated_at: now,
                     summary: None,
+                    error: None,
                 });
                 inner.due = Some(Continuation::Continue);
                 inner.budget_notice_sent = false;
+            }
+            GoalCommand::Fail { error } => {
+                let goal = inner.goal.as_mut().ok_or("no goal is set")?;
+                goal.status = GoalStatus::Failed;
+                goal.error = Some(error);
+                goal.updated_at = now;
+                inner.due = None;
             }
             GoalCommand::Complete { summary } => {
                 let goal = inner.goal.as_mut().ok_or("no goal is set")?;
@@ -238,7 +260,7 @@ impl GoalStore {
             GoalStatus::BudgetLimited => {
                 inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
             }
-            GoalStatus::Paused | GoalStatus::Complete => inner.due = None,
+            GoalStatus::Paused | GoalStatus::Complete | GoalStatus::Failed => inner.due = None,
         }
         let goal = inner.goal.clone();
         drop(inner);
@@ -345,6 +367,56 @@ mod tests {
         store.turn_ended();
         assert!(store.take_due_prompt().is_none());
         assert_eq!(store.get().unwrap().status, GoalStatus::Complete);
+    }
+
+    #[test]
+    fn a_failed_goal_stops_continuing_and_keeps_the_reason() {
+        let store = GoalStore::new(None);
+        store
+            .apply(GoalCommand::Create {
+                objective: "ship it".into(),
+                token_budget: None,
+            })
+            .unwrap();
+        store.take_due_prompt();
+
+        store
+            .apply(GoalCommand::Fail {
+                error: "the gate never passes".into(),
+            })
+            .unwrap();
+        store.turn_ended();
+
+        let goal = store.get().unwrap();
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.error.as_deref(), Some("the gate never passes"));
+        assert!(store.take_due_prompt().is_none());
+        assert!(
+            store
+                .apply(GoalCommand::Fail {
+                    error: "again".into()
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn elapsed_counts_from_creation_to_the_last_change() {
+        let mut goal = Goal {
+            id: "g".into(),
+            objective: "o".into(),
+            status: GoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            continuations: 0,
+            created_at: Timestamp::from_ms(1_000),
+            updated_at: Timestamp::from_ms(1_000),
+            summary: None,
+            error: None,
+        };
+        assert_eq!(goal.elapsed_secs(), 0);
+        goal.updated_at = Timestamp::from_ms(91_000);
+        assert_eq!(goal.elapsed_secs(), 90);
     }
 
     #[test]

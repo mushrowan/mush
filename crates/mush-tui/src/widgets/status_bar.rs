@@ -256,9 +256,16 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     {
         b.section_break();
         let label = match goal.status {
-            mush_runtime::GoalStatus::Active => format!("goal #{}", goal.continuations),
+            mush_runtime::GoalStatus::Active => format!(
+                "goal #{} · {}",
+                goal.continuations,
+                crate::turn_activity::format_elapsed(std::time::Duration::from_secs(
+                    goal.elapsed_secs()
+                ))
+            ),
             mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
             mush_runtime::GoalStatus::BudgetLimited => "goal over budget".to_string(),
+            mush_runtime::GoalStatus::Failed => "goal failed".to_string(),
             mush_runtime::GoalStatus::Complete => String::new(),
         };
         b.push_inline(Span::styled(label, app.theme.status_model));

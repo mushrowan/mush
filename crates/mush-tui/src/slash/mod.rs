@@ -44,7 +44,9 @@ pub enum SlashParseError {
     LoginCodeUsage,
     #[error("usage: /btw <question>")]
     SideUsage,
-    #[error("usage: /goal [--budget N] <objective> | /goal status|pause|resume|complete|clear")]
+    #[error(
+        "usage: /goal [--budget N] <objective> | /goal status|pause|resume|complete|clear | /goal fail <reason>"
+    )]
     GoalUsage,
     #[error(
         "usage: /heartbeat [every 10m] [--follow-up] <instruction> | /heartbeat status|pause|resume|clear"
@@ -198,6 +200,9 @@ pub enum GoalAction {
     Resume,
     Clear,
     Complete,
+    Fail {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -473,7 +478,17 @@ fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
         "resume" => return Ok(GoalAction::Resume),
         "clear" => return Ok(GoalAction::Clear),
         "complete" | "done" => return Ok(GoalAction::Complete),
+        "fail" => return Err(SlashParseError::GoalUsage),
         _ => {}
+    }
+    if let Some(error) = args.strip_prefix("fail ") {
+        let error = error.trim();
+        if error.is_empty() {
+            return Err(SlashParseError::GoalUsage);
+        }
+        return Ok(GoalAction::Fail {
+            error: error.to_string(),
+        });
     }
     let mut token_budget = None;
     let mut rest = args;

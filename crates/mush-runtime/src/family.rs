@@ -1508,7 +1508,8 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 Ok(serde_json::to_value(updated).unwrap_or(serde_json::Value::Null))
             }
             "goal.get" => Ok(self.goal_reply()),
-            "goal.create" | "goal.complete" | "goal.pause" | "goal.resume" | "goal.clear" => {
+            "goal.create" | "goal.complete" | "goal.fail" | "goal.pause" | "goal.resume"
+            | "goal.clear" => {
                 let store = self
                     .goal
                     .as_ref()
@@ -1524,6 +1525,10 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     },
                     "goal.complete" => crate::goal::GoalCommand::Complete {
                         summary: str_field("summary"),
+                    },
+                    "goal.fail" => crate::goal::GoalCommand::Fail {
+                        error: str_field("error")
+                            .ok_or_else(|| mush_kernel::HostError("error is required".into()))?,
                     },
                     "goal.pause" => crate::goal::GoalCommand::Pause,
                     "goal.resume" => crate::goal::GoalCommand::Resume,

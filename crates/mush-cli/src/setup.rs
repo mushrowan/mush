@@ -684,6 +684,8 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          repeated failure, when a reusable tactic emerges, or when the user corrects behaviour \
          that should persist. Local by default; `global_=True` for lessons every session should \
          keep. The current harness digest appears in the conversation when it changes.\n\
+         - `await goal.fail(reason)` stops a goal you cannot finish, with the reason; the \
+         user sees it. Prefer it to looping on something that will not work.\n\
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \
          during long work so they can see where you are.\n\
          - `await rlm.note(text)` keeps a short note that survives compaction and kernel \

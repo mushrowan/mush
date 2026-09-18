@@ -272,6 +272,10 @@ impl App {
                     Some(summary) => format!("goal complete: {summary}"),
                     None => "goal complete".to_string(),
                 },
+                mush_runtime::GoalStatus::Failed => match &goal.error {
+                    Some(error) => format!("goal failed: {error}"),
+                    None => "goal failed".to_string(),
+                },
             },
         };
         self.status = Some(note.into());
