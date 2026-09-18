@@ -160,7 +160,7 @@ struct Inner {
 pub struct Family {
     inner: Mutex<Inner>,
     factory: Option<ChildFactory>,
-    registry_path: Option<PathBuf>,
+    registry_path: Mutex<Option<PathBuf>>,
     max_depth: u32,
 }
 
@@ -207,7 +207,7 @@ impl Family {
                 children,
             }),
             factory,
-            registry_path,
+            registry_path: Mutex::new(registry_path),
             max_depth,
         })
     }
@@ -223,8 +223,16 @@ impl Family {
         rx
     }
 
-    pub fn set_root_session_id(&self, session_id: String) {
-        self.lock().root_session_id = session_id;
+    pub fn rebind(&self, session_id: String, registry_path: Option<PathBuf>) {
+        {
+            let mut inner = self.lock();
+            inner.root_session_id = session_id;
+        }
+        *self
+            .registry_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = registry_path;
+        self.persist();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -234,7 +242,12 @@ impl Family {
     }
 
     fn persist(&self) {
-        let Some(path) = &self.registry_path else {
+        let path = self
+            .registry_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(path) = path else {
             return;
         };
         let registry = Registry {
@@ -249,7 +262,7 @@ impl Family {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(&registry) {
-            let _ = mush_ai::private_io::write_private(path, bytes);
+            let _ = mush_ai::private_io::write_private(&path, bytes);
         }
     }
 

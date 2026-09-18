@@ -156,7 +156,7 @@ pub fn parse_expression(text: &str, now_ms: u64) -> Result<ScheduleKind, String>
 
 pub struct Scheduler {
     jobs: Mutex<Vec<Job>>,
-    path: Option<PathBuf>,
+    path: Mutex<Option<PathBuf>>,
 }
 
 impl Scheduler {
@@ -169,8 +169,21 @@ impl Scheduler {
             .unwrap_or_default();
         Self {
             jobs: Mutex::new(jobs),
-            path,
+            path: Mutex::new(path),
         }
+    }
+
+    pub fn rebind(&self, path: Option<PathBuf>) {
+        let jobs = path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Vec<Job>>(&bytes).ok())
+            .unwrap_or_default();
+        *self
+            .path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+        *self.lock() = jobs;
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Job>> {
@@ -180,14 +193,19 @@ impl Scheduler {
     }
 
     fn persist(&self, jobs: &[Job]) {
-        let Some(path) = &self.path else {
+        let path = self
+            .path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(path) = path else {
             return;
         };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(bytes) = serde_json::to_vec_pretty(jobs) {
-            let _ = mush_ai::private_io::write_private(path, bytes);
+            let _ = mush_ai::private_io::write_private(&path, bytes);
         }
     }
 

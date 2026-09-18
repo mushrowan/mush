@@ -233,6 +233,27 @@ impl InProcessConnection {
         }
     }
 
+    fn rebind_artifacts(&mut self) {
+        let persisted = self.runtime.saver.is_some();
+        let dir = persisted
+            .then(|| mush_session::SessionStore::default_artifact_dir(&self.runtime.session_id));
+        if let Some(family) = &self.family {
+            family.rebind(
+                self.runtime.session_id.to_string(),
+                dir.as_ref().map(|dir| dir.join("subagents.json")),
+            );
+        }
+        if let Some(goal) = &self.goal {
+            goal.rebind(dir.as_ref().map(|dir| dir.join("goal.json")));
+            self.known_goal = goal.get();
+        }
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.rebind(dir.as_ref().map(|dir| dir.join("scheduled-jobs.json")));
+            self.known_jobs = scheduler.jobs();
+        }
+        self.known_children.clear();
+    }
+
     pub fn set_scheduler(&mut self, scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>) {
         self.known_jobs = scheduler
             .as_ref()
@@ -1116,8 +1137,12 @@ impl AgentConnection for InProcessConnection {
                 self.config.compaction_model = model.map(|boxed| *boxed);
             }
             ClientCommand::Session(command) => {
+                let before = self.runtime.session_id.clone();
                 let events = self.runtime.handle(command).await;
                 self.sync_control_target();
+                if self.runtime.session_id != before {
+                    self.rebind_artifacts();
+                }
                 self.runtime.save_now_and_settle();
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
@@ -1725,5 +1750,32 @@ mod tests {
                 .await,
             Err(ConnectionError::Refused(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_new_session_rebinds_the_goal_and_schedule_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut connection, _requests) = connection();
+        let goal = Arc::new(crate::goal::GoalStore::new(Some(
+            dir.path().join("a/goal.json"),
+        )));
+        goal.apply(crate::goal::GoalCommand::Create {
+            objective: "old".into(),
+            token_budget: None,
+        })
+        .unwrap();
+        connection.set_goal_store(Some(Arc::clone(&goal)));
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+
+        connection
+            .send(ClientCommand::Session(SessionCommand::New))
+            .await
+            .unwrap();
+
+        assert!(
+            goal.get().is_none(),
+            "the new session starts without a goal"
+        );
+        assert!(dir.path().join("a/goal.json").exists());
     }
 }
