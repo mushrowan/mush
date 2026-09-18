@@ -80,6 +80,7 @@ impl Job {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ScheduleCommand {
+    List,
     Heartbeat {
         expression: String,
         prompt: String,
@@ -243,6 +244,7 @@ impl Scheduler {
         let now_ms = now.as_ms();
         let mut jobs = self.lock();
         match command {
+            ScheduleCommand::List => return Ok(jobs.clone()),
             ScheduleCommand::Heartbeat {
                 expression,
                 prompt,

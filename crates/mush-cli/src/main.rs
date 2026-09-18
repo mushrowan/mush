@@ -10,7 +10,7 @@ use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_cli::output::Style;
-use mush_cli::{agents, commands, config, daemon, logging, setup, timing};
+use mush_cli::{agents, commands, config, daemon, logging, schedule, setup, timing};
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -271,6 +271,25 @@ impl Cli {
 }
 
 #[derive(clap::Subcommand)]
+enum ScheduleCommand {
+    List {
+        agent: Option<String>,
+        #[arg(short, long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        agent: String,
+        expression: String,
+        #[arg(num_args = 1.., trailing_var_arg = true)]
+        message: Vec<String>,
+    },
+    #[command(alias = "remove", alias = "delete")]
+    Cancel { job: String },
+}
+
+#[derive(clap::Subcommand)]
 enum Command {
     Control(mush_cli::control::ControlArgs),
     Worker {
@@ -298,6 +317,10 @@ enum Command {
         agent: String,
         #[arg(num_args = 1.., trailing_var_arg = true)]
         name: Vec<String>,
+    },
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCommand,
     },
     Stop {
         id: String,
@@ -381,6 +404,19 @@ async fn main() -> Result<()> {
         Some(Command::List { all, json }) => return agents::list(all, json).await,
         Some(Command::Rename { agent, name }) => {
             return agents::rename(&agent, &name.join(" ")).await;
+        }
+        Some(Command::Schedule { command }) => {
+            return match command {
+                ScheduleCommand::List { agent, all, json } => {
+                    schedule::list(agent.as_deref(), all, json).await
+                }
+                ScheduleCommand::Add {
+                    agent,
+                    expression,
+                    message,
+                } => schedule::add(&agent, &expression, &message.join(" ")).await,
+                ScheduleCommand::Cancel { job } => schedule::cancel(&job).await,
+            };
         }
         Some(Command::Stop { id }) => return daemon::stop(&id).await,
         Some(Command::Send { session, text }) => {
