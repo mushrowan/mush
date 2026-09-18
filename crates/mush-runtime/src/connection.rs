@@ -105,6 +105,7 @@ pub enum ClientEvent {
     ChildUpdated(Box<crate::family::ChildSummary>),
     GoalChanged(Option<Box<crate::goal::Goal>>),
     ScheduleChanged(Vec<crate::schedule::Job>),
+    ProgressNote(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -345,6 +346,9 @@ impl InProcessConnection {
 
     fn try_poll_family(&mut self) -> Option<ClientEvent> {
         let family = self.family.clone()?;
+        if let Some(note) = family.take_root_note() {
+            return Some(ClientEvent::ProgressNote(note));
+        }
         for child in family.all() {
             let changed = self
                 .known_children

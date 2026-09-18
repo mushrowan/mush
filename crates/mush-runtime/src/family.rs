@@ -154,6 +154,7 @@ struct Inner {
     root: Identity,
     root_session_id: String,
     root_inbox: Option<mpsc::UnboundedSender<Delivery>>,
+    root_note: Option<String>,
     children: BTreeMap<ChildId, Node>,
 }
 
@@ -204,6 +205,7 @@ impl Family {
                 root,
                 root_session_id,
                 root_inbox: None,
+                root_note: None,
                 children,
             }),
             factory,
@@ -531,15 +533,19 @@ impl Family {
             .ok_or_else(|| format!("{id} vanished"))
     }
 
+    pub fn take_root_note(&self) -> Option<String> {
+        self.lock().root_note.take()
+    }
+
     pub fn progress_note(&self, caller: &Identity, text: &str) -> Result<(), String> {
-        let id = caller
-            .id
-            .as_deref()
-            .ok_or_else(|| "only a child agent reports progress".to_string())?;
         let text: String = text.trim().chars().take(PROGRESS_NOTE_CHARS).collect();
         if text.is_empty() {
             return Err("a progress note needs some text".into());
         }
+        let Some(id) = caller.id.as_deref() else {
+            self.lock().root_note = Some(text);
+            return Ok(());
+        };
         {
             let mut inner = self.lock();
             let node = inner
@@ -1424,7 +1430,12 @@ mod tests {
         family.progress_note(&child, "halfway").unwrap();
         let throttled = family.progress_note(&child, "nearly").unwrap_err();
         assert!(throttled.contains("one every"));
-        assert!(family.progress_note(&root, "x").is_err());
+        family.progress_note(&root, "reading the results").unwrap();
+        assert_eq!(
+            family.take_root_note().as_deref(),
+            Some("reading the results")
+        );
+        assert!(family.take_root_note().is_none());
         assert_eq!(
             family.children_of(&root)[0].progress_note.as_deref(),
             Some("halfway")
@@ -1525,11 +1536,11 @@ mod tests {
         assert!(collected.outcome.is_success(), "{text}");
         assert_eq!(text.trim(), "idle child says hi 1\ncounter");
 
-        let refused = tool
-            .execute(serde_json::json!({ "code": "await rlm.progress_note('x')" }))
+        let noted = tool
+            .execute(serde_json::json!({ "code": "await rlm.progress_note('nearly there')" }))
             .await;
-        assert!(!refused.outcome.is_success());
-        assert!(mush_tools::util::extract_text(&refused).contains("only a child agent"));
+        assert!(noted.outcome.is_success());
+        assert_eq!(family.take_root_note().as_deref(), Some("nearly there"));
         tool.shutdown().await;
     }
 
