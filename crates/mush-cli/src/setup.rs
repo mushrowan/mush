@@ -617,6 +617,13 @@ more instructions. A busy child is steered mid-turn; an idle one gets it as a ne
 worker for work that should outlive this conversation; it runs on its own and reports \
 nothing back. `mush send <id> ...` from bash reaches it.";
 
+const OBSERVE_PROMPT: &str = "\
+`await agent_observe.list_agents()` names everyone you can reach (yourself, your parent, your \
+siblings, your children) with their status and latest progress note. \
+`await agent_observe.recent_messages(target, limit=8, max_chars=800)` reads the tail of a live \
+family member's conversation. Both are read-only. Prefer a progress note or a message over \
+reading someone else's transcript.";
+
 fn child_doctrine(name: &str, depth: u32) -> String {
     format!(
         "You are a child agent named `{name}` (depth {depth}), spawned by your parent agent. Task \
@@ -741,6 +748,10 @@ pub fn build_rlm_system_prompt(
     if let Some(name) = &role.child_name {
         prompt.push_str("\n\n");
         prompt.push_str(&child_doctrine(name, role.depth));
+    }
+    if role.depth < role.max_depth || role.child_name.is_some() {
+        prompt.push_str("\n\n");
+        prompt.push_str(OBSERVE_PROMPT);
     }
     if let Some(extra) = &context.append_system_prompt {
         prompt.push_str("\n\n");
@@ -1189,6 +1200,27 @@ mod tests {
         assert!(prompt.contains("You are a child agent named `auth` (depth 2)"));
         assert!(prompt.contains("[task from parent]"));
         assert!(!prompt.contains("await rlm.spawn("));
+        assert!(prompt.contains("await agent_observe.list_agents()"));
+    }
+
+    #[test]
+    fn a_lone_session_that_cannot_spawn_is_not_told_about_its_family() {
+        let prompt = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::child("only", 1, 1),
+        );
+        assert!(prompt.contains("await agent_observe.list_agents()"));
+
+        let root_at_limit = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
+        assert!(!root_at_limit.contains("await agent_observe.list_agents()"));
+        assert!(!root_at_limit.contains("await rlm.spawn("));
     }
 
     #[test]

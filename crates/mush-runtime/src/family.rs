@@ -164,9 +164,110 @@ impl Delivery {
 
 pub type AgentInbox = mpsc::UnboundedReceiver<Delivery>;
 
+pub const OBSERVE_DEFAULT_LIMIT: usize = 8;
+pub const OBSERVE_MAX_LIMIT: usize = 50;
+pub const OBSERVE_DEFAULT_CHARS: usize = 800;
+pub const OBSERVE_MIN_CHARS: usize = 80;
+pub const OBSERVE_MAX_CHARS: usize = 2_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessagePreview {
+    pub role: String,
+    pub text: String,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+}
+
+pub struct ObserveRequest {
+    pub limit: usize,
+    pub max_chars: usize,
+    pub reply: oneshot::Sender<Vec<MessagePreview>>,
+}
+
+pub type ObserveInbox = mpsc::UnboundedReceiver<ObserveRequest>;
+
+#[must_use]
+pub fn preview_messages(
+    messages: &[mush_ai::types::Message],
+    limit: usize,
+    max_chars: usize,
+) -> Vec<MessagePreview> {
+    use mush_ai::types::Message;
+    messages
+        .iter()
+        .rev()
+        .take(limit)
+        .rev()
+        .map(|message| {
+            let (role, text, tool_calls) = match message {
+                Message::User(user) => ("user", user.text(), Vec::new()),
+                Message::Assistant(assistant) => (
+                    "assistant",
+                    assistant.text(),
+                    assistant
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            mush_ai::types::AssistantContentPart::ToolCall(call) => {
+                                Some(call.name.to_string())
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                Message::ToolResult(result) => (
+                    "tool_result",
+                    result
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            mush_ai::types::ToolResultContentPart::Text(text) => {
+                                Some(text.text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    vec![result.tool_name.to_string()],
+                ),
+                Message::Event(event) => ("event", event.content.clone(), Vec::new()),
+            };
+            let truncated = text.chars().count() > max_chars;
+            let text = if truncated {
+                text.chars().take(max_chars).collect()
+            } else {
+                text
+            };
+            MessagePreview {
+                role: role.to_string(),
+                text,
+                truncated,
+                tool_calls,
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentView {
+    pub name: String,
+    pub relationship: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlm_child_id: Option<ChildId>,
+    pub status: String,
+    pub observable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_note: Option<String>,
+}
+
 struct Node {
     summary: ChildSummary,
     inbox: Option<mpsc::UnboundedSender<Delivery>>,
+    observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_note_at: Option<Instant>,
@@ -176,6 +277,7 @@ struct Inner {
     root: Identity,
     root_session_id: String,
     root_inbox: Option<mpsc::UnboundedSender<Delivery>>,
+    root_observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
     root_note: Option<String>,
     children: BTreeMap<ChildId, Node>,
 }
@@ -215,6 +317,7 @@ impl Family {
                     Node {
                         summary,
                         inbox: None,
+                        observe: None,
                         shutdown: None,
                         task: None,
                         last_note_at: None,
@@ -227,6 +330,7 @@ impl Family {
                 root,
                 root_session_id,
                 root_inbox: None,
+                root_observe: None,
                 root_note: None,
                 children,
             }),
@@ -244,6 +348,12 @@ impl Family {
     pub fn root_inbox(&self) -> AgentInbox {
         let (tx, rx) = mpsc::unbounded_channel();
         self.lock().root_inbox = Some(tx);
+        rx
+    }
+
+    pub fn root_observe_inbox(&self) -> ObserveInbox {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.lock().root_observe = Some(tx);
         rx
     }
 
@@ -307,6 +417,107 @@ impl Family {
             .values()
             .map(|node| node.summary.clone())
             .collect()
+    }
+
+    #[must_use]
+    pub fn roster(&self, caller: &Identity) -> Vec<AgentView> {
+        let inner = self.lock();
+        let mut views = Vec::new();
+        match &caller.id {
+            None => views.push(AgentView {
+                name: inner.root.name.clone(),
+                relationship: "self".into(),
+                session_id: inner.root_session_id.clone(),
+                rlm_child_id: None,
+                status: "active".into(),
+                observable: false,
+                model_id: None,
+                progress_note: inner.root_note.clone(),
+            }),
+            Some(id) => {
+                let me = inner.children.get(id);
+                if let Some(node) = me {
+                    views.push(view_of(&node.summary, "self", false));
+                }
+                let parent = me.and_then(|node| node.summary.parent.clone());
+                match &parent {
+                    None => views.push(AgentView {
+                        name: inner.root.name.clone(),
+                        relationship: "parent".into(),
+                        session_id: inner.root_session_id.clone(),
+                        rlm_child_id: None,
+                        status: "active".into(),
+                        observable: inner.root_observe.is_some(),
+                        model_id: None,
+                        progress_note: inner.root_note.clone(),
+                    }),
+                    Some(parent_id) => {
+                        if let Some(node) = inner.children.get(parent_id) {
+                            views.push(view_of(&node.summary, "parent", node.observe.is_some()));
+                        }
+                    }
+                }
+                for node in inner.children.values() {
+                    if &node.summary.id != id && node.summary.parent == parent {
+                        views.push(view_of(&node.summary, "sibling", node.observe.is_some()));
+                    }
+                }
+            }
+        }
+        for node in inner.children.values() {
+            if node.summary.parent == caller.id {
+                views.push(view_of(&node.summary, "child", node.observe.is_some()));
+            }
+        }
+        views
+    }
+
+    pub async fn recent_messages(
+        &self,
+        caller: &Identity,
+        target: &str,
+        limit: usize,
+        max_chars: usize,
+    ) -> Result<Vec<MessagePreview>, String> {
+        let limit = limit.clamp(1, OBSERVE_MAX_LIMIT);
+        let max_chars = max_chars.clamp(OBSERVE_MIN_CHARS, OBSERVE_MAX_CHARS);
+        let (reply_tx, reply_rx) = oneshot::channel();
+        {
+            let reachable = self.roster(caller);
+            let view = reachable
+                .iter()
+                .find(|view| {
+                    view.relationship != "self"
+                        && (view.name == target
+                            || view.session_id == target
+                            || view.rlm_child_id.as_deref() == Some(target))
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "{target} is not your parent, sibling or child, or it has no live session"
+                    )
+                })?;
+            if !view.observable {
+                return Err(format!("{target} has no live session to read"));
+            }
+            let inner = self.lock();
+            let sender = match &view.rlm_child_id {
+                None => inner.root_observe.clone(),
+                Some(id) => inner.children.get(id).and_then(|node| node.observe.clone()),
+            };
+            sender
+                .ok_or_else(|| format!("{target} has no live session to read"))?
+                .send(ObserveRequest {
+                    limit,
+                    max_chars,
+                    reply: reply_tx,
+                })
+                .map_err(|_| format!("{target} stopped listening"))?;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), reply_rx)
+            .await
+            .map_err(|_| format!("{target} did not answer in time"))?
+            .map_err(|_| format!("{target} stopped listening"))
     }
 
     fn resolve(&self, caller: &Identity, target: &str) -> Result<ChildId, String> {
@@ -415,6 +626,8 @@ impl Family {
         let mut connection = parts.config.connect(&parts.tools, &parts.registry);
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         connection.attach_agent_inbox(inbox_rx);
+        let (observe_tx, observe_rx) = mpsc::unbounded_channel();
+        connection.attach_observe_inbox(observe_rx);
         let task = tokio::spawn(drive_child(
             Arc::clone(this),
             id.clone(),
@@ -427,6 +640,7 @@ impl Family {
             Node {
                 summary,
                 inbox: Some(inbox_tx),
+                observe: Some(observe_tx),
                 shutdown: Some(shutdown_tx),
                 task: Some(task),
                 last_note_at: None,
@@ -858,6 +1072,19 @@ impl Family {
     }
 }
 
+fn view_of(summary: &ChildSummary, relationship: &str, observable: bool) -> AgentView {
+    AgentView {
+        name: summary.name.clone(),
+        relationship: relationship.to_string(),
+        session_id: summary.session_id.clone(),
+        rlm_child_id: Some(summary.id.clone()),
+        status: format!("{:?}", summary.status).to_lowercase(),
+        observable,
+        model_id: Some(summary.model_id.clone()),
+        progress_note: summary.progress_note.clone(),
+    }
+}
+
 async fn drive_child(
     family: Arc<Family>,
     id: ChildId,
@@ -1164,6 +1391,27 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     serde_json::json!({ "scheduled": true, "note": "refinement runs after this turn ends" }),
                 )
             }
+            "agent_observe.list_agents" => Ok(serde_json::json!({
+                "agents": self.family.roster(&self.identity),
+            })),
+            "agent_observe.recent_messages" => {
+                let target = str_field("target")
+                    .ok_or_else(|| mush_kernel::HostError("target is required".into()))?;
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(OBSERVE_DEFAULT_LIMIT, |value| value as usize);
+                let max_chars = payload
+                    .get("max_chars")
+                    .and_then(serde_json::Value::as_u64)
+                    .map_or(OBSERVE_DEFAULT_CHARS, |value| value as usize);
+                let messages = self
+                    .family
+                    .recent_messages(&self.identity, &target, limit, max_chars)
+                    .await
+                    .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::json!({ "messages": messages }))
+            }
             "rlm.create_session" => {
                 if self.identity.depth > 0 {
                     return Err(mush_kernel::HostError(
@@ -1376,6 +1624,132 @@ mod tests {
             &asked[0].messages[0],
             Message::User(user) if user.text().starts_with("[task from parent]\n\nreview the auth flow")
         ));
+    }
+
+    #[tokio::test]
+    async fn the_roster_names_self_parent_siblings_and_children() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 3, None);
+        let root = Identity::root("root");
+        let first = family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        family
+            .spawn(&root, "two".into(), "beta".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+        let alpha = Identity {
+            id: Some(first.rlm_child_id.clone()),
+            name: "alpha".into(),
+            depth: 1,
+        };
+        family
+            .spawn(&alpha, "three".into(), "gamma".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &alpha).await;
+
+        let root_view: Vec<(String, String)> = family
+            .roster(&root)
+            .into_iter()
+            .map(|view| (view.relationship, view.name))
+            .collect();
+        assert_eq!(
+            root_view,
+            vec![
+                ("self".to_string(), "root".to_string()),
+                ("child".into(), "alpha".into()),
+                ("child".into(), "beta".into()),
+            ]
+        );
+
+        let alpha_view: Vec<(String, String)> = family
+            .roster(&alpha)
+            .into_iter()
+            .map(|view| (view.relationship, view.name))
+            .collect();
+        assert_eq!(
+            alpha_view,
+            vec![
+                ("self".to_string(), "alpha".to_string()),
+                ("parent".into(), "root".into()),
+                ("sibling".into(), "beta".into()),
+                ("child".into(), "gamma".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parent_reads_its_child_transcript_and_nothing_else() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        let handle = family
+            .spawn(
+                &root,
+                "review it".into(),
+                "auth".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        let messages = family.recent_messages(&root, "auth", 8, 800).await.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert!(messages[0].text.starts_with("[task from parent]"));
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].text, "child says hi");
+
+        let clipped = family
+            .recent_messages(&root, &handle.rlm_child_id, 1, 80)
+            .await
+            .unwrap();
+        assert_eq!(clipped.len(), 1);
+        assert_eq!(clipped[0].role, "assistant");
+
+        let refused = family.recent_messages(&root, "nobody", 8, 800).await;
+        assert!(
+            refused
+                .unwrap_err()
+                .contains("is not your parent, sibling or child"),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_cannot_read_a_parent_without_a_live_session() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        let handle = family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+        let alpha = Identity {
+            id: Some(handle.rlm_child_id),
+            name: "alpha".into(),
+            depth: 1,
+        };
+
+        let refused = family.recent_messages(&alpha, "root", 8, 800).await;
+        assert_eq!(
+            refused.unwrap_err(),
+            "root has no live session to read".to_string()
+        );
+
+        let _inbox = family.root_observe_inbox();
+        let view = family
+            .roster(&alpha)
+            .into_iter()
+            .find(|view| view.relationship == "parent")
+            .unwrap();
+        assert!(view.observable);
     }
 
     #[tokio::test]

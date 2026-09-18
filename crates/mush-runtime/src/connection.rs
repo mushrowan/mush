@@ -199,6 +199,7 @@ pub struct InProcessConnection {
     side_questions: Vec<(String, tokio::task::JoinHandle<Result<String, String>>)>,
     system_prompt_builder: Option<SystemPromptBuilder>,
     agent_inbox: Option<crate::family::AgentInbox>,
+    observe_inbox: Option<crate::family::ObserveInbox>,
     deferred_deliveries: VecDeque<crate::family::Delivery>,
     family: Option<std::sync::Arc<crate::family::Family>>,
     known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
@@ -303,6 +304,7 @@ impl InProcessConnection {
             side_questions: Vec::new(),
             system_prompt_builder: None,
             agent_inbox: None,
+            observe_inbox: None,
             deferred_deliveries: VecDeque::new(),
             family: None,
             known_children: std::collections::HashMap::new(),
@@ -568,6 +570,28 @@ impl InProcessConnection {
         self.agent_inbox = Some(inbox);
     }
 
+    pub fn attach_observe_inbox(&mut self, inbox: crate::family::ObserveInbox) {
+        self.observe_inbox = Some(inbox);
+    }
+
+    fn answer_observers(&mut self) {
+        let Some(inbox) = self.observe_inbox.as_mut() else {
+            return;
+        };
+        let mut requests = Vec::new();
+        while let Ok(request) = inbox.try_recv() {
+            requests.push(request);
+        }
+        for request in requests {
+            let messages = self.runtime.conversation.display_history();
+            let _ = request.reply.send(crate::family::preview_messages(
+                &messages,
+                request.limit,
+                request.max_chars,
+            ));
+        }
+    }
+
     #[must_use]
     pub fn default_model(&self) -> mush_ai::types::Model {
         self.config.default_model.clone()
@@ -746,6 +770,7 @@ impl InProcessConnection {
             return false;
         }
         self.poll_control().await;
+        self.answer_observers();
         self.poll_agent_inbox().await;
         self.submit_kernel_notices().await;
         self.poll_schedule().await;

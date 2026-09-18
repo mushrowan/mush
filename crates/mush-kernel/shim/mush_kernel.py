@@ -319,6 +319,19 @@ class _Compact:
         return await host_request("compact.run", payload)
 
 
+class _AgentObserve:
+    async def list_agents(self) -> list:
+        reply = await host_request("agent_observe.list_agents", {})
+        return reply.get("agents", [])
+
+    async def recent_messages(self, target, *, limit: int = 8, max_chars: int = 800) -> list:
+        reply = await host_request(
+            "agent_observe.recent_messages",
+            {"target": _child_target(target), "limit": limit, "max_chars": max_chars},
+        )
+        return reply.get("messages", [])
+
+
 class _Refine:
     async def status(self) -> dict:
         return await host_request("refine.status", {})
@@ -352,6 +365,7 @@ goal = _Goal()
 rlm_heartbeat = _RlmHeartbeat()
 compact = _Compact()
 refine = _Refine()
+agent_observe = _AgentObserve()
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -429,6 +443,7 @@ def _install_preload() -> None:
             "rlm_heartbeat": rlm_heartbeat,
             "compact": compact,
             "refine": refine,
+            "agent_observe": agent_observe,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,
         }

@@ -1362,6 +1362,7 @@ fn worker_config(
             host.set_extension(std::sync::Arc::new(handler));
         }
         worker.agent_inbox = Some(family.root_inbox());
+        worker.observe_inbox = Some(family.root_observe_inbox());
         worker.family = Some(family);
         worker.goal = Some(goal);
         worker.scheduler = Some(scheduler);
