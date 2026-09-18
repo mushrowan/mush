@@ -307,3 +307,64 @@ async fn a_steer_over_the_socket_during_a_tool_call_is_injected_and_announced() 
         matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "actually, stop and do y")
     );
 }
+
+#[tokio::test]
+async fn a_prompt_after_aborting_a_hung_tool_over_the_socket_starts_a_new_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let (connection, requests) = mush_runtime::testing::hanging_tool_connection();
+    let _task = tokio::spawn(serve(connection, listener, None, Default::default()));
+    let mut client = DaemonConnection::connect(&socket).await.unwrap();
+
+    client.send(prompt("start")).await.unwrap();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(
+            event,
+            ClientEvent::Agent {
+                event: mush_agent::AgentEvent::ToolExecStart { .. },
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+
+    let aborted = client.send(ClientCommand::Abort).await.unwrap();
+    assert!(
+        aborted
+            .iter()
+            .any(|event| matches!(event, ClientEvent::TurnEnded { cancelled: true })),
+        "{aborted:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while client.try_next_event().is_some() {}
+    let state_after_abort = client.state();
+
+    let started = client.send(prompt("again")).await.unwrap();
+    let mut events = started;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::TurnStarted))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no new turn after abort; state after abort {state_after_abort:?}, now {:?}, events {events:?}",
+            client.state()
+        );
+        if let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(100), client.next_event()).await
+        {
+            events.push(event);
+        }
+    }
+    drain_turn(&mut client).await;
+    let asked = requests.lock().unwrap();
+    assert_eq!(asked.len(), 2);
+    assert!(matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "again"));
+}

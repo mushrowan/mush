@@ -403,7 +403,6 @@ mod tests {
                             tool_name: "read".into(),
                             args: serde_json::json!({}),
                         },
-                        AgentEvent::AgentEnd,
                         AgentEvent::ToolExecEnd {
                             tool_call_id: "call".into(),
                             tool_name: "read".into(),
@@ -420,7 +419,7 @@ mod tests {
             fixture
                 .connection
                 .ingest_agent_event(pane, generation, agent_event);
-            if !fixture.connection.runtime.turn_active() {
+            if !fixture.connection.turn_active() {
                 break;
             }
             assert!(fixture.connection.poll_inbox().await);

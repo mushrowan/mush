@@ -978,7 +978,7 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
 }
 
 #[tokio::test]
-async fn cancelled_tool_is_dropped_before_queued_event_starts() {
+async fn a_queued_event_starts_right_after_the_abort() {
     let (mut runtime, mut config, control) = fixture();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut registry = ApiRegistry::new();
@@ -1025,9 +1025,10 @@ async fn cancelled_tool_is_dropped_before_queued_event_starts() {
     tokio::select! { _ = entered.notified() => {}, _ = runtime.session.in_process().runtime.turns.next() => panic!() }
     enqueue(&control, "after-cancel");
     super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
+    assert!(!runtime.session.connection.state().turn_active);
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
-    assert_eq!(outcome(&control, "after-cancel"), Outcome::Queued);
+    assert_eq!(outcome(&control, "after-cancel"), Outcome::Running);
     while let Some((pane, generation, event)) =
         runtime.session.in_process().runtime.turns.next().await
     {

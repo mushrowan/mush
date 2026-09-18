@@ -94,7 +94,7 @@ pub fn handle_agent_event(
                 app.start_streaming();
             }
         }
-        AgentEvent::SteeringInjected { messages } => {
+        AgentEvent::SteeringInjected { messages } | AgentEvent::FollowUpInjected { messages } => {
             let typed = messages
                 .iter()
                 .filter(|m| match m {
@@ -108,7 +108,6 @@ pub fn handle_agent_event(
                 msg.queued = false;
             }
         }
-        AgentEvent::FollowUpInjected { .. } => {}
         AgentEvent::ContextTransformed {
             before_count,
             after_count,
@@ -714,6 +713,38 @@ mod tests {
             .map(|m| (m.content.as_str(), m.queued))
             .collect();
         assert_eq!(queued, vec![("first", false), ("second", true)]);
+    }
+
+    #[test]
+    fn a_follow_up_injection_dequeues_the_typed_message_too() {
+        use crate::app::App;
+        use mush_ai::types::{TokenCount, UserContent, UserMessage};
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_queued_message("after you finish");
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            image_protos: &mut image_protos,
+        };
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("after you finish".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::FollowUpInjected { messages: injected },
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
+
+        assert!(!ctx.app.messages[0].queued);
     }
 
     #[test]

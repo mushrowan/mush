@@ -327,7 +327,7 @@ impl InProcessConnection {
         let Some(commands) = self.host_commands.clone() else {
             return;
         };
-        if self.runtime.turn_active() || self.compaction.is_some() {
+        if self.turn_active() || self.compaction.is_some() {
             return;
         }
         for command in commands.drain() {
@@ -356,7 +356,7 @@ impl InProcessConnection {
         };
         if !autonomous.due()
             || self.gate_task.is_some()
-            || self.runtime.turn_active()
+            || self.turn_active()
             || self.compaction.is_some()
             || self.runtime.pending_prompt.is_some()
         {
@@ -525,7 +525,7 @@ impl InProcessConnection {
         let Some(goal) = self.goal.clone() else {
             return;
         };
-        if self.runtime.turn_active()
+        if self.turn_active()
             || self.compaction.is_some()
             || self.runtime.pending_prompt.is_some()
             || self.children_running()
@@ -655,7 +655,7 @@ impl InProcessConnection {
 
     #[must_use]
     pub fn turn_active(&self) -> bool {
-        self.runtime.turns.meta(PRIMARY_PANE).is_some() || self.runtime.turn_active()
+        self.runtime.turns.meta(PRIMARY_PANE).is_some()
     }
 
     pub fn set_deps(&mut self, tools: ToolRegistry, registry: ApiRegistry) {
@@ -980,7 +980,7 @@ impl InProcessConnection {
         let settings = self.config.auto_refine;
         if !settings.enabled
             || !self.runtime.harness_enabled()
-            || self.runtime.turn_active()
+            || self.turn_active()
             || self.refine.is_some()
             || self.auto_review.is_some()
         {
@@ -1149,7 +1149,7 @@ impl InProcessConnection {
         for notice in notices {
             let text = notice.done.text();
             self.queued.push_back(ClientEvent::BashDone(notice));
-            if self.runtime.turn_active() {
+            if self.turn_active() {
                 self.steer(text, Vec::new()).await;
             } else {
                 self.queue_prompt(&text, Vec::new());
@@ -1308,9 +1308,7 @@ impl InProcessConnection {
     }
 
     async fn start_pending_prompt(&mut self) -> bool {
-        if self.runtime.turn_active()
-            || self.compaction.is_some()
-            || self.runtime.pending_prompt.is_none()
+        if self.turn_active() || self.compaction.is_some() || self.runtime.pending_prompt.is_none()
         {
             return false;
         }
@@ -2253,6 +2251,62 @@ mod tests {
         fn output_limit(&self) -> mush_agent::OutputLimit {
             mush_agent::OutputLimit::Head
         }
+    }
+
+    #[tokio::test]
+    async fn a_prompt_after_aborting_a_hung_tool_starts_a_new_turn() {
+        let (mut connection, requests) = crate::testing::hanging_tool_connection();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        wait_for(&mut connection, |event| {
+            matches!(
+                event,
+                ClientEvent::Agent {
+                    event: AgentEvent::ToolExecStart { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+
+        let aborted = connection.send(ClientCommand::Abort).await.unwrap();
+        assert!(
+            aborted
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnEnded { cancelled: true })),
+            "{aborted:?}"
+        );
+        assert!(!connection.state().turn_active, "{:?}", connection.state());
+
+        let started = connection
+            .send(ClientCommand::Prompt {
+                text: "again".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            started
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnStarted)),
+            "{started:?}"
+        );
+        let events = drain_turn(&mut connection).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Agent {
+                event: AgentEvent::MessageEnd { .. },
+                ..
+            }
+        )));
+        let asked = requests.lock().unwrap();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "again"));
     }
 
     #[tokio::test]

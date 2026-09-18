@@ -188,6 +188,56 @@ impl mush_agent::AgentTool for NoteTool {
     }
 }
 
+pub struct HangingTool;
+
+#[async_trait::async_trait]
+impl mush_agent::AgentTool for HangingTool {
+    fn name(&self) -> &str {
+        "note"
+    }
+    fn label(&self) -> &str {
+        "Note"
+    }
+    fn description(&self) -> &str {
+        "never returns"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    async fn execute(&self, _args: serde_json::Value) -> mush_agent::ToolResult {
+        std::future::pending::<()>().await;
+        mush_agent::ToolResult::text("unreachable")
+    }
+    fn output_limit(&self) -> mush_agent::OutputLimit {
+        mush_agent::OutputLimit::Head
+    }
+}
+
+#[must_use]
+pub fn hanging_tool_connection() -> (InProcessConnection, Requests) {
+    let requests: Requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    gate.notify_one();
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(ToolThenText {
+        requests: requests.clone(),
+        gate,
+    }));
+    let model = echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register_shared(Arc::new(HangingTool));
+    let connection = InProcessConnection::new(
+        runtime,
+        tools,
+        registry,
+        echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    (connection, requests)
+}
+
 #[must_use]
 pub fn tool_then_text_connection() -> (InProcessConnection, Requests, Arc<tokio::sync::Notify>) {
     let requests: Requests = Arc::new(Mutex::new(Vec::new()));

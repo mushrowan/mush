@@ -247,6 +247,7 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
     pane.app.finish_streaming(None, None);
     pane.app.stream.active = false;
     pane.app.active_tools.clear();
+    pane.app.end_turn();
     pane.app.status = Some("aborted".into());
     let restored = pane.app.take_queued_messages();
     if !restored.is_empty() {

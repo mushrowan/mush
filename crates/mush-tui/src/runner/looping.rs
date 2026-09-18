@@ -250,6 +250,7 @@ pub(super) async fn dispatch_client_event(
         ClientEvent::TurnStarted => {
             let app = &mut runtime.session.app;
             app.active_tools.clear();
+            app.promote_queued_messages();
             app.begin_turn();
             if !app.stream.active {
                 app.start_streaming();
@@ -294,6 +295,7 @@ pub(super) async fn apply_command_events(
             }
             ClientEvent::TurnStarted => {
                 session.app.active_tools.clear();
+                session.app.promote_queued_messages();
                 session.app.begin_turn();
                 if !session.app.stream.active {
                     session.app.start_streaming();
