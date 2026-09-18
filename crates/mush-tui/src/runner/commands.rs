@@ -239,6 +239,18 @@ pub(super) async fn handle_slash_action(
                 Err(error) => session.app.push_system_message(error.to_string()),
             }
         }
+        SlashAction::Refine(request) => {
+            match session
+                .connection
+                .send(mush_runtime::ClientCommand::Refine(request))
+                .await
+            {
+                Ok(events) => {
+                    super::looping::apply_command_events(session, tui_config, events).await;
+                }
+                Err(error) => session.app.push_system_message(error.to_string()),
+            }
+        }
         SlashAction::Side { question } => {
             slash::side_question::ask_side_question(&mut session.app, &question);
             let _ = session

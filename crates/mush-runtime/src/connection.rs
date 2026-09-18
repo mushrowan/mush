@@ -55,6 +55,7 @@ pub enum ClientCommand {
     SummariseAndNavigate {
         entry_id: mush_session::tree::EntryId,
     },
+    Refine(mush_session::refine::RefineRequest),
     Compact {
         focus: CompactionFocus,
         auto: bool,
@@ -111,6 +112,8 @@ pub enum ClientEvent {
     ScheduleChanged(Vec<crate::schedule::Job>),
     ProgressNote(String),
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
+    Refined(Box<mush_session::harness::RefinementResult>),
+    HarnessDigest(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -181,6 +184,7 @@ pub struct InProcessConnection {
         mush_session::tree::EntryId,
         tokio::task::JoinHandle<Result<String, String>>,
     )>,
+    refine: Option<tokio::task::JoinHandle<Result<mush_session::refine::Plan, String>>>,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
     inbox: Option<crate::inbox::OrchestratorInbox>,
     kernel: Option<crate::kernel_channels::KernelSignals>,
@@ -224,6 +228,24 @@ impl HostCommands {
             .collect()
     }
 
+    pub fn replace_refine(&self, request: mush_session::refine::RefineRequest) {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.retain(|command| !matches!(command, ClientCommand::Refine(_)));
+        queue.push_back(ClientCommand::Refine(request));
+    }
+
+    #[must_use]
+    pub fn pending_refine(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|command| matches!(command, ClientCommand::Refine(_)))
+    }
+
     #[must_use]
     pub fn pending(&self) -> usize {
         self.queue
@@ -262,6 +284,7 @@ impl InProcessConnection {
             fork_compaction_due: false,
             failed_compaction: None,
             branch_summary: None,
+            refine: None,
             title: None,
             inbox: None,
             kernel: None,
@@ -810,6 +833,9 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_branch_summary() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_refine() {
+            return Some(event);
+        }
         if let Some(event) = self.try_poll_family() {
             return Some(event);
         }
@@ -893,6 +919,62 @@ impl InProcessConnection {
         self.queued
             .extend(events.into_iter().map(ClientEvent::Session));
         Some(ClientEvent::Session(first))
+    }
+
+    async fn start_refine(
+        &mut self,
+        request: mush_session::refine::RefineRequest,
+    ) -> Result<(), ConnectionError> {
+        if !self.runtime.harness_enabled() {
+            return Err(ConnectionError::Refused(
+                "the continual harness needs a saved session (not --no-session)".into(),
+            ));
+        }
+        if self.refine.is_some() {
+            return Err(ConnectionError::Refused(
+                "a refinement is already running".into(),
+            ));
+        }
+        let target = self.runtime.compaction_target(&self.config).await;
+        let messages = self.runtime.conversation.context();
+        let history = self.runtime.refinement_history();
+        let session_id = self.runtime.session_id.clone();
+        let registry = self.registry.clone();
+        let rollback = request.rollback.is_some();
+        self.refine = Some(tokio::spawn(crate::refine::plan_refinement(
+            messages,
+            session_id,
+            history,
+            registry,
+            target.model,
+            target.options,
+            request,
+        )));
+        self.queued
+            .push_back(ClientEvent::Session(SessionEvent::Status(if rollback {
+                "rolling the harness back…".into()
+            } else {
+                "refining the harness…".into()
+            })));
+        Ok(())
+    }
+
+    fn try_poll_refine(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        if !self.refine.as_ref().is_some_and(|task| task.is_finished()) {
+            return None;
+        }
+        let task = self.refine.take()?;
+        let outcome = match task.now_or_never()? {
+            Ok(outcome) => outcome,
+            Err(error) => Err(format!("refine task failed: {error}")),
+        };
+        let result =
+            outcome.and_then(|plan| crate::refine::apply_plan(&self.runtime.session_id, &plan));
+        Some(match result {
+            Ok(result) => ClientEvent::Refined(Box::new(result)),
+            Err(error) => ClientEvent::Session(SessionEvent::Failed(format!("refine: {error}"))),
+        })
     }
 
     fn try_poll_side_questions(&mut self) -> Option<ClientEvent> {
@@ -1145,6 +1227,9 @@ impl InProcessConnection {
         };
         self.runtime.start_prepared_turn(request, prep, &deps);
         self.runtime.save_now_and_settle();
+        if let Some(digest) = self.runtime.harness_notice.take() {
+            self.queued.push_back(ClientEvent::HarnessDigest(digest));
+        }
         self.queued.push_back(ClientEvent::TurnStarted);
         true
     }
@@ -1447,6 +1532,7 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SummariseAndNavigate { entry_id } => {
                 self.summarise_and_navigate(entry_id).await;
             }
+            ClientCommand::Refine(request) => self.start_refine(request).await?,
             ClientCommand::Compact { focus, auto } => self.start_compaction(focus, auto).await?,
             ClientCommand::CompactionRetry => self.retry_compaction().await?,
             ClientCommand::CompactionFallback => {
@@ -1653,6 +1739,153 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    fn connection_replying(reply: &str) -> (InProcessConnection, crate::testing::Requests) {
+        let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(crate::testing::Echo {
+            requests: requests.clone(),
+            reply: reply.into(),
+        }));
+        let model = crate::testing::echo_model();
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.model_id = model.id.to_string();
+        let connection = InProcessConnection::new(
+            runtime,
+            ToolRegistry::new(),
+            registry,
+            crate::testing::echo_config(model),
+            mush_agent::AgentInjections::default(),
+        );
+        (connection, requests)
+    }
+
+    async fn wait_for(
+        connection: &mut InProcessConnection,
+        accept: impl Fn(&ClientEvent) -> bool,
+    ) -> ClientEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = connection.next_event().await
+                    && accept(&event)
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn refine_applies_the_planned_edits_and_the_next_turn_carries_the_digest() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let (mut connection, requests) = connection_replying(
+            "{\"summary\":\"remember the runner\",\"rationale\":\"seen twice\",\"expectedOutcome\":\"fewer misses\",\"edits\":[{\"action\":\"create\",\"kind\":\"memory\",\"title\":\"test runner\",\"content\":\"cargo nextest run\"}]}",
+        );
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+        connection.runtime.conversation = ConversationState::from_messages(vec![user("hi")]);
+
+        let started = connection
+            .send(ClientCommand::Refine(
+                mush_session::refine::RefineRequest::default(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            started[..],
+            [ClientEvent::Session(SessionEvent::Status(_))]
+        ));
+        let refined = wait_for(&mut connection, |event| {
+            matches!(event, ClientEvent::Refined(_))
+        })
+        .await;
+        let ClientEvent::Refined(result) = refined else {
+            unreachable!()
+        };
+        assert_eq!(result.scope, mush_session::harness::Scope::Local);
+        assert_eq!(result.applied_edits[0].id, "test_runner");
+        assert!(result.applied_edits[0].applied);
+        let local = mush_session::harness::load_merged(&connection.runtime.session_id);
+        assert_eq!(
+            local.entries[&mush_session::harness::Kind::Memory]["test_runner"].content,
+            "cargo nextest run"
+        );
+        assert_eq!(connection.runtime.refinement_history().len(), 1);
+
+        let started = connection
+            .send(ClientCommand::Prompt {
+                text: "next".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let Some(ClientEvent::HarnessDigest(text)) = started
+            .iter()
+            .find(|event| matches!(event, ClientEvent::HarnessDigest(_)))
+        else {
+            panic!("{started:?}");
+        };
+        assert!(text.contains("[local:test_runner] test runner"), "{text}");
+        drain_turn(&mut connection).await;
+        let turn = requests.lock().unwrap()[1].messages.clone();
+        assert_eq!(turn.len(), 3);
+        assert!(
+            matches!(&turn[1], Message::User(u) if u.text().starts_with(mush_session::harness::DIGEST_PREFIX))
+        );
+        assert!(matches!(&turn[2], Message::User(u) if u.text() == "next"));
+
+        let started = connection
+            .send(ClientCommand::Prompt {
+                text: "again".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            !started
+                .iter()
+                .any(|event| matches!(event, ClientEvent::HarnessDigest(_))),
+            "an unchanged harness is not re-delivered"
+        );
+        drain_turn(&mut connection).await;
+    }
+
+    #[tokio::test]
+    async fn a_refine_that_returns_no_json_fails_without_touching_the_harness() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let (mut connection, _) = connection_replying("i have nothing to add");
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+
+        connection
+            .send(ClientCommand::Refine(
+                mush_session::refine::RefineRequest::default(),
+            ))
+            .await
+            .unwrap();
+        let failed = wait_for(&mut connection, |event| {
+            matches!(event, ClientEvent::Session(SessionEvent::Failed(_)))
+        })
+        .await;
+        let ClientEvent::Session(SessionEvent::Failed(text)) = failed else {
+            unreachable!()
+        };
+        assert!(text.starts_with("refine:"), "{text}");
+        assert!(mush_session::harness::load_merged(&connection.runtime.session_id).is_empty());
+    }
+
+    #[tokio::test]
+    async fn refine_is_refused_without_a_saved_session() {
+        let (mut connection, _) = connection();
+        let refused = connection
+            .send(ClientCommand::Refine(
+                mush_session::refine::RefineRequest::default(),
+            ))
+            .await;
+        assert!(matches!(refused, Err(ConnectionError::Refused(_))));
     }
 
     #[tokio::test]

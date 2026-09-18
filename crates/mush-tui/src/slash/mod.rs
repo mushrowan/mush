@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod compaction;
+pub mod refine;
 pub mod side_question;
 
 use mush_ai::types::{SessionId, TokenCount, TokenCountParseError};
@@ -13,6 +14,7 @@ pub use compaction::{
     fallback_applied_compaction, handle_compact, run_compaction, show_applied_compaction,
     start_compaction,
 };
+pub use refine::{format_harness_digest, format_refinement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpQuery {
@@ -28,6 +30,10 @@ pub enum SlashParseError {
     MissingPrefix,
     #[error("usage: /branch <number> (try /tree first)")]
     BranchUsage,
+    #[error(
+        "usage: /refine [--global] [instructions] | /refine rollback <refinement-id> [--global]"
+    )]
+    RefineUsage,
     #[error("usage: /fork <number> (try /tree first)")]
     ForkUsage,
     #[error("usage: /logs [n]")]
@@ -97,6 +103,7 @@ pub enum SlashAction {
     Compact {
         focus: mush_session::compact::CompactionFocus,
     },
+    Refine(mush_session::refine::RefineRequest),
     CompactionModel {
         model_id: Option<String>,
     },
@@ -537,6 +544,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "clone" => Ok(SlashAction::Clone),
         "tree" => Ok(SlashAction::Tree),
         "compact" => parse_compact_focus(args).map(|focus| SlashAction::Compact { focus }),
+        "refine" => parse_refine(args).map(SlashAction::Refine),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -607,6 +615,42 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
         Some((name, rest)) => (name, rest.trim()),
         None => (trimmed, ""),
     }
+}
+
+fn parse_refine(args: &str) -> Result<mush_session::refine::RefineRequest, SlashParseError> {
+    let mut rest = args.trim();
+    let mut global = false;
+    if let Some(after) = rest.strip_prefix("--global")
+        && (after.is_empty() || after.starts_with(char::is_whitespace))
+    {
+        global = true;
+        rest = after.trim();
+    }
+    if let Some(after) = rest.strip_prefix("rollback")
+        && (after.is_empty() || after.starts_with(char::is_whitespace))
+    {
+        let mut id = after.trim();
+        if let Some(before) = id.strip_suffix("--global") {
+            global = true;
+            id = before.trim();
+        }
+        if id.is_empty() || id.contains(char::is_whitespace) {
+            return Err(SlashParseError::RefineUsage);
+        }
+        return Ok(mush_session::refine::RefineRequest {
+            instructions: None,
+            rollback: Some(id.to_string()),
+            global,
+        });
+    }
+    if rest.starts_with("--") {
+        return Err(SlashParseError::RefineUsage);
+    }
+    Ok(mush_session::refine::RefineRequest {
+        instructions: (!rest.is_empty()).then(|| rest.to_string()),
+        rollback: None,
+        global,
+    })
 }
 
 fn parse_compact_focus(
@@ -743,6 +787,39 @@ mod tests {
                 instructions: instructions.map(str::to_string),
             },
         }
+    }
+
+    #[test]
+    fn refine_parses_instructions_scope_and_rollback() {
+        use mush_session::refine::RefineRequest;
+        assert_eq!(
+            parse("/refine").unwrap(),
+            SlashAction::Refine(RefineRequest::default())
+        );
+        assert_eq!(
+            parse("/refine --global remember the port").unwrap(),
+            SlashAction::Refine(RefineRequest {
+                instructions: Some("remember the port".into()),
+                rollback: None,
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse("/refine rollback ref_abc --global").unwrap(),
+            SlashAction::Refine(RefineRequest {
+                instructions: None,
+                rollback: Some("ref_abc".into()),
+                global: true,
+            })
+        );
+        assert_eq!(
+            parse("/refine rollback").unwrap_err(),
+            SlashParseError::RefineUsage
+        );
+        assert_eq!(
+            parse("/refine --bogus").unwrap_err(),
+            SlashParseError::RefineUsage
+        );
     }
 
     #[test]

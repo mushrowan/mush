@@ -7,6 +7,7 @@ pub mod goal;
 pub mod inbox;
 pub mod kernel_channels;
 pub mod notes;
+pub mod refine;
 pub mod schedule;
 pub mod session;
 pub mod side_question;

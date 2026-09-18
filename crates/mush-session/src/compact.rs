@@ -1147,6 +1147,18 @@ fn compaction_stream_options(
     compact_options
 }
 
+pub async fn complete_text(
+    registry: &ApiRegistry,
+    model: &Model,
+    context: &LlmContext,
+    options: &StreamOptions,
+) -> Result<String, String> {
+    call_for_text(registry, model, context, options)
+        .await
+        .map(|outcome| outcome.text)
+        .map_err(|error| error.failure.to_string())
+}
+
 async fn call_for_text(
     registry: &ApiRegistry,
     model: &Model,

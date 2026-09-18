@@ -228,6 +228,7 @@ pub struct SessionRuntime {
     pub parent: Option<SessionId>,
     pub context_tokens: mush_ai::types::TokenCount,
     pub lease: Option<mush_session::SessionLease>,
+    pub harness_notice: Option<String>,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -259,6 +260,7 @@ impl SessionRuntime {
             parent: None,
             context_tokens: mush_ai::types::TokenCount::ZERO,
             lease: None,
+            harness_notice: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }

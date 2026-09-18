@@ -38,6 +38,9 @@ pub async fn handle(
                 "  /tree          - browse the conversation tree and jump to a message\n",
             );
             help.push_str(
+                "  /refine [--global] [instructions] - refine the continual harness, rollback <id> undoes one\n",
+            );
+            help.push_str(
                 "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
             );
             help.push_str("  /export [file] - save conversation as markdown\n");

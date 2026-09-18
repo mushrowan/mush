@@ -3,6 +3,7 @@ pub mod conversation;
 pub mod file_ops;
 pub mod harness;
 pub mod inbox;
+pub mod refine;
 pub mod session;
 pub mod store;
 pub mod title;

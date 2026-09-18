@@ -344,6 +344,17 @@ pub(super) async fn apply_command_events(
             ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
             ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),
             ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
+            ClientEvent::Refined(result) => {
+                session.app.status = None;
+                session
+                    .app
+                    .push_system_message(crate::slash::format_refinement(&result));
+            }
+            ClientEvent::HarnessDigest(digest) => {
+                session
+                    .app
+                    .push_system_message(crate::slash::format_harness_digest(&digest));
+            }
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {

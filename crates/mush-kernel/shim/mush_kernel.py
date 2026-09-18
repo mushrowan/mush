@@ -319,6 +319,19 @@ class _Compact:
         return await host_request("compact.run", payload)
 
 
+class _Refine:
+    async def status(self) -> dict:
+        return await host_request("refine.status", {})
+
+    async def run(self, instructions: str | None = None, global_: bool = False) -> dict:
+        payload = {}
+        if instructions is not None:
+            payload["instructions"] = instructions
+        if global_:
+            payload["global"] = True
+        return await host_request("refine.run", payload)
+
+
 class _RlmHeartbeat:
     async def create(self, prompt: str, *, interval: str = "5m", label: str | None = None) -> dict:
         payload = {"prompt": prompt, "interval": interval}
@@ -338,6 +351,7 @@ agent_message = _AgentMessage()
 goal = _Goal()
 rlm_heartbeat = _RlmHeartbeat()
 compact = _Compact()
+refine = _Refine()
 
 
 async def edit(path: str, old: str, new: str) -> str:
@@ -414,6 +428,7 @@ def _install_preload() -> None:
             "goal": goal,
             "rlm_heartbeat": rlm_heartbeat,
             "compact": compact,
+            "refine": refine,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,
         }

@@ -824,6 +824,57 @@ impl RefinementResult {
     }
 }
 
+pub const DIGEST_PREFIX: &str = "Continual harness state at this point:";
+
+#[must_use]
+pub fn global_dir() -> PathBuf {
+    crate::store::data_dir().join("harness")
+}
+
+#[must_use]
+pub fn local_dir(session_id: &mush_ai::types::SessionId) -> PathBuf {
+    crate::SessionStore::default_artifact_dir(session_id).join("harness")
+}
+
+#[must_use]
+pub fn load_merged(session_id: &mush_ai::types::SessionId) -> State {
+    State::merged(
+        &State::load(&global_dir(), Scope::Global),
+        &State::load(&local_dir(session_id), Scope::Local),
+    )
+}
+
+#[must_use]
+pub fn digest_message(state: &State) -> mush_ai::types::Message {
+    mush_ai::types::Message::User(
+        mush_ai::types::UserMessage::builder()
+            .content(mush_ai::types::UserContent::Text(format!(
+                "{DIGEST_PREFIX}\n\n<harness_digest fingerprint=\"{}\">\n{}\n</harness_digest>",
+                state.fingerprint(),
+                state.digest()
+            )))
+            .timestamp_ms(mush_ai::types::Timestamp::now())
+            .build(),
+    )
+}
+
+#[must_use]
+pub fn extract_digest(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix(DIGEST_PREFIX)?.trim_start();
+    let rest = rest.strip_prefix("<harness_digest fingerprint=\"")?;
+    let (fingerprint, rest) = rest.split_once("\">")?;
+    let body = rest.trim().strip_suffix("</harness_digest>")?.trim();
+    Some((fingerprint.to_string(), body.to_string()))
+}
+
+#[must_use]
+pub fn latest_digest_fingerprint(messages: &[mush_ai::types::Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        mush_ai::types::Message::User(user) => extract_digest(&user.text()).map(|(fp, _)| fp),
+        _ => None,
+    })
+}
+
 pub fn append_history(dir: &Path, result: &RefinementResult) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
@@ -1064,6 +1115,29 @@ mod tests {
         let cut = Proposal::parse("{\"summary\":\"s\",\"edits\":[{\"action\":\"crea").unwrap_err();
         assert!(cut.contains("stopped before completing"), "{cut}");
         assert!(Proposal::parse("no json here").is_err());
+    }
+
+    #[test]
+    fn the_digest_message_roundtrips_its_fingerprint() {
+        let mut state = State::default();
+        state.apply(
+            &proposal(vec![create(Kind::Memory, "a", "b")]),
+            "ref_1",
+            Scope::Local,
+            None,
+        );
+        let message = digest_message(&state);
+        let mush_ai::types::Message::User(user) = &message else {
+            unreachable!()
+        };
+        let (fingerprint, body) = extract_digest(&user.text()).unwrap();
+        assert_eq!(fingerprint, state.fingerprint());
+        assert_eq!(body, state.digest());
+        assert_eq!(
+            latest_digest_fingerprint(&[message]),
+            Some(state.fingerprint())
+        );
+        assert_eq!(latest_digest_fingerprint(&[]), None);
     }
 
     #[test]

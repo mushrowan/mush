@@ -671,6 +671,12 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          - `await compact.run(hint=None)` schedules a context compaction for after this turn, \
          with an optional hint on what the summary must keep. Use it when the conversation has \
          grown past what the task needs.\n\
+         - `await refine.run(instructions=None, global_=False)` schedules a continual harness \
+         refinement for after this turn: a review of the trajectory that creates, updates or \
+         deletes prompt notes, memories, skill entries and subagent specs. Call it after a \
+         repeated failure, when a reusable tactic emerges, or when the user corrects behaviour \
+         that should persist. Local by default; `global_=True` for lessons every session should \
+         keep. The current harness digest appears in the conversation when it changes.\n\
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \
          during long work so they can see where you are.\n\
          - `await rlm.note(text)` keeps a short note that survives compaction and kernel \

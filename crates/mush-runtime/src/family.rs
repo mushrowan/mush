@@ -1143,6 +1143,27 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     serde_json::json!({ "scheduled": true, "note": "compaction runs after this turn ends" }),
                 )
             }
+            "refine.run" | "refine.status" => {
+                let commands = self.host_commands.as_ref().ok_or_else(|| {
+                    mush_kernel::HostError("refinement is not available here".into())
+                })?;
+                let pending = commands.pending_refine();
+                if kind == "refine.status" {
+                    return Ok(serde_json::json!({ "pending": pending, "in_flight": false }));
+                }
+                let refine = mush_session::refine::RefineRequest {
+                    instructions: str_field("instructions").filter(|text| !text.trim().is_empty()),
+                    rollback: None,
+                    global: payload
+                        .get("global")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                };
+                commands.replace_refine(refine);
+                Ok(
+                    serde_json::json!({ "scheduled": true, "note": "refinement runs after this turn ends" }),
+                )
+            }
             "rlm.create_session" => {
                 if self.identity.depth > 0 {
                     return Err(mush_kernel::HostError(

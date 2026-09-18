@@ -31,6 +31,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("clone", "copy the current branch into a new session"),
     ("tree", "browse the conversation tree and jump to a message"),
     (
+        "refine",
+        "refine the continual harness (prompt notes, memories, skills, subagent specs)",
+    ),
+    (
         "compact",
         "summarise old messages ([--context-budget <n>] [focus instructions])",
     ),
