@@ -7,8 +7,6 @@ const DEFAULT_KEEP_RECENT: usize = 10;
 
 const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
 
-const COMPACTION_MAX_OUTPUT_TOKENS: u64 = 8192;
-
 const COMPACTION_MAX_RETRIES: u32 = 5;
 
 const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
@@ -520,23 +518,42 @@ mod focus_tests {
 }
 
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
-pub const COMPACTION_RESERVE_TOKENS: u64 = 16_384;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CompactionSettings {
+    pub reserve_tokens: u64,
+    pub keep_recent_tokens: u64,
+}
 
-#[must_use]
-pub fn compaction_threshold(context_window: TokenCount) -> TokenCount {
-    let window = context_window.get();
-    if window >= 2 * COMPACTION_RESERVE_TOKENS {
-        TokenCount::new(window - COMPACTION_RESERVE_TOKENS)
-    } else {
-        TokenCount::new(window * 95 / 100)
+impl Default for CompactionSettings {
+    fn default() -> Self {
+        Self {
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+        }
     }
 }
 
-pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
+impl CompactionSettings {
+    #[must_use]
+    pub fn threshold(&self, context_window: TokenCount) -> TokenCount {
+        let window = context_window.get();
+        if window >= 2 * self.reserve_tokens {
+            TokenCount::new(window - self.reserve_tokens)
+        } else {
+            TokenCount::new(window * 95 / 100)
+        }
+    }
 
-#[must_use]
-pub fn keep_recent_budget(context_window: TokenCount) -> usize {
-    DEFAULT_KEEP_RECENT_TOKENS.min(context_window.get() / 10) as usize
+    #[must_use]
+    pub fn max_output_tokens(&self) -> TokenCount {
+        TokenCount::new((self.reserve_tokens * 4 / 5).max(1))
+    }
+
+    #[must_use]
+    pub fn keep_recent(&self, messages: &[Message]) -> usize {
+        keep_recent_for_budget(messages, self.keep_recent_tokens as usize)
+    }
 }
 
 #[must_use]
@@ -563,20 +580,23 @@ pub fn needs_compaction_at(
     context_tokens: TokenCount,
     context_window: TokenCount,
     message_count: usize,
+    settings: &CompactionSettings,
 ) -> bool {
-    message_count > DEFAULT_KEEP_RECENT && context_tokens > compaction_threshold(context_window)
+    message_count > DEFAULT_KEEP_RECENT && context_tokens > settings.threshold(context_window)
 }
 
 pub fn needs_compaction_for_messages(
     context_tokens: TokenCount,
     context_window: TokenCount,
     messages: &[Message],
+    settings: &CompactionSettings,
 ) -> bool {
     let estimated = TokenCount::new(estimate_tokens(messages) as u64);
     needs_compaction_at(
         context_tokens.max(estimated),
         context_window,
         messages.len(),
+        settings,
     )
 }
 
@@ -586,13 +606,14 @@ pub fn needs_compaction_for_estimated_payload(
     current_estimated_tokens: TokenCount,
     context_window: TokenCount,
     message_count: usize,
+    settings: &CompactionSettings,
 ) -> bool {
     let effective_tokens = compaction_tokens_for_estimated_payload(
         context_tokens,
         baseline_estimated_tokens,
         current_estimated_tokens,
     );
-    needs_compaction_at(effective_tokens, context_window, message_count)
+    needs_compaction_at(effective_tokens, context_window, message_count, settings)
 }
 
 pub fn compaction_tokens_for_estimated_payload(
@@ -615,6 +636,7 @@ pub struct AutoCompactResult {
     pub summary: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn auto_compact(
     messages: Vec<Message>,
     context_tokens: TokenCount,
@@ -623,8 +645,9 @@ pub async fn auto_compact(
     model: &Model,
     options: &StreamOptions,
     live: Option<&LiveContext>,
+    settings: &CompactionSettings,
 ) -> AutoCompactResult {
-    if !needs_compaction_for_messages(context_tokens, context_window, &messages) {
+    if !needs_compaction_for_messages(context_tokens, context_window, &messages, settings) {
         return AutoCompactResult {
             messages,
             masked_count: 0,
@@ -638,7 +661,7 @@ pub async fn auto_compact(
     let mask_result = mask_observations(&mut messages, None);
 
     if mask_result.masked_count > 0
-        && estimate_tokens(&messages) < compaction_threshold(context_window).get() as usize
+        && estimate_tokens(&messages) < settings.threshold(context_window).get() as usize
     {
         return AutoCompactResult {
             messages,
@@ -649,7 +672,7 @@ pub async fn auto_compact(
         };
     }
 
-    let keep = keep_recent_for_budget(&messages, keep_recent_budget(context_window));
+    let keep = settings.keep_recent(&messages);
     let result = llm_compact(
         messages,
         registry,
@@ -658,6 +681,7 @@ pub async fn auto_compact(
         Some(keep),
         CompactionFocus::default(),
         live,
+        settings,
     )
     .await;
 
@@ -670,6 +694,7 @@ pub async fn auto_compact(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn llm_compact(
     messages: Vec<Message>,
     registry: &ApiRegistry,
@@ -678,14 +703,27 @@ pub async fn llm_compact(
     keep_recent: Option<usize>,
     focus: CompactionFocus,
     live: Option<&LiveContext>,
+    settings: &CompactionSettings,
 ) -> CompactionResult {
-    match try_llm_compact(messages, registry, model, options, keep_recent, focus, live).await {
+    match try_llm_compact(
+        messages,
+        registry,
+        model,
+        options,
+        keep_recent,
+        focus,
+        live,
+        settings,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(failure) => failure.into_fallback_result(),
     }
 }
 
 #[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
 pub async fn try_llm_compact(
     messages: Vec<Message>,
     registry: &ApiRegistry,
@@ -694,6 +732,7 @@ pub async fn try_llm_compact(
     keep_recent: Option<usize>,
     focus: CompactionFocus,
     live: Option<&LiveContext>,
+    settings: &CompactionSettings,
 ) -> Result<CompactionResult, CompactionFailureReport> {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
@@ -711,7 +750,7 @@ pub async fn try_llm_compact(
 
     let split_at = messages.len() - keep;
 
-    let compact_options = compaction_stream_options(model, options, live.is_some());
+    let compact_options = compaction_stream_options(model, options, live.is_some(), settings);
     let mut old_start = 0;
     let mut diagnostics = CompactionDiagnostics {
         model_id: model.id.to_string(),
@@ -770,10 +809,16 @@ pub async fn summarise_branch(
     registry: &ApiRegistry,
     model: &Model,
     options: &StreamOptions,
+    settings: &CompactionSettings,
 ) -> Result<String, String> {
     let focus = CompactionFocus::default();
-    let context = compaction_context(abandoned, &[], &focus, None);
-    let compact_options = compaction_stream_options(model, options, false);
+    let budget = settings.threshold(model.compaction_window()).get() as usize;
+    let mut start = 0;
+    while start + 1 < abandoned.len() && estimate_tokens(&abandoned[start..]) > budget {
+        start += 1;
+    }
+    let context = compaction_context(&abandoned[start..], &[], &focus, None);
+    let compact_options = compaction_stream_options(model, options, false, settings);
     call_for_text(registry, model, &context, &compact_options)
         .await
         .map(|outcome| with_file_operations(outcome.text, abandoned))
@@ -1088,9 +1133,14 @@ fn tool_result_text(result: &ToolResultMessage) -> String {
         .join(" ")
 }
 
-fn compaction_stream_options(model: &Model, options: &StreamOptions, live: bool) -> StreamOptions {
+fn compaction_stream_options(
+    model: &Model,
+    options: &StreamOptions,
+    live: bool,
+    settings: &CompactionSettings,
+) -> StreamOptions {
     let mut compact_options = options.clone();
-    compact_options.max_tokens = Some(TokenCount::new(COMPACTION_MAX_OUTPUT_TOKENS));
+    compact_options.max_tokens = Some(settings.max_output_tokens());
     if !live {
         compact_options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
     }
@@ -1513,6 +1563,7 @@ mod tests {
             TokenCount::new(100),
             TokenCount::new(200_000),
             20,
+            &CompactionSettings::default(),
         ));
     }
 
@@ -1522,28 +1573,40 @@ mod tests {
             TokenCount::new(9600),
             TokenCount::new(10_000),
             20,
+            &CompactionSettings::default(),
         ));
     }
 
     #[test]
     fn the_threshold_leaves_the_reserve_free_above_small_windows() {
+        let settings = CompactionSettings::default();
         assert_eq!(
-            compaction_threshold(TokenCount::new(200_000)),
-            TokenCount::new(200_000 - COMPACTION_RESERVE_TOKENS)
+            settings.threshold(TokenCount::new(200_000)),
+            TokenCount::new(200_000 - 16_384)
         );
         assert_eq!(
-            compaction_threshold(TokenCount::new(10_000)),
+            settings.threshold(TokenCount::new(10_000)),
             TokenCount::new(9_500)
+        );
+        assert_eq!(
+            CompactionSettings {
+                reserve_tokens: 8_192,
+                ..settings
+            }
+            .threshold(TokenCount::new(200_000)),
+            TokenCount::new(200_000 - 8_192)
         );
         assert!(needs_compaction_at(
             TokenCount::new(184_000),
             TokenCount::new(200_000),
             20,
+            &CompactionSettings::default(),
         ));
         assert!(!needs_compaction_at(
             TokenCount::new(183_000),
             TokenCount::new(200_000),
             20,
+            &CompactionSettings::default(),
         ));
     }
 
@@ -1569,8 +1632,14 @@ mod tests {
         assert_eq!(keep_recent_for_budget(&msgs, 150), 1);
         assert_eq!(keep_recent_for_budget(&msgs, 100_000), DEFAULT_KEEP_RECENT);
         assert_eq!(keep_recent_for_budget(&msgs, 0), 1);
-        assert_eq!(keep_recent_budget(TokenCount::new(200_000)), 20_000);
-        assert_eq!(keep_recent_budget(TokenCount::new(10_000)), 1_000);
+        assert_eq!(
+            CompactionSettings {
+                keep_recent_tokens: 250,
+                ..CompactionSettings::default()
+            }
+            .keep_recent(&msgs),
+            4
+        );
     }
 
     #[test]
@@ -1579,6 +1648,7 @@ mod tests {
             TokenCount::new(9600),
             TokenCount::new(10_000),
             8,
+            &CompactionSettings::default(),
         ));
     }
 
@@ -1601,10 +1671,16 @@ mod tests {
             before_new_payload,
             after_new_payload,
             context_window,
-            messages.len()
+            messages.len(),
+            &CompactionSettings::default(),
         ));
         assert!(
-            !needs_compaction_at(previous_api_tokens, context_window, messages.len()),
+            !needs_compaction_at(
+                previous_api_tokens,
+                context_window,
+                messages.len(),
+                &CompactionSettings::default()
+            ),
             "old api-token-only trigger misses the newly appended payload"
         );
     }
@@ -1617,11 +1693,21 @@ mod tests {
 
         let tokens = TokenCount::new(260_000);
         assert!(
-            needs_compaction_at(tokens, model.compaction_window(), 20),
+            needs_compaction_at(
+                tokens,
+                model.compaction_window(),
+                20,
+                &CompactionSettings::default()
+            ),
             "must compact against the effective input budget"
         );
         assert!(
-            !needs_compaction_at(tokens, model.context_window, 20),
+            !needs_compaction_at(
+                tokens,
+                model.context_window,
+                20,
+                &CompactionSettings::default()
+            ),
             "keying off the displayed window would compact too late"
         );
     }
@@ -1706,6 +1792,7 @@ mod tests {
             Some(5),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
         assert_eq!(result.summarised_count, 15);
@@ -1736,6 +1823,7 @@ mod tests {
             Some(5),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
         let Err(failure) = outcome else {
@@ -1771,6 +1859,7 @@ mod tests {
             Some(5),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
 
@@ -1811,6 +1900,7 @@ mod tests {
             Some(2),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
 
@@ -1908,6 +1998,7 @@ mod tests {
             Some(5),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
 
@@ -1983,6 +2074,7 @@ mod tests {
             Some(5),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
 
@@ -2050,6 +2142,7 @@ mod tests {
             Some(4),
             CompactionFocus::default(),
             None,
+            &CompactionSettings::default(),
         )
         .await;
 
@@ -2080,9 +2173,10 @@ mod tests {
             ..StreamOptions::default()
         };
 
-        let compact_options = compaction_stream_options(&model, &options, false);
+        let compact_options =
+            compaction_stream_options(&model, &options, false, &CompactionSettings::default());
 
-        assert_eq!(compact_options.max_tokens, Some(TokenCount::new(8192)));
+        assert_eq!(compact_options.max_tokens, Some(TokenCount::new(13_107)));
         assert_eq!(compact_options.thinking, Some(ThinkingLevel::Low));
     }
 
@@ -2105,7 +2199,8 @@ mod tests {
             needs_compaction_at(
                 TokenCount::new(estimated as u64),
                 context_window,
-                msgs.len()
+                msgs.len(),
+                &CompactionSettings::default()
             ),
             "should need compaction: {estimated} tokens",
         );
@@ -2118,7 +2213,8 @@ mod tests {
             !needs_compaction_at(
                 TokenCount::new(post_estimated as u64),
                 context_window,
-                msgs.len()
+                msgs.len(),
+                &CompactionSettings::default()
             ),
             "shouldn't need compaction right after: {post_estimated} tokens in {} msgs",
             msgs.len(),
@@ -2135,7 +2231,12 @@ mod tests {
 
         let regrown = estimate_tokens(&msgs);
         assert!(
-            needs_compaction_at(TokenCount::new(regrown as u64), context_window, msgs.len()),
+            needs_compaction_at(
+                TokenCount::new(regrown as u64),
+                context_window,
+                msgs.len(),
+                &CompactionSettings::default()
+            ),
             "should need re-compaction: {regrown} tokens in {} msgs",
             msgs.len(),
         );

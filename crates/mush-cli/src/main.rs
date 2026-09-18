@@ -527,7 +527,8 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
         }
     }));
-    let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.auto_compact {
+    let compaction_settings = setup.client.cfg.compaction.settings();
+    let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.compaction.enabled {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
             let o = compact_options.clone();
@@ -549,6 +550,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     Some(&hooks),
                     Some(cwd.as_path()),
                     live.as_ref().as_ref(),
+                    &compaction_settings,
                 )
                 .await;
                 if result.summarised_count > 0 {
@@ -1082,6 +1084,8 @@ fn turn_config(
         provider_api_keys: seed.provider_api_keys.clone(),
         confirm_tools: seed.confirm_tools,
         auto_compact: false,
+        compaction: Default::default(),
+        branch_summary: Default::default(),
         auto_fork_compact: false,
         compaction_model: None,
         forbidden_chars: seed.forbidden_chars.clone(),
@@ -1216,7 +1220,9 @@ fn worker_config(
         setup.client.model.clone(),
         setup.client.options.clone(),
     );
-    turn.auto_compact = setup.client.cfg.auto_compact;
+    turn.auto_compact = setup.client.cfg.compaction.enabled;
+    turn.compaction = setup.client.cfg.compaction.settings();
+    turn.branch_summary = setup.client.cfg.branch_summary.settings();
     turn.auto_fork_compact = setup.client.cfg.auto_fork_compact;
     turn.compaction_model = setup
         .client
@@ -1315,7 +1321,8 @@ fn worker_config(
                 .with_goal(goal.clone())
                 .with_scheduler(scheduler.clone())
                 .with_notes(notes.clone())
-                .with_host_commands(host_commands.clone());
+                .with_host_commands(host_commands.clone())
+                .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
             if !cli.no_session {
                 handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
             }
@@ -1423,6 +1430,7 @@ fn client_config(
             km
         },
         open_session_picker: false,
+        branch_summary_skip_prompt: client.cfg.branch_summary.skip_prompt,
         startup_notice: None,
         startup_commands: cli.startup_commands(),
         reload_context: Some(std::sync::Arc::new({

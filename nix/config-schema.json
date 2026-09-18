@@ -268,6 +268,21 @@
         }
       ]
     },
+    "BranchSummaryConfig": {
+      "properties": {
+        "reserve_tokens": {
+          "default": 16384,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skip_prompt": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "CacheRetention": {
       "enum": [
         "none",
@@ -282,6 +297,31 @@
         "arrows"
       ],
       "type": "string"
+    },
+    "CompactionConfig": {
+      "properties": {
+        "agent_callable": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "keep_recent_tokens": {
+          "default": 20000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reserve_tokens": {
+          "default": 16384,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
     },
     "EffortLevel": {
       "anyOf": [
@@ -929,13 +969,16 @@
         "openrouter": null
       }
     },
-    "auto_compact": {
-      "default": false,
-      "type": "boolean"
-    },
     "auto_fork_compact": {
       "default": false,
       "type": "boolean"
+    },
+    "branch_summary": {
+      "$ref": "#/$defs/BranchSummaryConfig",
+      "default": {
+        "reserve_tokens": 16384,
+        "skip_prompt": false
+      }
     },
     "cache_retention": {
       "anyOf": [
@@ -951,6 +994,15 @@
     "cache_timer": {
       "default": true,
       "type": "boolean"
+    },
+    "compaction": {
+      "$ref": "#/$defs/CompactionConfig",
+      "default": {
+        "agent_callable": true,
+        "enabled": true,
+        "keep_recent_tokens": 20000,
+        "reserve_tokens": 16384
+      }
     },
     "compaction_model": {
       "default": null,

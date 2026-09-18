@@ -261,7 +261,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("config.toml"),
-        "auto_compact = false\n[api_keys]\nfixture = 'fixture-key'\n",
+        "[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -412,7 +412,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("config.toml"),
-        "auto_compact = false\n[api_keys]\nfixture = 'fixture-key'\n",
+        "[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

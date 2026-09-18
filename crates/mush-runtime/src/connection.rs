@@ -606,6 +606,8 @@ impl InProcessConnection {
                 provider_api_keys: std::collections::HashMap::new(),
                 confirm_tools: false,
                 auto_compact: false,
+                compaction: Default::default(),
+                branch_summary: Default::default(),
                 auto_fork_compact: false,
                 compaction_model: None,
                 forbidden_chars: Default::default(),
@@ -737,6 +739,7 @@ impl InProcessConnection {
             self.runtime.context_tokens,
             window,
             &self.runtime.conversation.context(),
+            &self.config.compaction,
         )
     }
 
@@ -843,12 +846,14 @@ impl InProcessConnection {
         }
         let target = self.runtime.compaction_target(&self.config).await;
         let registry = self.registry.clone();
+        let settings = self.config.branch_summary;
         let task = tokio::spawn(async move {
             mush_session::compact::summarise_branch(
                 &abandoned,
                 &registry,
                 &target.model,
                 &target.options,
+                &settings,
             )
             .await
         });
@@ -1267,6 +1272,7 @@ impl InProcessConnection {
             self.injections.cwd.clone(),
             focus,
             live,
+            self.config.compaction,
         );
         self.compaction = Some(task);
         self.queued.push_back(ClientEvent::Compacting);

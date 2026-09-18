@@ -65,6 +65,7 @@ pub fn start_compaction(
     cwd: Option<PathBuf>,
     focus: CompactionFocus,
     live: Option<mush_session::compact::LiveContext>,
+    settings: mush_session::compact::CompactionSettings,
 ) -> tokio::task::JoinHandle<CompactionTaskResult> {
     let before_count = messages.len();
     let model_id = model.id.to_string();
@@ -78,6 +79,7 @@ pub fn start_compaction(
             cwd.as_deref(),
             focus,
             live.as_ref(),
+            &settings,
         )
         .await;
         match run {
@@ -138,27 +140,33 @@ pub async fn run_compaction(
     cwd: Option<&Path>,
     focus: CompactionFocus,
     live: Option<&mush_session::compact::LiveContext>,
+    settings: &mush_session::compact::CompactionSettings,
 ) -> RunCompactionResult {
     use mush_session::compact;
 
     let tokens_before = compact::estimate_tokens(&messages);
     let instructions = focus.instructions.clone();
-    let keep = compact::keep_recent_for_budget(
-        &messages,
-        compact::keep_recent_budget(model.compaction_window()),
-    );
-    let result =
-        match compact::try_llm_compact(messages, registry, model, options, Some(keep), focus, live)
-            .await
-        {
-            Ok(result) => result,
-            Err(failure) => {
-                return RunCompactionResult::Failed {
-                    failure,
-                    tokens_before,
-                };
-            }
-        };
+    let keep = settings.keep_recent(&messages);
+    let result = match compact::try_llm_compact(
+        messages,
+        registry,
+        model,
+        options,
+        Some(keep),
+        focus,
+        live,
+        settings,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(failure) => {
+            return RunCompactionResult::Failed {
+                failure,
+                tokens_before,
+            };
+        }
+    };
 
     let mut applied = build_applied_compaction(
         result,

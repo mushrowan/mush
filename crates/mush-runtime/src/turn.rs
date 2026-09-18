@@ -23,6 +23,8 @@ pub struct TurnConfig {
     pub provider_api_keys: HashMap<String, ApiKey>,
     pub confirm_tools: bool,
     pub auto_compact: bool,
+    pub compaction: mush_session::compact::CompactionSettings,
+    pub branch_summary: mush_session::compact::CompactionSettings,
     pub auto_fork_compact: bool,
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
@@ -203,6 +205,7 @@ impl SessionRuntime {
             target.model,
             target.options,
             config.auto_compact,
+            config.compaction,
             model.compaction_window(),
             registry.clone(),
             context_tokens_shared.clone(),
@@ -268,6 +271,7 @@ pub fn build_context_transform(
     compact_model: Model,
     compact_options: StreamOptions,
     do_auto_compact: bool,
+    settings: mush_session::compact::CompactionSettings,
     compaction_window: TokenCount,
     registry: ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
@@ -313,6 +317,7 @@ pub fn build_context_transform(
                 effective_compaction_tokens,
                 compaction_window,
                 owned_messages.len(),
+                &settings,
             ) {
                 baseline_estimated_tokens.store(
                     current_estimated_tokens.get(),
@@ -330,6 +335,7 @@ pub fn build_context_transform(
                 Some(&hooks),
                 Some(cwd.as_path()),
                 live.as_ref().as_ref(),
+                &settings,
             )
             .await;
             let tokens_after = estimated_tokens_u64(&result.messages);
@@ -439,6 +445,7 @@ pub async fn auto_compact(
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&std::path::Path>,
     live: Option<&mush_session::compact::LiveContext>,
+    settings: &mush_session::compact::CompactionSettings,
 ) -> mush_session::compact::AutoCompactResult {
     let result = mush_session::compact::auto_compact(
         messages,
@@ -448,6 +455,7 @@ pub async fn auto_compact(
         model,
         options,
         live,
+        settings,
     )
     .await;
 
@@ -597,6 +605,7 @@ mod tests {
             model,
             StreamOptions::default(),
             true,
+            mush_session::compact::CompactionSettings::default(),
             TokenCount::new(10_000),
             ApiRegistry::new(),
             context_tokens,
@@ -641,6 +650,7 @@ mod tests {
             model,
             StreamOptions::default(),
             true,
+            mush_session::compact::CompactionSettings::default(),
             TokenCount::new(10_000),
             ApiRegistry::new(),
             context_tokens,

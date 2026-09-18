@@ -919,6 +919,7 @@ pub struct RlmHandler {
     notes: Option<Arc<crate::notes::Notes>>,
     sessions: Option<SessionSpawner>,
     host_commands: Option<Arc<crate::connection::HostCommands>>,
+    compaction_callable: bool,
 }
 
 impl RlmHandler {
@@ -932,7 +933,14 @@ impl RlmHandler {
             notes: None,
             sessions: None,
             host_commands: None,
+            compaction_callable: true,
         }
+    }
+
+    #[must_use]
+    pub fn with_compaction_callable(mut self, callable: bool) -> Self {
+        self.compaction_callable = callable;
+        self
     }
 
     #[must_use]
@@ -1117,6 +1125,12 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 }))
             }
             "compact.run" => {
+                if !self.compaction_callable {
+                    return Err(mush_kernel::HostError(
+                        "compaction from the agent is turned off (compaction.agent_callable)"
+                            .into(),
+                    ));
+                }
                 let commands = self.host_commands.as_ref().ok_or_else(|| {
                     mush_kernel::HostError("compaction is not available here".into())
                 })?;

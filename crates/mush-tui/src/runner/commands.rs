@@ -442,7 +442,7 @@ pub(super) async fn handle_slash_action(
                     )
                     .is_empty()
             });
-            if leaves_something_behind {
+            if leaves_something_behind && !tui_config.branch_summary_skip_prompt {
                 session.app.interaction.branch_summary_ask = Some(entry_id);
                 session.app.interaction.mode = crate::app::AppMode::ToolConfirm;
             } else {
@@ -967,6 +967,29 @@ mod tests {
         );
         assert_eq!(session.app.interaction.branch_summary_ask, Some(target));
         assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
+    }
+
+    #[test]
+    fn skip_prompt_jumps_without_asking() {
+        let mut session = conversation_session(vec![user("first"), user("second")]);
+        let mut config = TuiConfig::for_test();
+        config.branch_summary_skip_prompt = true;
+        let target = session.in_process().runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::NavigateTree { entry_id: target },
+        );
+
+        assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+        assert_eq!(
+            session.in_process().runtime.conversation.context(),
+            vec![user("first")]
+        );
+        assert_eq!(session.app.input.text, "second");
     }
 
     #[test]

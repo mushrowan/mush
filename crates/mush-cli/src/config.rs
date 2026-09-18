@@ -38,6 +38,63 @@ pub struct KernelConfig {
     pub extra_packages: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct CompactionConfig {
+    pub enabled: bool,
+    pub reserve_tokens: u64,
+    pub keep_recent_tokens: u64,
+    pub agent_callable: bool,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        let defaults = mush_session::compact::CompactionSettings::default();
+        Self {
+            enabled: true,
+            reserve_tokens: defaults.reserve_tokens,
+            keep_recent_tokens: defaults.keep_recent_tokens,
+            agent_callable: true,
+        }
+    }
+}
+
+impl CompactionConfig {
+    #[must_use]
+    pub fn settings(&self) -> mush_session::compact::CompactionSettings {
+        mush_session::compact::CompactionSettings {
+            reserve_tokens: self.reserve_tokens,
+            keep_recent_tokens: self.keep_recent_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct BranchSummaryConfig {
+    pub reserve_tokens: u64,
+    pub skip_prompt: bool,
+}
+
+impl Default for BranchSummaryConfig {
+    fn default() -> Self {
+        Self {
+            reserve_tokens: mush_session::compact::CompactionSettings::default().reserve_tokens,
+            skip_prompt: false,
+        }
+    }
+}
+
+impl BranchSummaryConfig {
+    #[must_use]
+    pub fn settings(&self) -> mush_session::compact::CompactionSettings {
+        mush_session::compact::CompactionSettings {
+            reserve_tokens: self.reserve_tokens,
+            ..Default::default()
+        }
+    }
+}
+
 impl Default for KernelConfig {
     fn default() -> Self {
         Self {
@@ -67,7 +124,9 @@ pub struct Config {
     #[serde(default)]
     pub force_budget_thinking: bool,
     #[serde(default)]
-    pub auto_compact: bool,
+    pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub branch_summary: BranchSummaryConfig,
     #[serde(default)]
     pub auto_fork_compact: bool,
     #[serde(default = "default_rlm")]
@@ -142,7 +201,8 @@ impl Default for Config {
             log_filter: None,
             thinking_display: mush_tui::ThinkingDisplay::default(),
             force_budget_thinking: false,
-            auto_compact: false,
+            compaction: CompactionConfig::default(),
+            branch_summary: BranchSummaryConfig::default(),
             auto_fork_compact: false,
             rlm: true,
             rlm_max_depth: None,
@@ -909,15 +969,28 @@ mouse_scroll_lines = 5
     }
 
     #[test]
-    fn auto_compact_defaults_to_false() {
+    fn compaction_defaults_match_prime() {
         let config: Config = toml::from_str("").unwrap();
-        assert!(!config.auto_compact);
+        assert!(config.compaction.enabled);
+        assert_eq!(config.compaction.reserve_tokens, 16_384);
+        assert_eq!(config.compaction.keep_recent_tokens, 20_000);
+        assert!(config.compaction.agent_callable);
+        assert_eq!(config.branch_summary.reserve_tokens, 16_384);
+        assert!(!config.branch_summary.skip_prompt);
     }
 
     #[test]
-    fn auto_compact_can_be_enabled() {
-        let config: Config = toml::from_str("auto_compact = true").unwrap();
-        assert!(config.auto_compact);
+    fn compaction_table_overrides_each_knob() {
+        let config: Config = toml::from_str(
+            "[compaction]\nenabled = false\nreserve_tokens = 8192\nkeep_recent_tokens = 5000\nagent_callable = false\n\n[branch_summary]\nreserve_tokens = 4096\nskip_prompt = true\n",
+        )
+        .unwrap();
+        assert!(!config.compaction.enabled);
+        assert_eq!(config.compaction.settings().reserve_tokens, 8_192);
+        assert_eq!(config.compaction.settings().keep_recent_tokens, 5_000);
+        assert!(!config.compaction.agent_callable);
+        assert_eq!(config.branch_summary.settings().reserve_tokens, 4_096);
+        assert!(config.branch_summary.skip_prompt);
     }
 
     #[test]
