@@ -10,6 +10,12 @@ pub fn extract(content: &str) -> Option<(&str, usize)> {
     Some((after_fence[..end].trim(), body_start))
 }
 
+#[must_use]
+pub fn body(content: &str) -> Option<&str> {
+    let (_, start) = extract(content)?;
+    Some(&content[start..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

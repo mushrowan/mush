@@ -7,7 +7,7 @@ use mush_ai::types::{SessionId, TokenCount, TokenCountParseError};
 use thiserror::Error;
 
 pub(crate) use commands::handle_login_start;
-pub use commands::{expand_template, handle, handle_export, rebuild_display};
+pub use commands::{expand_skill, expand_template, handle, handle_export, rebuild_display};
 pub use compaction::{
     AppliedCompaction, CompactionTaskResult, MIN_MESSAGES_FOR_COMPACTION, PendingCompaction,
     apply_applied_compaction, apply_compaction_result, extract_fresh_summary,

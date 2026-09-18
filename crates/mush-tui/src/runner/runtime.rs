@@ -364,6 +364,16 @@ fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
         app.completion.templates.push(template);
     }
 
+    for skill in &tui_config.skills.skills {
+        app.completion
+            .completions
+            .push(format!("/skill:{}", skill.name));
+        app.completion.slash_commands.push(SlashCommand {
+            name: format!("skill:{}", skill.name),
+            description: skill.description.clone(),
+        });
+    }
+
     for entry in mush_ai::discovery::merged_catalogue() {
         app.completion.completions.push(entry.model.id.to_string());
         app.completion

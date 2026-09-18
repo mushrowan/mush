@@ -25,6 +25,7 @@ pub async fn handle(
             help.push_str("  /help          - show this message\n");
             help.push_str("  /keys          - show keyboard shortcuts\n");
             help.push_str("  /subagents     - show or register session supervisors\n");
+            help.push_str("  /skill:<name> [args] - send a skill's instructions as your prompt\n");
             help.push_str("  /new           - save session, start fresh\n");
             help.push_str(
                 "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
@@ -358,7 +359,12 @@ pub async fn handle(
             app.toggle_thinking_expanded();
             None
         }
-        SlashAction::Other { name, args } => try_template(app, name, args),
+        SlashAction::Other { name, args } => {
+            if let Some(skill) = name.strip_prefix("skill:") {
+                return try_skill(app, &tui_config.skills.skills, skill, args);
+            }
+            try_template(app, name, args)
+        }
         _ => None,
     }
 }
@@ -1010,6 +1016,45 @@ fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
     Some(expanded)
 }
 
+pub fn expand_skill(skill: &mush_ext::Skill, args: &str) -> Result<String, std::io::Error> {
+    let content = std::fs::read_to_string(&skill.path)?;
+    let body = mush_ext::frontmatter_body(&content)
+        .unwrap_or(&content)
+        .trim();
+    let base = skill
+        .path
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    let block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {base}.\n\n{body}\n</skill>",
+        skill.name,
+        skill.path.display(),
+    );
+    Ok(if args.trim().is_empty() {
+        block
+    } else {
+        format!("{block}\n\n{}", args.trim())
+    })
+}
+
+fn try_skill(app: &mut App, skills: &[mush_ext::Skill], name: &str, args: &str) -> Option<String> {
+    let Some(skill) = skills.iter().find(|skill| skill.name == name) else {
+        app.push_system_message(format!("no skill called {name}. /skills lists them"));
+        return None;
+    };
+    match expand_skill(skill, args) {
+        Ok(expanded) => {
+            app.push_user_message(expanded.clone());
+            Some(expanded)
+        }
+        Err(error) => {
+            app.push_system_message(format!("could not read {}: {error}", skill.path.display()));
+            None
+        }
+    }
+}
+
 pub fn expand_template(prompt: &str) -> String {
     if !prompt.starts_with('/') {
         return prompt.to_string();
@@ -1380,6 +1425,82 @@ mod tests {
         assert_eq!(
             format_skill_catalogue(&crate::runner::SkillCatalogue::default()),
             "no skills loaded"
+        );
+    }
+
+    fn skill_on_disk(dir: &std::path::Path, name: &str, body: &str) -> mush_ext::Skill {
+        let path = dir.join(format!("{name}/SKILL.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("---\nname: {name}\ndescription: does {name} things\n---\n\n{body}\n"),
+        )
+        .unwrap();
+        mush_ext::Skill {
+            name: name.to_string(),
+            description: format!("does {name} things"),
+            path,
+            source: mush_ext::SkillSource::User,
+            disable_model_invocation: false,
+        }
+    }
+
+    #[test]
+    fn a_skill_command_expands_to_a_skill_block_with_the_arguments_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = skill_on_disk(dir.path(), "anki", "# anki\n\nmake good cards");
+
+        let block = expand_skill(&skill, "  make ten on rust  ").unwrap();
+
+        assert!(
+            block.starts_with(&format!(
+                "<skill name=\"anki\" location=\"{}\">",
+                skill.path.display()
+            )),
+            "{block}"
+        );
+        assert!(
+            block.contains(&format!(
+                "References are relative to {}.",
+                skill.path.parent().unwrap().display()
+            )),
+            "{block}"
+        );
+        assert!(block.contains("# anki\n\nmake good cards"), "{block}");
+        assert!(!block.contains("description: does anki things"), "{block}");
+        assert!(block.ends_with("</skill>\n\nmake ten on rust"), "{block}");
+
+        let bare = expand_skill(&skill, "").unwrap();
+        assert!(bare.ends_with("</skill>"), "{bare}");
+    }
+
+    #[test]
+    fn a_skill_command_sends_the_block_as_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = vec![skill_on_disk(dir.path(), "jj", "use jj not git")];
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        let prompt = try_skill(&mut app, &skills, "jj", "commit it").unwrap();
+
+        assert!(prompt.contains("use jj not git"), "{prompt}");
+        assert_eq!(app.messages.last().unwrap().content, prompt);
+        assert_eq!(
+            app.messages.last().unwrap().role,
+            crate::display_types::MessageRole::User
+        );
+    }
+
+    #[test]
+    fn an_unknown_skill_says_so_and_sends_nothing() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+
+        assert!(try_skill(&mut app, &[], "nope", "").is_none());
+
+        let message = app.messages.last().unwrap();
+        assert_eq!(message.role, crate::display_types::MessageRole::System);
+        assert!(
+            message.content.contains("no skill called nope"),
+            "{message:?}"
         );
     }
 

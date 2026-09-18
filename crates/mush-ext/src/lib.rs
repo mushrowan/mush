@@ -1,4 +1,4 @@
-mod frontmatter;
+pub mod frontmatter;
 pub mod hook;
 pub mod loader;
 pub mod prompts;
@@ -7,6 +7,7 @@ pub mod skill_scan;
 pub mod skills;
 pub mod types;
 
+pub use frontmatter::body as frontmatter_body;
 pub use hook::*;
 pub use loader::*;
 pub use prompts::*;

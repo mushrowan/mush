@@ -513,6 +513,7 @@ pub(super) async fn handle_slash_action(
                 .send(mush_runtime::ClientCommand::ReloadSystemPrompt)
                 .await;
             apply_reloaded_templates(session, &reloaded.templates);
+            apply_reloaded_skills(session, &reloaded.skills.skills);
             let warnings = reloaded.skills.diagnostics.len();
             tui_config.skills = reloaded.skills;
             session.app.status = Some(crate::app_state::Status::from(format!(
@@ -606,6 +607,27 @@ fn apply_reloaded_templates(session: &mut Session, templates: &[mush_ext::Prompt
                 });
             pane.app.completion.templates.push(template.clone());
         }
+    }
+}
+
+fn apply_reloaded_skills(session: &mut Session, skills: &[mush_ext::Skill]) {
+    let app = &mut session.app;
+    app.completion
+        .completions
+        .retain(|entry| !entry.starts_with("/skill:"));
+    app.completion
+        .slash_commands
+        .retain(|command| !command.name.starts_with("skill:"));
+    for skill in skills {
+        app.completion
+            .completions
+            .push(format!("/skill:{}", skill.name));
+        app.completion
+            .slash_commands
+            .push(crate::app::SlashCommand {
+                name: format!("skill:{}", skill.name),
+                description: skill.description.clone(),
+            });
     }
 }
 
