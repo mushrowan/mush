@@ -714,6 +714,21 @@ pub async fn try_llm_compact(
     Ok(result)
 }
 
+pub async fn summarise_branch(
+    abandoned: &[Message],
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+) -> Result<String, String> {
+    let focus = CompactionFocus::default();
+    let context = compaction_context(abandoned, &[], &focus, None);
+    let compact_options = compaction_stream_options(model, options, false);
+    call_for_text(registry, model, &context, &compact_options)
+        .await
+        .map(|outcome| outcome.text)
+        .map_err(|error| error.failure.to_string())
+}
+
 pub fn compaction_system_prompt(focus: &CompactionFocus) -> String {
     let mut prompt = COMPACTION_PROMPT.to_string();
     prompt.push_str(&focus_tail(focus));

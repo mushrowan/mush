@@ -23,6 +23,8 @@ pub enum SessionCommand {
     },
     NavigateTree {
         entry_id: mush_session::tree::EntryId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     Undo,
     Clear,
@@ -223,41 +225,8 @@ impl SessionRuntime {
                     SessionEvent::Status(format!("branched before: {preview}")),
                 ]
             }
-            SessionCommand::NavigateTree { entry_id } => {
-                let tree = self.conversation.tree();
-                let Some(target) = tree.by_id(&entry_id) else {
-                    return vec![SessionEvent::Failed(
-                        "that message is no longer in the tree".into(),
-                    )];
-                };
-                let preview = entry_preview(target);
-                let (new_leaf, editor_text) = match &target.kind {
-                    mush_session::tree::EntryKind::Message {
-                        message: Message::User(user),
-                    } => (target.parent_id.clone(), Some(user.text())),
-                    _ => (
-                        if tree.unanswered_tool_calls(&target.id).is_empty() {
-                            Some(target.id.clone())
-                        } else {
-                            tree.nearest_branchable_ancestor(&target.id).cloned()
-                        },
-                        None,
-                    ),
-                };
-                match new_leaf {
-                    Some(leaf) => {
-                        self.conversation.branch(&leaf);
-                    }
-                    None => self.conversation.reset_leaf(),
-                }
-                vec![
-                    SessionEvent::TranscriptReplaced {
-                        reason: Replaced::Branched,
-                        messages: self.conversation.context(),
-                        editor_text,
-                    },
-                    SessionEvent::Status(format!("branched before: {preview}")),
-                ]
+            SessionCommand::NavigateTree { entry_id, summary } => {
+                self.navigate_tree(&entry_id, summary)
             }
             SessionCommand::Undo => {
                 let parent = self
@@ -397,6 +366,67 @@ impl SessionRuntime {
             SessionEvent::SessionIdChanged(self.session_id.clone()),
             SessionEvent::Title(self.title.clone()),
         ]
+    }
+
+    pub fn navigate_tree(
+        &mut self,
+        entry_id: &mush_session::tree::EntryId,
+        summary: Option<String>,
+    ) -> Vec<SessionEvent> {
+        let tree = self.conversation.tree();
+        let Some(target) = tree.by_id(entry_id) else {
+            return vec![SessionEvent::Failed(
+                "that message is no longer in the tree".into(),
+            )];
+        };
+        let preview = entry_preview(target);
+        let editor_text = match &target.kind {
+            mush_session::tree::EntryKind::Message {
+                message: Message::User(user),
+            } => Some(user.text()),
+            _ => None,
+        };
+        let new_leaf = navigation_leaf(tree, target);
+        let status = match (new_leaf, summary) {
+            (Some(leaf), Some(summary)) => {
+                self.conversation.branch_with_summary(&leaf, summary);
+                format!("branched before: {preview}, with a summary of the branch left behind")
+            }
+            (Some(leaf), None) => {
+                self.conversation.branch(&leaf);
+                format!("branched before: {preview}")
+            }
+            (None, Some(summary)) => {
+                self.conversation.reset_leaf_with_summary(summary);
+                format!("branched before: {preview}, with a summary of the branch left behind")
+            }
+            (None, None) => {
+                self.conversation.reset_leaf();
+                format!("branched before: {preview}")
+            }
+        };
+        vec![
+            SessionEvent::TranscriptReplaced {
+                reason: Replaced::Branched,
+                messages: self.conversation.context(),
+                editor_text,
+            },
+            SessionEvent::Status(status),
+        ]
+    }
+}
+
+#[must_use]
+pub fn navigation_leaf(
+    tree: &mush_session::tree::SessionTree,
+    target: &mush_session::tree::SessionEntry,
+) -> Option<mush_session::tree::EntryId> {
+    match &target.kind {
+        mush_session::tree::EntryKind::Message {
+            message: Message::User(_),
+        } => target.parent_id.clone(),
+        _ if tree.unanswered_tool_calls(&target.id).is_empty() => Some(target.id.clone()),
+        _ => tree.nearest_branchable_ancestor(&target.id).cloned(),
     }
 }
 
@@ -610,7 +640,10 @@ mod tests {
         let target = runtime.conversation.tree().entries()[1].id.clone();
 
         let events = runtime
-            .handle(SessionCommand::NavigateTree { entry_id: target })
+            .handle(SessionCommand::NavigateTree {
+                entry_id: target,
+                summary: None,
+            })
             .await;
 
         assert_eq!(runtime.conversation.context(), vec![user("a")]);
@@ -626,7 +659,10 @@ mod tests {
         let target = runtime.conversation.tree().entries()[1].id.clone();
 
         let events = runtime
-            .handle(SessionCommand::NavigateTree { entry_id: target })
+            .handle(SessionCommand::NavigateTree {
+                entry_id: target,
+                summary: None,
+            })
             .await;
 
         assert_eq!(runtime.conversation.context_len(), 2);
@@ -637,12 +673,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn navigating_with_a_summary_leaves_it_on_the_new_branch() {
+        let mut runtime = runtime(vec![user("a"), assistant("reply"), user("b")]);
+        let target = runtime.conversation.tree().entries()[0].id.clone();
+
+        runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: target,
+                summary: Some("we tried b".into()),
+            })
+            .await;
+
+        let context = runtime.conversation.context();
+        assert_eq!(context.len(), 1);
+        assert!(matches!(&context[0], Message::User(user) if user.text().contains("we tried b")));
+    }
+
+    #[tokio::test]
     async fn navigating_to_an_unknown_entry_fails() {
         let mut runtime = runtime(vec![user("a")]);
 
         let events = runtime
             .handle(SessionCommand::NavigateTree {
                 entry_id: mush_session::tree::EntryId::new(),
+                summary: None,
             })
             .await;
 

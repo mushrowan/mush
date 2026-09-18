@@ -87,6 +87,10 @@ impl ConversationState {
         self.tree.branch_with_summary(from_id, summary)
     }
 
+    pub fn reset_leaf_with_summary(&mut self, summary: impl Into<String>) -> EntryId {
+        self.tree.reset_leaf_with_summary(summary)
+    }
+
     pub fn compact_at_leaf(
         &mut self,
         summary: String,

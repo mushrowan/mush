@@ -34,7 +34,9 @@ pub async fn handle(
             help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
             help.push_str("  /refresh-models - refresh discovered model catalogue\n");
             help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
-            help.push_str("  /tree          - browse the conversation tree and jump to a message\n");
+            help.push_str(
+                "  /tree          - browse the conversation tree and jump to a message\n",
+            );
             help.push_str(
                 "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
             );

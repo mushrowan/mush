@@ -49,6 +49,62 @@ fn confirmation_answer(code: KeyCode) -> Option<bool> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchSummaryChoice {
+    Summarise,
+    JustJump,
+    Stay,
+}
+
+fn branch_summary_answer(code: KeyCode) -> Option<BranchSummaryChoice> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            Some(BranchSummaryChoice::Summarise)
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(BranchSummaryChoice::JustJump),
+        KeyCode::Esc => Some(BranchSummaryChoice::Stay),
+        _ => None,
+    }
+}
+
+async fn answer_branch_summary(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    choice: BranchSummaryChoice,
+) {
+    let app = &mut session.app;
+    app.interaction.mode = app::AppMode::Insert;
+    let Some(entry_id) = app.interaction.branch_summary_ask.take() else {
+        return;
+    };
+    match choice {
+        BranchSummaryChoice::Stay => {}
+        BranchSummaryChoice::JustJump => {
+            super::commands::run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::NavigateTree {
+                    entry_id,
+                    summary: None,
+                },
+            )
+            .await;
+        }
+        BranchSummaryChoice::Summarise => {
+            match session
+                .connection
+                .send(mush_runtime::ClientCommand::SummariseAndNavigate { entry_id })
+                .await
+            {
+                Ok(events) => {
+                    super::looping::apply_command_events(session, tui_config, events).await;
+                }
+                Err(error) => session.app.push_system_message(error.to_string()),
+            }
+        }
+    }
+}
+
 fn kernel_busy_answer(code: KeyCode) -> Option<mush_tools::ipython::BusyKernelChoice> {
     use mush_tools::ipython::BusyKernelChoice;
     match code {
@@ -321,6 +377,13 @@ async fn handle_streaming_key_event(
         return Ok(LoopAction::Redraw);
     }
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
+        if session.app.interaction.branch_summary_ask.is_some() {
+            if let Some(choice) = branch_summary_answer(key.code) {
+                answer_branch_summary(session, deps.tui_config, choice).await;
+                return Ok(LoopAction::Redraw);
+            }
+            return Ok(LoopAction::Continue);
+        }
         if session.app.interaction.kernel_busy == crate::app_state::KernelBusy::Asked {
             if let Some(choice) = kernel_busy_answer(key.code) {
                 super::streams::answer_kernel_busy(session, choice).await;
@@ -812,6 +875,69 @@ mod tests {
             assert_eq!(state.signal.as_mut().unwrap().finished().await, None);
             assert_eq!(probe.sends.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn answering_n_to_the_branch_question_jumps_without_a_summary() {
+        let mut session = Session::with_conversation(
+            App::new("test".into(), TokenCount::new(200_000)),
+            mush_session::ConversationState::from_messages(vec![
+                crate::test_support::user_message("first"),
+                crate::test_support::user_message("second"),
+            ]),
+        );
+        let target = session.in_process().runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+        session.app.interaction.branch_summary_ask = Some(target);
+        session.app.interaction.mode = app::AppMode::ToolConfirm;
+        let mut config = streaming_test_config();
+
+        answer_branch_summary(&mut session, &mut config, BranchSummaryChoice::JustJump).await;
+
+        assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+        assert!(session.app.interaction.branch_summary_ask.is_none());
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+        assert_eq!(session.app.input.text, "second");
+    }
+
+    #[tokio::test]
+    async fn esc_on_the_branch_question_stays_put() {
+        let mut session = Session::with_conversation(
+            App::new("test".into(), TokenCount::new(200_000)),
+            mush_session::ConversationState::from_messages(vec![
+                crate::test_support::user_message("first"),
+                crate::test_support::user_message("second"),
+            ]),
+        );
+        let target = session.in_process().runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+        session.app.interaction.branch_summary_ask = Some(target);
+        session.app.interaction.mode = app::AppMode::ToolConfirm;
+        let mut config = streaming_test_config();
+
+        answer_branch_summary(&mut session, &mut config, BranchSummaryChoice::Stay).await;
+
+        assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
+    }
+
+    #[test]
+    fn branch_summary_answers_map_the_three_keys() {
+        assert_eq!(
+            branch_summary_answer(KeyCode::Char('y')),
+            Some(BranchSummaryChoice::Summarise)
+        );
+        assert_eq!(
+            branch_summary_answer(KeyCode::Char('n')),
+            Some(BranchSummaryChoice::JustJump)
+        );
+        assert_eq!(
+            branch_summary_answer(KeyCode::Esc),
+            Some(BranchSummaryChoice::Stay)
+        );
+        assert_eq!(branch_summary_answer(KeyCode::Char('x')), None);
     }
 
     #[test]

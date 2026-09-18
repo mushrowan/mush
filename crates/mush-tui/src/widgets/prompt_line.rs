@@ -15,6 +15,11 @@ pub fn question(app: &App) -> Option<String> {
             "interrupted python cell still running. y wait, n kill and restart, esc cancel".into(),
         );
     }
+    if app.interaction.branch_summary_ask.is_some() {
+        return Some(
+            "summarise the branch you're leaving? y summarise, n just jump, esc stay".into(),
+        );
+    }
     Some(match app.interaction.confirm_prompt.as_deref() {
         Some(prompt) => format!("run {prompt}? y/n"),
         None => "confirm tool? y/n".into(),

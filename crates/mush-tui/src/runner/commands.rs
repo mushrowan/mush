@@ -14,7 +14,7 @@ pub(super) struct SlashEnv<'a> {
     pub pending_prompt: &'a mut Option<String>,
 }
 
-async fn run_session_command(
+pub(super) async fn run_session_command(
     session: &mut Session,
     tui_config: &mut TuiConfig,
     command: mush_runtime::SessionCommand,
@@ -434,12 +434,28 @@ pub(super) async fn handle_slash_action(
                 run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await;
         }
         SlashAction::NavigateTree { entry_id } => {
-            state_changed = run_session_command(
-                session,
-                tui_config,
-                mush_runtime::SessionCommand::NavigateTree { entry_id },
-            )
-            .await;
+            let tree = session.connection.tree().await;
+            let leaves_something_behind = tree.by_id(&entry_id).is_some_and(|target| {
+                !tree
+                    .abandoned_by_moving_to(
+                        mush_runtime::commands::navigation_leaf(&tree, target).as_ref(),
+                    )
+                    .is_empty()
+            });
+            if leaves_something_behind {
+                session.app.interaction.branch_summary_ask = Some(entry_id);
+                session.app.interaction.mode = crate::app::AppMode::ToolConfirm;
+            } else {
+                state_changed = run_session_command(
+                    session,
+                    tui_config,
+                    mush_runtime::SessionCommand::NavigateTree {
+                        entry_id,
+                        summary: None,
+                    },
+                )
+                .await;
+            }
         }
         SlashAction::Branch { index: Some(index) } => {
             state_changed = run_session_command(
@@ -842,6 +858,21 @@ mod tests {
         )
     }
 
+    fn assistant(text: &str) -> Message {
+        Message::Assistant(
+            mush_ai::types::AssistantMessage::builder()
+                .content(vec![mush_ai::types::AssistantContentPart::Text(
+                    mush_ai::types::TextContent { text: text.into() },
+                )])
+                .model("m".into())
+                .provider(mush_ai::types::Provider::Anthropic)
+                .api(mush_ai::types::Api::AnthropicMessages)
+                .stop_reason(mush_ai::types::StopReason::Stop)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
     fn conversation_session(messages: Vec<Message>) -> Session {
         let app = App::new(ModelId::from("test"), TokenCount::new(1024));
         Session::with_conversation(
@@ -925,14 +956,35 @@ mod tests {
         run(
             &mut session,
             &mut config,
-            SlashAction::NavigateTree { entry_id: target },
+            SlashAction::NavigateTree {
+                entry_id: target.clone(),
+            },
         );
 
         assert_eq!(
-            session.in_process().runtime.conversation.context(),
-            vec![user("first")]
+            session.app.interaction.mode,
+            crate::app::AppMode::ToolConfirm
         );
-        assert_eq!(session.app.input.text, "second");
+        assert_eq!(session.app.interaction.branch_summary_ask, Some(target));
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
+    }
+
+    #[test]
+    fn navigating_to_the_current_leaf_asks_nothing() {
+        let mut session = conversation_session(vec![user("first"), assistant("reply")]);
+        let mut config = TuiConfig::for_test();
+        let leaf = session.in_process().runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::NavigateTree { entry_id: leaf },
+        );
+
+        assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
+        assert!(session.app.interaction.branch_summary_ask.is_none());
     }
 
     #[test]

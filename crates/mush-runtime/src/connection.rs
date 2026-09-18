@@ -52,6 +52,9 @@ pub enum ClientCommand {
     SetStreamOptions(mush_ai::types::StreamOptions),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
+    SummariseAndNavigate {
+        entry_id: mush_session::tree::EntryId,
+    },
     Compact {
         focus: CompactionFocus,
         auto: bool,
@@ -174,6 +177,10 @@ pub struct InProcessConnection {
     compaction_auto: bool,
     fork_compaction_due: bool,
     failed_compaction: Option<FailedCompaction>,
+    branch_summary: Option<(
+        mush_session::tree::EntryId,
+        tokio::task::JoinHandle<Result<String, String>>,
+    )>,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
     inbox: Option<crate::inbox::OrchestratorInbox>,
     kernel: Option<crate::kernel_channels::KernelSignals>,
@@ -254,6 +261,7 @@ impl InProcessConnection {
             compaction_auto: false,
             fork_compaction_due: false,
             failed_compaction: None,
+            branch_summary: None,
             title: None,
             inbox: None,
             kernel: None,
@@ -796,6 +804,9 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_side_questions() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_branch_summary() {
+            return Some(event);
+        }
         if let Some(event) = self.try_poll_family() {
             return Some(event);
         }
@@ -809,6 +820,74 @@ impl InProcessConnection {
             return Some(event);
         }
         self.try_poll_compaction()
+    }
+
+    async fn summarise_and_navigate(&mut self, entry_id: mush_session::tree::EntryId) {
+        let abandoned = {
+            let tree = self.runtime.conversation.tree();
+            let Some(target) = tree.by_id(&entry_id) else {
+                self.queued
+                    .push_back(ClientEvent::Session(SessionEvent::Failed(
+                        "that message is no longer in the tree".into(),
+                    )));
+                return;
+            };
+            tree.abandoned_by_moving_to(crate::commands::navigation_leaf(tree, target).as_ref())
+        };
+        if abandoned.is_empty() || self.branch_summary.is_some() {
+            let events = self.runtime.navigate_tree(&entry_id, None);
+            self.runtime.save_now_and_settle();
+            self.queued
+                .extend(events.into_iter().map(ClientEvent::Session));
+            return;
+        }
+        let target = self.runtime.compaction_target(&self.config).await;
+        let registry = self.registry.clone();
+        let task = tokio::spawn(async move {
+            mush_session::compact::summarise_branch(
+                &abandoned,
+                &registry,
+                &target.model,
+                &target.options,
+            )
+            .await
+        });
+        self.branch_summary = Some((entry_id, task));
+        self.queued
+            .push_back(ClientEvent::Session(SessionEvent::Status(
+                "summarising the branch you're leaving…".into(),
+            )));
+    }
+
+    fn try_poll_branch_summary(&mut self) -> Option<ClientEvent> {
+        use futures::FutureExt;
+        if !self
+            .branch_summary
+            .as_ref()
+            .is_some_and(|(_, task)| task.is_finished())
+        {
+            return None;
+        }
+        let (entry_id, task) = self.branch_summary.take()?;
+        let outcome = match task.now_or_never()? {
+            Ok(outcome) => outcome,
+            Err(error) => Err(format!("branch summary task failed: {error}")),
+        };
+        let mut events = match outcome {
+            Ok(summary) => self.runtime.navigate_tree(&entry_id, Some(summary)),
+            Err(error) => {
+                let mut events = self.runtime.navigate_tree(&entry_id, None);
+                events.push(SessionEvent::Status(format!(
+                    "branch summary failed ({error}), branched without it"
+                )));
+                events
+            }
+        };
+        self.runtime.save_now_and_settle();
+        let first = events.remove(0);
+        self.queued
+            .extend(events.into_iter().map(ClientEvent::Session));
+        Some(ClientEvent::Session(first))
     }
 
     fn try_poll_side_questions(&mut self) -> Option<ClientEvent> {
@@ -1359,6 +1438,9 @@ impl AgentConnection for InProcessConnection {
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
             }
+            ClientCommand::SummariseAndNavigate { entry_id } => {
+                self.summarise_and_navigate(entry_id).await;
+            }
             ClientCommand::Compact { focus, auto } => self.start_compaction(focus, auto).await?,
             ClientCommand::CompactionRetry => self.retry_compaction().await?,
             ClientCommand::CompactionFallback => {
@@ -1473,7 +1555,7 @@ impl AgentConnection for InProcessConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::{Api, AssistantMessage, StopReason};
+    use mush_ai::types::{Api, AssistantContentPart, AssistantMessage, StopReason, TextContent};
     use mush_session::ConversationState;
     use std::sync::{Arc, Mutex};
 
@@ -1603,6 +1685,96 @@ mod tests {
         assert!(!connection.state().compacting);
         assert!(connection.transcript().await.len() < 30);
         assert_eq!(*saved.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn summarise_and_navigate_puts_the_model_summary_on_the_new_branch() {
+        let (mut connection, requests) = connection();
+        connection.runtime.conversation = ConversationState::from_messages(vec![
+            user("apples"),
+            user("bananas"),
+            user("cherries"),
+        ]);
+        let target = connection.runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+
+        let started = connection
+            .send(ClientCommand::SummariseAndNavigate { entry_id: target })
+            .await
+            .unwrap();
+        assert!(matches!(
+            started[..],
+            [ClientEvent::Session(SessionEvent::Status(_))]
+        ));
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(event @ ClientEvent::Session(SessionEvent::TranscriptReplaced { .. })) =
+                    connection.next_event().await
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let ClientEvent::Session(SessionEvent::TranscriptReplaced {
+            messages,
+            editor_text,
+            ..
+        }) = event
+        else {
+            unreachable!()
+        };
+        assert_eq!(editor_text.as_deref(), Some("bananas"));
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(&messages[0], Message::User(u) if u.text() == "apples"));
+        assert!(matches!(&messages[1], Message::User(u) if u.text().contains("hi back")));
+        let asked = requests.lock().unwrap();
+        assert_eq!(asked.len(), 1);
+        let Message::User(request) = &asked[0].messages[0] else {
+            unreachable!()
+        };
+        let summarised = request.text();
+        assert!(summarised.contains("bananas"), "{summarised}");
+        assert!(summarised.contains("cherries"), "{summarised}");
+        assert!(!summarised.contains("apples"), "{summarised}");
+    }
+
+    #[tokio::test]
+    async fn summarise_and_navigate_skips_the_model_when_nothing_is_left_behind() {
+        let (mut connection, requests) = connection();
+        let reply = Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![AssistantContentPart::Text(TextContent {
+                    text: "reply".into(),
+                })])
+                .model("m".into())
+                .provider(mush_ai::types::Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .stop_reason(StopReason::Stop)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        );
+        connection.runtime.conversation = ConversationState::from_messages(vec![user("a"), reply]);
+        let assistant = connection.runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+
+        let events = connection
+            .send(ClientCommand::SummariseAndNavigate {
+                entry_id: assistant,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            events[0],
+            ClientEvent::Session(SessionEvent::TranscriptReplaced { .. })
+        ));
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     struct NoteTool;

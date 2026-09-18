@@ -283,14 +283,30 @@ impl SessionTree {
         summary: impl Into<String>,
     ) -> Option<EntryId> {
         self.by_id(from_id)?;
-        let old_leaf = self.leaf_id.clone().unwrap_or_else(|| from_id.clone());
+        Some(self.summarised_branch(Some(from_id.clone()), summary))
+    }
+
+    pub fn reset_leaf_with_summary(&mut self, summary: impl Into<String>) -> EntryId {
+        self.summarised_branch(None, summary)
+    }
+
+    fn summarised_branch(
+        &mut self,
+        from_id: Option<EntryId>,
+        summary: impl Into<String>,
+    ) -> EntryId {
+        let old_leaf = self
+            .leaf_id
+            .clone()
+            .or_else(|| from_id.clone())
+            .unwrap_or_default();
         let event_receipts =
             EventMessage::summary(String::new(), Timestamp::zero(), &self.build_context()).receipts;
-        self.leaf_id = Some(from_id.clone());
+        self.leaf_id = from_id.clone();
 
         let entry = SessionEntry {
             id: EntryId::new(),
-            parent_id: Some(from_id.clone()),
+            parent_id: from_id,
             timestamp: Timestamp::now(),
             kind: EntryKind::BranchSummary {
                 summary: summary.into(),
@@ -301,7 +317,7 @@ impl SessionTree {
         let id = entry.id.clone();
         self.entries.push(entry);
         self.leaf_id = Some(id.clone());
-        Some(id)
+        id
     }
 
     pub fn compact_at_leaf(
@@ -349,6 +365,19 @@ impl SessionTree {
 
     pub fn current_branch(&self) -> Vec<&SessionEntry> {
         self.branch_ending_at(self.leaf_id.as_ref())
+    }
+
+    pub fn abandoned_by_moving_to(&self, new_leaf: Option<&EntryId>) -> Vec<Message> {
+        let staying: std::collections::HashSet<&str> = self
+            .branch_ending_at(new_leaf)
+            .into_iter()
+            .map(|entry| &*entry.id)
+            .collect();
+        self.current_branch()
+            .into_iter()
+            .filter(|entry| !staying.contains(&*entry.id))
+            .map(entry_to_message)
+            .collect()
     }
 
     fn branch_ending_at(&self, id: Option<&EntryId>) -> Vec<&SessionEntry> {
@@ -749,6 +778,36 @@ mod tests {
             rows[1].is_fork,
             "the entry the branches diverge from should be marked"
         );
+    }
+
+    #[test]
+    fn moving_back_up_the_live_branch_abandons_what_follows_the_target() {
+        let tree = forked_tree();
+        let q0 = tree.entries()[0].id.clone();
+
+        let abandoned: Vec<String> = tree
+            .abandoned_by_moving_to(Some(&q0))
+            .iter()
+            .map(text_of)
+            .collect();
+
+        assert_eq!(abandoned, vec!["a0", "q2", "a2"]);
+        assert!(tree.abandoned_by_moving_to(tree.leaf_id()).is_empty());
+        assert_eq!(tree.abandoned_by_moving_to(None).len(), 4);
+    }
+
+    #[test]
+    fn moving_onto_a_side_branch_abandons_only_past_the_fork() {
+        let tree = forked_tree();
+        let a1 = tree.entries()[3].id.clone();
+
+        let abandoned: Vec<String> = tree
+            .abandoned_by_moving_to(Some(&a1))
+            .iter()
+            .map(text_of)
+            .collect();
+
+        assert_eq!(abandoned, vec!["q2", "a2"]);
     }
 
     #[test]
