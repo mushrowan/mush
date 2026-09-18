@@ -12,12 +12,13 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{ClientId, Cursor, Frame, Reply, Request, encode};
+use crate::protocol::{ClientId, CommandId, Cursor, Envelope, Frame, Reply, Request, encode};
 use crate::supervisor::WorkerDescriptor;
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(50);
 const CLIENT_FRAMES: usize = 512;
 const REPLAY_HISTORY: usize = 2048;
+const JOURNAL: usize = 256;
 
 pub struct Descriptor {
     path: std::path::PathBuf,
@@ -314,6 +315,7 @@ pub async fn serve(
     let mut worker = Worker {
         log: TurnLog::default(),
         hub: Hub::new(incoming, connection.state()),
+        journal: Journal::default(),
         shutdown,
         shutting_down: false,
     };
@@ -331,9 +333,39 @@ pub async fn serve(
     served
 }
 
+type Outcome = Result<Vec<ClientEvent>, ConnectionError>;
+
+#[derive(Default)]
+struct Journal {
+    entries: HashMap<(ClientId, CommandId), Outcome>,
+    order: VecDeque<(ClientId, CommandId)>,
+}
+
+impl Journal {
+    fn stored(&self, key: &(ClientId, CommandId)) -> Option<Outcome> {
+        self.entries.get(key).cloned()
+    }
+
+    fn record(&mut self, key: (ClientId, CommandId), result: Outcome) {
+        self.order.push_back(key.clone());
+        self.entries.insert(key, result);
+        while self.order.len() > JOURNAL {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn ack(&mut self, key: &(ClientId, CommandId)) {
+        self.entries.remove(key);
+        self.order.retain(|held| held != key);
+    }
+}
+
 struct Worker {
     log: TurnLog,
     hub: Hub,
+    journal: Journal,
     shutdown: CancellationToken,
     shutting_down: bool,
 }
@@ -412,6 +444,9 @@ impl Worker {
             Request::Attach { client, from, .. } => {
                 Ok(self.attach(connection, key, client, from).await)
             }
+            Request::Command {
+                command, envelope, ..
+            } => self.dispatch(connection, command, envelope).await,
             other => handle(connection, other).await,
         };
         let state = self.hub.state_delta(connection);
@@ -430,6 +465,24 @@ impl Worker {
             }
         }
         self.hub.send(key, Frame::Response { id, result, state });
+    }
+
+    async fn dispatch(
+        &mut self,
+        connection: &mut InProcessConnection,
+        command: ClientCommand,
+        envelope: Envelope,
+    ) -> Result<Reply, ConnectionError> {
+        if let Some(ack) = envelope.ack {
+            self.journal.ack(&(envelope.client.clone(), ack));
+        }
+        let key = (envelope.client, envelope.command);
+        if let Some(stored) = self.journal.stored(&key) {
+            return stored.map(|events| Reply::Events { events });
+        }
+        let result = connection.send(command).await;
+        self.journal.record(key, result.clone());
+        result.map(|events| Reply::Events { events })
     }
 
     async fn attach(
@@ -481,10 +534,7 @@ async fn handle(
 ) -> Result<Reply, ConnectionError> {
     match request {
         Request::Attach { .. } => Err(ConnectionError::Transport("already attached".into())),
-        Request::Command { command, .. } => connection
-            .send(command)
-            .await
-            .map(|events| Reply::Events { events }),
+        Request::Command { .. } => Err(ConnectionError::Transport("unjournalled command".into())),
         Request::Transcript { .. } => Ok(Reply::Transcript {
             messages: connection.transcript().await,
         }),

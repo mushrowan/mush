@@ -12,7 +12,8 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::sync::mpsc;
 
 use crate::protocol::{
-    ClientId, CodecError, Cursor, Frame, Reply, Request, RequestId, decode, encode,
+    ClientId, CodecError, CommandId, Cursor, ENVELOPE_VERSION, Envelope, Frame, Reply, Request,
+    RequestId, decode, encode,
 };
 
 const FRAME_BUFFER: usize = 256;
@@ -61,6 +62,8 @@ pub struct DaemonConnection {
     state: ConnectionState,
     worker_build: String,
     next_id: RequestId,
+    next_command: u64,
+    acked: Option<CommandId>,
     closed: bool,
 }
 
@@ -92,6 +95,8 @@ impl DaemonConnection {
             state,
             worker_build,
             next_id: 1,
+            next_command: 1,
+            acked: None,
             closed: false,
         };
         tokio::time::timeout(timeout, connection.attach(None))
@@ -242,6 +247,21 @@ impl DaemonConnection {
         }
     }
 
+    fn envelope(&mut self, command: CommandId) -> Envelope {
+        Envelope {
+            version: ENVELOPE_VERSION,
+            client: self.client.clone(),
+            command,
+            ack: self.acked.take(),
+        }
+    }
+
+    fn next_command_id(&mut self) -> CommandId {
+        let id = self.next_command;
+        self.next_command += 1;
+        format!("{}-{id}", self.client)
+    }
+
     fn next_request_id(&mut self) -> RequestId {
         let id = self.next_id;
         self.next_id += 1;
@@ -304,7 +324,30 @@ impl AgentConnection for DaemonConnection {
 
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError> {
         let id = self.next_request_id();
-        match self.request(Request::Command { id, command }).await? {
+        let command_id = self.next_command_id();
+        let envelope = self.envelope(command_id.clone());
+        let generation = self.cursor.generation.clone();
+        let request = Request::Command {
+            id,
+            command: command.clone(),
+            envelope,
+        };
+        let mut reply = self.request(request).await;
+        if matches!(reply, Err(ConnectionError::Reconnected))
+            && self.cursor.generation == generation
+        {
+            let id = self.next_request_id();
+            let envelope = self.envelope(command_id.clone());
+            reply = self
+                .request(Request::Command {
+                    id,
+                    command,
+                    envelope,
+                })
+                .await;
+        }
+        self.acked = Some(command_id);
+        match reply? {
             Reply::Events { events } => Ok(events),
             other => Err(ConnectionError::Transport(format!(
                 "unexpected reply to a command: {other:?}"

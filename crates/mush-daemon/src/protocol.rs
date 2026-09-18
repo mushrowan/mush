@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 
 pub type RequestId = u64;
 pub type ClientId = String;
+pub type CommandId = String;
+
+pub const ENVELOPE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Envelope {
+    pub version: u32,
+    pub client: ClientId,
+    pub command: CommandId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack: Option<CommandId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -24,6 +36,7 @@ pub enum Request {
     Command {
         id: RequestId,
         command: ClientCommand,
+        envelope: Envelope,
     },
     Transcript {
         id: RequestId,
@@ -140,6 +153,12 @@ mod tests {
     fn a_command_request_survives_the_wire() {
         let request = Request::Command {
             id: 7,
+            envelope: Envelope {
+                version: ENVELOPE_VERSION,
+                client: "c".into(),
+                command: "c-1".into(),
+                ack: None,
+            },
             command: ClientCommand::Prompt {
                 text: "hello".into(),
                 images: Vec::new(),

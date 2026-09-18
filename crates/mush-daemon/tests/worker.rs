@@ -523,6 +523,39 @@ impl RawClient {
         serde_json::from_str(&line).unwrap()
     }
 
+    async fn command(&mut self, id: u64, text: &str, command_id: &str) {
+        use tokio::io::AsyncWriteExt;
+        let request = serde_json::json!({
+            "type": "command",
+            "id": id,
+            "command": {"type": "prompt", "data": {"text": text, "images": []}},
+            "envelope": {
+                "version": 1,
+                "client": "raw",
+                "command": command_id,
+            },
+        });
+        let line = format!("{request}\n");
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+
+    async fn acked(&mut self, id: u64, text: &str, command_id: &str, ack: &str) {
+        use tokio::io::AsyncWriteExt;
+        let request = serde_json::json!({
+            "type": "command",
+            "id": id,
+            "command": {"type": "prompt", "data": {"text": text, "images": []}},
+            "envelope": {
+                "version": 1,
+                "client": "raw",
+                "command": command_id,
+                "ack": ack,
+            },
+        });
+        let line = format!("{request}\n");
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+
     async fn attach(&mut self, from: Option<mush_daemon::Cursor>) {
         use tokio::io::AsyncWriteExt;
         let request = serde_json::json!({
@@ -664,4 +697,82 @@ async fn a_client_reattaches_when_the_worker_comes_back() {
     client.send(prompt("again")).await.unwrap();
     drain_turn(&mut client).await;
     assert!(!second.is_finished());
+}
+
+#[tokio::test]
+async fn the_journal_answers_a_repeated_command_without_running_it_again() {
+    let worker = spawn_worker();
+    let (mut raw, _) = RawClient::connect(&worker.socket).await;
+    raw.attach(None).await;
+    let mush_daemon::Frame::Response { .. } = raw.read().await else {
+        panic!("expected the attach response")
+    };
+
+    for id in [1, 2] {
+        raw.command(id, "hello", "cmd-1").await;
+        loop {
+            match raw.read().await {
+                mush_daemon::Frame::Response { result, .. } => {
+                    let Ok(mush_daemon::Reply::Events { events }) = result else {
+                        panic!("expected events")
+                    };
+                    assert!(matches!(events[..], [ClientEvent::TurnStarted]));
+                    break;
+                }
+                mush_daemon::Frame::Event { .. } => {}
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+    }
+
+    let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let transcript = client.transcript().await;
+        if transcript.len() >= 2 {
+            assert_eq!(transcript.len(), 2, "the repeat ran a second turn");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the turn never ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(client.transcript().await.len(), 2);
+}
+
+#[tokio::test]
+async fn an_acked_command_leaves_the_journal() {
+    let worker = spawn_worker();
+    let (mut raw, _) = RawClient::connect(&worker.socket).await;
+    raw.attach(None).await;
+    let _ = raw.read().await;
+
+    raw.command(1, "hello", "cmd-1").await;
+    wait_for_response(&mut raw).await;
+    raw.acked(2, "hello", "cmd-2", "cmd-1").await;
+    wait_for_response(&mut raw).await;
+    raw.command(3, "hello", "cmd-1").await;
+    wait_for_response(&mut raw).await;
+
+    let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if client.transcript().await.len() >= 6 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the acked command should run again: {:?}",
+            client.transcript().await.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_response(raw: &mut RawClient) {
+    loop {
+        if let mush_daemon::Frame::Response { .. } = raw.read().await {
+            return;
+        }
+    }
 }
