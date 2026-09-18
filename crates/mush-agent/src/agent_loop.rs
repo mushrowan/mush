@@ -368,6 +368,21 @@ pub fn agent_loop(
                             }
                             StreamEvent::Error { message, .. } => {
                                 let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
+                                let has_text = message.content.iter().any(|part| {
+                                    matches!(part, AssistantContentPart::Text(text) if !text.text.trim().is_empty())
+                                });
+                                if !has_text
+                                    && attempt < MAX_RETRIES
+                                    && mush_ai::registry::is_retryable_stream_error_message(&error_msg)
+                                {
+                                    tracing::warn!(
+                                        error = %error_msg,
+                                        attempt,
+                                        "stream broke before any text arrived, retrying"
+                                    );
+                                    last_error = Some(format!("stream error: {error_msg}"));
+                                    continue 'attempt;
+                                }
                                 tracing::error!(
                                     error = %error_msg,
                                     model = %config.model.id,
@@ -1449,6 +1464,120 @@ mod tests {
                     if tool_call_id.as_str() == "tc_stream_error" && result.outcome.is_error()
             )
         }));
+    }
+
+    #[test]
+    fn a_connection_reset_mid_tool_call_is_retried_and_leaves_no_stub() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ResetOnceProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for ResetOnceProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    let partial = AssistantMessage::builder()
+                        .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                            id: "tc_reset".into(),
+                            name: "counter".into(),
+                            arguments: serde_json::json!({}),
+                        })])
+                        .model(model.id.clone())
+                        .provider(model.provider.clone())
+                        .api(model.api)
+                        .stop_reason(StopReason::Error)
+                        .error_message(
+                            "error decoding response body: error reading a body from connection: \
+                             Connection reset by peer (os error 104)",
+                        )
+                        .timestamp_ms(Timestamp::zero())
+                        .build();
+                    let s = async_stream::stream! {
+                        yield StreamEvent::Start { partial: partial.clone() };
+                        yield StreamEvent::ToolCallStart { content_index: 0 };
+                        yield StreamEvent::Error { reason: StopReason::Error, message: partial };
+                    };
+                    return Ok(Box::pin(s) as mush_ai::registry::EventStream);
+                }
+                let message = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: "recovered".into(),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(StopReason::Stop)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: message.clone() };
+                    yield StreamEvent::Done { reason: StopReason::Stop, message };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Box::new(ResetOnceProvider {
+            calls: calls.clone(),
+        }));
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::from_boxed(vec![Box::new(CounterTool)]),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 1,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: None,
+        };
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("use a tool".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        let events: Vec<AgentEvent> = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { agent_loop(config, messages).collect().await });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecEnd { .. }))
+        );
+        let final_text = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AgentEvent::MessageEnd { message } => Some(message.text()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(final_text, "recovered");
     }
 
     #[test]
