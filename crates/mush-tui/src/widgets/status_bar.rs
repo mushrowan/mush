@@ -594,8 +594,8 @@ mod tests {
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("outputting…"),
-            "expected 'outputting…' in status: {content}"
+            content.contains("writing"),
+            "expected 'writing' in status: {content}"
         );
     }
 
@@ -614,8 +614,8 @@ mod tests {
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
         assert!(
-            content.contains("using bash…"),
-            "expected 'using bash…' in status: {content}"
+            content.contains("using bash"),
+            "expected 'using bash' in status: {content}"
         );
     }
 
@@ -626,7 +626,7 @@ mod tests {
         app.start_streaming();
         let buf = render_status(&app, 120, 1);
         let content = buffer_to_string(&buf);
-        assert!(content.contains("thinking…"));
+        assert!(content.contains("waiting"));
         assert!(!content.contains("press ctrl+c again to exit"));
     }
 

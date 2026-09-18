@@ -250,11 +250,13 @@ pub(super) async fn dispatch_client_event(
         ClientEvent::TurnStarted => {
             let app = &mut runtime.session.app;
             app.active_tools.clear();
+            app.turn.begin();
             if !app.stream.active {
                 app.start_streaming();
             }
         }
         ClientEvent::TurnEnded { cancelled } => {
+            runtime.session.app.turn.end();
             let automatic_continuation =
                 runtime.pending_prompt.is_some() || runtime.session.connection.state().compacting;
             super::streams::handle_turn_ended(
@@ -292,6 +294,7 @@ pub(super) async fn apply_command_events(
             }
             ClientEvent::TurnStarted => {
                 session.app.active_tools.clear();
+                session.app.turn.begin();
                 if !session.app.stream.active {
                     session.app.start_streaming();
                 }

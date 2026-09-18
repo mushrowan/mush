@@ -39,6 +39,7 @@ pub mod terminal_policy;
 mod test_support;
 pub mod text;
 pub mod theme;
+pub mod turn_activity;
 pub mod ui;
 pub mod widgets;
 

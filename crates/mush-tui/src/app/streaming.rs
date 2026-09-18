@@ -32,7 +32,7 @@ impl App {
     }
 
     pub fn push_tool_args_delta(&mut self, delta: &str) {
-        self.stream.tool_args.push_str(delta);
+        self.stream.push_tool_args(delta);
     }
 
     pub fn announce_tool_calls(&mut self, message: &mush_ai::types::AssistantMessage) {
@@ -259,6 +259,10 @@ impl App {
     }
 
     pub fn finish_streaming(&mut self, usage: Option<Usage>, cost: Option<Dollars>) {
+        self.turn.record_message(
+            usage.map(|u| u.output_tokens.get()),
+            self.stream.streamed_chars,
+        );
         let (text, thinking) = self.stream.take();
 
         let assistant_msg = DisplayMessage {

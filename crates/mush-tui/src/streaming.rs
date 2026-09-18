@@ -1,9 +1,13 @@
+use crate::turn_activity::StreamPart;
+
 #[derive(Debug, Clone)]
 pub struct StreamingState {
     pub text: String,
     pub thinking: String,
     pub active: bool,
     pub tool_args: String,
+    pub last_part: Option<StreamPart>,
+    pub streamed_chars: usize,
     text_tw: TypewriterState,
     think_tw: TypewriterState,
 }
@@ -62,6 +66,8 @@ impl StreamingState {
             thinking: String::new(),
             active: false,
             tool_args: String::new(),
+            last_part: None,
+            streamed_chars: 0,
             text_tw: TypewriterState::default(),
             think_tw: TypewriterState::default(),
         }
@@ -72,6 +78,8 @@ impl StreamingState {
         self.text.clear();
         self.thinking.clear();
         self.tool_args.clear();
+        self.last_part = None;
+        self.streamed_chars = 0;
         self.text_tw.reset();
         self.think_tw.reset();
     }
@@ -82,13 +90,27 @@ impl StreamingState {
         } else {
             delta
         };
-        self.text_tw.record_push(delta.chars().count());
+        let chars = delta.chars().count();
+        self.text_tw.record_push(chars);
         self.text.push_str(delta);
+        self.streamed(StreamPart::Text, chars);
     }
 
     pub fn push_thinking(&mut self, delta: &str) {
-        self.think_tw.record_push(delta.chars().count());
+        let chars = delta.chars().count();
+        self.think_tw.record_push(chars);
         self.thinking.push_str(delta);
+        self.streamed(StreamPart::Thinking, chars);
+    }
+
+    pub fn push_tool_args(&mut self, delta: &str) {
+        self.tool_args.push_str(delta);
+        self.streamed(StreamPart::ToolArgs, delta.chars().count());
+    }
+
+    fn streamed(&mut self, part: StreamPart, chars: usize) {
+        self.last_part = Some(part);
+        self.streamed_chars += chars;
     }
 
     #[must_use]
@@ -120,6 +142,8 @@ impl StreamingState {
         };
         let text = std::mem::take(&mut self.text);
         self.tool_args.clear();
+        self.last_part = None;
+        self.streamed_chars = 0;
         self.text_tw.reset();
         self.think_tw.reset();
         (text, thinking)

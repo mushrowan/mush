@@ -1183,18 +1183,60 @@ fn activity_label_none_when_idle() {
 }
 
 #[test]
-fn activity_label_thinking_when_streaming_with_no_text() {
+fn activity_label_waits_when_streaming_with_nothing_received() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
-    assert_eq!(app.activity_label().as_deref(), Some("thinking…"));
+    assert_eq!(app.activity_label().as_deref(), Some("waiting"));
 }
 
 #[test]
-fn activity_label_outputting_when_streaming_text() {
+fn activity_label_follows_the_latest_stream_part() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
-    app.push_text_delta("hello");
-    assert_eq!(app.activity_label().as_deref(), Some("outputting…"));
+    app.push_thinking_delta("hm");
+    assert_eq!(app.activity_label().as_deref(), Some("thinking"));
+    app.push_text_delta("h");
+    assert_eq!(app.activity_label().as_deref(), Some("writing"));
+    app.push_tool_args_delta("{");
+    assert_eq!(
+        app.activity_label().as_deref(),
+        Some("writing code · ↓ 1 tokens")
+    );
+}
+
+#[test]
+fn activity_label_counts_output_tokens_across_the_turn() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.turn.begin();
+    app.turn.end();
+    app.start_streaming();
+    app.push_text_delta(&"x".repeat(4_000));
+    assert_eq!(
+        app.activity_label().as_deref(),
+        Some("writing · ↓ 1.0k tokens")
+    );
+    app.finish_streaming(
+        Some(Usage {
+            output_tokens: TokenCount::new(1_500),
+            ..Usage::default()
+        }),
+        None,
+    );
+    app.start_streaming();
+    assert_eq!(
+        app.activity_label().as_deref(),
+        Some("waiting · ↑ 1.5k tokens")
+    );
+}
+
+#[test]
+fn activity_label_shows_the_turn_clock_while_it_runs() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.turn.begin();
+    app.start_streaming();
+    let label = app.activity_label().unwrap();
+    assert!(label.starts_with("waiting · "), "{label}");
+    assert!(label.ends_with('s'), "{label}");
 }
 
 #[test]
@@ -1209,7 +1251,7 @@ fn activity_label_uses_tool_name_when_one_running() {
             status: ToolCallStatus::Running,
             output: None,
         });
-    assert_eq!(app.activity_label().as_deref(), Some("using bash…"));
+    assert_eq!(app.activity_label().as_deref(), Some("using bash"));
 }
 
 #[test]
@@ -1226,7 +1268,7 @@ fn activity_label_collapses_distinct_parallel_tools_to_count() {
                 output: None,
             });
     }
-    assert_eq!(app.activity_label().as_deref(), Some("using 3 tools…"));
+    assert_eq!(app.activity_label().as_deref(), Some("using 3 tools"));
 }
 
 #[test]
@@ -1243,7 +1285,7 @@ fn activity_label_keeps_tool_name_when_all_same_tool() {
                 output: None,
             });
     }
-    assert_eq!(app.activity_label().as_deref(), Some("using read…"));
+    assert_eq!(app.activity_label().as_deref(), Some("using read"));
 }
 
 #[test]
@@ -1269,7 +1311,7 @@ fn compacting_makes_app_busy_with_label() {
 
     app.compacting = true;
     assert!(app.is_busy());
-    assert_eq!(app.activity_label().as_deref(), Some("compacting…"));
+    assert_eq!(app.activity_label().as_deref(), Some("compacting"));
 }
 
 #[test]
@@ -1286,7 +1328,7 @@ fn compacting_label_takes_precedence_over_streaming_and_tools() {
             output: None,
         });
     app.compacting = true;
-    assert_eq!(app.activity_label().as_deref(), Some("compacting…"));
+    assert_eq!(app.activity_label().as_deref(), Some("compacting"));
 }
 
 #[test]
@@ -1302,7 +1344,7 @@ fn activity_label_prefers_tool_over_streaming() {
             status: ToolCallStatus::Running,
             output: None,
         });
-    assert_eq!(app.activity_label().as_deref(), Some("using edit…"));
+    assert_eq!(app.activity_label().as_deref(), Some("using edit"));
 }
 
 #[test]

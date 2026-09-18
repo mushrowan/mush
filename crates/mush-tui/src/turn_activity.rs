@@ -1,0 +1,131 @@
+use std::time::{Duration, Instant};
+
+const CHARS_PER_TOKEN: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamPart {
+    Thinking,
+    Text,
+    ToolArgs,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnActivity {
+    started_at: Option<Instant>,
+    completed_output_tokens: u64,
+    reported_tokens: u64,
+}
+
+impl TurnActivity {
+    pub fn begin(&mut self) {
+        *self = Self {
+            started_at: Some(Instant::now()),
+            ..Self::default()
+        };
+    }
+
+    pub fn end(&mut self) {
+        self.started_at = None;
+    }
+
+    #[must_use]
+    pub fn running(&self) -> bool {
+        self.started_at.is_some()
+    }
+
+    pub fn record_message(&mut self, output_tokens: Option<u64>, streamed_chars: usize) {
+        self.reported_tokens = self.tokens(streamed_chars);
+        self.completed_output_tokens +=
+            output_tokens.unwrap_or_else(|| estimate_tokens(streamed_chars));
+        self.reported_tokens = self.reported_tokens.max(self.completed_output_tokens);
+    }
+
+    #[must_use]
+    pub fn tokens(&self, streamed_chars: usize) -> u64 {
+        self.reported_tokens
+            .max(self.completed_output_tokens + estimate_tokens(streamed_chars))
+    }
+
+    #[must_use]
+    pub fn elapsed(&self) -> Option<Duration> {
+        self.started_at.map(|started| started.elapsed())
+    }
+}
+
+fn estimate_tokens(chars: usize) -> u64 {
+    (chars / CHARS_PER_TOKEN) as u64
+}
+
+#[must_use]
+pub fn format_elapsed(elapsed: Duration) -> String {
+    let total = elapsed.as_secs();
+    let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+#[must_use]
+pub fn format_tokens(count: u64) -> String {
+    match count {
+        0..1_000 => count.to_string(),
+        1_000..10_000 => format!("{:.1}k", count as f64 / 1_000.0),
+        10_000..1_000_000 => format!("{}k", count / 1_000),
+        _ => format!("{:.1}m", count as f64 / 1_000_000.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_formats_by_magnitude() {
+        assert_eq!(format_elapsed(Duration::from_secs(7)), "7s");
+        assert_eq!(format_elapsed(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(format_elapsed(Duration::from_secs(3_725)), "1h 02m 05s");
+    }
+
+    #[test]
+    fn tokens_format_by_magnitude() {
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_234), "1.2k");
+        assert_eq!(format_tokens(45_678), "45k");
+        assert_eq!(format_tokens(2_500_000), "2.5m");
+    }
+
+    #[test]
+    fn reported_tokens_never_dip_when_usage_arrives_below_the_estimate() {
+        let mut turn = TurnActivity::default();
+        turn.begin();
+        assert_eq!(turn.tokens(400), 100);
+        turn.record_message(Some(60), 400);
+        assert_eq!(turn.tokens(0), 100);
+        assert_eq!(turn.tokens(200), 110);
+    }
+
+    #[test]
+    fn a_message_without_usage_counts_its_streamed_text() {
+        let mut turn = TurnActivity::default();
+        turn.begin();
+        turn.record_message(None, 800);
+        assert_eq!(turn.tokens(0), 200);
+    }
+
+    #[test]
+    fn begin_resets_the_count_and_end_stops_the_clock() {
+        let mut turn = TurnActivity::default();
+        turn.begin();
+        turn.record_message(Some(50), 0);
+        turn.begin();
+        assert_eq!(turn.tokens(0), 0);
+        assert!(turn.running());
+        turn.end();
+        assert!(!turn.running());
+        assert!(turn.elapsed().is_none());
+    }
+}

@@ -131,6 +131,7 @@ pub struct App {
     pub keymap: crate::keybinds::KeyMap,
     pub confirm_quit_pending: bool,
     pub compacting: bool,
+    pub turn: crate::turn_activity::TurnActivity,
     pub compaction_model_id: Option<ModelId>,
     pub session_title: Option<String>,
     pub detail: ChatDetail,
@@ -197,6 +198,7 @@ impl App {
             keymap: crate::keybinds::KeyMap::default(),
             confirm_quit_pending: false,
             compacting: false,
+            turn: crate::turn_activity::TurnActivity::default(),
             compaction_model_id: None,
             session_title: None,
             detail: ChatDetail::default(),
@@ -352,25 +354,55 @@ impl App {
     }
 
     pub fn activity_label(&self) -> Option<String> {
+        let mut label = self.activity_kind()?;
+        if let Some(elapsed) = self.turn.elapsed() {
+            label.push_str(" · ");
+            label.push_str(&crate::turn_activity::format_elapsed(elapsed));
+        }
+        let tokens = self.turn.tokens(if self.stream.active {
+            self.stream.streamed_chars
+        } else {
+            0
+        });
+        if tokens > 0 {
+            let arrow = if self.stream.active && self.stream.last_part.is_some() {
+                "↓"
+            } else {
+                "↑"
+            };
+            label.push_str(&format!(
+                " · {arrow} {} tokens",
+                crate::turn_activity::format_tokens(tokens)
+            ));
+        }
+        Some(label)
+    }
+
+    fn activity_kind(&self) -> Option<String> {
+        use crate::turn_activity::StreamPart;
         if self.compacting {
-            return Some("compacting…".into());
+            return Some("compacting".into());
         }
         let running: Vec<&str> = self.running_tool_names().collect();
         if !running.is_empty() {
             let first = running[0];
             let all_same = running.iter().all(|n| *n == first);
             return Some(if all_same {
-                format!("using {first}…")
+                format!("using {first}")
             } else {
-                format!("using {} tools…", running.len())
+                format!("using {} tools", running.len())
             });
         }
         if self.stream.active {
-            return Some(if self.stream.text.is_empty() {
-                "thinking…".into()
-            } else {
-                "outputting…".into()
-            });
+            return Some(
+                match self.stream.last_part {
+                    None => "waiting",
+                    Some(StreamPart::Thinking) => "thinking",
+                    Some(StreamPart::Text) => "writing",
+                    Some(StreamPart::ToolArgs) => "writing code",
+                }
+                .into(),
+            );
         }
         None
     }
