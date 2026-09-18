@@ -717,39 +717,23 @@ fn code_block_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxRefe
     ps.find_syntax_by_token(lang)
 }
 
+pub(crate) const CODE_BLOCK_INDENT: &str = "  ";
+
 fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
-    let mut lines = Vec::with_capacity(code_lines.len() + 2);
-    let width = code_block_width(code_lines, "");
-    lines.push(Line::styled(
-        format!("┌{}┐", "─".repeat(width + 2)),
-        Style::default().fg(Color::DarkGray),
-    ));
-    for code_line in code_lines {
-        lines.push(Line::from(vec![
-            Span::styled("│ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(pad_code_line(code_line, width), Style::default()),
-            Span::styled(" │", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
-    lines.push(Line::styled(
-        format!("└{}┘", "─".repeat(width + 2)),
-        Style::default().fg(Color::DarkGray),
-    ));
-    lines
-}
-
-fn code_block_width(code_lines: &[String], lang: &str) -> usize {
-    let content_width = code_lines
+    let lines: Vec<Line<'static>> = code_lines
         .iter()
-        .map(|line| usize::from(line.as_str().cell_width()))
-        .max()
-        .unwrap_or(0);
-    content_width.max(usize::from(lang.cell_width())).max(1)
-}
-
-fn pad_code_line(line: &str, width: usize) -> String {
-    let line_width = usize::from(line.cell_width());
-    format!("{line}{}", " ".repeat(width.saturating_sub(line_width)))
+        .map(|code_line| {
+            Line::from(vec![
+                Span::raw(CODE_BLOCK_INDENT),
+                Span::styled(code_line.clone(), Style::default()),
+            ])
+        })
+        .collect();
+    if lines.is_empty() {
+        vec![Line::from(CODE_BLOCK_INDENT)]
+    } else {
+        lines
+    }
 }
 
 fn highlight_code_block(
@@ -763,21 +747,8 @@ fn highlight_code_block(
 
     let theme = &THEME_SET.themes["base16-ocean.dark"];
     let mut h = HighlightLines::new(syntax, theme);
-    let width = code_block_width(code_lines, &syntax.name);
-    let mut lines = Vec::with_capacity(code_lines.len() + 2);
+    let mut lines = Vec::with_capacity(code_lines.len());
     let mut line_with_nl = String::new();
-
-    lines.push(Line::from(vec![
-        Span::styled("┌─ ", ui_theme.horizontal_rule),
-        Span::styled(syntax.name.to_string(), ui_theme.inline_code),
-        Span::styled(
-            format!(
-                " {}┐",
-                "─".repeat(width.saturating_sub(usize::from(syntax.name.cell_width())))
-            ),
-            ui_theme.horizontal_rule,
-        ),
-    ]));
 
     for code_line in code_lines {
         line_with_nl.clear();
@@ -785,8 +756,7 @@ fn highlight_code_block(
         line_with_nl.push('\n');
         match h.highlight_line(&line_with_nl, ps) {
             Ok(ranges) => {
-                let mut spans: Vec<Span<'static>> =
-                    vec![Span::styled("│ ", ui_theme.horizontal_rule)];
+                let mut spans: Vec<Span<'static>> = vec![Span::raw(CODE_BLOCK_INDENT)];
                 for (style, text) in ranges {
                     let text = text.trim_end_matches('\n').to_string();
                     if text.is_empty() {
@@ -794,28 +764,19 @@ fn highlight_code_block(
                     }
                     spans.push(Span::styled(text, syntect_to_style(style)));
                 }
-                let line_width = usize::from(code_line.as_str().cell_width());
-                if width > line_width {
-                    spans.push(Span::raw(" ".repeat(width - line_width)));
-                }
-                spans.push(Span::styled(" │", ui_theme.horizontal_rule));
                 lines.push(Line::from(spans));
             }
             Err(_) => {
                 lines.push(Line::from(vec![
-                    Span::styled("│ ", ui_theme.horizontal_rule),
-                    Span::styled(pad_code_line(code_line, width), ui_theme.code_block),
-                    Span::styled(" │", ui_theme.horizontal_rule),
+                    Span::raw(CODE_BLOCK_INDENT),
+                    Span::styled(code_line.clone(), ui_theme.code_block),
                 ]));
             }
         }
     }
-
-    lines.push(Line::styled(
-        format!("└{}┘", "─".repeat(width + 2)),
-        ui_theme.horizontal_rule,
-    ));
-
+    if lines.is_empty() {
+        lines.push(Line::from(CODE_BLOCK_INDENT));
+    }
     lines
 }
 
@@ -1112,19 +1073,12 @@ mod tests {
             "paragraphs should be separated from following blocks: {rendered:?}"
         );
         assert!(
-            rendered.iter().any(|line| line.contains("sh")),
-            "fenced code blocks should show their language label: {rendered:?}"
+            rendered.iter().any(|line| line == "  nix run .#profiler"),
+            "code block lines are indented by two spaces and nothing else: {rendered:?}"
         );
         assert!(
-            rendered
-                .iter()
-                .any(|line| line.contains("nix run .#profiler")),
-            "code block content should remain visible: {rendered:?}"
-        );
-        assert!(
-            rendered.iter().any(|line| line.contains('┌'))
-                && rendered.iter().any(|line| line.contains('└')),
-            "code blocks should render with a visible box: {rendered:?}"
+            !rendered.iter().any(|line| line.contains(['┌', '└', '│'])),
+            "code blocks render without a box: {rendered:?}"
         );
         assert!(
             rendered
@@ -1147,27 +1101,32 @@ mod tests {
     #[test]
     fn code_block() {
         let text = render("```rust\nfn main() {}\n```", &t());
-        assert_eq!(text.lines.len(), 3);
-        let content = text.lines[1].to_string();
-        assert!(content.contains("fn main()"), "got: {content}");
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].to_string(), "  fn main() {}");
     }
 
     #[test]
     fn code_block_has_colour() {
         let text = render("```rust\nlet x = 42;\n```", &t());
-        assert_eq!(text.lines.len(), 3);
+        assert_eq!(text.lines.len(), 1);
         assert!(
-            text.lines[1].spans.len() > 1,
+            text.lines[0].spans.len() > 2,
             "expected syntax highlighting spans, got: {:?}",
-            text.lines[1].spans
+            text.lines[0].spans
         );
     }
 
     #[test]
     fn code_block_unknown_lang() {
         let text = render("```xyz\nhello world\n```", &t());
-        assert_eq!(text.lines.len(), 3);
-        assert!(text.lines[1].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].to_string(), "  hello world");
+    }
+
+    #[test]
+    fn an_empty_code_block_still_takes_a_line() {
+        let text = render("```\n```", &t());
+        assert_eq!(text.lines.len(), 1);
     }
 
     #[test]
@@ -1176,20 +1135,9 @@ mod tests {
 
         let text = render("```\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 3);
-        assert!(text.lines[1].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
-    }
-
-    #[test]
-    fn plain_code_block_uses_terminal_cell_width_for_halfwidth_dakuten() {
-        use ratatui::buffer::CellWidth;
-
-        let text = render("```\nabcｶﾞ\n```", &t());
-        let border_width = text.lines[1].to_string().cell_width();
-        let content_width = text.lines[2].to_string().cell_width();
-
-        assert_eq!(content_width, border_width);
     }
 
     #[test]
@@ -1210,8 +1158,8 @@ mod tests {
 
         let text = render("```xyz\nhello world\n```", &t());
 
-        assert_eq!(text.lines.len(), 3);
-        assert!(text.lines[1].to_string().contains("hello world"));
+        assert_eq!(text.lines.len(), 1);
+        assert!(text.lines[0].to_string().contains("hello world"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
 
@@ -1222,7 +1170,7 @@ mod tests {
 
         let text = render(&source, &t());
 
-        assert_eq!(text.lines.len(), 82);
+        assert_eq!(text.lines.len(), 80);
         assert!(text.lines[1].to_string().contains("let x = 42;"));
         assert_eq!(highlight_code_block_call_count(), 0);
     }
