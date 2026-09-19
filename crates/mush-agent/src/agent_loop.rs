@@ -178,31 +178,16 @@ impl AgentHooks for ClosureHooks {
     }
 }
 
-pub type DynamicContext = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
-
 pub type FileRuleCallback =
     std::sync::Arc<dyn Fn(&std::path::Path) -> Option<String> + Send + Sync>;
 
 pub type DiagnosticCallback =
     std::sync::Arc<dyn Fn(&std::path::Path) -> BoxFuture<'_, Option<String>> + Send + Sync>;
 
-#[must_use]
-pub fn effective_system_prompt(
-    base: Option<&str>,
-    dynamic: Option<&DynamicContext>,
-) -> Option<String> {
-    let base = base?;
-    match dynamic.and_then(|suffix| suffix()) {
-        Some(suffix) => Some(format!("{base}\n\n{suffix}")),
-        None => Some(base.to_string()),
-    }
-}
-
 #[derive(Default, Clone)]
 pub struct AgentInjections {
     pub lifecycle_hooks: crate::hooks::LifecycleHooks,
     pub cwd: Option<std::path::PathBuf>,
-    pub dynamic_system_context: Option<DynamicContext>,
     pub file_rules: Option<FileRuleCallback>,
     pub lsp_diagnostics: Option<DiagnosticCallback>,
     pub control_endpoint: Option<crate::exec_context::ControlEndpoint>,
@@ -293,10 +278,7 @@ pub fn agent_loop(
                 let tool_defs: Vec<ToolDefinition> =
                     crate::tool::tool_definitions(&config.tools, config.model.api);
 
-                let system_prompt = effective_system_prompt(
-                    config.system_prompt.as_deref(),
-                    config.injections.dynamic_system_context.as_ref(),
-                );
+                let system_prompt = config.system_prompt.clone();
 
                 let context = LlmContext {
                     system_prompt,

@@ -700,9 +700,9 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \
          during long work so they can see where you are.\n\
          - `await rlm.note(text)` keeps a short note that survives compaction and kernel \
-         restarts; the notes appear in your system prompt. `await rlm.notes()` reads them, \
-         `await rlm.clear_notes()` drops them. Use them for decisions, paths and state a long \
-         task needs later.\n\
+         restarts; they reappear in the conversation whenever they change. `await \
+         rlm.notes()` reads them, `await rlm.clear_notes()` drops them. Use them for \
+         decisions, paths and state a long task needs later.\n\
          - Use Python for loops, conditionals and parsing. Use `bash()` to run programs, not \
          to write shell programs.\n\
          - Run a project's own commands through its own environment (`cargo test`, `npm run \

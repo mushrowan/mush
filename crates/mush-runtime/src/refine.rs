@@ -31,6 +31,22 @@ impl SessionRuntime {
         Some(digest)
     }
 
+    pub fn refresh_notes(&mut self) -> Option<String> {
+        let text = self.notes.as_ref()?.read();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let current = crate::notes::fingerprint(&text);
+        if crate::notes::latest_fingerprint(&self.conversation.context()).as_deref()
+            == Some(&current)
+        {
+            return None;
+        }
+        self.conversation
+            .append_message(crate::notes::message(&text));
+        Some(text)
+    }
+
     #[must_use]
     pub fn refinement_history(&self) -> Vec<RefinementResult> {
         let mut history = harness::load_history(&harness::global_dir());

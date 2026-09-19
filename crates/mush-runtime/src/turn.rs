@@ -186,6 +186,7 @@ impl SessionRuntime {
         let registry: &ApiRegistry = registry;
         let steering_queue = self.steering_queue.clone();
         self.refresh_harness_digest();
+        self.refresh_notes();
         self.pending_prompt = Some(prompt);
         self.persist_pending_prompt();
         let conversation_snapshot = self.conversation.context();
@@ -197,10 +198,7 @@ impl SessionRuntime {
         let cwd = injections.cwd.clone().unwrap_or_default();
         let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
         let live = (target.model.id == model.id).then(|| LiveContext {
-            system_prompt: mush_agent::effective_system_prompt(
-                self.system_prompt.as_deref(),
-                injections.dynamic_system_context.as_ref(),
-            ),
+            system_prompt: self.system_prompt.clone(),
             tools: mush_agent::tool_definitions(&tool_registry, model.api),
         });
         let transform = build_context_transform(

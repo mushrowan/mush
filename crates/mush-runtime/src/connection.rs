@@ -459,9 +459,7 @@ impl InProcessConnection {
     }
 
     pub fn set_notes(&mut self, notes: Option<std::sync::Arc<crate::notes::Notes>>) {
-        if let Some(notes) = &notes {
-            self.injections.dynamic_system_context = Some(notes.dynamic_context());
-        }
+        self.runtime.notes = notes.clone();
         self.notes = notes;
     }
 
@@ -1502,10 +1500,7 @@ impl InProcessConnection {
                 self.injections.cwd.clone().unwrap_or_default(),
             );
             mush_session::compact::LiveContext {
-                system_prompt: mush_agent::effective_system_prompt(
-                    self.runtime.system_prompt.as_deref(),
-                    self.injections.dynamic_system_context.as_ref(),
-                ),
+                system_prompt: self.runtime.system_prompt.clone(),
                 tools: mush_agent::tool_definitions(&tools, pane_model.api),
             }
         });
@@ -1827,16 +1822,7 @@ impl AgentConnection for InProcessConnection {
     }
 
     async fn system_prompt(&mut self) -> Option<String> {
-        let base = self.runtime.system_prompt.clone()?;
-        let extra = self
-            .injections
-            .dynamic_system_context
-            .as_ref()
-            .and_then(|context| context());
-        Some(match extra {
-            Some(extra) => format!("{base}\n\n{extra}"),
-            None => base,
-        })
+        self.runtime.system_prompt.clone()
     }
 }
 
@@ -3064,18 +3050,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_system_prompt_read_includes_the_notes() {
-        let (mut connection, _requests) = connection();
+    async fn the_notes_ride_in_the_conversation_and_not_the_system_prompt() {
+        let (mut connection, requests) = connection();
         connection.runtime.system_prompt = Some("base".into());
         let notes = crate::notes::Notes::new(None);
         connection.set_notes(Some(Arc::clone(&notes)));
+        notes.append("remember the socket path").unwrap();
         assert_eq!(connection.system_prompt().await.as_deref(), Some("base"));
 
-        notes.append("remember the socket path").unwrap();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "first".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        let turn = requests.lock().unwrap()[0].messages.clone();
+        let Message::User(carried) = &turn[0] else {
+            panic!("{turn:?}")
+        };
+        let (fingerprint, body) = crate::notes::extract(&carried.text()).unwrap();
+        assert_eq!(fingerprint, crate::notes::fingerprint(&notes.read()));
+        assert!(body.ends_with("- remember the socket path"));
+        assert!(matches!(&turn[1], Message::User(u) if u.text() == "first"));
 
-        let prompt = connection.system_prompt().await.unwrap();
-        assert!(prompt.starts_with("base\n\n# Notes"));
-        assert!(prompt.ends_with("- remember the socket path"));
+        connection
+            .send(ClientCommand::Prompt {
+                text: "second".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        let turn = requests.lock().unwrap()[1].messages.clone();
+        assert_eq!(
+            turn.iter()
+                .filter(|message| matches!(message, Message::User(u) if crate::notes::extract(&u.text()).is_some()))
+                .count(),
+            1,
+            "unchanged notes are not re-delivered"
+        );
+
+        notes.append("and the pid file").unwrap();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "third".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        let turn = requests.lock().unwrap()[2].messages.clone();
+        assert_eq!(
+            turn.iter()
+                .filter(|message| matches!(message, Message::User(u) if crate::notes::extract(&u.text()).is_some()))
+                .count(),
+            2,
+            "a changed note lands at the tail"
+        );
+        let Message::User(latest) = &turn[turn.len() - 2] else {
+            panic!("{turn:?}")
+        };
+        assert!(crate::notes::extract(&latest.text()).is_some());
     }
 
     #[tokio::test]

@@ -47,7 +47,9 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 let text = user.text();
                 if let Some(body) = extract_compaction_summary(&text) {
                     app.push_system_message(format_compaction_banner(&body));
-                } else if mush_session::harness::extract_digest(&text).is_some() {
+                } else if mush_session::harness::extract_digest(&text).is_some()
+                    || mush_runtime::notes::extract(&text).is_some()
+                {
                 } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
                     app.push_bash_done(&done, None);
                 } else {

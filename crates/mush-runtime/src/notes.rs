@@ -106,21 +106,48 @@ impl Notes {
             let _ = mush_ai::private_io::write_private(&path, text.as_bytes());
         }
     }
+}
 
-    #[must_use]
-    pub fn dynamic_context(self: &Arc<Self>) -> mush_agent::DynamicContext {
-        let notes = Arc::clone(self);
-        Arc::new(move || {
-            let text = notes.read();
-            (!text.trim().is_empty()).then(|| {
-                format!(
-                    "# Notes\n\nNotes you kept earlier in this session with `rlm.note()`. They \
-                     survive compaction and kernel restarts.\n\n{}",
-                    text.trim_end()
-                )
-            })
-        })
-    }
+pub const NOTES_PREFIX: &str = "Notes you kept in this session:";
+
+#[must_use]
+pub fn fingerprint(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    text.trim_end().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+#[must_use]
+pub fn message(text: &str) -> mush_ai::types::Message {
+    mush_ai::types::Message::User(
+        mush_ai::types::UserMessage::builder()
+            .content(mush_ai::types::UserContent::Text(format!(
+                "{NOTES_PREFIX}\n\n<notes fingerprint=\"{}\">\nNotes you kept earlier with \
+                 `rlm.note()`. They survive compaction and kernel restarts.\n\n{}\n</notes>",
+                fingerprint(text),
+                text.trim_end()
+            )))
+            .timestamp_ms(mush_ai::types::Timestamp::now())
+            .build(),
+    )
+}
+
+#[must_use]
+pub fn extract(text: &str) -> Option<(String, String)> {
+    let rest = text.strip_prefix(NOTES_PREFIX)?.trim_start();
+    let rest = rest.strip_prefix("<notes fingerprint=\"")?;
+    let (fingerprint, rest) = rest.split_once("\">")?;
+    let body = rest.trim().strip_suffix("</notes>")?.trim();
+    Some((fingerprint.to_string(), body.to_string()))
+}
+
+#[must_use]
+pub fn latest_fingerprint(messages: &[mush_ai::types::Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| match message {
+        mush_ai::types::Message::User(user) => extract(&user.text()).map(|(fp, _)| fp),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -128,12 +155,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_append_persist_and_feed_the_system_context() {
+    fn notes_append_persist_and_reload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.md");
         let notes = Notes::new(Some(path.clone()));
-        let context = notes.dynamic_context();
-        assert!(context().is_none());
+        assert!(notes.read().is_empty());
 
         notes
             .append("tests run with env -u MUSH_KERNEL_PYTHON")
@@ -146,18 +172,31 @@ mod tests {
             text,
             "- tests run with env -u MUSH_KERNEL_PYTHON\n- the daemon lives in mush-daemon\n"
         );
-        assert!(context().unwrap().starts_with("# Notes"));
-        assert!(
-            context()
-                .unwrap()
-                .ends_with("- the daemon lives in mush-daemon")
-        );
-
         let reloaded = Notes::new(Some(path.clone()));
         assert_eq!(reloaded.read(), text);
         reloaded.replace("");
         assert!(!path.exists());
-        assert!(reloaded.dynamic_context()().is_none());
+        assert!(reloaded.read().is_empty());
+    }
+
+    #[test]
+    fn the_notes_message_roundtrips_its_fingerprint() {
+        let notes = Notes::new(None);
+        notes.append("the daemon lives in mush-daemon").unwrap();
+        let text = notes.read();
+        let carrier = message(&text);
+        let mush_ai::types::Message::User(user) = &carrier else {
+            panic!("{carrier:?}")
+        };
+        let (found, body) = extract(&user.text()).unwrap();
+        assert_eq!(found, fingerprint(&text));
+        assert!(body.ends_with("- the daemon lives in mush-daemon"));
+        assert_eq!(
+            latest_fingerprint(&[carrier]).as_deref(),
+            Some(fingerprint(&text).as_str())
+        );
+        assert_eq!(latest_fingerprint(&[]), None);
+        assert_ne!(fingerprint(&text), fingerprint("something else"));
     }
 
     #[test]

@@ -1327,7 +1327,6 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             worker.injections = mush_agent::AgentInjections {
                 lifecycle_hooks: seed.lifecycle_hooks.clone(),
                 cwd: Some(seed.cwd.clone()),
-                dynamic_system_context: None,
                 file_rules: seed.file_rules.clone(),
                 lsp_diagnostics: seed.lsp_diagnostics.clone(),
                 control_endpoint: None,
@@ -1431,7 +1430,6 @@ fn worker_config(
     worker.injections = mush_agent::AgentInjections {
         lifecycle_hooks: setup.lifecycle_hooks.clone(),
         cwd: Some(std::env::current_dir().unwrap_or_default()),
-        dynamic_system_context: None,
         file_rules: setup.file_rules.clone(),
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         control_endpoint: None,
