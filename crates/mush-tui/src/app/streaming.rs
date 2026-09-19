@@ -297,6 +297,8 @@ impl App {
                     .last_request
                     .as_ref()
                     .map(|d| d.fingerprint.messages_prefix),
+                system_fingerprint: self.last_request.as_ref().map(|d| d.fingerprint.system),
+                tools_fingerprint: self.last_request.as_ref().map(|d| d.fingerprint.tools),
             };
             if let Some(ttl) = self.last_request.as_ref().map(|d| d.cache_ttl_secs)
                 && ttl > 0
@@ -346,6 +348,14 @@ impl App {
                                 .and_then(|c| c.messages_prefix_fingerprint),
                             curr_messages_prefix_fingerprint: curr_config
                                 .messages_prefix_fingerprint,
+                            prev_system_fingerprint: prev_config_snapshot
+                                .as_ref()
+                                .and_then(|c| c.system_fingerprint),
+                            curr_system_fingerprint: curr_config.system_fingerprint,
+                            prev_tools_fingerprint: prev_config_snapshot
+                                .as_ref()
+                                .and_then(|c| c.tools_fingerprint),
+                            curr_tools_fingerprint: curr_config.tools_fingerprint,
                             prev_usage: prev_usage_snapshot,
                             curr_usage: *u,
                             prev_context_tokens: prev_context_snapshot.get(),
@@ -369,15 +379,21 @@ impl App {
                             None => String::new(),
                         };
 
-                        match reason {
-                            BustReason::Unexplained => Some(format!(
-                                "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k (prefix evicted){dump_note}",
-                                prev_cache_read.get() / 1000,
-                                curr_cache_read.get() / 1000,
-                                curr_cache_write.get() / 1000,
-                            )),
-                            _ => None,
-                        }
+                        let cause = match reason {
+                            BustReason::Unexplained => Some("prefix evicted"),
+                            BustReason::SystemPromptChanged => Some("system prompt changed"),
+                            BustReason::ToolsChanged => Some("tool list changed"),
+                            BustReason::ModelChanged
+                            | BustReason::ThinkingChanged
+                            | BustReason::EffortChanged
+                            | BustReason::HistoryReshaped => None,
+                        };
+                        cause.map(|cause| format!(
+                            "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k ({cause}){dump_note}",
+                            prev_cache_read.get() / 1000,
+                            curr_cache_read.get() / 1000,
+                            curr_cache_write.get() / 1000,
+                        ))
                     }
                 };
                 if let Some(msg) = msg_opt {

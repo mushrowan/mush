@@ -213,6 +213,8 @@ pub enum BustReason {
     ThinkingChanged,
     EffortChanged,
     HistoryReshaped,
+    SystemPromptChanged,
+    ToolsChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -223,6 +225,10 @@ pub struct CallConfig {
     pub context_management: ContextManagementMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages_prefix_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_fingerprint: Option<u64>,
 }
 
 impl CallConfig {
@@ -234,6 +240,14 @@ impl CallConfig {
             BustReason::ThinkingChanged
         } else if prev.effort != curr.effort {
             BustReason::EffortChanged
+        } else if let (Some(p), Some(c)) = (prev.tools_fingerprint, curr.tools_fingerprint)
+            && p != c
+        {
+            BustReason::ToolsChanged
+        } else if let (Some(p), Some(c)) = (prev.system_fingerprint, curr.system_fingerprint)
+            && p != c
+        {
+            BustReason::SystemPromptChanged
         } else if let (Some(p), Some(c)) = (
             prev.messages_prefix_fingerprint,
             curr.messages_prefix_fingerprint,
@@ -430,6 +444,14 @@ pub struct CacheBustDiagnostic {
     pub prev_messages_prefix_fingerprint: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub curr_messages_prefix_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_system_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curr_system_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_tools_fingerprint: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curr_tools_fingerprint: Option<u64>,
     pub prev_usage: Option<Usage>,
     pub curr_usage: Usage,
     pub prev_context_tokens: u64,
@@ -662,6 +684,8 @@ mod tests {
             effort: None,
             context_management: ContextManagementMode::ProviderManaged,
             messages_prefix_fingerprint: None,
+            system_fingerprint: None,
+            tools_fingerprint: None,
         };
         let curr_cfg = prev_cfg.clone();
 
@@ -695,6 +719,8 @@ mod tests {
             effort: None,
             context_management: ContextManagementMode::SessionManaged,
             messages_prefix_fingerprint: None,
+            system_fingerprint: None,
+            tools_fingerprint: None,
         };
         let curr_cfg = prev_cfg.clone();
 

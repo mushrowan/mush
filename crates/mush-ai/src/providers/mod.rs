@@ -15,6 +15,8 @@ const RECENT_TURNS_TO_KEEP: usize = 3;
 
 pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
 
+pub const EVENT_TOOL_NAME: &str = "mush_event";
+
 pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
     if let Some(explicit) = options.max_tokens {
         return explicit.get();
@@ -68,7 +70,7 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
             Message::ToolResult(tr) => visitor.on_tool_result(tr, is_old_turn),
             Message::Event(event) => {
                 use crate::types::*;
-                let mut id = format!("mush_event_{i}");
+                let mut id = format!("{EVENT_TOOL_NAME}_{i}");
                 while !used_ids.insert(id.clone()) {
                     id.push('_');
                 }
@@ -77,7 +79,7 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
                     &AssistantMessage::builder()
                         .content(vec![AssistantContentPart::ToolCall(ToolCall {
                             id: id.clone(),
-                            name: "mush_event".into(),
+                            name: EVENT_TOOL_NAME.into(),
                             arguments: serde_json::json!({}),
                         })])
                         .model("mush-event".into())
@@ -90,7 +92,7 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
                 visitor.on_tool_result(
                     &ToolResultMessage {
                         tool_call_id: id,
-                        tool_name: "mush_event".into(),
+                        tool_name: EVENT_TOOL_NAME.into(),
                         content: vec![ToolResultContentPart::Text(TextContent {
                             text: event.text(),
                         })],
@@ -350,14 +352,14 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .content(vec![AssistantContentPart::ToolCall(ToolCall {
                     id: "mush_event_2".into(),
-                    name: "mush_event".into(),
+                    name: EVENT_TOOL_NAME.into(),
                     arguments: serde_json::json!({"real":true}),
                 })])
                 .build(),
         );
         let result = Message::ToolResult(ToolResultMessage {
             tool_call_id: "mush_event_2".into(),
-            tool_name: "mush_event".into(),
+            tool_name: EVENT_TOOL_NAME.into(),
             content: vec![],
             outcome: ToolOutcome::Success,
             timestamp_ms: Timestamp::zero(),

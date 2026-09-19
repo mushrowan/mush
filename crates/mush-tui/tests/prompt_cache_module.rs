@@ -12,6 +12,8 @@ fn test_config(model: &str, thinking: &str, effort: Option<&str>) -> CallConfig 
         effort: effort.map(Into::into),
         context_management: ContextManagementMode::LocalMonotonic,
         messages_prefix_fingerprint: None,
+        system_fingerprint: None,
+        tools_fingerprint: None,
     }
 }
 
@@ -27,6 +29,20 @@ fn test_config_with_prefix(
         effort: effort.map(Into::into),
         context_management: ContextManagementMode::LocalMonotonic,
         messages_prefix_fingerprint: Some(prefix),
+        system_fingerprint: None,
+        tools_fingerprint: None,
+    }
+}
+
+fn test_config_with_fingerprints(system: u64, tools: u64, prefix: u64) -> CallConfig {
+    CallConfig {
+        model_id: "m".into(),
+        thinking_level: "off".into(),
+        effort: None,
+        context_management: ContextManagementMode::LocalMonotonic,
+        messages_prefix_fingerprint: Some(prefix),
+        system_fingerprint: Some(system),
+        tools_fingerprint: Some(tools),
     }
 }
 
@@ -170,6 +186,8 @@ fn provider_managed_context_shrink_does_not_alarm_as_cache_bust() {
         effort: None,
         context_management: ContextManagementMode::ProviderManaged,
         messages_prefix_fingerprint: Some(0xCAFE),
+        system_fingerprint: None,
+        tools_fingerprint: None,
     };
 
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, Some(&cfg), Some(&cfg));
@@ -267,6 +285,10 @@ fn dump_pins_referenced_request_snapshots() {
         prev_effort: None,
         prev_messages_prefix_fingerprint: None,
         curr_messages_prefix_fingerprint: None,
+        prev_system_fingerprint: None,
+        curr_system_fingerprint: None,
+        prev_tools_fingerprint: None,
+        curr_tools_fingerprint: None,
         prev_usage: None,
         curr_usage: Usage::default(),
         prev_context_tokens: 0,
@@ -305,4 +327,43 @@ fn dump_pins_referenced_request_snapshots() {
     std::fs::remove_file(&curr_snap).unwrap();
     assert!(pinned_curr.exists(), "pinned copy survives live deletion");
     assert!(pinned_prev.exists(), "pinned copy survives live deletion");
+}
+
+#[test]
+fn a_changed_system_prompt_is_not_unexplained() {
+    let anomalies = detect_cache_anomalies(
+        Some(&prev_usage()),
+        &curr_usage(),
+        Some(&test_config_with_fingerprints(1, 9, 7)),
+        Some(&test_config_with_fingerprints(2, 9, 7)),
+    );
+    assert_eq!(
+        bust_reason(&anomalies),
+        Some(BustReason::SystemPromptChanged)
+    );
+}
+
+#[test]
+fn a_changed_tool_list_outranks_the_system_prompt() {
+    let anomalies = detect_cache_anomalies(
+        Some(&prev_usage()),
+        &curr_usage(),
+        Some(&test_config_with_fingerprints(1, 9, 7)),
+        Some(&test_config_with_fingerprints(2, 8, 7)),
+    );
+    assert_eq!(bust_reason(&anomalies), Some(BustReason::ToolsChanged));
+}
+
+#[test]
+fn a_changed_system_prompt_outranks_reshaped_history() {
+    let anomalies = detect_cache_anomalies(
+        Some(&prev_usage()),
+        &curr_usage(),
+        Some(&test_config_with_fingerprints(1, 9, 7)),
+        Some(&test_config_with_fingerprints(2, 9, 6)),
+    );
+    assert_eq!(
+        bust_reason(&anomalies),
+        Some(BustReason::SystemPromptChanged)
+    );
 }

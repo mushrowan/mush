@@ -783,6 +783,13 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
             }
             crate::truncation::apply_for_tool(result, limit, Some(tool_call.name.as_str()))
         }
+        None if tool_call.name.as_str() == mush_ai::providers::EVENT_TOOL_NAME => {
+            ToolResult::error(
+                "mush_event is how the harness shows you an event that arrived out of band. it is \
+                 not a tool and there is nothing to call."
+                    .to_string(),
+            )
+        }
         None => {
             tracing::error!(tool = %tool_call.name, "tool not found");
             let preview = crate::tool::preview_args(&tool_call.arguments);
@@ -858,6 +865,25 @@ mod tests {
             text.contains("path") && text.contains("/etc/passwd") && text.contains("count"),
             "error should preview attempted args, got: {text}"
         );
+    }
+
+    #[test]
+    fn the_event_channel_is_not_reported_as_a_missing_tool() {
+        let tools = ToolRegistry::new();
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: mush_ai::providers::EVENT_TOOL_NAME.into(),
+            arguments: serde_json::json!({}),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_tool(&tools, &tc));
+        assert!(result.outcome.is_error());
+        let text = match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        assert!(!text.contains("tool not found"), "got: {text}");
+        assert!(text.contains("not a tool"), "got: {text}");
     }
 
     #[test]
