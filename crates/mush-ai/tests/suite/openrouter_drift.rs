@@ -102,7 +102,7 @@ async fn endpoints_response_matches_manifest() {
     }
 }
 
-const VENDORED_OPENAPI: &str = include_str!("fixtures/openrouter-openapi.json");
+const VENDORED_OPENAPI: &str = include_str!("../fixtures/openrouter-openapi.json");
 
 #[tokio::test]
 #[ignore = "hits openrouter; run with --run-ignored=only"]

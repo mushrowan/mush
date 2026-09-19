@@ -83,7 +83,7 @@ fn cross_process_saved_prefix_and_acknowledgment() {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "cross_process_saved_prefix_and_acknowledgment",
+                "inbox::cross_process_saved_prefix_and_acknowledgment",
                 "--nocapture",
             ])
             .env("MUSH_INBOX_TEST_CHILD", dir.path())

@@ -177,6 +177,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 
+[profile.dev.package."*"]
+debug = false
+
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"

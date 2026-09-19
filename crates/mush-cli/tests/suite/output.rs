@@ -421,7 +421,7 @@ fn colour_environment_matches_clap_policy() {
         assert!(!status.success());
         assert_messages(&fixture, &stdout, &stderr, enabled, enabled, true);
         for argument in ["--help", "--invalid-fixture-option"] {
-            let mut command = crate::command(fixture.dir.path());
+            let mut command = self::command(fixture.dir.path());
             command.envs(env.clone()).arg(argument);
             let (_, stdout, stderr) = capture(command, true, true);
             assert_eq!(
