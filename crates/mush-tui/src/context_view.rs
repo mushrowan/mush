@@ -249,6 +249,7 @@ mod tests {
 
     fn child(id: &str, name: &str, parent: Option<&str>, status: ChildStatus) -> ChildSummary {
         ChildSummary {
+            paused: None,
             id: id.into(),
             name: name.into(),
             parent: parent.map(Into::into),

@@ -128,6 +128,11 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         ));
     }
 
+    if app.paused.is_some() {
+        b.section_break();
+        b.push_inline(Span::styled("paused", app.theme.tool_error));
+    }
+
     if let Some(subagent) = &app.subagent_model_id {
         b.section_break();
         b.push_inline(Span::styled(

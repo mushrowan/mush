@@ -39,6 +39,7 @@ pub struct WorkerConfig {
     pub recovery_notice: Option<String>,
     pub models: crate::models::ModelSelection,
     pub subagent_model: Option<String>,
+    pub paused: Option<mush_session::Pause>,
 }
 
 impl WorkerConfig {
@@ -72,6 +73,7 @@ impl WorkerConfig {
             recovery_notice: None,
             models: crate::models::ModelSelection::default(),
             subagent_model: None,
+            paused: None,
         }
     }
 
@@ -86,6 +88,7 @@ impl WorkerConfig {
         self.models.set_current(runtime.model_id.clone());
         self.models.set_subagent(self.subagent_model.clone());
         runtime.subagent_model = self.subagent_model;
+        runtime.paused = self.paused;
         runtime.models = self.models;
         runtime.system_prompt = self.system_prompt;
         runtime.rlm_depth = self.rlm_depth;

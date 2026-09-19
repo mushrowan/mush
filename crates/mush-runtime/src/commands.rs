@@ -293,6 +293,7 @@ impl SessionRuntime {
             system_prompt: self.system_prompt.clone(),
             parent: self.parent.clone(),
             subagent_model: self.subagent_model.clone(),
+            paused: self.paused.clone(),
         }
     }
 

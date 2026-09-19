@@ -218,6 +218,7 @@ class ChildSummary:
         self.turns = int(reply.get("turns", 0))
         self.usage = reply.get("usage") or {}
         self.cost = reply.get("cost") or {}
+        self.paused = reply.get("paused")
 
     @property
     def settled(self) -> bool:
@@ -225,13 +226,22 @@ class ChildSummary:
 
     def __repr__(self) -> str:
         note = f", note={self.progress_note!r}" if self.progress_note else ""
-        return f"ChildSummary(name={self.name!r}, status={self.status!r}, turns={self.turns}{note})"
+        paused = ", paused" if self.paused else ""
+        return f"ChildSummary(name={self.name!r}, status={self.status!r}, turns={self.turns}{note}{paused})"
 
 
 def _child_target(target) -> str:
     if isinstance(target, (ChildHandle, ChildSummary)):
         return target.rlm_child_id
     return str(target)
+
+
+def _child_targets(targets) -> list:
+    if targets is None:
+        return []
+    if isinstance(targets, (str, ChildHandle, ChildSummary)):
+        targets = [targets]
+    return [_child_target(target) for target in targets]
 
 
 class _Rlm:
@@ -253,6 +263,16 @@ class _Rlm:
             targets = [targets]
         payload = {"targets": [_child_target(t) for t in targets], "timeout_ms": int(timeout_ms)}
         return [ChildSummary(entry) for entry in await host_request("rlm.collect", payload)]
+
+    async def pause_subagents(self, targets=None, *, reason: str | None = None) -> list:
+        payload = {"targets": _child_targets(targets)}
+        if reason is not None:
+            payload["reason"] = reason
+        return [ChildSummary(entry) for entry in await host_request("rlm.pause_subagents", payload)]
+
+    async def resume_subagents(self, targets=None) -> list:
+        payload = {"targets": _child_targets(targets)}
+        return [ChildSummary(entry) for entry in await host_request("rlm.resume_subagents", payload)]
 
     async def delete_subagent(self, target) -> ChildSummary:
         return ChildSummary(await host_request("rlm.delete_subagent", {"target": _child_target(target)}))

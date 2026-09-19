@@ -136,6 +136,7 @@ mod tests {
 
     fn state() -> ConnectionState {
         ConnectionState {
+            paused: None,
             session_id: SessionId::new(),
             title: None,
             model_id: "m".into(),

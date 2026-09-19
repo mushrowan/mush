@@ -10,6 +10,7 @@ pub struct SessionSnapshot {
     pub system_prompt: Option<String>,
     pub parent: Option<SessionId>,
     pub subagent_model: Option<String>,
+    pub paused: Option<mush_session::Pause>,
 }
 
 pub struct PaneSnapshot {

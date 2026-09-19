@@ -47,6 +47,7 @@ impl Descriptor {
                 started_at,
                 title: None,
                 turn_active: false,
+                paused: false,
                 messages: 0,
                 updated_at: started_at,
                 clients: 0,
@@ -61,6 +62,7 @@ impl Descriptor {
             model_id: state.model_id.clone(),
             title: state.title.clone(),
             turn_active: state.turn_active,
+            paused: state.paused.is_some(),
             messages: state.context_len,
             clients,
             ..self.written.clone()
@@ -559,6 +561,7 @@ mod tests {
 
     fn state() -> ConnectionState {
         ConnectionState {
+            paused: None,
             session_id: mush_ai::types::SessionId::new(),
             title: None,
             model_id: "m".into(),

@@ -327,6 +327,18 @@ enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
+    Pause {
+        agent: Option<String>,
+        #[arg(short, long)]
+        all: bool,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    Unpause {
+        agent: Option<String>,
+        #[arg(short, long)]
+        all: bool,
+    },
     Stop {
         id: String,
     },
@@ -424,6 +436,12 @@ async fn main() -> Result<()> {
         Some(Command::List { all, json }) => return agents::list(all, json).await,
         Some(Command::Rename { agent, name }) => {
             return agents::rename(&agent, &name.join(" ")).await;
+        }
+        Some(Command::Pause { agent, all, reason }) => {
+            return mush_cli::pause::pause(agent.as_deref(), all, reason.as_deref()).await;
+        }
+        Some(Command::Unpause { agent, all }) => {
+            return mush_cli::pause::resume(agent.as_deref(), all).await;
         }
         Some(Command::Schedule { command }) => {
             return match command {
@@ -1419,6 +1437,7 @@ fn worker_config(
     worker.kernel_signals = Some(kernel_signals);
     worker.models = models;
     worker.subagent_model = session.meta.subagent_model.clone();
+    worker.paused = session.meta.paused.clone();
     let role = setup::RlmRole {
         depth: worker.rlm_depth,
         max_depth: worker.rlm_max_depth,
@@ -1659,6 +1678,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.system_prompt = snapshot.system_prompt;
     session.meta.parent = snapshot.parent;
     session.meta.subagent_model = snapshot.subagent_model;
+    session.meta.paused = snapshot.paused;
     session.meta.message_count = session.conversation.context_len();
     session.panes = snapshot
         .panes
@@ -1732,6 +1752,7 @@ mod tests {
                 .build(),
         )]);
         mush_tui::SessionSnapshot {
+            paused: None,
             session_id: mush_ai::types::SessionId::new(),
             title: title.map(str::to_string),
             primary: conversation,

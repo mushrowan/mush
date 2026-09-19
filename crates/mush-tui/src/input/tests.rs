@@ -1471,6 +1471,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
     use mush_ai::types::{ModelId, SessionId, Timestamp};
     vec![
         mush_session::SessionMeta {
+            paused: None,
             id: SessionId::from("one"),
             title: Some("hello".into()),
             model_id: ModelId::from("m"),
@@ -1482,6 +1483,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             subagent_model: None,
         },
         mush_session::SessionMeta {
+            paused: None,
             id: SessionId::from("two"),
             title: Some("jkl session".into()),
             model_id: ModelId::from("m"),

@@ -91,6 +91,10 @@ pub enum SlashAction {
         model_id: Option<String>,
         unset: bool,
     },
+    Pause {
+        reason: Option<String>,
+    },
+    Resumed,
     Sessions,
     Resume {
         session_id: SessionId,
@@ -569,6 +573,11 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
                 unset,
             })
         }
+        "pause" if matches!(args, "off" | "clear") => Ok(SlashAction::Resumed),
+        "pause" => Ok(SlashAction::Pause {
+            reason: (!args.is_empty()).then(|| args.to_string()),
+        }),
+        "unpause" => Ok(SlashAction::Resumed),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -974,6 +983,23 @@ mod tests {
                 model_id: Some("claude-sonnet-4-20250514".into())
             }
         );
+    }
+
+    #[test]
+    fn parse_pause_takes_a_reason_and_off_unpauses() {
+        assert_eq!(
+            parse("/pause").unwrap(),
+            SlashAction::Pause { reason: None }
+        );
+        assert_eq!(
+            parse("/pause rebuilding mush").unwrap(),
+            SlashAction::Pause {
+                reason: Some("rebuilding mush".into()),
+            }
+        );
+        assert_eq!(parse("/pause off").unwrap(), SlashAction::Resumed);
+        assert_eq!(parse("/unpause").unwrap(), SlashAction::Resumed);
+        assert_eq!(parse("/resume").unwrap(), SlashAction::Sessions);
     }
 
     #[test]

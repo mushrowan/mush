@@ -43,6 +43,11 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "subagent-model",
         "pick the model new subagents use ([<model-id>|unset])",
     ),
+    (
+        "pause",
+        "stop this agent taking new turns ([<reason>] | off)",
+    ),
+    ("unpause", "let this agent take turns again"),
     ("export", "save conversation as markdown"),
     ("undo", "revert last turn"),
     ("search", "search conversation"),
@@ -401,6 +406,7 @@ fn seed_from_state(
         .subagent_model
         .as_deref()
         .map(mush_ai::types::ModelId::from);
+    app.paused = state.paused.clone();
     if state.turn_active {
         app.start_streaming();
     }

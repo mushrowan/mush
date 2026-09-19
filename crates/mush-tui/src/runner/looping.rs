@@ -345,6 +345,16 @@ pub(super) async fn apply_command_events(
             ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
             ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
             ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),
+            ClientEvent::PausedChanged(pause) => {
+                session.app.paused = pause.clone();
+                session.app.push_system_message(match &pause {
+                    Some(pause) => match &pause.reason {
+                        Some(reason) => format!("paused: {reason}"),
+                        None => "paused".to_string(),
+                    },
+                    None => "resumed".to_string(),
+                });
+            }
             ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
             ClientEvent::Refined(result) => {
                 session.app.status = None;

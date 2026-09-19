@@ -103,6 +103,11 @@ impl ChildStatus {
     pub fn settled(self) -> bool {
         !matches!(self, Self::Starting | Self::Running)
     }
+
+    #[must_use]
+    pub fn alive(self) -> bool {
+        matches!(self, Self::Starting | Self::Running | Self::Idle)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +133,8 @@ pub struct ChildSummary {
     pub tool_running: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_confirmation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<mush_session::Pause>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +290,7 @@ struct Node {
     summary: ChildSummary,
     inbox: Option<mpsc::UnboundedSender<Delivery>>,
     observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
+    control: Option<mpsc::UnboundedSender<ClientCommand>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_note_at: Option<Instant>,
@@ -333,6 +341,7 @@ impl Family {
                         summary,
                         inbox: None,
                         observe: None,
+                        control: None,
                         shutdown: None,
                         task: None,
                         last_note_at: None,
@@ -667,6 +676,7 @@ impl Family {
             streaming: false,
             tool_running: None,
             awaiting_confirmation: None,
+            paused: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut connection = parts.config.connect(&parts.tools, &parts.registry);
@@ -674,11 +684,13 @@ impl Family {
         connection.attach_agent_inbox(inbox_rx);
         let (observe_tx, observe_rx) = mpsc::unbounded_channel();
         connection.attach_observe_inbox(observe_rx);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(drive_child(
             Arc::clone(this),
             id.clone(),
             connection,
             shutdown_rx,
+            control_rx,
             format!("{TASK_LABEL}\n\n{prompt}"),
         ));
         self.lock().children.insert(
@@ -687,6 +699,7 @@ impl Family {
                 summary,
                 inbox: Some(inbox_tx),
                 observe: Some(observe_tx),
+                control: Some(control_tx),
                 shutdown: Some(shutdown_tx),
                 task: Some(task),
                 last_note_at: None,
@@ -858,6 +871,65 @@ impl Family {
             .get(&id)
             .map(|node| node.summary.clone())
             .ok_or_else(|| format!("{id} vanished"))
+    }
+
+    pub fn set_paused(
+        &self,
+        caller: &Identity,
+        targets: &[String],
+        pause: Option<&mush_session::Pause>,
+    ) -> Result<Vec<ChildSummary>, String> {
+        let roots = if targets.is_empty() {
+            self.lock()
+                .children
+                .values()
+                .filter(|node| node.summary.parent == caller.id && node.summary.status.alive())
+                .map(|node| node.summary.id.clone())
+                .collect()
+        } else {
+            targets
+                .iter()
+                .map(|target| self.resolve(caller, target))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut queue = roots;
+        let mut reached = Vec::new();
+        while let Some(id) = queue.pop() {
+            if reached.contains(&id) {
+                continue;
+            }
+            let descendants: Vec<ChildId> = self
+                .lock()
+                .children
+                .values()
+                .filter(|node| node.summary.parent.as_ref() == Some(&id))
+                .map(|node| node.summary.id.clone())
+                .collect();
+            queue.extend(descendants);
+            reached.push(id);
+        }
+        let mut summaries = Vec::new();
+        for id in reached {
+            let control = self
+                .lock()
+                .children
+                .get(&id)
+                .and_then(|node| node.control.clone());
+            if let Some(control) = control {
+                let _ = control.send(ClientCommand::SetPaused(pause.cloned()));
+            }
+            self.update(&id, |child| child.paused = pause.cloned());
+            if let Some(summary) = self
+                .lock()
+                .children
+                .get(&id)
+                .map(|node| node.summary.clone())
+            {
+                summaries.push(summary);
+            }
+        }
+        self.persist();
+        Ok(summaries)
     }
 
     pub fn take_root_note(&self) -> Option<String> {
@@ -1199,6 +1271,7 @@ async fn drive_child(
     id: ChildId,
     mut connection: InProcessConnection,
     shutdown: oneshot::Receiver<()>,
+    mut control: mpsc::UnboundedReceiver<ClientCommand>,
     first_prompt: String,
 ) {
     let model = connection.default_model();
@@ -1230,6 +1303,18 @@ async fn drive_child(
             _ = &mut shutdown, if !closing => {
                 closing = true;
                 let _ = connection.send(ClientCommand::Shutdown).await;
+            }
+            Some(command) = control.recv() => {
+                match connection.send(command).await {
+                    Ok(events) => {
+                        for event in &events {
+                            family.record(&id, event, Some(&model));
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%id, %error, "a child refused a control command");
+                    }
+                }
             }
             event = connection.next_event() => {
                 let Some(event) = event else {
@@ -1405,6 +1490,31 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     .family
                     .collect(&self.identity, targets, Duration::from_millis(timeout_ms))
                     .await
+                    .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::Value::Array(
+                    children.iter().map(summary_json).collect(),
+                ))
+            }
+            "rlm.pause_subagents" | "rlm.resume_subagents" => {
+                let targets: Vec<String> = payload
+                    .get("targets")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|targets| {
+                        targets
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let pause = (kind == "rlm.pause_subagents").then(|| mush_session::Pause {
+                    at: Timestamp::now(),
+                    reason: str_field("reason"),
+                    by: Some(self.identity.name.clone()),
+                });
+                let children = self
+                    .family
+                    .set_paused(&self.identity, &targets, pause.as_ref())
                     .map_err(mush_kernel::HostError)?;
                 Ok(serde_json::Value::Array(
                     children.iter().map(summary_json).collect(),
@@ -1747,6 +1857,63 @@ mod tests {
             &asked[0].messages[0],
             Message::User(user) if user.text().starts_with("[task from parent]\n\nreview the auth flow")
         ));
+    }
+
+    #[tokio::test]
+    async fn pausing_with_no_targets_reaches_every_descendant() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 3, None);
+        let root = Identity::root("root");
+        let parent = family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        let alpha = Identity {
+            id: Some(parent.rlm_child_id.clone()),
+            name: "alpha".into(),
+            depth: 1,
+        };
+        let grandchild = family
+            .spawn(&alpha, "two".into(), "beta".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        let pause = mush_session::Pause {
+            at: Timestamp::now(),
+            reason: Some("rebuilding".into()),
+            by: Some("root".into()),
+        };
+        let touched = family.set_paused(&root, &[], Some(&pause)).unwrap();
+        let ids: Vec<&str> = touched.iter().map(|child| child.id.as_str()).collect();
+        assert!(ids.contains(&parent.rlm_child_id.as_str()), "{ids:?}");
+        assert!(ids.contains(&grandchild.rlm_child_id.as_str()), "{ids:?}");
+        assert!(touched.iter().all(|child| child.paused.is_some()));
+
+        family.set_paused(&root, &[], None).unwrap();
+        assert!(family.all().iter().all(|child| child.paused.is_none()));
+    }
+
+    #[tokio::test]
+    async fn pausing_a_child_that_is_not_yours_is_refused() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 3, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+        let stranger = Identity {
+            id: Some("sub-nope".into()),
+            name: "stranger".into(),
+            depth: 1,
+        };
+        assert!(
+            family
+                .set_paused(&stranger, &["alpha".to_string()], None)
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2116,6 +2283,7 @@ mod tests {
                 streaming: false,
                 tool_running: None,
                 awaiting_confirmation: None,
+                paused: None,
             }],
         };
         std::fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();

@@ -610,6 +610,10 @@ child:<name>]`. Do not poll for it. Files the child writes are also yours to rea
 answer). `await rlm.collect(targets=None, timeout_ms=0)` returns the same snapshots and, with \
 a timeout, waits until they settle. `await rlm.delete_subagent(child)` stops one and drops \
 its context.\n\
+- `await rlm.pause_subagents(targets=None, reason=...)` stops children taking new turns, \
+descendants included, and `await rlm.resume_subagents(targets=None)` lets them go again. \
+Omit `targets` for all of them. A turn already running finishes; the pause holds anything \
+queued, scheduled or delivered until you resume.\n\
 - `await agent_message.send(text, receiver_role=\"child\", receiver_name=...)` sends a child \
 more instructions. A busy child is steered mid-turn; an idle one gets it as a new prompt.\n\
 - Give a child one clear task with the context it needs; it starts from an empty conversation.\n\

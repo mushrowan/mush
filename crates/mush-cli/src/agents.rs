@@ -12,6 +12,7 @@ use crate::output::Style;
 pub enum AgentStatus {
     Working,
     Failed,
+    Paused,
     Idle,
     Saved,
 }
@@ -21,6 +22,7 @@ impl AgentStatus {
         match self {
             Self::Working => "working",
             Self::Failed => "failed",
+            Self::Paused => "paused",
             Self::Idle => "idle",
             Self::Saved => "saved",
         }
@@ -30,6 +32,7 @@ impl AgentStatus {
         match self {
             Self::Working => Style::Yellow,
             Self::Failed => Style::Red,
+            Self::Paused => Style::Dim,
             Self::Idle => Style::Cyan,
             Self::Saved => Style::Dim,
         }
@@ -79,10 +82,11 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
         .map(|worker| AgentRow {
             name: worker.title.clone().unwrap_or_default(),
             id: short_id(&worker.session_id),
-            status: match (&worker.failed, worker.turn_active) {
-                (Some(_), _) => AgentStatus::Failed,
-                (None, true) => AgentStatus::Working,
-                (None, false) => AgentStatus::Idle,
+            status: match (&worker.failed, worker.turn_active, worker.paused) {
+                (Some(_), _, _) => AgentStatus::Failed,
+                (None, true, _) => AgentStatus::Working,
+                (None, false, true) => AgentStatus::Paused,
+                (None, false, false) => AgentStatus::Idle,
             },
             model: worker.model_id.clone(),
             messages: worker.messages,
@@ -286,6 +290,7 @@ mod tests {
 
     fn worker(id: &str, turn_active: bool, updated_at: u64) -> WorkerDescriptor {
         WorkerDescriptor {
+            paused: false,
             session_id: id.into(),
             model_id: "gpt-5.4".into(),
             build: mush_daemon::build_id(),
@@ -305,6 +310,7 @@ mod tests {
 
     fn meta(id: &str) -> SessionMeta {
         SessionMeta {
+            paused: None,
             id: mush_ai::types::SessionId::from(id.to_string()),
             title: None,
             model_id: "gpt-5.4".into(),

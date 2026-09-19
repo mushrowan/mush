@@ -46,6 +46,7 @@ pub enum ClientCommand {
     },
     SetModel(String),
     SetSubagentModel(Option<String>),
+    SetPaused(Option<mush_session::Pause>),
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
     SetSystemPrompt(Option<String>),
@@ -112,6 +113,7 @@ pub enum ClientEvent {
     GoalChanged(Option<Box<crate::goal::Goal>>),
     ScheduleChanged(Vec<crate::schedule::Job>),
     ProgressNote(String),
+    PausedChanged(Option<mush_session::Pause>),
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
     Refined(Box<mush_session::harness::RefinementResult>),
     HarnessDigest(String),
@@ -124,6 +126,8 @@ pub struct ConnectionState {
     pub model_id: String,
     #[serde(default)]
     pub subagent_model: Option<String>,
+    #[serde(default)]
+    pub paused: Option<mush_session::Pause>,
     pub thinking_level: ThinkingLevel,
     pub context_tokens: TokenCount,
     pub context_len: usize,
@@ -789,6 +793,11 @@ impl InProcessConnection {
     }
 
     pub async fn start_pending(&mut self) -> bool {
+        if self.runtime.paused.is_some() {
+            self.answer_observers();
+            self.runtime.save_if_dirty();
+            return false;
+        }
         if !self.poll_inbox().await {
             self.runtime.save_if_dirty();
             return false;
@@ -1610,6 +1619,10 @@ impl AgentConnection for InProcessConnection {
         let before = self.queued.len();
         match command {
             ClientCommand::Prompt { text, images } => {
+                if self.runtime.paused.take().is_some() {
+                    self.runtime.save_now_and_settle();
+                    self.queued.push_back(ClientEvent::PausedChanged(None));
+                }
                 if self.turn_active() {
                     self.steer(text, images).await;
                 } else {
@@ -1669,6 +1682,13 @@ impl AgentConnection for InProcessConnection {
                 self.runtime.models.set_subagent(id.clone());
                 self.runtime.subagent_model = id;
                 self.runtime.save_now_and_settle();
+            }
+            ClientCommand::SetPaused(pause) => {
+                if self.runtime.paused != pause {
+                    self.runtime.paused = pause.clone();
+                    self.runtime.save_now_and_settle();
+                    self.queued.push_back(ClientEvent::PausedChanged(pause));
+                }
             }
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
@@ -1768,6 +1788,7 @@ impl AgentConnection for InProcessConnection {
             title: self.runtime.title.clone(),
             model_id: self.runtime.model_id.clone(),
             subagent_model: self.runtime.subagent_model.clone(),
+            paused: self.runtime.paused.clone(),
             thinking_level: self.runtime.thinking_level.clone(),
             context_tokens: self.runtime.context_tokens,
             context_len: self.runtime.conversation.context_len(),
@@ -3245,6 +3266,73 @@ mod tests {
             auto: false,
         });
         assert!(commands.compaction_queued());
+    }
+
+    fn a_pause() -> mush_session::Pause {
+        mush_session::Pause {
+            at: mush_ai::types::Timestamp::now(),
+            reason: Some("rebuilding".into()),
+            by: Some("cli".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_agent_holds_a_queued_prompt_until_it_resumes() {
+        let (mut connection, _requests) = connection();
+        connection
+            .send(ClientCommand::SetPaused(Some(a_pause())))
+            .await
+            .unwrap();
+
+        connection
+            .send(ClientCommand::QueuePrompt {
+                text: "work".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(!connection.start_pending().await);
+        assert!(!connection.turn_active());
+        assert!(connection.runtime.pending_prompt.is_some());
+
+        connection
+            .send(ClientCommand::SetPaused(None))
+            .await
+            .unwrap();
+        assert!(connection.start_pending().await);
+        assert!(connection.turn_active());
+    }
+
+    #[tokio::test]
+    async fn a_pause_reaches_the_client_and_a_prompt_lifts_it() {
+        let (mut connection, _requests) = connection();
+        let events = connection
+            .send(ClientCommand::SetPaused(Some(a_pause())))
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::PausedChanged(Some(_)))),
+            "{events:?}"
+        );
+        assert!(connection.state().paused.is_some());
+
+        let events = connection
+            .send(ClientCommand::Prompt {
+                text: "go".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::PausedChanged(None))),
+            "{events:?}"
+        );
+        assert!(connection.state().paused.is_none());
+        assert!(connection.turn_active());
     }
 
     #[tokio::test]

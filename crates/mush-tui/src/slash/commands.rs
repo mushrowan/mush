@@ -335,6 +335,30 @@ pub async fn handle(
             });
             None
         }
+        SlashAction::Pause { reason } => {
+            let pause = mush_session::Pause {
+                at: mush_ai::types::Timestamp::now(),
+                reason: reason.clone(),
+                by: Some("user".to_string()),
+            };
+            app.paused = Some(pause.clone());
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetPaused(Some(pause)))
+                .await;
+            app.push_system_message(match reason {
+                Some(reason) => format!("paused: {reason}"),
+                None => "paused, no new turns until /unpause".to_string(),
+            });
+            None
+        }
+        SlashAction::Resumed => {
+            app.paused = None;
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetPaused(None))
+                .await;
+            app.push_system_message("resumed");
+            None
+        }
         SlashAction::CompactionModel { model_id } => {
             handle_compaction_model(app, tui_config, model_id.as_deref());
             let _ = connection
@@ -1230,6 +1254,7 @@ mod tests {
 
     fn child(name: &str, status: mush_runtime::ChildStatus) -> mush_runtime::ChildSummary {
         mush_runtime::ChildSummary {
+            paused: None,
             id: format!("sub-{name}"),
             name: name.into(),
             parent: None,

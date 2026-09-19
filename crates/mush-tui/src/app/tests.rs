@@ -647,6 +647,7 @@ fn session_picker_open_close() {
     assert_eq!(app.interaction.mode, AppMode::Insert);
 
     let sessions = vec![SessionMeta {
+        paused: None,
         id: mush_session::SessionId::from("abc"),
         title: Some("test session".into()),
         model_id: "claude-sonnet".into(),
@@ -671,6 +672,7 @@ fn session_picker_open_close() {
 fn session_picker_filter() {
     let sessions = vec![
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("a"),
             title: Some("rust project".into()),
             model_id: "m".into(),
@@ -682,6 +684,7 @@ fn session_picker_filter() {
             subagent_model: None,
         },
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("b"),
             title: Some("python script".into()),
             model_id: "m".into(),
@@ -708,6 +711,7 @@ fn session_picker_filter() {
 fn session_picker_filter_is_fuzzy_subsequence() {
     let sessions = vec![
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("a"),
             title: Some("rust project".into()),
             model_id: "m".into(),
@@ -719,6 +723,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             subagent_model: None,
         },
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("b"),
             title: Some("python script".into()),
             model_id: "m".into(),
@@ -749,6 +754,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
 fn session_picker_scope_filter() {
     let sessions = vec![
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("a"),
             title: Some("local session".into()),
             model_id: "m".into(),
@@ -760,6 +766,7 @@ fn session_picker_scope_filter() {
             subagent_model: None,
         },
         SessionMeta {
+            paused: None,
             id: mush_session::SessionId::from("b"),
             title: Some("other session".into()),
             model_id: "m".into(),

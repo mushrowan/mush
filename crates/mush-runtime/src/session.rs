@@ -231,6 +231,7 @@ pub struct SessionRuntime {
     pub harness_notice: Option<String>,
     pub models: crate::models::ModelSelection,
     pub subagent_model: Option<String>,
+    pub paused: Option<mush_session::Pause>,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -265,6 +266,7 @@ impl SessionRuntime {
             harness_notice: None,
             models: crate::models::ModelSelection::default(),
             subagent_model: None,
+            paused: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }

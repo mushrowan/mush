@@ -17,6 +17,17 @@ pub struct SessionMeta {
     pub parent: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused: Option<Pause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    pub at: Timestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +65,7 @@ impl Session {
                 cwd: cwd.into(),
                 parent: None,
                 subagent_model: None,
+                paused: None,
             },
             conversation: ConversationState::new(),
             panes: vec![],

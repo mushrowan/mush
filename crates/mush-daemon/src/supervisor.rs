@@ -85,6 +85,8 @@ pub struct WorkerDescriptor {
     #[serde(default)]
     pub turn_active: bool,
     #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
     pub messages: usize,
     #[serde(default)]
     pub updated_at: u64,
@@ -576,6 +578,7 @@ impl Nursery {
             started_at: now_secs(),
             title: None,
             turn_active: false,
+            paused: false,
             messages: 0,
             updated_at: now_secs(),
             clients: 0,
