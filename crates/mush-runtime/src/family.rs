@@ -1468,7 +1468,8 @@ impl RlmHandler {
             |entries: Vec<mush_session::harness::Entry>| serde_json::json!({ "entries": entries });
 
         match kind {
-            "harness.list" => Ok(entries(store.list(entry_kind()?))),
+            "harness.list" => Ok(entries(store.list(entry_kind()?, global))),
+            "harness.overview" => Ok(serde_json::json!({ "overview": store.overview(global) })),
             "harness.search" => {
                 let query = text("query")
                     .ok_or_else(|| mush_kernel::HostError("query is required".into()))?;
@@ -1477,7 +1478,32 @@ impl RlmHandler {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(10)
                     .clamp(1, 100) as usize;
-                Ok(entries(store.search(&query, entry_kind()?, limit)))
+                Ok(entries(store.search(&query, entry_kind()?, limit, global)))
+            }
+            "harness.record_refinement" => {
+                let trigger = text("trigger")
+                    .ok_or_else(|| mush_kernel::HostError("trigger is required".into()))?;
+                let changes = match payload.get("changes") {
+                    Some(serde_json::Value::String(one)) => vec![one.clone()],
+                    Some(serde_json::Value::Array(many)) => many
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let event = mush_session::harness::RefinementEvent {
+                    id: text("id").unwrap_or_else(mush_session::harness::new_id),
+                    trigger,
+                    changes,
+                    evidence: text("evidence").unwrap_or_default(),
+                    outcome: text("outcome").unwrap_or_default(),
+                    created_at: mush_session::harness::now(),
+                };
+                let recorded = store
+                    .record_refinement(global, event)
+                    .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::json!({ "refinement": recorded }))
             }
             "harness.get" => {
                 let found = store.find(required_kind()?, &required_id()?, global);
@@ -1509,12 +1535,11 @@ impl RlmHandler {
                 .map_err(mush_kernel::HostError)?;
                 Ok(serde_json::json!({ "entry": entry }))
             }
-            "harness.delete" => {
-                let entry = store
+            "harness.delete" => Ok(serde_json::json!({
+                "deleted": store
                     .delete(required_kind()?, &required_id()?, global)
-                    .map_err(mush_kernel::HostError)?;
-                Ok(serde_json::json!({ "entry": entry }))
-            }
+                    .is_ok(),
+            })),
             other => Err(mush_kernel::HostError(format!("unknown request {other}"))),
         }
     }
@@ -1704,8 +1729,14 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     serde_json::json!({ "scheduled": true, "note": "compaction runs after this turn ends" }),
                 )
             }
-            "harness.list" | "harness.get" | "harness.search" | "harness.create"
-            | "harness.update" | "harness.delete" => return self.harness_call(kind, &payload),
+            "harness.list"
+            | "harness.get"
+            | "harness.search"
+            | "harness.overview"
+            | "harness.create"
+            | "harness.update"
+            | "harness.delete"
+            | "harness.record_refinement" => return self.harness_call(kind, &payload),
             "refine.run" | "refine.status" => {
                 let commands = self.host_commands.as_ref().ok_or_else(|| {
                     mush_kernel::HostError("refinement is not available here".into())
@@ -2554,13 +2585,14 @@ mod tests {
         assert_eq!(updated["entry"]["version"], 2);
         assert_eq!(updated["entry"]["title"], "the worktree gate");
 
-        handler
+        let deleted = handler
             .handle(
                 "harness.delete",
                 serde_json::json!({ "kind": "memory", "id": "the_worktree_gate" }),
             )
             .await
             .unwrap();
+        assert_eq!(deleted["deleted"], true);
         let gone = handler
             .handle("harness.list", serde_json::json!({}))
             .await
@@ -2572,6 +2604,32 @@ mod tests {
             .await
             .unwrap_err();
         assert!(bad_kind.0.contains("kind must be"));
+
+        let recorded = handler
+            .handle(
+                "harness.record_refinement",
+                serde_json::json!({
+                    "trigger": "the gate moved",
+                    "changes": "update memory:the_worktree_gate",
+                    "outcome": "the next run reads the right command",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recorded["refinement"]["changes"][0],
+            "update memory:the_worktree_gate"
+        );
+        let overview = handler
+            .handle("harness.overview", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            overview["overview"]
+                .as_str()
+                .unwrap()
+                .contains("the gate moved")
+        );
     }
 
     #[tokio::test]

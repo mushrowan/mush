@@ -46,17 +46,51 @@ impl HarnessStore {
     }
 
     #[must_use]
-    pub fn list(&self, kind: Option<Kind>) -> Vec<Entry> {
-        self.merged().list(kind).into_iter().cloned().collect()
+    pub fn read(&self, global: bool) -> State {
+        if global {
+            let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            State::load(&self.global, Scope::Global)
+        } else {
+            self.merged()
+        }
     }
 
     #[must_use]
-    pub fn search(&self, query: &str, kind: Option<Kind>, limit: usize) -> Vec<Entry> {
-        self.merged()
+    pub fn list(&self, kind: Option<Kind>, global: bool) -> Vec<Entry> {
+        self.read(global).list(kind).into_iter().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn search(
+        &self,
+        query: &str,
+        kind: Option<Kind>,
+        limit: usize,
+        global: bool,
+    ) -> Vec<Entry> {
+        self.read(global)
             .search(query, kind, limit)
             .into_iter()
             .cloned()
             .collect()
+    }
+
+    #[must_use]
+    pub fn overview(&self, global: bool) -> String {
+        self.read(global).digest()
+    }
+
+    pub fn record_refinement(
+        &self,
+        global: bool,
+        event: mush_session::harness::RefinementEvent,
+    ) -> Result<mush_session::harness::RefinementEvent, String> {
+        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let scope = if global { Scope::Global } else { Scope::Local };
+        self.write(scope, |state| {
+            state.refinements.push(event.clone());
+            Ok(event)
+        })
     }
 
     #[must_use]
@@ -179,7 +213,7 @@ mod tests {
             store.find(Kind::Memory, "tests", true).unwrap().1.content,
             "global text"
         );
-        assert_eq!(store.list(Some(Kind::Memory)).len(), 2);
+        assert_eq!(store.list(Some(Kind::Memory), false).len(), 2);
     }
 
     #[test]
@@ -214,9 +248,15 @@ mod tests {
         store
             .create(true, &edit(Action::Create, "formatting", "cargo fmt"))
             .unwrap();
-        let hits = store.search("worktree", None, 10);
+        let hits = store.search("worktree", None, 10, false);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].scope, Scope::Local);
-        assert_eq!(store.search("cargo", Some(Kind::Memory), 10).len(), 2);
+        assert_eq!(
+            store.search("cargo", Some(Kind::Memory), 10, false).len(),
+            2
+        );
+        assert_eq!(store.search("cargo", Some(Kind::Memory), 10, true).len(), 1);
+        assert_eq!(store.list(None, true).len(), 1);
+        assert!(store.overview(false).contains("worktree gate"));
     }
 }

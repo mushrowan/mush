@@ -372,23 +372,27 @@ class _Refine:
 
 
 class _Harness:
-    async def list(self, kind: str | None = None) -> list:
-        payload = {}
+    async def list(self, kind: str | None = None, *, global_: bool = False) -> list:
+        payload = {"global": global_}
         if kind is not None:
             payload["kind"] = kind
         reply = await host_request("harness.list", payload)
         return reply.get("entries", [])
 
-    async def search(self, query: str, *, kind: str | None = None, limit: int = 10) -> list:
-        payload = {"query": query, "limit": int(limit)}
+    async def get(self, kind: str, id: str, *, global_: bool = False) -> dict | None:
+        reply = await host_request("harness.get", {"kind": kind, "id": id, "global": global_})
+        return reply.get("entry")
+
+    async def search(self, query: str, kind: str | None = None, limit: int = 10, *, global_: bool = False) -> list:
+        payload = {"query": query, "limit": int(limit), "global": global_}
         if kind is not None:
             payload["kind"] = kind
         reply = await host_request("harness.search", payload)
         return reply.get("entries", [])
 
-    async def get(self, kind: str, id: str, *, global_: bool = False) -> dict | None:
-        reply = await host_request("harness.get", {"kind": kind, "id": id, "global": global_})
-        return reply.get("entry")
+    async def overview(self, *, global_: bool = False) -> str:
+        reply = await host_request("harness.overview", {"global": global_})
+        return str(reply.get("overview", ""))
 
     async def create(
         self,
@@ -397,16 +401,21 @@ class _Harness:
         content: str,
         *,
         id: str | None = None,
-        path: str | None = None,
+        path: str = "general",
         reference: dict | None = None,
         arguments: dict | None = None,
         metadata: dict | None = None,
         global_: bool = False,
     ) -> dict:
-        payload = {"kind": kind, "title": title, "content": content, "global": global_}
+        payload = {
+            "kind": kind,
+            "title": title,
+            "content": content,
+            "path": path,
+            "global": global_,
+        }
         for key, value in (
             ("id", id),
-            ("path", path),
             ("reference", reference),
             ("arguments", arguments),
             ("metadata", metadata),
@@ -420,9 +429,9 @@ class _Harness:
         self,
         kind: str,
         id: str,
-        *,
         title: str | None = None,
         content: str | None = None,
+        *,
         path: str | None = None,
         reference: dict | None = None,
         arguments: dict | None = None,
@@ -443,9 +452,52 @@ class _Harness:
         reply = await host_request("harness.update", payload)
         return reply.get("entry", {})
 
-    async def delete(self, kind: str, id: str, *, global_: bool = False) -> dict:
+    async def delete(self, kind: str, id: str, *, global_: bool = False) -> bool:
         reply = await host_request("harness.delete", {"kind": kind, "id": id, "global": global_})
-        return reply.get("entry", {})
+        return bool(reply.get("deleted"))
+
+    async def create_memory(self, title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.create("memory", title, content, id=id, path=path, metadata=metadata, global_=global_)
+
+    async def update_memory(self, id: str, title: str | None = None, content: str | None = None, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.update("memory", id, title, content, path=path, metadata=metadata, global_=global_)
+
+    async def delete_memory(self, id: str, *, global_: bool = False) -> bool:
+        return await self.delete("memory", id, global_=global_)
+
+    async def create_prompt_note(self, title: str, content: str, *, id: str | None = None, path: str = "policy", metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.create("prompt", title, content, id=id, path=path, metadata=metadata, global_=global_)
+
+    async def update_prompt_note(self, id: str, title: str | None = None, content: str | None = None, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.update("prompt", id, title, content, path=path, metadata=metadata, global_=global_)
+
+    async def delete_prompt_note(self, id: str, *, global_: bool = False) -> bool:
+        return await self.delete("prompt", id, global_=global_)
+
+    async def create_skill(self, title: str, content: str, *, id: str | None = None, path: str = "general", reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.create("skill", title, content, id=id, path=path, reference=reference, arguments=arguments, metadata=metadata, global_=global_)
+
+    async def update_skill(self, id: str, title: str | None = None, content: str | None = None, *, path: str | None = None, reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.update("skill", id, title, content, path=path, reference=reference, arguments=arguments, metadata=metadata, global_=global_)
+
+    async def delete_skill(self, id: str, *, global_: bool = False) -> bool:
+        return await self.delete("skill", id, global_=global_)
+
+    async def create_subagent(self, title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.create("subagent", title, content, id=id, path=path, metadata=metadata, global_=global_)
+
+    async def update_subagent(self, id: str, title: str | None = None, content: str | None = None, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> dict:
+        return await self.update("subagent", id, title, content, path=path, metadata=metadata, global_=global_)
+
+    async def delete_subagent(self, id: str, *, global_: bool = False) -> bool:
+        return await self.delete("subagent", id, global_=global_)
+
+    async def record_refinement(self, trigger: str, changes, *, evidence: str = "", outcome: str = "", id: str | None = None, global_: bool = False) -> dict:
+        payload = {"trigger": trigger, "changes": changes, "evidence": evidence, "outcome": outcome, "global": global_}
+        if id is not None:
+            payload["id"] = id
+        reply = await host_request("harness.record_refinement", payload)
+        return reply.get("refinement", {})
 
 
 class _RlmHeartbeat:
@@ -462,13 +514,14 @@ class _RlmHeartbeat:
         return await host_request("rlm_heartbeat.update", {"id": id, "status": status})
 
 
+harness = _Harness()
+_Rlm.harness = harness
 rlm = _Rlm()
 agent_message = _AgentMessage()
 goal = _Goal()
 rlm_heartbeat = _RlmHeartbeat()
 compact = _Compact()
 refine = _Refine()
-harness = _Harness()
 agent_observe = _AgentObserve()
 
 
@@ -547,6 +600,7 @@ def _install_preload() -> None:
             "rlm_heartbeat": rlm_heartbeat,
             "compact": compact,
             "refine": refine,
+            "harness": harness,
             "agent_observe": agent_observe,
             "ChildHandle": ChildHandle,
             "ChildSummary": ChildSummary,

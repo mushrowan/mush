@@ -647,7 +647,8 @@ fn slug(raw: &str, fallback: &str) -> String {
     }
 }
 
-fn now() -> String {
+#[must_use]
+pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
