@@ -55,6 +55,7 @@ impl SessionRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn plan_refinement(
     messages: Vec<mush_ai::types::Message>,
     session_id: mush_ai::types::SessionId,
@@ -63,10 +64,18 @@ pub async fn plan_refinement(
     model: Model,
     options: StreamOptions,
     request: RefineRequest,
+    session_thinking: mush_ai::types::ThinkingLevel,
 ) -> Result<Plan, String> {
     let merged = harness::load_merged(&session_id);
     mush_session::refine::plan(
-        &messages, &merged, &history, &registry, &model, &options, &request,
+        &messages,
+        &merged,
+        &history,
+        &registry,
+        &model,
+        &options,
+        &request,
+        &session_thinking,
     )
     .await
 }

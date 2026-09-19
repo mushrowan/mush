@@ -122,6 +122,28 @@ pub struct Plan {
     pub scope: Scope,
 }
 
+#[must_use]
+pub fn auxiliary_thinking(model: &Model, session: &ThinkingLevel) -> Option<ThinkingLevel> {
+    if !model.reasoning || *session == ThinkingLevel::Off {
+        return None;
+    }
+    let preferred = match session {
+        ThinkingLevel::Minimal => ThinkingLevel::Minimal,
+        _ => ThinkingLevel::Low,
+    };
+    Some(model.clamp_thinking(&preferred)).filter(|level| *level != ThinkingLevel::Off)
+}
+
+fn output_budget(model: &Model, thinking: Option<&ThinkingLevel>, cap: u64) -> TokenCount {
+    let ceiling = model.max_output_tokens.get();
+    TokenCount::new(if thinking.is_some() {
+        ceiling
+    } else {
+        cap.min(ceiling)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn plan(
     messages: &[Message],
     merged: &State,
@@ -130,6 +152,7 @@ pub async fn plan(
     model: &Model,
     options: &StreamOptions,
     request: &RefineRequest,
+    session_thinking: &ThinkingLevel,
 ) -> Result<Plan, String> {
     let id = harness::new_id();
     if let Some(target_id) = &request.rollback {
@@ -157,10 +180,9 @@ pub async fn plan(
         tools: Vec::new(),
     };
     let mut options = options.clone();
-    options.max_tokens = Some(TokenCount::new(
-        MAX_OUTPUT_TOKENS.min(model.max_output_tokens.get()),
-    ));
-    options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    let thinking = auxiliary_thinking(model, session_thinking);
+    options.max_tokens = Some(output_budget(model, thinking.as_ref(), MAX_OUTPUT_TOKENS));
+    options.thinking = thinking;
     let text = complete_text(registry, model, &context, &options).await?;
     let proposal = Proposal::parse(&text)?;
     Ok(Plan {
@@ -319,6 +341,7 @@ pub async fn review(
     options: &StreamOptions,
     reason: AutoRefineReason,
     turns_since_review: u32,
+    session_thinking: &ThinkingLevel,
 ) -> Result<AutoRefineReview, String> {
     let conversation = tail(
         &build_compaction_prompt(messages),
@@ -356,10 +379,13 @@ pub async fn review(
         tools: Vec::new(),
     };
     let mut options = options.clone();
-    options.max_tokens = Some(TokenCount::new(
-        REVIEW_MAX_OUTPUT_TOKENS.min(model.max_output_tokens.get()),
+    let thinking = auxiliary_thinking(model, session_thinking);
+    options.max_tokens = Some(output_budget(
+        model,
+        thinking.as_ref(),
+        REVIEW_MAX_OUTPUT_TOKENS,
     ));
-    options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+    options.thinking = thinking;
     let text = complete_text(registry, model, &context, &options).await?;
     AutoRefineReview::parse(&text)
 }
@@ -375,6 +401,49 @@ fn tail(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_auxiliary_thinking_level_follows_the_session_and_the_model() {
+        let mut model = mush_ai::models::all_models()
+            .into_iter()
+            .find(|model| model.reasoning)
+            .unwrap();
+        model.supported_thinking_levels = Vec::new();
+        assert_eq!(
+            auxiliary_thinking(&model, &ThinkingLevel::High),
+            Some(ThinkingLevel::Low)
+        );
+        assert_eq!(
+            auxiliary_thinking(&model, &ThinkingLevel::Minimal),
+            Some(ThinkingLevel::Minimal)
+        );
+        assert_eq!(auxiliary_thinking(&model, &ThinkingLevel::Off), None);
+
+        model.supported_thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+        assert_eq!(
+            auxiliary_thinking(&model, &ThinkingLevel::High),
+            Some(ThinkingLevel::Medium)
+        );
+
+        model.reasoning = false;
+        assert_eq!(auxiliary_thinking(&model, &ThinkingLevel::High), None);
+    }
+
+    #[test]
+    fn thinking_takes_the_whole_output_budget_and_a_plain_call_takes_the_cap() {
+        let mut model = mush_ai::models::all_models().into_iter().next().unwrap();
+        model.max_output_tokens = TokenCount::new(64_000);
+        assert_eq!(
+            output_budget(&model, Some(&ThinkingLevel::Low), MAX_OUTPUT_TOKENS).get(),
+            64_000
+        );
+        assert_eq!(
+            output_budget(&model, None, MAX_OUTPUT_TOKENS).get(),
+            MAX_OUTPUT_TOKENS
+        );
+        model.max_output_tokens = TokenCount::new(8_000);
+        assert_eq!(output_budget(&model, None, MAX_OUTPUT_TOKENS).get(), 8_000);
+    }
 
     #[test]
     fn the_prompt_carries_state_history_conversation_and_scope() {

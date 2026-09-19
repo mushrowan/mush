@@ -73,6 +73,23 @@ pub struct Model {
 
 impl Model {
     #[must_use]
+    pub fn clamp_thinking(&self, level: &ThinkingLevel) -> ThinkingLevel {
+        let available = &self.supported_thinking_levels;
+        if available.is_empty() || available.contains(level) {
+            return level.clone();
+        }
+        let Some(at) = ThinkingLevel::LADDER.iter().position(|rung| rung == level) else {
+            return available[0].clone();
+        };
+        ThinkingLevel::LADDER[at..]
+            .iter()
+            .chain(ThinkingLevel::LADDER[..at].iter().rev())
+            .find(|rung| available.contains(rung))
+            .unwrap_or(&available[0])
+            .clone()
+    }
+
+    #[must_use]
     pub fn compaction_window(&self) -> TokenCount {
         self.effective_context_window.unwrap_or(self.context_window)
     }
@@ -114,6 +131,15 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    pub const LADDER: [Self; 6] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::Xhigh,
+    ];
+
     #[must_use]
     pub fn normalize_visible(&self) -> Self {
         match self {

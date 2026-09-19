@@ -1012,6 +1012,7 @@ impl InProcessConnection {
         let session_id = self.runtime.session_id.clone();
         let registry = self.registry.clone();
         let rollback = request.rollback.is_some();
+        let thinking = self.runtime.thinking_level.clone();
         self.refine = Some(tokio::spawn(crate::refine::plan_refinement(
             messages,
             session_id,
@@ -1020,6 +1021,7 @@ impl InProcessConnection {
             target.model,
             target.options,
             request,
+            thinking,
         )));
         self.queued
             .push_back(ClientEvent::Session(SessionEvent::Status(if rollback {
@@ -1034,6 +1036,7 @@ impl InProcessConnection {
         use mush_session::refine::AutoRefineReason;
         let settings = self.config.auto_refine;
         if !settings.enabled
+            || self.runtime.rlm_depth > 0
             || !self.runtime.harness_enabled()
             || self.turn_active()
             || self.refine.is_some()
@@ -1066,6 +1069,7 @@ impl InProcessConnection {
         let history = self.runtime.refinement_history();
         let merged = mush_session::harness::load_merged(&self.runtime.session_id);
         let registry = self.registry.clone();
+        let thinking = self.runtime.thinking_level.clone();
         self.auto_review = Some((
             reason,
             tokio::spawn(async move {
@@ -1078,6 +1082,7 @@ impl InProcessConnection {
                     &target.options,
                     reason,
                     turns,
+                    &thinking,
                 )
                 .await
             }),
@@ -2129,6 +2134,37 @@ mod tests {
             "{}",
             review.text()
         );
+    }
+
+    #[tokio::test]
+    async fn a_subagent_never_runs_the_auto_refine_review() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let (mut connection, requests) =
+            connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+        connection.runtime.rlm_depth = 1;
+        connection.config.auto_refine = mush_session::refine::AutoRefineSettings {
+            enabled: true,
+            turn_interval: 1,
+            compact: true,
+            cooldown_ms: 0,
+        };
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+        connection.start_pending().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        while connection.try_next_event().is_some() {}
+
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(connection.auto_review.is_none());
     }
 
     #[tokio::test]
