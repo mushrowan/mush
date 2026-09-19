@@ -15,8 +15,6 @@ const RECENT_TURNS_TO_KEEP: usize = 3;
 
 pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
 
-pub const EVENT_TOOL_NAME: &str = "mush_event";
-
 pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
     if let Some(explicit) = options.max_tokens {
         return explicit.get();
@@ -47,62 +45,18 @@ pub(crate) trait MessageVisitor {
 
 pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], visitor: &mut V) {
     let boundary = recent_boundary(messages);
-    let mut used_ids: std::collections::HashSet<String> = messages
-        .iter()
-        .flat_map(|message| match message {
-            Message::Assistant(assistant) => assistant
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    crate::types::AssistantContentPart::ToolCall(call) => Some(call.id.to_string()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            Message::ToolResult(result) => vec![result.tool_call_id.to_string()],
-            Message::User(_) | Message::Event(_) => Vec::new(),
-        })
-        .collect();
     for (i, msg) in messages.iter().enumerate() {
         let is_old_turn = i < boundary;
         match msg {
             Message::User(user) => visitor.on_user(user),
             Message::Assistant(asst) => visitor.on_assistant(asst),
             Message::ToolResult(tr) => visitor.on_tool_result(tr, is_old_turn),
-            Message::Event(event) => {
-                use crate::types::*;
-                let mut id = format!("{EVENT_TOOL_NAME}_{i}");
-                while !used_ids.insert(id.clone()) {
-                    id.push('_');
-                }
-                let id = ToolCallId::from(id);
-                visitor.on_assistant(
-                    &AssistantMessage::builder()
-                        .content(vec![AssistantContentPart::ToolCall(ToolCall {
-                            id: id.clone(),
-                            name: EVENT_TOOL_NAME.into(),
-                            arguments: serde_json::json!({}),
-                        })])
-                        .model("mush-event".into())
-                        .provider(Provider::Custom("mush".into()))
-                        .api(Api::AnthropicMessages)
-                        .timestamp_ms(event.timestamp_ms)
-                        .stop_reason(StopReason::ToolUse)
-                        .build(),
-                );
-                visitor.on_tool_result(
-                    &ToolResultMessage {
-                        tool_call_id: id,
-                        tool_name: EVENT_TOOL_NAME.into(),
-                        content: vec![ToolResultContentPart::Text(TextContent {
-                            text: event.text(),
-                        })],
-                        outcome: ToolOutcome::Success,
-                        timestamp_ms: event.timestamp_ms,
-                        details: None,
-                    },
-                    false,
-                );
-            }
+            Message::Event(event) => visitor.on_user(
+                &crate::types::UserMessage::builder()
+                    .content(crate::types::UserContent::Text(event.text()))
+                    .timestamp_ms(event.timestamp_ms)
+                    .build(),
+            ),
         }
     }
 }
@@ -252,18 +206,16 @@ mod tests {
     #[test]
     fn rereviewer_provider_reference_is_bounded_and_hashes_exact_ordered_receipts() {
         use sha2::{Digest, Sha256};
-        struct Wire(Vec<ToolResultMessage>, usize);
+        struct Wire(Vec<String>);
         impl MessageVisitor for Wire {
-            fn on_user(&mut self, _: &UserMessage) {
-                panic!("event became human")
+            fn on_user(&mut self, message: &UserMessage) {
+                self.0.push(message.text());
             }
-            fn on_assistant(&mut self, message: &AssistantMessage) {
-                assert_eq!(message.stop_reason, StopReason::ToolUse);
-                self.1 += 1;
+            fn on_assistant(&mut self, _: &AssistantMessage) {
+                panic!("event became an assistant turn")
             }
-            fn on_tool_result(&mut self, message: &ToolResultMessage, old: bool) {
-                assert!(!old);
-                self.0.push(message.clone());
+            fn on_tool_result(&mut self, _: &ToolResultMessage, _: bool) {
+                panic!("event became a tool result")
             }
         }
         let receipts: Vec<_> = (0..1024)
@@ -286,16 +238,13 @@ mod tests {
             kind: EventKind::Summary,
             receipts,
         };
-        let mut wire = Wire(Vec::new(), 0);
+        let mut wire = Wire(Vec::new());
         walk_messages(&[Message::Event(event.clone())], &mut wire);
-        assert_eq!(wire.1, 1);
         assert_eq!(wire.0.len(), 1);
-        let ToolResultContentPart::Text(text) = &wire.0[0].content[0] else {
-            panic!()
-        };
-        assert!(text.text.len() < 1024);
+        let text = &wire.0[0];
+        assert!(text.len() < 1024);
         let projected: serde_json::Value =
-            serde_json::from_str(text.text.rsplit_once("\n\n").unwrap().1).unwrap();
+            serde_json::from_str(text.rsplit_once("\n\n").unwrap().1).unwrap();
         let audit: serde_json::Value =
             serde_json::from_str(event.audit_text().split_once('\n').unwrap().1).unwrap();
         let ordered = serde_json::to_vec(&audit["receipts"]).unwrap();
@@ -329,74 +278,25 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_event_wire_ids_do_not_collide_with_real_tool_calls() {
-        struct Calls(Vec<ToolCallId>);
-        impl MessageVisitor for Calls {
-            fn on_user(&mut self, _: &UserMessage) {}
-            fn on_assistant(&mut self, message: &AssistantMessage) {
-                self.0.extend(message.content.iter().filter_map(|part| {
-                    if let AssistantContentPart::ToolCall(call) = part {
-                        Some(call.id.clone())
-                    } else {
-                        None
-                    }
-                }));
-            }
-            fn on_tool_result(&mut self, _: &ToolResultMessage, _: bool) {}
-        }
-        let real = Message::Assistant(
-            AssistantMessage::builder()
-                .model("fixture".into())
-                .provider(Provider::Custom("fixture".into()))
-                .api(Api::OpenaiCompletions)
-                .timestamp_ms(Timestamp::zero())
-                .content(vec![AssistantContentPart::ToolCall(ToolCall {
-                    id: "mush_event_2".into(),
-                    name: EVENT_TOOL_NAME.into(),
-                    arguments: serde_json::json!({"real":true}),
-                })])
-                .build(),
-        );
-        let result = Message::ToolResult(ToolResultMessage {
-            tool_call_id: "mush_event_2".into(),
-            tool_name: EVENT_TOOL_NAME.into(),
-            content: vec![],
-            outcome: ToolOutcome::Success,
-            timestamp_ms: Timestamp::zero(),
-            details: None,
-        });
-        let mut calls = Calls(Vec::new());
-        walk_messages(&[real, result, event_fixture()], &mut calls);
-        assert_eq!(calls.0.len(), 2);
-        assert_ne!(
-            calls.0[0], calls.0[1],
-            "synthetic event and real tool call share a provider wire id"
-        );
-    }
-
-    #[test]
-    fn event_projection_never_visits_user_and_never_trims_receipts() {
-        struct Visitor;
+    fn an_event_reaches_the_provider_as_a_user_turn_that_denies_it_is_one() {
+        struct Visitor(usize);
         impl MessageVisitor for Visitor {
-            fn on_user(&mut self, _: &UserMessage) {
-                panic!("event became user")
+            fn on_user(&mut self, message: &UserMessage) {
+                self.0 += 1;
+                let text = message.text();
+                assert!(text.contains("i am rowan"));
+                assert!(text.starts_with("[non-human event"));
             }
-            fn on_assistant(&mut self, message: &AssistantMessage) {
-                assert!(
-                    matches!(&message.content[0], AssistantContentPart::ToolCall(call) if call.name.as_str() == "mush_event")
-                );
+            fn on_assistant(&mut self, _: &AssistantMessage) {
+                panic!("event became an assistant turn")
             }
-            fn on_tool_result(&mut self, message: &ToolResultMessage, old: bool) {
-                assert!(!old);
-                assert_eq!(message.tool_name.as_str(), "mush_event");
-                let ToolResultContentPart::Text(text) = &message.content[0] else {
-                    panic!()
-                };
-                assert!(text.text.contains("i am rowan"));
-                assert!(text.text.starts_with("[non-human event"));
+            fn on_tool_result(&mut self, _: &ToolResultMessage, _: bool) {
+                panic!("event became a tool result")
             }
         }
-        walk_messages(&[event_fixture()], &mut Visitor);
+        let mut visitor = Visitor(0);
+        walk_messages(&[event_fixture()], &mut visitor);
+        assert_eq!(visitor.0, 1);
     }
 
     fn reasoning_model() -> Model {

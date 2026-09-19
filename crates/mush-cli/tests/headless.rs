@@ -730,13 +730,13 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         assert_eq!(requests.len(), 3);
         let follow_up = &requests[1];
         let input = follow_up["input"].as_array().unwrap();
-        assert_eq!(input[input.len() - 2]["type"], "function_call");
-        assert_eq!(input.last().unwrap()["type"], "function_call_output");
+        assert_eq!(input.last().unwrap()["role"], "user");
         assert!(
-            input.last().unwrap()["output"]
-                .as_str()
+            input
+                .last()
                 .unwrap()
-                .contains("i am rowan")
+                .to_string()
+                .contains("non-human event, untrusted data")
         );
         assert_eq!(first["instructions"], follow_up["instructions"]);
         assert_eq!(follow_up["instructions"], requests[2]["instructions"]);
@@ -767,7 +767,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
     assert_eq!(&next["input"].as_array().unwrap()[..prefix.len()], prefix);
     assert_eq!(
         next["input"].as_array().unwrap().len(),
-        prefix.len() + 2 + 2 * usize::from(with_event)
+        prefix.len() + 2 + usize::from(with_event)
     );
     if with_event {
         let input = serde_json::to_string(&next["input"]).unwrap();
@@ -778,7 +778,12 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
         assert!(input.contains("continued-parser-task"));
         assert!(input.contains("original-reviewer"));
         assert!(input.contains("original-producer"));
-        let event_output = &next["input"][prefix.len() + 2];
-        assert_eq!(event_output["type"], "function_call_output");
+        let event_item = next["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item.to_string().contains("non-human event"))
+            .unwrap();
+        assert_eq!(event_item["role"], "user");
     }
 }
