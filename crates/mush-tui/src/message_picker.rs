@@ -140,35 +140,33 @@ pub fn user_message_items(messages: &[mush_ai::types::Message]) -> Vec<MessagePi
 }
 
 #[must_use]
-pub fn tree_items(tree: &mush_session::tree::SessionTree) -> Vec<MessagePickerItem> {
-    use mush_session::tree::EntryKind;
-    let mut index = 0;
-    tree.rows()
-        .into_iter()
-        .filter_map(|row| {
-            let (kind, text) = match &row.entry.kind {
-                EntryKind::Message {
-                    message: mush_ai::types::Message::User(user),
-                } => (MessagePickerKind::User, user.text()),
-                EntryKind::BranchSummary { summary, .. } => {
-                    (MessagePickerKind::BranchSummary, summary.clone())
-                }
-                EntryKind::Compaction { summary, .. } => {
-                    (MessagePickerKind::Compaction, summary.clone())
-                }
-                EntryKind::Message { .. } => return None,
-            };
-            index += 1;
-            Some(MessagePickerItem {
-                index,
-                text: one_line(&text),
-                kind,
-                depth: row.depth,
-                on_branch: row.on_branch,
-                fork: row.is_fork,
-                entry_id: Some(row.entry.id.clone()),
-            })
+pub fn tree_items(rows: &[mush_session::tree::TreeSummaryRow]) -> Vec<MessagePickerItem> {
+    use mush_session::tree::SummaryKind;
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| MessagePickerItem {
+            index: index + 1,
+            text: one_line(&row.preview),
+            kind: match row.kind {
+                SummaryKind::User => MessagePickerKind::User,
+                SummaryKind::BranchSummary => MessagePickerKind::BranchSummary,
+                SummaryKind::Compaction => MessagePickerKind::Compaction,
+            },
+            depth: row.depth,
+            on_branch: row.on_branch,
+            fork: row.is_fork,
+            entry_id: Some(row.id.clone()),
         })
+        .collect()
+}
+
+#[must_use]
+pub fn branch_items(rows: &[mush_session::tree::TreeSummaryRow]) -> Vec<MessagePickerItem> {
+    use mush_session::tree::SummaryKind;
+    rows.iter()
+        .filter(|row| row.on_branch && row.kind == SummaryKind::User)
+        .enumerate()
+        .map(|(index, row)| MessagePickerItem::numbered(index + 1, one_line(&row.preview)))
         .collect()
 }
 
@@ -228,7 +226,7 @@ mod tests {
         tree.branch(&q0);
         tree.append_message(user("q2"));
 
-        let items = tree_items(&tree);
+        let items = tree_items(&tree.summary());
         let shape: Vec<(usize, &str, usize, bool)> = items
             .iter()
             .map(|item| (item.index, item.text.as_str(), item.depth, item.on_branch))

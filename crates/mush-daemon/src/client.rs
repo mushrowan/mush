@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use mush_ai::types::Message;
 use mush_runtime::{AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState};
-use mush_session::tree::SessionTree;
+use mush_session::tree::TreeSummaryRow;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
@@ -428,11 +428,23 @@ impl AgentConnection for DaemonConnection {
         }
     }
 
-    async fn tree(&mut self) -> SessionTree {
+    async fn tree_summary(&mut self) -> Vec<TreeSummaryRow> {
         let id = self.next_request_id();
-        match self.request(Request::Tree { id }).await {
-            Ok(Reply::Tree { tree }) => tree,
-            _ => SessionTree::default(),
+        match self.request(Request::TreeSummary { id }).await {
+            Ok(Reply::TreeSummary { rows }) => rows,
+            _ => Vec::new(),
+        }
+    }
+
+    async fn navigation_impact(&mut self, entry_id: &mush_session::tree::EntryId) -> usize {
+        let id = self.next_request_id();
+        let request = Request::NavigationImpact {
+            id,
+            entry_id: entry_id.clone(),
+        };
+        match self.request(request).await {
+            Ok(Reply::NavigationImpact { abandons }) => abandons,
+            _ => 0,
         }
     }
 

@@ -123,7 +123,7 @@ async fn a_session_command_answers_with_its_events() {
     )));
     assert_ne!(client.state().session_id, before);
     assert_eq!(client.state().context_len, 0);
-    assert!(client.tree().await.is_empty());
+    assert!(client.tree_summary().await.is_empty());
 }
 
 #[tokio::test]

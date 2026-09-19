@@ -169,7 +169,8 @@ pub trait AgentConnection: Send + std::any::Any {
     fn closed(&self) -> bool;
     async fn transcript(&mut self) -> Vec<Message>;
     async fn history(&mut self) -> Vec<Message>;
-    async fn tree(&mut self) -> mush_session::tree::SessionTree;
+    async fn tree_summary(&mut self) -> Vec<mush_session::tree::TreeSummaryRow>;
+    async fn navigation_impact(&mut self, entry_id: &mush_session::tree::EntryId) -> usize;
     async fn system_prompt(&mut self) -> Option<String>;
 }
 
@@ -1767,8 +1768,17 @@ impl AgentConnection for InProcessConnection {
         self.runtime.conversation.display_history()
     }
 
-    async fn tree(&mut self) -> mush_session::tree::SessionTree {
-        self.runtime.conversation.tree().clone()
+    async fn tree_summary(&mut self) -> Vec<mush_session::tree::TreeSummaryRow> {
+        self.runtime.conversation.tree().summary()
+    }
+
+    async fn navigation_impact(&mut self, entry_id: &mush_session::tree::EntryId) -> usize {
+        let tree = self.runtime.conversation.tree();
+        let Some(target) = tree.by_id(entry_id) else {
+            return 0;
+        };
+        tree.abandoned_by_moving_to(crate::commands::navigation_leaf(tree, target).as_ref())
+            .len()
     }
 
     async fn system_prompt(&mut self) -> Option<String> {

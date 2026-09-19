@@ -456,14 +456,7 @@ pub(super) async fn handle_slash_action(
                 run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await;
         }
         SlashAction::NavigateTree { entry_id } => {
-            let tree = session.connection.tree().await;
-            let leaves_something_behind = tree.by_id(&entry_id).is_some_and(|target| {
-                !tree
-                    .abandoned_by_moving_to(
-                        mush_runtime::commands::navigation_leaf(&tree, target).as_ref(),
-                    )
-                    .is_empty()
-            });
+            let leaves_something_behind = session.connection.navigation_impact(&entry_id).await > 0;
             if leaves_something_behind && !tui_config.branch_summary_skip_prompt {
                 session.app.interaction.branch_summary_ask = Some(entry_id);
                 session.app.interaction.mode = crate::app::AppMode::ToolConfirm;

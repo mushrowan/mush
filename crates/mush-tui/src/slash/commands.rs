@@ -153,7 +153,7 @@ pub async fn handle(
         SlashAction::Reload => None,
         SlashAction::RefreshModels => None,
         SlashAction::Tree => {
-            let items = crate::message_picker::tree_items(&connection.tree().await);
+            let items = crate::message_picker::tree_items(&connection.tree_summary().await);
             open_message_picker(
                 app,
                 crate::message_picker::MessagePickerPurpose::Tree,
@@ -171,17 +171,7 @@ pub async fn handle(
             None
         }
         SlashAction::Branch { index: None } => {
-            let tree = connection.tree().await;
-            let items = crate::message_picker::user_message_items(
-                &tree
-                    .user_messages_in_branch()
-                    .into_iter()
-                    .filter_map(|entry| match &entry.kind {
-                        mush_session::tree::EntryKind::Message { message } => Some(message.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-            );
+            let items = crate::message_picker::branch_items(&connection.tree_summary().await);
             open_message_picker(
                 app,
                 crate::message_picker::MessagePickerPurpose::Branch,

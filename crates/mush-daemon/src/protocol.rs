@@ -1,6 +1,6 @@
 use mush_ai::types::Message;
 use mush_runtime::{ClientCommand, ClientEvent, ConnectionError, ConnectionState};
-use mush_session::tree::SessionTree;
+use mush_session::tree::TreeSummaryRow;
 use serde::{Deserialize, Serialize};
 
 pub type RequestId = u64;
@@ -44,8 +44,12 @@ pub enum Request {
     History {
         id: RequestId,
     },
-    Tree {
+    TreeSummary {
         id: RequestId,
+    },
+    NavigationImpact {
+        id: RequestId,
+        entry_id: mush_session::tree::EntryId,
     },
     SystemPrompt {
         id: RequestId,
@@ -60,7 +64,8 @@ impl Request {
             | Self::Command { id, .. }
             | Self::Transcript { id }
             | Self::History { id }
-            | Self::Tree { id }
+            | Self::TreeSummary { id }
+            | Self::NavigationImpact { id, .. }
             | Self::SystemPrompt { id } => *id,
         }
     }
@@ -73,7 +78,8 @@ pub enum Reply {
     Events { events: Vec<ClientEvent> },
     Transcript { messages: Vec<Message> },
     History { messages: Vec<Message> },
-    Tree { tree: SessionTree },
+    TreeSummary { rows: Vec<TreeSummaryRow> },
+    NavigationImpact { abandons: usize },
     SystemPrompt { prompt: Option<String> },
 }
 

@@ -541,8 +541,11 @@ async fn handle(
         Request::History { .. } => Ok(Reply::History {
             messages: connection.history().await,
         }),
-        Request::Tree { .. } => Ok(Reply::Tree {
-            tree: connection.tree().await,
+        Request::TreeSummary { .. } => Ok(Reply::TreeSummary {
+            rows: connection.tree_summary().await,
+        }),
+        Request::NavigationImpact { entry_id, .. } => Ok(Reply::NavigationImpact {
+            abandons: connection.navigation_impact(&entry_id).await,
         }),
         Request::SystemPrompt { .. } => Ok(Reply::SystemPrompt {
             prompt: connection.system_prompt().await,

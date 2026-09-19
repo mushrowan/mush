@@ -69,6 +69,34 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
+const PREVIEW: usize = 400;
+
+fn clip(text: &str, width: usize) -> String {
+    match text.char_indices().nth(width) {
+        Some((end, _)) => text[..end].to_string(),
+        None => text.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryKind {
+    User,
+    BranchSummary,
+    Compaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeSummaryRow {
+    pub id: EntryId,
+    pub kind: SummaryKind,
+    pub preview: String,
+    pub depth: usize,
+    pub on_branch: bool,
+    pub is_fork: bool,
+    pub is_leaf: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct TreeRow<'a> {
     pub entry: &'a SessionEntry,
@@ -443,6 +471,36 @@ impl SessionTree {
             current = entry.parent_id.as_ref();
         }
         None
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> Vec<TreeSummaryRow> {
+        self.rows()
+            .into_iter()
+            .filter_map(|row| {
+                let (kind, text) = match &row.entry.kind {
+                    EntryKind::Message {
+                        message: Message::User(user),
+                    } => (SummaryKind::User, user.text()),
+                    EntryKind::BranchSummary { summary, .. } => {
+                        (SummaryKind::BranchSummary, summary.clone())
+                    }
+                    EntryKind::Compaction { summary, .. } => {
+                        (SummaryKind::Compaction, summary.clone())
+                    }
+                    EntryKind::Message { .. } => return None,
+                };
+                Some(TreeSummaryRow {
+                    id: row.entry.id.clone(),
+                    kind,
+                    preview: clip(&text, PREVIEW),
+                    depth: row.depth,
+                    on_branch: row.on_branch,
+                    is_fork: row.is_fork,
+                    is_leaf: row.is_leaf,
+                })
+            })
+            .collect()
     }
 
     pub fn rows(&self) -> Vec<TreeRow<'_>> {
