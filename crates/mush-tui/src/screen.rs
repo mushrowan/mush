@@ -304,7 +304,7 @@ impl Viewport {
     }
 
     fn max_scroll(&self) -> usize {
-        self.total.get().saturating_sub(self.height.get())
+        self.total.get().saturating_sub(self.page())
     }
 }
 
@@ -417,6 +417,17 @@ mod tests {
 
     fn lines(widths: &[usize]) -> Vec<Line<'static>> {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
+    }
+
+    #[test]
+    fn a_zero_height_area_leaves_the_cursor_on_the_last_line() {
+        let viewport = Viewport::default();
+        viewport.place(&lines(&[10; 200]), log_area(20));
+
+        let window = viewport.place(&lines(&[10; 200]), log_area(0));
+
+        assert!(window.is_empty());
+        assert_eq!(viewport.cursor().line, 199);
     }
 
     #[test]
