@@ -138,9 +138,38 @@ fn push_keyboard_enhancement(out: &mut impl Write) {
     }
 }
 
+static CAUGHT_RENDER_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+thread_local! {
+    static RENDERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn catch_render_panic<T>(draw: impl FnOnce() -> T) -> Result<T, String> {
+    RENDERING.with(|rendering| rendering.set(true));
+    let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(draw));
+    RENDERING.with(|rendering| rendering.set(false));
+    drawn.map_err(|_| {
+        CAUGHT_RENDER_PANIC
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| "a render panicked".into())
+    })
+}
+
 pub(super) fn install_panic_cleanup_hook() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if RENDERING.with(std::cell::Cell::get) {
+            let where_ = info
+                .location()
+                .map_or_else(String::new, |at| format!(" at {at}"));
+            *CAUGHT_RENDER_PANIC
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(format!("{}{where_}", panic_payload_str(info)));
+            return;
+        }
         restore_terminal_state();
         super::diag::verify_terminal_restored(vec![format!(
             "exit path: panic hook, payload: {}",
@@ -269,6 +298,21 @@ fn set_termios(fd: libc::c_int, termios: &libc::termios) -> io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_draw_is_caught_and_reported_once() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_cleanup_hook();
+
+        let report = catch_render_panic(|| panic!("widget fell over")).unwrap_err();
+
+        std::panic::set_hook(previous);
+        assert!(report.contains("widget fell over"), "{report}");
+        assert!(report.contains("terminal.rs"), "{report}");
+        assert!(!RENDERING.with(std::cell::Cell::get));
+        assert_eq!(catch_render_panic(|| 7), Ok(7));
+    }
 
     fn quiet_policy() -> TerminalPolicy {
         TerminalPolicy {

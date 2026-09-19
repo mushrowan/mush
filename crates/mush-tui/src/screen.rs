@@ -323,6 +323,7 @@ fn redraw_stitched_row(row: Rect, buf: &mut Buffer) {
 #[derive(Debug, Default)]
 pub struct Screen {
     pub(crate) title: Option<String>,
+    pub(crate) render_panic: Option<String>,
 }
 
 impl Screen {

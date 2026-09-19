@@ -33,9 +33,24 @@ pub(super) fn draw_panes(
             .caret(session.app.interaction.focus),
     );
 
-    terminal.draw(|frame| {
-        draw_frame(frame, screen, &mut session.app, settings);
-    })?;
+    let drawn = super::terminal::catch_render_panic(|| {
+        terminal.draw(|frame| {
+            draw_frame(frame, screen, &mut session.app, settings);
+        })
+    });
+    match drawn {
+        Ok(result) => result?,
+        Err(report) => {
+            tracing::error!(%report, "render panicked");
+            if screen.render_panic.as_deref() != Some(report.as_str()) {
+                session
+                    .app
+                    .push_system_message(format!("a render panicked: {report}"));
+                screen.render_panic = Some(report);
+            }
+            return Ok(());
+        }
+    };
     Ok(())
 }
 
