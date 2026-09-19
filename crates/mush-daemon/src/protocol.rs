@@ -139,6 +139,7 @@ mod tests {
             session_id: SessionId::new(),
             title: None,
             model_id: "m".into(),
+            subagent_model: None,
             thinking_level: ThinkingLevel::Off,
             context_tokens: TokenCount::ZERO,
             context_len: 0,

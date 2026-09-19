@@ -74,6 +74,16 @@ impl App {
         self.open_model_picker_overlay_inner(false);
     }
 
+    pub fn open_subagent_model_picker(&mut self) {
+        self.open_model_picker_overlay_inner(false);
+        if let Some(picker) = self.interaction.model_picker.as_mut() {
+            picker.purpose = crate::model_picker::ModelPickerPurpose::Subagent;
+            picker.tab = crate::model_picker::ModelPickerTab::All;
+            picker.models.insert(0, crate::model_picker::inherit_row());
+            picker.selected = 0;
+        }
+    }
+
     pub fn open_model_picker_overlay_all(&mut self) {
         self.open_model_picker_overlay_inner(true);
     }

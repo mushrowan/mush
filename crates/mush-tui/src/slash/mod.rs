@@ -87,6 +87,10 @@ pub enum SlashAction {
         model_id: Option<String>,
         show_all: bool,
     },
+    SubagentModel {
+        model_id: Option<String>,
+        unset: bool,
+    },
     Sessions,
     Resume {
         session_id: SessionId,
@@ -558,6 +562,13 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "tree" => Ok(SlashAction::Tree),
         "compact" => parse_compact_focus(args).map(|focus| SlashAction::Compact { focus }),
         "refine" => parse_refine(args).map(SlashAction::Refine),
+        "subagent-model" | "sub-model" => {
+            let unset = matches!(args, "unset" | "none" | "default" | "inherit");
+            Ok(SlashAction::SubagentModel {
+                model_id: (!args.is_empty() && !unset).then(|| args.to_string()),
+                unset,
+            })
+        }
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
             model_id: (!args.is_empty()).then(|| args.to_string()),
         }),
@@ -915,6 +926,40 @@ mod tests {
     #[test]
     fn parse_compact_rejects_unknown_flag() {
         assert!(parse("/compact --frobnicate 10k").is_err());
+    }
+
+    #[test]
+    fn parse_subagent_model() {
+        assert_eq!(
+            parse("/subagent-model").unwrap(),
+            SlashAction::SubagentModel {
+                model_id: None,
+                unset: false
+            }
+        );
+        assert_eq!(
+            parse("/subagent-model claude-haiku-4-5").unwrap(),
+            SlashAction::SubagentModel {
+                model_id: Some("claude-haiku-4-5".into()),
+                unset: false
+            }
+        );
+        for word in ["unset", "none", "default", "inherit"] {
+            assert_eq!(
+                parse(&format!("/subagent-model {word}")).unwrap(),
+                SlashAction::SubagentModel {
+                    model_id: None,
+                    unset: true
+                }
+            );
+        }
+        assert_eq!(
+            parse("/sub-model unset").unwrap(),
+            SlashAction::SubagentModel {
+                model_id: None,
+                unset: true
+            }
+        );
     }
 
     #[test]

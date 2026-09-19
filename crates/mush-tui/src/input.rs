@@ -1327,13 +1327,20 @@ fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .matches_in(KeyScope::ModelPicker, Action::Confirm, key) =>
         {
             let id = app.selected_model_id()?;
-            let show_all = app
-                .interaction
-                .model_picker
-                .as_ref()
-                .map(|p| p.show_all)
-                .unwrap_or(false);
+            let picker = app.interaction.model_picker.as_ref();
+            let show_all = picker.map(|p| p.show_all).unwrap_or(false);
+            let subagent = picker
+                .is_some_and(|p| p.purpose == crate::model_picker::ModelPickerPurpose::Subagent);
             app.close_model_picker();
+            if subagent {
+                let unset = id == crate::model_picker::INHERIT_ID;
+                return Some(AppEvent::SlashCommand {
+                    action: crate::slash::SlashAction::SubagentModel {
+                        model_id: (!unset).then_some(id),
+                        unset,
+                    },
+                });
+            }
             Some(AppEvent::SlashCommand {
                 action: crate::slash::SlashAction::Model {
                     model_id: Some(id),

@@ -292,6 +292,7 @@ impl SessionRuntime {
             panes: Vec::new(),
             system_prompt: self.system_prompt.clone(),
             parent: self.parent.clone(),
+            subagent_model: self.subagent_model.clone(),
         }
     }
 

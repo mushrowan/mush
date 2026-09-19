@@ -37,6 +37,8 @@ pub struct WorkerConfig {
     pub autonomous: Option<Arc<crate::autonomous::Autonomous>>,
     pub host_commands: Option<Arc<crate::connection::HostCommands>>,
     pub recovery_notice: Option<String>,
+    pub models: crate::models::ModelSelection,
+    pub subagent_model: Option<String>,
 }
 
 impl WorkerConfig {
@@ -68,6 +70,8 @@ impl WorkerConfig {
             autonomous: None,
             host_commands: None,
             recovery_notice: None,
+            models: crate::models::ModelSelection::default(),
+            subagent_model: None,
         }
     }
 
@@ -79,6 +83,10 @@ impl WorkerConfig {
         runtime.session_id = self.session_id;
         runtime.title = self.title;
         runtime.model_id = self.turn.default_model.id.to_string();
+        self.models.set_current(runtime.model_id.clone());
+        self.models.set_subagent(self.subagent_model.clone());
+        runtime.subagent_model = self.subagent_model;
+        runtime.models = self.models;
         runtime.system_prompt = self.system_prompt;
         runtime.rlm_depth = self.rlm_depth;
         runtime.rlm_max_depth = self.rlm_max_depth;

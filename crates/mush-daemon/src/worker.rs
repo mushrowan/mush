@@ -562,6 +562,7 @@ mod tests {
             session_id: mush_ai::types::SessionId::new(),
             title: None,
             model_id: "m".into(),
+            subagent_model: None,
             thinking_level: mush_ai::types::ThinkingLevel::Off,
             context_tokens: mush_ai::types::TokenCount::ZERO,
             context_len: 0,

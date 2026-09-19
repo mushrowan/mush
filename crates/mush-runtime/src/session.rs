@@ -229,6 +229,8 @@ pub struct SessionRuntime {
     pub context_tokens: mush_ai::types::TokenCount,
     pub lease: Option<mush_session::SessionLease>,
     pub harness_notice: Option<String>,
+    pub models: crate::models::ModelSelection,
+    pub subagent_model: Option<String>,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -261,6 +263,8 @@ impl SessionRuntime {
             context_tokens: mush_ai::types::TokenCount::ZERO,
             lease: None,
             harness_notice: None,
+            models: crate::models::ModelSelection::default(),
+            subagent_model: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }

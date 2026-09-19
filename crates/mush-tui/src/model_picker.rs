@@ -9,6 +9,29 @@ pub enum ModelPickerTab {
     Favourites,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelPickerPurpose {
+    #[default]
+    Session,
+    Subagent,
+}
+
+pub const INHERIT_ID: &str = "";
+
+#[must_use]
+pub fn inherit_row() -> crate::slash_menu::ModelCompletion {
+    crate::slash_menu::ModelCompletion {
+        id: INHERIT_ID.to_string(),
+        name: "inherit the model this session is on".into(),
+        provider: "unset".into(),
+        stale: false,
+        description: Some("spawns follow the parent, changing when you change model".into()),
+        speed_tiers: Vec::new(),
+        priority: i32::MAX,
+        visibility: None,
+    }
+}
+
 #[derive(Debug)]
 pub struct ModelPickerState {
     pub models: Vec<ModelCompletion>,
@@ -20,6 +43,7 @@ pub struct ModelPickerState {
     pub toast: Option<String>,
     pub confirm_delete: Option<DeleteConfirm>,
     pub show_all: bool,
+    pub purpose: ModelPickerPurpose,
     matcher: RefCell<FuzzyFilter>,
 }
 
@@ -40,6 +64,7 @@ impl ModelPickerState {
             models,
             favourite_models,
             favourites_locked,
+            purpose: ModelPickerPurpose::default(),
             tab,
             filter: String::new(),
             selected: 0,

@@ -1200,6 +1200,7 @@ struct ChildSeed {
     saver: Option<mush_runtime::SessionSaver>,
     rlm_max_depth: u32,
     subagent_model: Option<String>,
+    models: mush_runtime::ModelSelection,
 }
 
 fn turn_config(
@@ -1232,10 +1233,15 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
         Box::pin(async move {
-            let model = match spec.model.as_deref().or(seed.subagent_model.as_deref()) {
-                Some(id) => mush_ai::discovery::resolve_model_by_id(id)
+            let chosen = seed
+                .models
+                .for_child(spec.model.as_deref())
+                .or_else(|| seed.subagent_model.clone());
+            let model = match chosen {
+                Some(id) => mush_ai::discovery::resolve_model_by_id(&id)
                     .ok_or_else(|| format!("unknown model {id}"))?,
-                None => seed.model.clone(),
+                None => mush_ai::discovery::resolve_model_by_id(&seed.models.current())
+                    .unwrap_or_else(|| seed.model.clone()),
             };
             let mut options = seed.options.clone();
             if let Some(thinking) = &spec.thinking {
@@ -1327,7 +1333,12 @@ fn worker_config(
     kernel_signals: mush_runtime::KernelSignals,
 ) -> mush_runtime::WorkerConfig {
     let session = &opened.session;
+    let models = mush_runtime::ModelSelection::new(
+        setup.client.model.id.to_string(),
+        session.meta.subagent_model.clone(),
+    );
     let seed = ChildSeed {
+        models: models.clone(),
         model: setup.client.model.clone(),
         options: setup.client.options.clone(),
         max_turns: setup.max_turns,
@@ -1406,6 +1417,8 @@ fn worker_config(
     };
     worker.agent_card = Some(agent_card(setup));
     worker.kernel_signals = Some(kernel_signals);
+    worker.models = models;
+    worker.subagent_model = session.meta.subagent_model.clone();
     let role = setup::RlmRole {
         depth: worker.rlm_depth,
         max_depth: worker.rlm_max_depth,
@@ -1645,6 +1658,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.conversation = snapshot.primary;
     session.system_prompt = snapshot.system_prompt;
     session.meta.parent = snapshot.parent;
+    session.meta.subagent_model = snapshot.subagent_model;
     session.meta.message_count = session.conversation.context_len();
     session.panes = snapshot
         .panes
@@ -1725,6 +1739,7 @@ mod tests {
             panes: Vec::new(),
             system_prompt: None,
             parent: None,
+            subagent_model: None,
         }
     }
 

@@ -45,6 +45,7 @@ pub enum ClientCommand {
         allow: bool,
     },
     SetModel(String),
+    SetSubagentModel(Option<String>),
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
     SetSystemPrompt(Option<String>),
@@ -121,6 +122,8 @@ pub struct ConnectionState {
     pub session_id: mush_ai::types::SessionId,
     pub title: Option<String>,
     pub model_id: String,
+    #[serde(default)]
+    pub subagent_model: Option<String>,
     pub thinking_level: ThinkingLevel,
     pub context_tokens: TokenCount,
     pub context_len: usize,
@@ -1658,7 +1661,15 @@ impl AgentConnection for InProcessConnection {
                 self.queued
                     .push_back(ClientEvent::GoalChanged(updated.map(Box::new)));
             }
-            ClientCommand::SetModel(id) => self.runtime.model_id = id,
+            ClientCommand::SetModel(id) => {
+                self.runtime.models.set_current(id.clone());
+                self.runtime.model_id = id;
+            }
+            ClientCommand::SetSubagentModel(id) => {
+                self.runtime.models.set_subagent(id.clone());
+                self.runtime.subagent_model = id;
+                self.runtime.save_now_and_settle();
+            }
             ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
@@ -1756,6 +1767,7 @@ impl AgentConnection for InProcessConnection {
             session_id: self.runtime.session_id.clone(),
             title: self.runtime.title.clone(),
             model_id: self.runtime.model_id.clone(),
+            subagent_model: self.runtime.subagent_model.clone(),
             thinking_level: self.runtime.thinking_level.clone(),
             context_tokens: self.runtime.context_tokens,
             context_len: self.runtime.conversation.context_len(),
@@ -3233,5 +3245,52 @@ mod tests {
             auto: false,
         });
         assert!(commands.compaction_queued());
+    }
+
+    #[tokio::test]
+    async fn the_subagent_model_is_session_state_and_reaches_the_client() {
+        let (mut connection, _requests) = connection();
+        assert!(connection.state().subagent_model.is_none());
+        assert!(connection.runtime.models.for_child(None).is_none());
+
+        connection
+            .send(ClientCommand::SetSubagentModel(Some("cheap".into())))
+            .await
+            .unwrap();
+
+        assert_eq!(connection.state().subagent_model.as_deref(), Some("cheap"));
+        assert_eq!(
+            connection.runtime.models.for_child(None).as_deref(),
+            Some("cheap")
+        );
+        assert_eq!(
+            connection
+                .runtime
+                .models
+                .for_child(Some("named"))
+                .as_deref(),
+            Some("named"),
+            "a spawn that names a model still wins"
+        );
+
+        connection
+            .send(ClientCommand::SetSubagentModel(None))
+            .await
+            .unwrap();
+        assert!(connection.state().subagent_model.is_none());
+        assert!(connection.runtime.models.for_child(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn changing_the_session_model_moves_what_a_spawn_inherits() {
+        let (mut connection, _requests) = connection();
+        connection.runtime.models.set_current("at-start".into());
+
+        connection
+            .send(ClientCommand::SetModel("now".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(connection.runtime.models.current(), "now");
     }
 }

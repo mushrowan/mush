@@ -9,6 +9,7 @@ pub struct SessionSnapshot {
     pub panes: Vec<PaneSnapshot>,
     pub system_prompt: Option<String>,
     pub parent: Option<SessionId>,
+    pub subagent_model: Option<String>,
 }
 
 pub struct PaneSnapshot {

@@ -15,6 +15,8 @@ pub struct SessionMeta {
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +53,7 @@ impl Session {
                 message_count: 0,
                 cwd: cwd.into(),
                 parent: None,
+                subagent_model: None,
             },
             conversation: ConversationState::new(),
             panes: vec![],

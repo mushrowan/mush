@@ -128,6 +128,14 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         ));
     }
 
+    if let Some(subagent) = &app.subagent_model_id {
+        b.section_break();
+        b.push_inline(Span::styled(
+            format!("sub: {}", subagent.abbreviated()),
+            app.theme.status_model,
+        ));
+    }
+
     if app.interaction.show_token_counters {
         if app.stats.input_tokens > TokenCount::ZERO {
             b.push_inline(Span::styled(

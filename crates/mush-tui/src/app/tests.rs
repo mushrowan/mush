@@ -655,6 +655,7 @@ fn session_picker_open_close() {
         message_count: 5,
         cwd: "/tmp".into(),
         parent: None,
+        subagent_model: None,
     }];
 
     app.open_session_picker(sessions, "/tmp".into());
@@ -678,6 +679,7 @@ fn session_picker_filter() {
             message_count: 1,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -688,6 +690,7 @@ fn session_picker_filter() {
             message_count: 2,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
     ];
 
@@ -713,6 +716,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             message_count: 1,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -723,6 +727,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             message_count: 2,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
     ];
 
@@ -752,6 +757,7 @@ fn session_picker_scope_filter() {
             message_count: 1,
             cwd: "/home/user/project".into(),
             parent: None,
+            subagent_model: None,
         },
         SessionMeta {
             id: mush_session::SessionId::from("b"),
@@ -762,6 +768,7 @@ fn session_picker_scope_filter() {
             message_count: 2,
             cwd: "/home/user/other".into(),
             parent: None,
+            subagent_model: None,
         },
     ];
 
@@ -2215,5 +2222,59 @@ fn the_detail_level_cycles_and_wraps() {
     assert_eq!(
         app.status.as_ref().map(|s| s.text.as_str()),
         Some("detail: overview")
+    );
+}
+
+#[test]
+fn the_subagent_picker_offers_inherit_first() {
+    let mut app = App::new("claude-opus-4-7".into(), TokenCount::new(200_000));
+    app.completion.model_completions = vec![crate::slash_menu::ModelCompletion {
+        id: "claude-haiku-4-5".into(),
+        name: "haiku".into(),
+        provider: "anthropic".into(),
+        stale: false,
+        description: None,
+        speed_tiers: Vec::new(),
+        priority: 0,
+        visibility: None,
+    }];
+
+    app.open_subagent_model_picker();
+
+    let picker = app.interaction.model_picker.as_ref().unwrap();
+    assert_eq!(
+        picker.purpose,
+        crate::model_picker::ModelPickerPurpose::Subagent
+    );
+    assert_eq!(picker.models[0].id, crate::model_picker::INHERIT_ID);
+    assert_eq!(app.selected_model_id().as_deref(), Some(""));
+}
+
+#[test]
+fn the_session_picker_keeps_its_purpose() {
+    let mut app = App::new("claude-opus-4-7".into(), TokenCount::new(200_000));
+    app.completion.model_completions = vec![crate::slash_menu::ModelCompletion {
+        id: "claude-haiku-4-5".into(),
+        name: "haiku".into(),
+        provider: "anthropic".into(),
+        stale: false,
+        description: None,
+        speed_tiers: Vec::new(),
+        priority: 0,
+        visibility: None,
+    }];
+
+    app.open_model_picker_overlay();
+
+    let picker = app.interaction.model_picker.as_ref().unwrap();
+    assert_eq!(
+        picker.purpose,
+        crate::model_picker::ModelPickerPurpose::Session
+    );
+    assert!(
+        picker
+            .models
+            .iter()
+            .all(|m| m.id != crate::model_picker::INHERIT_ID)
     );
 }

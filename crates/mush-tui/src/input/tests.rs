@@ -1479,6 +1479,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             message_count: 1,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
         mush_session::SessionMeta {
             id: SessionId::from("two"),
@@ -1489,6 +1490,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             message_count: 1,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         },
     ]
 }

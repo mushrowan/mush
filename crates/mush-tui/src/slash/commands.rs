@@ -314,6 +314,27 @@ pub async fn handle(
                 .await;
             None
         }
+        SlashAction::SubagentModel { model_id, unset } => {
+            let chosen = if *unset {
+                None
+            } else if let Some(id) = model_id {
+                Some(id.clone())
+            } else {
+                app.open_subagent_model_picker();
+                return None;
+            };
+            app.subagent_model_id = chosen.as_deref().map(mush_ai::types::ModelId::from);
+            let _ = connection
+                .send(mush_runtime::ClientCommand::SetSubagentModel(
+                    chosen.clone(),
+                ))
+                .await;
+            app.push_system_message(match &chosen {
+                Some(id) => format!("subagents will use {id}"),
+                None => "subagents will use whatever model this session is on".to_string(),
+            });
+            None
+        }
         SlashAction::CompactionModel { model_id } => {
             handle_compaction_model(app, tui_config, model_id.as_deref());
             let _ = connection

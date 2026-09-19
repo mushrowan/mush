@@ -313,6 +313,7 @@ mod tests {
             message_count: 3,
             cwd: "/tmp".into(),
             parent: None,
+            subagent_model: None,
         }
     }
 

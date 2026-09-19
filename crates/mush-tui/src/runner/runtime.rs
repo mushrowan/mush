@@ -39,6 +39,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "summarise old messages ([--context-budget <n>] [focus instructions])",
     ),
     ("compaction-model", "view or set the compaction model"),
+    (
+        "subagent-model",
+        "pick the model new subagents use ([<model-id>|unset])",
+    ),
     ("export", "save conversation as markdown"),
     ("undo", "revert last turn"),
     ("search", "search conversation"),
@@ -393,6 +397,10 @@ fn seed_from_state(
     tui_config.options.session_id = Some(state.session_id.clone());
     app.session_title = state.title.clone();
     app.thinking_level = state.thinking_level.clone();
+    app.subagent_model_id = state
+        .subagent_model
+        .as_deref()
+        .map(mush_ai::types::ModelId::from);
     if state.turn_active {
         app.start_streaming();
     }
