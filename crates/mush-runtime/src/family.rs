@@ -122,6 +122,12 @@ pub struct ChildSummary {
     pub usage: Usage,
     pub cost: Cost,
     pub turns: u32,
+    #[serde(default)]
+    pub streaming: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_running: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_confirmation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,7 +170,8 @@ impl Delivery {
 
 pub type AgentInbox = mpsc::UnboundedReceiver<Delivery>;
 
-pub const OBSERVE_DEFAULT_LIMIT: usize = 8;
+const TOOL_LABEL: usize = 120;
+const OBSERVE_DEFAULT_LIMIT: usize = 8;
 pub const OBSERVE_MAX_LIMIT: usize = 50;
 pub const OBSERVE_DEFAULT_CHARS: usize = 800;
 pub const OBSERVE_MIN_CHARS: usize = 80;
@@ -262,6 +269,14 @@ pub struct AgentView {
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_note: Option<String>,
+    #[serde(default)]
+    pub streaming: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_running: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_confirmation: Option<String>,
+    #[serde(default)]
+    pub children_running: usize,
 }
 
 struct Node {
@@ -433,11 +448,20 @@ impl Family {
                 observable: false,
                 model_id: None,
                 progress_note: inner.root_note.clone(),
+                streaming: false,
+                tool_running: None,
+                awaiting_confirmation: None,
+                children_running: running_children(&inner, &None),
             }),
             Some(id) => {
                 let me = inner.children.get(id);
                 if let Some(node) = me {
-                    views.push(view_of(&node.summary, "self", false));
+                    views.push(view_of(
+                        &node.summary,
+                        "self",
+                        false,
+                        running_children(&inner, &Some(node.summary.id.clone())),
+                    ));
                 }
                 let parent = me.and_then(|node| node.summary.parent.clone());
                 match &parent {
@@ -450,23 +474,42 @@ impl Family {
                         observable: inner.root_observe.is_some(),
                         model_id: None,
                         progress_note: inner.root_note.clone(),
+                        streaming: false,
+                        tool_running: None,
+                        awaiting_confirmation: None,
+                        children_running: running_children(&inner, &None),
                     }),
                     Some(parent_id) => {
                         if let Some(node) = inner.children.get(parent_id) {
-                            views.push(view_of(&node.summary, "parent", node.observe.is_some()));
+                            views.push(view_of(
+                                &node.summary,
+                                "parent",
+                                node.observe.is_some(),
+                                running_children(&inner, &Some(node.summary.id.clone())),
+                            ));
                         }
                     }
                 }
                 for node in inner.children.values() {
                     if &node.summary.id != id && node.summary.parent == parent {
-                        views.push(view_of(&node.summary, "sibling", node.observe.is_some()));
+                        views.push(view_of(
+                            &node.summary,
+                            "sibling",
+                            node.observe.is_some(),
+                            running_children(&inner, &Some(node.summary.id.clone())),
+                        ));
                     }
                 }
             }
         }
         for node in inner.children.values() {
             if node.summary.parent == caller.id {
-                views.push(view_of(&node.summary, "child", node.observe.is_some()));
+                views.push(view_of(
+                    &node.summary,
+                    "child",
+                    node.observe.is_some(),
+                    running_children(&inner, &Some(node.summary.id.clone())),
+                ));
             }
         }
         views
@@ -621,6 +664,9 @@ impl Family {
             usage: Usage::default(),
             cost: Cost::default(),
             turns: 0,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut connection = parts.config.connect(&parts.tools, &parts.registry);
@@ -674,6 +720,35 @@ impl Family {
                 child.turns += 1;
             }),
             ClientEvent::Agent {
+                event: AgentEvent::MessageStart { .. },
+                ..
+            } => self.update(id, |child| child.streaming = true),
+            ClientEvent::Agent {
+                event:
+                    AgentEvent::ToolExecStart {
+                        tool_name, args, ..
+                    },
+                ..
+            } => {
+                let label = tool_label(tool_name, args);
+                self.update(id, |child| {
+                    child.awaiting_confirmation = None;
+                    child.tool_running = Some(label);
+                });
+            }
+            ClientEvent::Agent {
+                event: AgentEvent::ToolExecEnd { .. },
+                ..
+            } => self.update(id, |child| child.tool_running = None),
+            ClientEvent::ConfirmRequest { prompt, .. } => {
+                let prompt = prompt.clone();
+                self.update(id, |child| child.awaiting_confirmation = Some(prompt));
+            }
+            ClientEvent::ToolsCancelled(_) => self.update(id, |child| {
+                child.tool_running = None;
+                child.awaiting_confirmation = None;
+            }),
+            ClientEvent::Agent {
                 event: AgentEvent::MessageEnd { message },
                 ..
             } => {
@@ -681,6 +756,7 @@ impl Family {
                 let usage = message.usage;
                 let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
                 self.update(id, |child| {
+                    child.streaming = false;
                     if !text.trim().is_empty() {
                         child.answer = Some(text);
                     }
@@ -704,6 +780,9 @@ impl Family {
                 child.error = Some(error.clone());
             }),
             ClientEvent::TurnEnded { cancelled } => self.update(id, |child| {
+                child.streaming = false;
+                child.tool_running = None;
+                child.awaiting_confirmation = None;
                 if child.status == ChildStatus::Running {
                     child.status = if *cancelled {
                         ChildStatus::Cancelled
@@ -1072,7 +1151,12 @@ impl Family {
     }
 }
 
-fn view_of(summary: &ChildSummary, relationship: &str, observable: bool) -> AgentView {
+fn view_of(
+    summary: &ChildSummary,
+    relationship: &str,
+    observable: bool,
+    children_running: usize,
+) -> AgentView {
     AgentView {
         name: summary.name.clone(),
         relationship: relationship.to_string(),
@@ -1082,7 +1166,32 @@ fn view_of(summary: &ChildSummary, relationship: &str, observable: bool) -> Agen
         observable,
         model_id: Some(summary.model_id.clone()),
         progress_note: summary.progress_note.clone(),
+        streaming: summary.streaming,
+        tool_running: summary.tool_running.clone(),
+        awaiting_confirmation: summary.awaiting_confirmation.clone(),
+        children_running,
     }
+}
+
+fn tool_label(tool_name: &str, args: &serde_json::Value) -> String {
+    let summary = mush_agent::summarise_tool_args(tool_name, args);
+    let summary = summary.split('\n').next().unwrap_or_default();
+    let clipped: String = summary.chars().take(TOOL_LABEL).collect();
+    if clipped.is_empty() {
+        tool_name.to_string()
+    } else {
+        format!("{tool_name}: {clipped}")
+    }
+}
+
+fn running_children(inner: &Inner, parent: &Option<ChildId>) -> usize {
+    inner
+        .children
+        .values()
+        .filter(|node| {
+            &node.summary.parent == parent && node.summary.status == ChildStatus::Running
+        })
+        .count()
 }
 
 async fn drive_child(
@@ -1998,6 +2107,9 @@ mod tests {
                 usage: Usage::default(),
                 cost: Cost::default(),
                 turns: 1,
+                streaming: false,
+                tool_running: None,
+                awaiting_confirmation: None,
             }],
         };
         std::fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();
@@ -2144,5 +2256,56 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.0.contains("only the root agent"));
+    }
+
+    #[tokio::test]
+    async fn a_child_reports_the_tool_it_is_running_and_what_it_waits_on() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "scout".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+
+        family.record(
+            &id,
+            &ClientEvent::Agent {
+                generation: crate::StreamGeneration(1),
+                event: mush_agent::AgentEvent::ToolExecStart {
+                    tool_call_id: mush_ai::types::ToolCallId::from("call_1"),
+                    tool_name: "bash".into(),
+                    args: serde_json::json!({ "command": "sleep 600" }),
+                },
+                applied: crate::Applied::Nothing,
+            },
+            None,
+        );
+        assert_eq!(
+            family.children_of(&root)[0].tool_running.as_deref(),
+            Some("bash: sleep 600")
+        );
+
+        family.record(
+            &id,
+            &ClientEvent::ConfirmRequest {
+                tool_call_id: mush_ai::types::ToolCallId::from("call_2"),
+                prompt: "run `rm -rf build`?".into(),
+            },
+            None,
+        );
+        assert_eq!(
+            family.children_of(&root)[0]
+                .awaiting_confirmation
+                .as_deref(),
+            Some("run `rm -rf build`?")
+        );
+
+        family.record(&id, &ClientEvent::TurnEnded { cancelled: false }, None);
+        let settled = family.children_of(&root).remove(0);
+        assert!(settled.tool_running.is_none());
+        assert!(settled.awaiting_confirmation.is_none());
+        assert!(!settled.streaming);
     }
 }

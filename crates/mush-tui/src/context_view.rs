@@ -11,6 +11,7 @@ pub struct AgentNode {
     pub tokens: TokenCount,
     pub cost: Dollars,
     pub context: Option<(TokenCount, TokenCount)>,
+    pub activity: Option<String>,
     pub children: Vec<AgentNode>,
 }
 
@@ -29,6 +30,7 @@ pub fn agent_tree(
         cost: stats.total_cost,
         context: (stats.context_window > TokenCount::ZERO)
             .then_some((stats.context_tokens, stats.context_window)),
+        activity: None,
         children: child_nodes(children, None),
     }
 }
@@ -44,9 +46,32 @@ fn child_nodes(children: &[ChildSummary], parent: Option<&str>) -> Vec<AgentNode
             tokens: child.usage.total_tokens(),
             cost: child.cost.total(),
             context: None,
+            activity: activity(child, children),
             children: child_nodes(children, Some(&child.id)),
         })
         .collect()
+}
+
+fn activity(child: &ChildSummary, family: &[ChildSummary]) -> Option<String> {
+    if let Some(prompt) = &child.awaiting_confirmation {
+        return Some(format!("waiting for you: {prompt}"));
+    }
+    if let Some(tool) = &child.tool_running {
+        return Some(tool.clone());
+    }
+    let running = family
+        .iter()
+        .filter(|other| {
+            other.parent.as_deref() == Some(&child.id) && other.status == ChildStatus::Running
+        })
+        .count();
+    if running > 0 {
+        return Some(format!("waiting on {running} child(ren)"));
+    }
+    if child.streaming {
+        return Some("thinking".into());
+    }
+    child.progress_note.clone()
 }
 
 const fn status_marker(status: ChildStatus) -> &'static str {
@@ -133,20 +158,28 @@ pub fn format_context(root: &AgentNode, stats: &crate::prompt_cache::TokenStats)
         lines.push(format!("model: {model}"));
         lines.push(String::new());
     }
+    let shows_activity = rows.iter().any(|(_, node)| node.activity.is_some());
+    let context_width = if shows_activity { 12 } else { 0 };
     lines.push(format!(
-        "{:<label_width$}  {:>token_width$}  {:>cost_width$}  context",
-        "agent", "tokens", "cost"
+        "{:<label_width$}  {:>token_width$}  {:>cost_width$}  {:<context_width$}{}",
+        "agent",
+        "tokens",
+        "cost",
+        "context",
+        if shows_activity { "activity" } else { "" }
     ));
     for (index, (_, node)) in rows.iter().enumerate() {
         let padding = label_width.saturating_sub(label_cells[index].chars().count());
-        lines.push(format!(
-            "{}{}  {:>token_width$}  {:>cost_width$}  {}",
+        let line = format!(
+            "{}{}  {:>token_width$}  {:>cost_width$}  {:<context_width$}{}",
             label_cells[index],
             " ".repeat(padding),
             token_cells[index],
             cost_cells[index],
             context_cell(node.context),
-        ));
+            node.activity.as_deref().unwrap_or_default(),
+        );
+        lines.push(line.trim_end().to_string());
     }
 
     let (tokens, cost, agents) = totals(root);
@@ -238,6 +271,9 @@ mod tests {
                 ..Cost::default()
             },
             turns: 1,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
         }
     }
 
@@ -325,5 +361,55 @@ mod tests {
         assert_eq!(right_edge("tokens"), right_edge("12k"));
         assert_eq!(right_edge("tokens"), right_edge("500"));
         assert_eq!(right_edge("cost"), right_edge("$0.4200"));
+    }
+
+    #[test]
+    fn a_child_blocked_on_you_says_so_and_beats_every_other_activity() {
+        let mut blocked = child("a", "scout", None, ChildStatus::Running);
+        blocked.streaming = true;
+        blocked.tool_running = Some("bash: rm -rf build".into());
+        blocked.progress_note = Some("halfway".into());
+        blocked.awaiting_confirmation = Some("run `rm -rf build`?".into());
+
+        let rendered = format_context(&agent_tree("root", "m", &stats(), &[blocked]), &stats());
+
+        assert!(rendered.contains("activity"));
+        assert!(rendered.contains("waiting for you: run `rm -rf build`?"));
+        assert!(!rendered.contains("halfway"));
+    }
+
+    #[test]
+    fn a_running_tool_shows_over_thinking_and_a_note() {
+        let mut busy = child("a", "scout", None, ChildStatus::Running);
+        busy.streaming = true;
+        busy.tool_running = Some("ipython: import pandas".into());
+        busy.progress_note = Some("halfway".into());
+
+        let rendered = format_context(&agent_tree("root", "m", &stats(), &[busy]), &stats());
+
+        assert!(rendered.contains("ipython: import pandas"));
+        assert!(!rendered.contains("thinking"));
+    }
+
+    #[test]
+    fn a_parent_waiting_on_children_says_how_many() {
+        let parent = child("a", "lead", None, ChildStatus::Running);
+        let first = child("b", "one", Some("a"), ChildStatus::Running);
+        let second = child("c", "two", Some("a"), ChildStatus::Running);
+        let done = child("d", "three", Some("a"), ChildStatus::Idle);
+
+        let rendered = format_context(
+            &agent_tree("root", "m", &stats(), &[parent, first, second, done]),
+            &stats(),
+        );
+
+        assert!(rendered.contains("waiting on 2 child(ren)"));
+    }
+
+    #[test]
+    fn an_idle_family_has_no_activity_column() {
+        let quiet = child("a", "scout", None, ChildStatus::Idle);
+        let rendered = format_context(&agent_tree("root", "m", &stats(), &[quiet]), &stats());
+        assert!(!rendered.contains("activity"));
     }
 }

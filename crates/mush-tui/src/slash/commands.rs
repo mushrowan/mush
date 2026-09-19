@@ -1231,6 +1231,9 @@ mod tests {
                 ..Default::default()
             },
             turns: 2,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
         }
     }
 
