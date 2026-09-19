@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mush_ai::types::{EventKind, Message};
+use mush_ai::types::Message;
 use mush_session::inbox::{Consumer, Event};
 
 use crate::session::{PendingPrompt, SessionRuntime};
@@ -127,7 +127,7 @@ impl OrchestratorInbox {
                     .receipts
                     .iter()
                     .any(|r| r.id.starts_with("orchestrator-event-"))
-                && event.kind != EventKind::Summary
+                && !event.kind.is_summary()
             {
                 let mut prompt = PendingPrompt::text(event.text());
                 prompt.mark_persisted();

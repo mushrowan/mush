@@ -226,6 +226,15 @@ pub struct HostCommands {
 }
 
 impl HostCommands {
+    #[must_use]
+    pub fn compaction_queued(&self) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|command| matches!(command, ClientCommand::Compact { .. }))
+    }
+
     pub fn push(&self, command: ClientCommand) {
         self.queue
             .lock()
@@ -338,9 +347,16 @@ impl InProcessConnection {
             return;
         }
         for command in commands.drain() {
+            let requested_compaction = matches!(command, ClientCommand::Compact { .. });
             match self.send(command).await {
                 Ok(events) => self.queued.extend(events),
                 Err(error) => {
+                    if requested_compaction {
+                        self.runtime.conversation.append_message(
+                            mush_session::compact::outcome_message("skipped", &error.to_string()),
+                        );
+                        self.runtime.save_now_and_settle();
+                    }
                     self.queued
                         .push_back(ClientEvent::Session(SessionEvent::Status(
                             error.to_string(),
@@ -3182,5 +3198,40 @@ mod tests {
                 _ => None,
             });
         assert_eq!(status.as_deref(), Some("conversation too short to compact"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_compaction_from_the_agent_lands_in_the_conversation() {
+        let (mut connection, _requests) = connection();
+        let commands = Arc::new(HostCommands::default());
+        connection.set_host_commands(Some(Arc::clone(&commands)));
+        connection.runtime.conversation =
+            ConversationState::from_messages(vec![user("one"), user("two")]);
+
+        commands.push(ClientCommand::Compact {
+            focus: mush_session::compact::CompactionFocus::default(),
+            auto: false,
+        });
+        connection.run_host_commands().await;
+
+        let last = connection.runtime.conversation.context().pop().unwrap();
+        let Message::User(message) = last else {
+            panic!("expected the outcome as a user message")
+        };
+        let text = message.text();
+        assert!(text.starts_with(mush_session::compact::COMPACTION_OUTCOME_PREFIX));
+        assert!(text.contains("skipped"), "{text}");
+        assert!(text.contains("too short"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_second_compaction_request_in_one_turn_is_refused() {
+        let commands = HostCommands::default();
+        assert!(!commands.compaction_queued());
+        commands.push(ClientCommand::Compact {
+            focus: mush_session::compact::CompactionFocus::default(),
+            auto: false,
+        });
+        assert!(commands.compaction_queued());
     }
 }

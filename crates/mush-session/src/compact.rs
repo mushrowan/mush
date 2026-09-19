@@ -15,8 +15,21 @@ const CHARS_PER_TOKEN: usize = 4;
 
 const IMAGE_CHAR_ESTIMATE: usize = 1000;
 
-pub const COMPACTION_SUMMARY_PREFIX: &str =
-    "The conversation history before this point was compacted into the following summary:";
+pub use mush_ai::types::COMPACTION_SUMMARY_PREFIX;
+
+pub const COMPACTION_OUTCOME_PREFIX: &str = "[compaction-outcome]";
+
+#[must_use]
+pub fn outcome_message(outcome: &str, reason: &str) -> mush_ai::types::Message {
+    mush_ai::types::Message::User(
+        mush_ai::types::UserMessage::builder()
+            .content(mush_ai::types::UserContent::Text(format!(
+                "{COMPACTION_OUTCOME_PREFIX}\n\nthe compaction you requested was {outcome}: {reason}"
+            )))
+            .timestamp_ms(mush_ai::types::Timestamp::now())
+            .build(),
+    )
+}
 
 #[derive(Debug)]
 pub struct CompactionResult {

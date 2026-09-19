@@ -1470,6 +1470,12 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 let commands = self.host_commands.as_ref().ok_or_else(|| {
                     mush_kernel::HostError("compaction is not available here".into())
                 })?;
+                if commands.compaction_queued() {
+                    return Ok(serde_json::json!({
+                        "scheduled": false,
+                        "note": "a compaction is already queued for the end of this turn",
+                    }));
+                }
                 let focus = mush_session::compact::CompactionFocus {
                     context_budget: None,
                     instructions: str_field("hint").filter(|hint| !hint.trim().is_empty()),

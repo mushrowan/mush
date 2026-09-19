@@ -293,7 +293,7 @@ mod tests {
         };
         assert!(text.text.len() < 1024);
         let projected: serde_json::Value =
-            serde_json::from_str(text.text.split_once('\n').unwrap().1).unwrap();
+            serde_json::from_str(text.text.rsplit_once("\n\n").unwrap().1).unwrap();
         let audit: serde_json::Value =
             serde_json::from_str(event.audit_text().split_once('\n').unwrap().1).unwrap();
         let ordered = serde_json::to_vec(&audit["receipts"]).unwrap();

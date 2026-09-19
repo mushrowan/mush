@@ -171,7 +171,7 @@ pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
 fn context_is_compacted(conversation: &[Message]) -> bool {
     conversation.iter().any(|message| match message {
         Message::User(user) => extract_compaction_summary(&user.text()).is_some(),
-        Message::Event(event) => event.kind == mush_ai::types::EventKind::Summary,
+        Message::Event(event) => event.kind.is_summary(),
         _ => false,
     })
 }

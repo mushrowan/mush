@@ -169,7 +169,7 @@ impl SessionTree {
                 }
                 EntryKind::Message {
                     message: Message::Event(event),
-                } if event.kind == EventKind::Summary => {
+                } if event.kind.is_summary() => {
                     let history: Vec<_> = tree
                         .branch_ending_at(tree.entries[index].parent_id.as_ref())
                         .into_iter()
@@ -248,8 +248,13 @@ fn entry_to_message(entry: &SessionEntry) -> Message {
             summary,
             event_receipts,
             ..
-        }
-        | EntryKind::Compaction {
+        } if !event_receipts.is_empty() => Message::Event(EventMessage {
+            content: summary.clone(),
+            timestamp_ms: entry.timestamp,
+            kind: EventKind::BranchSummary,
+            receipts: event_receipts.clone(),
+        }),
+        EntryKind::Compaction {
             summary,
             event_receipts,
             ..

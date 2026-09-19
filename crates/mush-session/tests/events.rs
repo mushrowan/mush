@@ -133,7 +133,12 @@ fn branch_summary_retains_the_abandoned_branch_event_origin() {
     let Message::Event(summary) = &conversation.context()[1] else {
         panic!()
     };
-    assert_eq!(summary.kind, EventKind::Summary);
+    assert_eq!(summary.kind, EventKind::BranchSummary);
+    assert!(
+        summary
+            .text()
+            .contains("branch this conversation came back from")
+    );
     assert_eq!(summary.receipts.len(), 1);
     assert_eq!(summary.receipts[0].timestamp_ms.as_ms(), 1789431450123);
 }
