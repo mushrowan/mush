@@ -1295,21 +1295,16 @@ mod tests {
     }
 
     #[test]
-    fn a_settled_child_leaves_a_status_line_once_and_cost_folds_it_in() {
+    fn a_settled_child_only_moves_the_count_and_cost_folds_it_in() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.note_child(child("auth", mush_runtime::ChildStatus::Running));
         assert!(app.status.is_none());
         assert_eq!(app.running_children(), 1);
 
         app.note_child(child("auth", mush_runtime::ChildStatus::Idle));
-        assert_eq!(
-            app.status.as_ref().map(|s| s.text.as_str()),
-            Some("subagent auth: finished")
-        );
-        app.status = None;
-        app.note_child(child("auth", mush_runtime::ChildStatus::Idle));
         assert!(app.status.is_none());
         assert_eq!(app.running_children(), 0);
+        assert_eq!(app.children.len(), 1);
 
         show_cost(&mut app);
         let text = &app.messages.last().unwrap().content;
