@@ -33,6 +33,13 @@ impl Kind {
             Self::Subagent => "subagent",
         }
     }
+
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == text.trim().to_lowercase())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,14 +204,122 @@ impl State {
     }
 
     #[must_use]
+    pub fn entry(&self, kind: Kind, id: &str) -> Option<&Entry> {
+        self.get(kind, id)
+    }
+
+    #[must_use]
+    pub fn list(&self, kind: Option<Kind>) -> Vec<&Entry> {
+        Kind::ALL
+            .into_iter()
+            .filter(|candidate| kind.is_none_or(|wanted| wanted == *candidate))
+            .flat_map(|candidate| self.entries.get(&candidate).into_iter().flatten())
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
+    pub fn upsert(&mut self, edit: &Edit, scope: Scope, source: &str) -> Result<Entry, String> {
+        let id = edit.id.clone().unwrap_or_else(|| {
+            slug(
+                edit.title.as_deref().unwrap_or(edit.kind.as_str()),
+                edit.kind.as_str(),
+            )
+        });
+        if let Some(error) = validate(edit, &id) {
+            return Err(error);
+        }
+        let before = self.get(edit.kind, &id).cloned();
+        match (edit.action, &before) {
+            (Action::Create, Some(_)) => return Err(format!("{id} already exists")),
+            (Action::Update, None) => return Err(format!("{id} not found")),
+            _ => {}
+        }
+        let after = merge_entry(edit, &id, before.as_ref(), scope, source);
+        self.entries
+            .entry(edit.kind)
+            .or_default()
+            .insert(id, after.clone());
+        Ok(after)
+    }
+
+    pub fn remove(&mut self, kind: Kind, id: &str) -> Result<Entry, String> {
+        self.entries
+            .entry(kind)
+            .or_default()
+            .remove(id)
+            .ok_or_else(|| format!("{id} not found"))
+    }
+
+    #[must_use]
+    pub fn search(&self, query: &str, kind: Option<Kind>, limit: usize) -> Vec<&Entry> {
+        let terms = query_terms(query);
+        let entries = self.list(kind);
+        if terms.is_empty() || entries.is_empty() {
+            return Vec::new();
+        }
+        let haystacks: Vec<(String, String, String)> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.title.to_lowercase(),
+                    entry.content.to_lowercase(),
+                    format!("{} {}", entry.path, entry.id).to_lowercase(),
+                )
+            })
+            .collect();
+        let hits = |term: &str, fields: &(String, String, String)| {
+            u32::from(fields.0.contains(term))
+                + u32::from(fields.1.contains(term))
+                + u32::from(fields.2.contains(term))
+        };
+        let idf: Vec<(String, f64)> = terms
+            .into_iter()
+            .filter_map(|term| {
+                let documents = haystacks
+                    .iter()
+                    .filter(|fields| hits(&term, fields) > 0)
+                    .count();
+                (documents > 0).then(|| {
+                    let idf = (1.0 + entries.len() as f64 / documents as f64).ln();
+                    (term, idf)
+                })
+            })
+            .collect();
+        let mut ranked: Vec<(f64, &Entry)> = entries
+            .iter()
+            .zip(&haystacks)
+            .filter_map(|(entry, fields)| {
+                let score: f64 = idf
+                    .iter()
+                    .map(|(term, idf)| match hits(term, fields) {
+                        0 => 0.0,
+                        found => idf * (1.0 + f64::from(found - 1) * 0.5),
+                    })
+                    .sum();
+                (score > 0.0).then_some((score, *entry))
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| b.1.updated_at.cmp(&a.1.updated_at))
+        });
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, entry)| entry)
+            .collect()
+    }
+
+    #[must_use]
     pub fn digest(&self) -> String {
         let mut lines = vec![
             "# continual harness state".to_string(),
             String::new(),
             "local entries belong to this session, global entries persist across sessions. \
-             these are compact summaries, use them as routing hints and inspect or refine \
-             the entry only when detail matters. the base system prompt is immutable, prompt \
-             entries are supplemental notes."
+             these are compact summaries, use them as routing hints and read the whole entry \
+             with `await harness.get('<kind>', '<id>')` when the detail matters. \
+             `await harness.search(query)` ranks them. the base system prompt is immutable, \
+             prompt entries are supplemental notes."
                 .to_string(),
             String::new(),
             "call `await refine.run()` after a repeated failure, when a reusable tactic emerges, \
@@ -364,45 +479,7 @@ impl State {
                     });
                 }
                 (Action::Create | Action::Update, _) => {
-                    let after = Entry {
-                        id: entry_id.clone(),
-                        kind: edit.kind,
-                        title: edit
-                            .title
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.title.clone()))
-                            .unwrap_or_else(|| entry_id.clone()),
-                        content: edit
-                            .content
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.content.clone()))
-                            .unwrap_or_default(),
-                        path: edit
-                            .path
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.path.clone()))
-                            .unwrap_or_else(|| "general".into()),
-                        scope: before.as_ref().map_or(scope, |b| b.scope),
-                        reference: edit
-                            .reference
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.reference.clone()))
-                            .unwrap_or_default(),
-                        arguments: edit
-                            .arguments
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.arguments.clone()))
-                            .unwrap_or_default(),
-                        metadata: edit
-                            .metadata
-                            .clone()
-                            .or_else(|| before.as_ref().map(|b| b.metadata.clone()))
-                            .unwrap_or_default(),
-                        source: "refine".into(),
-                        created_at: before.as_ref().map_or_else(now, |b| b.created_at.clone()),
-                        updated_at: now(),
-                        version: before.as_ref().map_or(1, |b| b.version + 1),
-                    };
+                    let after = merge_entry(edit, &entry_id, before.as_ref(), scope, "refine");
                     self.entries
                         .entry(edit.kind)
                         .or_default()
@@ -447,6 +524,63 @@ impl State {
             scope,
             rollback_of: rollback_of.map(str::to_string),
         }
+    }
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for run in query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|run| !run.is_empty())
+    {
+        let floor = if run.is_ascii() { 3 } else { 2 };
+        if run.chars().count() >= floor && !terms.iter().any(|seen| seen == run) {
+            terms.push(run.to_string());
+        }
+    }
+    terms
+}
+
+fn merge_entry(edit: &Edit, id: &str, before: Option<&Entry>, scope: Scope, source: &str) -> Entry {
+    Entry {
+        id: id.to_string(),
+        kind: edit.kind,
+        title: edit
+            .title
+            .clone()
+            .or_else(|| before.map(|b| b.title.clone()))
+            .unwrap_or_else(|| id.to_string()),
+        content: edit
+            .content
+            .clone()
+            .or_else(|| before.map(|b| b.content.clone()))
+            .unwrap_or_default(),
+        path: edit
+            .path
+            .clone()
+            .or_else(|| before.map(|b| b.path.clone()))
+            .unwrap_or_else(|| "general".into()),
+        scope: before.map_or(scope, |b| b.scope),
+        reference: edit
+            .reference
+            .clone()
+            .or_else(|| before.map(|b| b.reference.clone()))
+            .unwrap_or_default(),
+        arguments: edit
+            .arguments
+            .clone()
+            .or_else(|| before.map(|b| b.arguments.clone()))
+            .unwrap_or_default(),
+        metadata: edit
+            .metadata
+            .clone()
+            .or_else(|| before.map(|b| b.metadata.clone()))
+            .unwrap_or_default(),
+        source: source.to_string(),
+        created_at: before.map_or_else(now, |b| b.created_at.clone()),
+        updated_at: now(),
+        version: before.map_or(1, |b| b.version + 1),
     }
 }
 
@@ -683,21 +817,25 @@ fn validate(edit: &Edit, id: &str) -> Option<String> {
     if edit.action == Action::Delete {
         return None;
     }
-    if edit.title.is_none() || edit.content.is_none() {
+    let creating = edit.action == Action::Create;
+    if creating && (edit.title.is_none() || edit.content.is_none()) {
         return Some(format!(
             "{} requires title and content",
             edit.action.as_str()
         ));
     }
     if edit.kind == Kind::Skill {
-        if edit.arguments.is_none() {
+        if creating && edit.arguments.is_none() {
             return Some(format!("{} skill requires arguments", edit.action.as_str()));
         }
         let Some(reference) = &edit.reference else {
-            return Some(format!(
-                "{} skill requires a python reference",
-                edit.action.as_str()
-            ));
+            if creating {
+                return Some(format!(
+                    "{} skill requires a python reference",
+                    edit.action.as_str()
+                ));
+            }
+            return None;
         };
         if reference.get("type").and_then(Value::as_str) != Some("python") {
             return Some(format!(
@@ -1138,6 +1276,76 @@ mod tests {
             Some(state.fingerprint())
         );
         assert_eq!(latest_digest_fingerprint(&[]), None);
+    }
+
+    #[test]
+    fn a_crud_create_slugs_its_id_and_a_second_one_clashes() {
+        let mut state = State::default();
+        let entry = state
+            .upsert(
+                &create(Kind::Memory, "Run The Tests", "cargo nextest"),
+                Scope::Local,
+                "agent",
+            )
+            .unwrap();
+        assert_eq!(entry.id, "run_the_tests");
+        assert_eq!(entry.source, "agent");
+        assert_eq!(entry.version, 1);
+        assert_eq!(
+            state.upsert(
+                &create(Kind::Memory, "Run The Tests", "x"),
+                Scope::Local,
+                "agent"
+            ),
+            Err("run_the_tests already exists".into())
+        );
+    }
+
+    #[test]
+    fn a_crud_update_changes_one_field_and_leaves_the_rest() {
+        let mut state = State::default();
+        state
+            .upsert(
+                &create(Kind::Memory, "tests", "run them"),
+                Scope::Local,
+                "agent",
+            )
+            .unwrap();
+        let mut edit = create(Kind::Memory, "tests", "run them");
+        edit.action = Action::Update;
+        edit.id = Some("tests".into());
+        edit.title = None;
+        edit.content = Some("run them twice".into());
+        let after = state.upsert(&edit, Scope::Local, "agent").unwrap();
+        assert_eq!(after.title, "tests");
+        assert_eq!(after.content, "run them twice");
+        assert_eq!(after.version, 2);
+        let removed = state.remove(Kind::Memory, "tests").unwrap();
+        assert_eq!(removed.id, "tests");
+        assert_eq!(
+            state.remove(Kind::Memory, "tests"),
+            Err("tests not found".into())
+        );
+    }
+
+    #[test]
+    fn search_ranks_a_rare_term_over_a_common_one() {
+        let mut state = State::default();
+        for (title, content) in [
+            ("first", "the worktree gate runs cargo nextest"),
+            ("second", "cargo build is slow"),
+            ("third", "cargo fmt is fast"),
+        ] {
+            state
+                .upsert(&create(Kind::Memory, title, content), Scope::Local, "agent")
+                .unwrap();
+        }
+        let hits = state.search("cargo worktree", None, 10);
+        assert_eq!(hits[0].title, "first");
+        assert_eq!(hits.len(), 3);
+        assert_eq!(state.search("cargo", Some(Kind::Skill), 10).len(), 0);
+        assert_eq!(state.search("zz", None, 10).len(), 0);
+        assert_eq!(state.list(Some(Kind::Memory)).len(), 3);
     }
 
     #[test]

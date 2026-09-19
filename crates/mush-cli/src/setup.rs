@@ -688,6 +688,13 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          repeated failure, when a reusable tactic emerges, or when the user corrects behaviour \
          that should persist. Local by default; `global_=True` for lessons every session should \
          keep. The current harness digest appears in the conversation when it changes.\n\
+         - `await harness.search(query, kind=None, limit=10)`, `harness.list(kind=None)` and \
+         `harness.get(kind, id)` read the harness entries the digest summarises; the digest \
+         is a routing hint, so read the entry when the detail matters. `harness.create(kind, \
+         title, content, ...)`, `harness.update(kind, id, ...)` and `harness.delete(kind, id)` \
+         are the single-entry edits; `refine.run()` is the reviewed pass over the whole \
+         trajectory. Ids carry a `local:` or `global:` prefix in the digest and are accepted \
+         with it.\n\
          - `await goal.fail(reason)` stops a goal you cannot finish, with the reason; the \
          user sees it. Prefer it to looping on something that will not work.\n\
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \

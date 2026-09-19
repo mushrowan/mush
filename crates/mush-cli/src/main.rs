@@ -1294,7 +1294,10 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                     mush_runtime::RlmHandler::new(family, identity)
                         .with_goal(goal.clone())
                         .with_scheduler(scheduler.clone())
-                        .with_notes(notes.clone()),
+                        .with_notes(notes.clone())
+                        .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
+                            &session.meta.id,
+                        ))),
                 ));
             }
             let project =
@@ -1490,6 +1493,9 @@ fn worker_config(
                 .with_goal(goal.clone())
                 .with_scheduler(scheduler.clone())
                 .with_notes(notes.clone())
+                .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
+                    &session.meta.id,
+                )))
                 .with_host_commands(host_commands.clone())
                 .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
             if !cli.no_session {

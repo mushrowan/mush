@@ -371,6 +371,83 @@ class _Refine:
         return await host_request("refine.run", payload)
 
 
+class _Harness:
+    async def list(self, kind: str | None = None) -> list:
+        payload = {}
+        if kind is not None:
+            payload["kind"] = kind
+        reply = await host_request("harness.list", payload)
+        return reply.get("entries", [])
+
+    async def search(self, query: str, *, kind: str | None = None, limit: int = 10) -> list:
+        payload = {"query": query, "limit": int(limit)}
+        if kind is not None:
+            payload["kind"] = kind
+        reply = await host_request("harness.search", payload)
+        return reply.get("entries", [])
+
+    async def get(self, kind: str, id: str, *, global_: bool = False) -> dict | None:
+        reply = await host_request("harness.get", {"kind": kind, "id": id, "global": global_})
+        return reply.get("entry")
+
+    async def create(
+        self,
+        kind: str,
+        title: str,
+        content: str,
+        *,
+        id: str | None = None,
+        path: str | None = None,
+        reference: dict | None = None,
+        arguments: dict | None = None,
+        metadata: dict | None = None,
+        global_: bool = False,
+    ) -> dict:
+        payload = {"kind": kind, "title": title, "content": content, "global": global_}
+        for key, value in (
+            ("id", id),
+            ("path", path),
+            ("reference", reference),
+            ("arguments", arguments),
+            ("metadata", metadata),
+        ):
+            if value is not None:
+                payload[key] = value
+        reply = await host_request("harness.create", payload)
+        return reply.get("entry", {})
+
+    async def update(
+        self,
+        kind: str,
+        id: str,
+        *,
+        title: str | None = None,
+        content: str | None = None,
+        path: str | None = None,
+        reference: dict | None = None,
+        arguments: dict | None = None,
+        metadata: dict | None = None,
+        global_: bool = False,
+    ) -> dict:
+        payload = {"kind": kind, "id": id, "global": global_}
+        for key, value in (
+            ("title", title),
+            ("content", content),
+            ("path", path),
+            ("reference", reference),
+            ("arguments", arguments),
+            ("metadata", metadata),
+        ):
+            if value is not None:
+                payload[key] = value
+        reply = await host_request("harness.update", payload)
+        return reply.get("entry", {})
+
+    async def delete(self, kind: str, id: str, *, global_: bool = False) -> dict:
+        reply = await host_request("harness.delete", {"kind": kind, "id": id, "global": global_})
+        return reply.get("entry", {})
+
+
 class _RlmHeartbeat:
     async def create(self, prompt: str, *, interval: str = "5m", label: str | None = None) -> dict:
         payload = {"prompt": prompt, "interval": interval}
@@ -391,6 +468,7 @@ goal = _Goal()
 rlm_heartbeat = _RlmHeartbeat()
 compact = _Compact()
 refine = _Refine()
+harness = _Harness()
 agent_observe = _AgentObserve()
 
 

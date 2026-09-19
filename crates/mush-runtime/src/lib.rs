@@ -5,6 +5,7 @@ pub mod connection;
 pub mod cron;
 pub mod family;
 pub mod goal;
+pub mod harness;
 pub mod inbox;
 pub mod kernel_channels;
 pub mod models;
@@ -38,6 +39,7 @@ pub use family::{
     SessionSpawner,
 };
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
+pub use harness::HarnessStore;
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use models::ModelSelection;
 pub use notes::Notes;

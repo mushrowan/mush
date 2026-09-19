@@ -1338,6 +1338,7 @@ pub struct RlmHandler {
     goal: Option<Arc<crate::goal::GoalStore>>,
     scheduler: Option<Arc<crate::schedule::Scheduler>>,
     notes: Option<Arc<crate::notes::Notes>>,
+    harness: Option<Arc<crate::harness::HarnessStore>>,
     sessions: Option<SessionSpawner>,
     host_commands: Option<Arc<crate::connection::HostCommands>>,
     compaction_callable: bool,
@@ -1352,6 +1353,7 @@ impl RlmHandler {
             goal: None,
             scheduler: None,
             notes: None,
+            harness: None,
             sessions: None,
             host_commands: None,
             compaction_callable: true,
@@ -1383,6 +1385,12 @@ impl RlmHandler {
     }
 
     #[must_use]
+    pub fn with_harness(mut self, harness: Arc<crate::harness::HarnessStore>) -> Self {
+        self.harness = Some(harness);
+        self
+    }
+
+    #[must_use]
     pub fn with_goal(mut self, goal: Arc<crate::goal::GoalStore>) -> Self {
         self.goal = Some(goal);
         self
@@ -1408,6 +1416,107 @@ impl RlmHandler {
             .filter(|job| job.source == crate::schedule::JobSource::RlmHeartbeat)
             .collect();
         Ok((scheduler, jobs))
+    }
+
+    fn harness_store(&self) -> Result<&Arc<crate::harness::HarnessStore>, mush_kernel::HostError> {
+        self.harness
+            .as_ref()
+            .ok_or_else(|| mush_kernel::HostError("the harness is not available here".into()))
+    }
+
+    fn harness_call(
+        &self,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, mush_kernel::HostError> {
+        use mush_session::harness::{Action, Edit, Kind as EntryKind};
+
+        let store = self.harness_store()?;
+        let text = |key: &str| -> Option<String> {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let object = |key: &str| {
+            payload
+                .get(key)
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+        };
+        let global = payload
+            .get("global")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let entry_kind = || -> Result<Option<EntryKind>, mush_kernel::HostError> {
+            let Some(raw) = text("kind") else {
+                return Ok(None);
+            };
+            EntryKind::parse(&raw).map(Some).ok_or_else(|| {
+                mush_kernel::HostError(format!(
+                    "kind must be prompt, memory, skill or subagent, not {raw}"
+                ))
+            })
+        };
+        let required_kind = || -> Result<EntryKind, mush_kernel::HostError> {
+            entry_kind()?.ok_or_else(|| mush_kernel::HostError("kind is required".into()))
+        };
+        let required_id = || -> Result<String, mush_kernel::HostError> {
+            text("id").ok_or_else(|| mush_kernel::HostError("id is required".into()))
+        };
+        let entries =
+            |entries: Vec<mush_session::harness::Entry>| serde_json::json!({ "entries": entries });
+
+        match kind {
+            "harness.list" => Ok(entries(store.list(entry_kind()?))),
+            "harness.search" => {
+                let query = text("query")
+                    .ok_or_else(|| mush_kernel::HostError("query is required".into()))?;
+                let limit = payload
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(10)
+                    .clamp(1, 100) as usize;
+                Ok(entries(store.search(&query, entry_kind()?, limit)))
+            }
+            "harness.get" => {
+                let found = store.find(required_kind()?, &required_id()?, global);
+                Ok(serde_json::json!({ "entry": found.map(|(_, entry)| entry) }))
+            }
+            "harness.create" | "harness.update" => {
+                let creating = kind == "harness.create";
+                let edit = Edit {
+                    action: if creating {
+                        Action::Create
+                    } else {
+                        Action::Update
+                    },
+                    kind: required_kind()?,
+                    id: text("id"),
+                    title: text("title"),
+                    content: text("content"),
+                    path: text("path"),
+                    reference: object("reference"),
+                    arguments: object("arguments"),
+                    metadata: object("metadata"),
+                    reason: None,
+                };
+                let entry = if creating {
+                    store.create(global, &edit)
+                } else {
+                    store.update(&required_id()?, global, &edit)
+                }
+                .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::json!({ "entry": entry }))
+            }
+            "harness.delete" => {
+                let entry = store
+                    .delete(required_kind()?, &required_id()?, global)
+                    .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::json!({ "entry": entry }))
+            }
+            other => Err(mush_kernel::HostError(format!("unknown request {other}"))),
+        }
     }
 
     fn goal_reply(&self) -> serde_json::Value {
@@ -1595,6 +1704,8 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     serde_json::json!({ "scheduled": true, "note": "compaction runs after this turn ends" }),
                 )
             }
+            "harness.list" | "harness.get" | "harness.search" | "harness.create"
+            | "harness.update" | "harness.delete" => return self.harness_call(kind, &payload),
             "refine.run" | "refine.status" => {
                 let commands = self.host_commands.as_ref().ok_or_else(|| {
                     mush_kernel::HostError("refinement is not available here".into())
@@ -2383,6 +2494,84 @@ mod tests {
         assert!(sent.outcome.is_success(), "{text}");
         assert_eq!(text.trim(), "root delivered");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_harness_crud_reaches_the_store_and_reports_what_it_wrote() {
+        use mush_kernel::HostRequestHandler;
+
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let dir = tempfile::tempdir().unwrap();
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root")).with_harness(
+            Arc::new(crate::harness::HarnessStore::with_dirs(
+                dir.path().join("local"),
+                dir.path().join("global"),
+            )),
+        );
+
+        let created = handler
+            .handle(
+                "harness.create",
+                serde_json::json!({
+                    "kind": "memory",
+                    "title": "the worktree gate",
+                    "content": "cargo nextest run --workspace",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["entry"]["id"], "the_worktree_gate");
+        assert_eq!(created["entry"]["scope"], "local");
+        assert_eq!(created["entry"]["source"], "agent");
+
+        let found = handler
+            .handle(
+                "harness.get",
+                serde_json::json!({ "kind": "memory", "id": "local:the_worktree_gate" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found["entry"]["content"], "cargo nextest run --workspace");
+
+        let hits = handler
+            .handle("harness.search", serde_json::json!({ "query": "worktree" }))
+            .await
+            .unwrap();
+        assert_eq!(hits["entries"].as_array().unwrap().len(), 1);
+
+        let updated = handler
+            .handle(
+                "harness.update",
+                serde_json::json!({
+                    "kind": "memory",
+                    "id": "the_worktree_gate",
+                    "content": "cargo nextest run --workspace, then cargo shear",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["entry"]["version"], 2);
+        assert_eq!(updated["entry"]["title"], "the worktree gate");
+
+        handler
+            .handle(
+                "harness.delete",
+                serde_json::json!({ "kind": "memory", "id": "the_worktree_gate" }),
+            )
+            .await
+            .unwrap();
+        let gone = handler
+            .handle("harness.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(gone["entries"].as_array().unwrap().is_empty());
+
+        let bad_kind = handler
+            .handle("harness.list", serde_json::json!({ "kind": "recipe" }))
+            .await
+            .unwrap_err();
+        assert!(bad_kind.0.contains("kind must be"));
     }
 
     #[tokio::test]
