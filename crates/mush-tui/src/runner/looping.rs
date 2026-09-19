@@ -362,11 +362,6 @@ pub(super) async fn apply_command_events(
                     .app
                     .push_system_message(crate::slash::format_refinement(&result));
             }
-            ClientEvent::HarnessDigest(digest) => {
-                session
-                    .app
-                    .push_system_message(crate::slash::format_harness_digest(&digest));
-            }
             ClientEvent::Agent { .. }
             | ClientEvent::TurnEnded { .. }
             | ClientEvent::ConfirmRequest { .. } => {

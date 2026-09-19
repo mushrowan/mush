@@ -116,7 +116,6 @@ pub enum ClientEvent {
     PausedChanged(Option<mush_session::Pause>),
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
     Refined(Box<mush_session::harness::RefinementResult>),
-    HarnessDigest(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1388,9 +1387,6 @@ impl InProcessConnection {
         };
         self.runtime.start_prepared_turn(request, prep, &deps);
         self.runtime.save_now_and_settle();
-        if let Some(digest) = self.runtime.harness_notice.take() {
-            self.queued.push_back(ClientEvent::HarnessDigest(digest));
-        }
         self.queued.push_back(ClientEvent::TurnStarted);
         true
     }
@@ -2035,42 +2031,43 @@ mod tests {
         );
         assert_eq!(connection.runtime.refinement_history().len(), 1);
 
-        let started = connection
+        connection
             .send(ClientCommand::Prompt {
                 text: "next".into(),
                 images: Vec::new(),
             })
             .await
             .unwrap();
-        let Some(ClientEvent::HarnessDigest(text)) = started
-            .iter()
-            .find(|event| matches!(event, ClientEvent::HarnessDigest(_)))
-        else {
-            panic!("{started:?}");
-        };
-        assert!(text.contains("[local:test_runner] test runner"), "{text}");
         drain_turn(&mut connection).await;
         let turn = requests.lock().unwrap()[1].messages.clone();
         assert_eq!(turn.len(), 3);
+        let Message::User(digest) = &turn[1] else {
+            panic!("{turn:?}")
+        };
         assert!(
-            matches!(&turn[1], Message::User(u) if u.text().starts_with(mush_session::harness::DIGEST_PREFIX))
+            digest
+                .text()
+                .starts_with(mush_session::harness::DIGEST_PREFIX)
         );
+        assert!(digest.text().contains("[local:test_runner] test runner"));
         assert!(matches!(&turn[2], Message::User(u) if u.text() == "next"));
 
-        let started = connection
+        connection
             .send(ClientCommand::Prompt {
                 text: "again".into(),
                 images: Vec::new(),
             })
             .await
             .unwrap();
+        drain_turn(&mut connection).await;
+        let turn = requests.lock().unwrap()[2].messages.clone();
         assert!(
-            !started
+            !turn
                 .iter()
-                .any(|event| matches!(event, ClientEvent::HarnessDigest(_))),
+                .skip(3)
+                .any(|message| matches!(message, Message::User(u) if u.text().starts_with(mush_session::harness::DIGEST_PREFIX))),
             "an unchanged harness is not re-delivered"
         );
-        drain_turn(&mut connection).await;
     }
 
     #[tokio::test]
@@ -3274,6 +3271,18 @@ mod tests {
             reason: Some("rebuilding".into()),
             by: Some("cli".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn a_pause_carried_by_the_worker_config_reaches_the_runtime() {
+        let mut worker =
+            crate::WorkerConfig::new(crate::testing::echo_config(crate::testing::echo_model()));
+        worker.paused = Some(a_pause());
+        let connection = worker.connect(
+            &mush_agent::ToolRegistry::new(),
+            &mush_ai::registry::ApiRegistry::new(),
+        );
+        assert!(connection.state().paused.is_some());
     }
 
     #[tokio::test]

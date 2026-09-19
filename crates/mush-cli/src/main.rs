@@ -1765,6 +1765,27 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_session_keeps_the_pause() {
+        let mut snapshot = snapshot(None);
+        snapshot.paused = Some(mush_session::Pause {
+            at: Timestamp::zero(),
+            reason: Some("rebuilding".into()),
+            by: Some("cli".into()),
+        });
+
+        let session = session_from_snapshot(snapshot, "/tmp");
+
+        assert_eq!(
+            session
+                .meta
+                .paused
+                .and_then(|pause| pause.reason)
+                .as_deref(),
+            Some("rebuilding")
+        );
+    }
+
+    #[test]
     fn a_fork_gets_a_fresh_id_and_keeps_the_conversation() {
         let source = session_from_snapshot(snapshot(Some("port prime")), "/tmp");
         let source_id = source.meta.id.clone();

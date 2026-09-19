@@ -1,49 +1,95 @@
-use mush_session::harness::RefinementResult;
+use mush_session::harness::{Action, Kind, RefinementResult};
 
-#[must_use]
-pub fn format_refinement(result: &RefinementResult) -> String {
-    let heading = match &result.rollback_of {
-        Some(target) => format!(
-            "━ harness rollback of {target} ({}) ━",
-            result.scope.as_str()
-        ),
-        None => format!(
-            "━ harness refined [{}] ({}) ━",
-            result.id,
-            result.scope.as_str()
-        ),
-    };
-    let applied = result
+fn plural(kind: Kind, count: usize) -> String {
+    match (kind, count) {
+        (Kind::Memory, 1) => "memory".into(),
+        (Kind::Memory, _) => "memories".into(),
+        (kind, 1) => kind.as_str().into(),
+        (kind, _) => format!("{}s", kind.as_str()),
+    }
+}
+
+fn past(action: Action) -> &'static str {
+    match action {
+        Action::Create => "created",
+        Action::Update => "updated",
+        Action::Delete => "deleted",
+    }
+}
+
+fn headline(result: &RefinementResult) -> String {
+    let rollback = result.rollback_of.is_some();
+    let total = result.applied_edits.len();
+    let applied: Vec<_> = result
         .applied_edits
         .iter()
         .filter(|edit| edit.applied)
-        .count();
-    let mut text = format!("{heading}\n\n{}", result.notice());
-    if applied == 0 && result.applied_edits.is_empty() {
-        text.push_str("\n\nno edits proposed");
-        if !result.rationale.is_empty() {
-            text.push_str(&format!(": {}", result.rationale));
+        .collect();
+    if total == 0 {
+        return if rollback {
+            "harness rollback unchanged, no edits applied".into()
+        } else {
+            "harness unchanged, no edits applied".into()
+        };
+    }
+    if applied.is_empty() {
+        let what = if rollback { "rollback" } else { "refinement" };
+        return format!("harness {what} failed, 0 of {total} edits applied");
+    }
+    if applied.len() < total {
+        let what = if rollback {
+            "partially rolled back"
+        } else {
+            "partially refined"
+        };
+        return format!("harness {what}, {} of {total} edits applied", applied.len());
+    }
+    if rollback {
+        return format!("harness rolled back, {total} edits applied");
+    }
+    let first = applied[0];
+    if applied.iter().all(|edit| edit.edit.kind == first.edit.kind) {
+        let verb = if applied
+            .iter()
+            .all(|edit| edit.edit.action == first.edit.action)
+        {
+            past(first.edit.action)
+        } else {
+            "changed"
+        };
+        return format!(
+            "harness refined, {} {} {verb}",
+            applied.len(),
+            plural(first.edit.kind, applied.len())
+        );
+    }
+    format!("harness refined, {} edits applied", applied.len())
+}
+
+#[must_use]
+pub fn format_refinement(result: &RefinementResult) -> String {
+    let mut text = format!("◆ {}", headline(result));
+    let summary = result.summary.trim();
+    if summary.is_empty() {
+        if !result.rationale.trim().is_empty() {
+            text.push_str(&format!("\n{}", result.rationale.trim()));
         }
+    } else {
+        text.push_str(&format!("\n{summary}"));
     }
     for edit in result.applied_edits.iter().filter(|edit| !edit.applied) {
         text.push_str(&format!(
-            "\n- rejected {} {}:{}: {}",
+            "\nrejected {} {}:{}: {}",
             edit.edit.action.as_str(),
             edit.edit.kind.as_str(),
             edit.id,
             edit.error.as_deref().unwrap_or("unknown reason")
         ));
     }
-    if !result.expected_outcome.is_empty() {
-        text.push_str(&format!("\n\nexpected: {}", result.expected_outcome));
+    if result.applied_edits.iter().any(|edit| edit.applied) {
+        text.push_str(&format!("\n/refine rollback {} undoes this", result.id));
     }
-    text.push_str(&format!("\n\n/refine rollback {} undoes this", result.id));
     text
-}
-
-#[must_use]
-pub fn format_harness_digest(digest: &str) -> String {
-    format!("━ harness digest ━\n\n{digest}")
 }
 
 #[cfg(test)]
@@ -91,22 +137,90 @@ mod tests {
             None,
         );
         let text = format_refinement(&result);
-        assert!(
-            text.starts_with("━ harness refined [ref_abc] (local) ━"),
-            "{text}"
+        assert_eq!(
+            text,
+            "◆ harness partially refined, 1 of 2 edits applied\n\
+             remember the test runner\n\
+             rejected delete memory:missing: entry not found\n\
+             /refine rollback ref_abc undoes this"
         );
-        assert!(
-            text.contains("- create memory [local:test_runner] test runner: use cargo nextest"),
-            "{text}"
+        assert!(!text.contains("use cargo nextest"), "{text}");
+        assert!(!text.contains("fewer cargo test runs"), "{text}");
+    }
+
+    fn applied(action: Action, kind: Kind, id: &str) -> mush_session::harness::AppliedEdit {
+        mush_session::harness::AppliedEdit {
+            edit: Edit {
+                action,
+                kind,
+                id: Some(id.into()),
+                title: Some(id.into()),
+                content: Some("body".into()),
+                path: None,
+                reference: None,
+                arguments: None,
+                metadata: None,
+                reason: None,
+            },
+            id: id.into(),
+            applied: true,
+            error: None,
+            before: None,
+            after: None,
+        }
+    }
+
+    fn result_of(edits: Vec<mush_session::harness::AppliedEdit>) -> RefinementResult {
+        RefinementResult {
+            id: "ref_abc".into(),
+            summary: "six memories".into(),
+            rationale: String::new(),
+            expected_outcome: "less re-deriving".into(),
+            applied_edits: edits,
+            scope: Scope::Local,
+            rollback_of: None,
+        }
+    }
+
+    #[test]
+    fn a_batch_of_one_kind_is_counted_not_listed() {
+        let edits = (0..6)
+            .map(|i| applied(Action::Create, Kind::Memory, &format!("m{i}")))
+            .collect();
+        let text = format_refinement(&result_of(edits));
+
+        assert_eq!(
+            text,
+            "◆ harness refined, 6 memories created\n\
+             six memories\n\
+             /refine rollback ref_abc undoes this"
         );
+    }
+
+    #[test]
+    fn mixed_kinds_and_actions_fall_back_to_a_count() {
+        let mixed = vec![
+            applied(Action::Create, Kind::Memory, "m"),
+            applied(Action::Update, Kind::Skill, "s"),
+        ];
         assert!(
-            text.contains("- rejected delete memory:missing: entry not found"),
-            "{text}"
+            format_refinement(&result_of(mixed)).starts_with("◆ harness refined, 2 edits applied")
         );
-        assert!(text.contains("expected: fewer cargo test runs"), "{text}");
+
+        let one_kind = vec![
+            applied(Action::Create, Kind::Prompt, "a"),
+            applied(Action::Delete, Kind::Prompt, "b"),
+        ];
         assert!(
-            text.ends_with("/refine rollback ref_abc undoes this"),
-            "{text}"
+            format_refinement(&result_of(one_kind))
+                .starts_with("◆ harness refined, 2 prompts changed")
         );
+    }
+
+    #[test]
+    fn nothing_proposed_says_so_and_offers_no_rollback() {
+        let text = format_refinement(&result_of(Vec::new()));
+
+        assert_eq!(text, "◆ harness unchanged, no edits applied\nsix memories");
     }
 }

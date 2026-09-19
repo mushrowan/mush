@@ -14,7 +14,7 @@ pub use compaction::{
     fallback_applied_compaction, handle_compact, run_compaction, show_applied_compaction,
     start_compaction,
 };
-pub use refine::{format_harness_digest, format_refinement};
+pub use refine::format_refinement;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpQuery {
