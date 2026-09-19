@@ -1,3 +1,5 @@
+#![allow(clippy::panic)]
+
 use mush_agent::ipc::{
     IpcListener,
     control::{Control, Event, Outcome},

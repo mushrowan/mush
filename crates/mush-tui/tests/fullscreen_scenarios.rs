@@ -564,6 +564,7 @@ fn the_cursor_starts_at_the_bottom_left_of_the_window() {
     assert_eq!(cursor(&app).1, 0);
 }
 
+#[expect(clippy::panic, reason = "the fixture needs a line with text")]
 fn cursor_onto_text(app: &mut App) {
     let window = window_rows(app);
     let Some(row) = window.iter().rposition(|row| row.trim().len() > 4) else {

@@ -1,4 +1,5 @@
 #![expect(clippy::unwrap_used)]
+#![allow(clippy::panic)]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

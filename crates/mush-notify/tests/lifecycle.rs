@@ -311,6 +311,7 @@ impl Transport for Unavailable {
     fn available(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         Box::pin(async { false })
     }
+    #[expect(clippy::panic, reason = "the fixture must not be sent through")]
     fn send(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
         panic!("unavailable transport was called")
     }

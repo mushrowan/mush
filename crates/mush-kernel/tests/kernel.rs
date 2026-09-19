@@ -8,6 +8,7 @@ async fn kernel() -> Kernel {
     kernel_with(Arc::new(NoHost)).await
 }
 
+#[expect(clippy::panic, reason = "the suite needs python3 on PATH")]
 async fn kernel_with(handler: Arc<dyn HostRequestHandler>) -> Kernel {
     match Kernel::start(KernelConfig::default(), handler).await {
         Ok(kernel) => kernel,

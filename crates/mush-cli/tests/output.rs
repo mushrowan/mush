@@ -1,4 +1,5 @@
 #![cfg(target_os = "linux")]
+#![allow(clippy::panic)]
 
 use std::fs::File;
 use std::io::{Read, Write};

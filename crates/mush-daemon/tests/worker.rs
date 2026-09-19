@@ -500,6 +500,7 @@ struct RawClient {
 }
 
 impl RawClient {
+    #[expect(clippy::panic, reason = "the fixture needs the hello frame")]
     async fn connect(socket: &std::path::Path) -> (Self, mush_daemon::Cursor) {
         use tokio::io::AsyncBufReadExt;
         let stream = tokio::net::UnixStream::connect(socket).await.unwrap();

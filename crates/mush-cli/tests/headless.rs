@@ -1,3 +1,5 @@
+#![allow(clippy::panic)]
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

@@ -47,6 +47,7 @@ pub fn missing_consumed_fields(value: &serde_json::Value, manifest: &[FieldStatu
 }
 
 #[track_caller]
+#[expect(clippy::panic, reason = "an assertion helper for the drift test")]
 pub fn assert_no_drift(label: &str, value: &serde_json::Value, manifest: &[FieldStatus]) {
     let unknown = unknown_fields(value, manifest);
     let missing = missing_consumed_fields(value, manifest);
