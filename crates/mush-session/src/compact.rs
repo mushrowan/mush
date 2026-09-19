@@ -899,6 +899,7 @@ fn compaction_context(
     focus: &CompactionFocus,
     live: Option<&LiveContext>,
 ) -> LlmContext {
+    // reuse the turn's exact prefix to hit the prompt cache
     if let Some(live) = live {
         let mut messages: Vec<Message> = old_messages
             .iter()
