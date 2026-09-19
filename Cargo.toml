@@ -173,6 +173,10 @@ tempfile = "3"
 filetime = "0.2"
 criterion = { version = "0.8", features = ["html_reports"] }
 
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.profiling]
 inherits = "release"
 debug = "line-tables-only"
