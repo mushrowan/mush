@@ -294,6 +294,7 @@ struct Node {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
     last_note_at: Option<Instant>,
+    replied: bool,
 }
 
 struct Inner {
@@ -345,6 +346,7 @@ impl Family {
                         shutdown: None,
                         task: None,
                         last_note_at: None,
+                        replied: false,
                     },
                 );
             }
@@ -703,6 +705,7 @@ impl Family {
                 shutdown: Some(shutdown_tx),
                 task: Some(task),
                 last_note_at: None,
+                replied: false,
             },
         );
         self.persist();
@@ -788,22 +791,35 @@ impl Family {
             ClientEvent::Agent {
                 event: AgentEvent::Error { error },
                 ..
-            } => self.update(id, |child| {
-                child.status = ChildStatus::Failed;
-                child.error = Some(error.clone());
-            }),
-            ClientEvent::TurnEnded { cancelled } => self.update(id, |child| {
-                child.streaming = false;
-                child.tool_running = None;
-                child.awaiting_confirmation = None;
-                if child.status == ChildStatus::Running {
-                    child.status = if *cancelled {
-                        ChildStatus::Cancelled
+            } => {
+                self.update(id, |child| {
+                    child.status = ChildStatus::Failed;
+                    child.error = Some(error.clone());
+                });
+                self.post_exit_notice(id, ExitNotice::Failed);
+            }
+            ClientEvent::TurnEnded { cancelled } => {
+                self.update(id, |child| {
+                    child.streaming = false;
+                    child.tool_running = None;
+                    child.awaiting_confirmation = None;
+                    if child.status == ChildStatus::Running {
+                        child.status = if *cancelled {
+                            ChildStatus::Cancelled
+                        } else {
+                            ChildStatus::Idle
+                        };
+                    }
+                });
+                self.post_exit_notice(
+                    id,
+                    if *cancelled {
+                        ExitNotice::Cancelled
                     } else {
-                        ChildStatus::Idle
-                    };
-                }
-            }),
+                        ExitNotice::NoReply
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -1010,6 +1026,10 @@ impl Family {
                         .unwrap_or_default(),
                     None => inner.root.name.clone(),
                 };
+                drop(inner);
+                if let Some(node) = self.lock().children.get_mut(id) {
+                    node.replied = true;
+                }
                 vec![(parent, parent_name, self.sender_label(caller, "child"))]
             }
             "child" => {
@@ -1221,6 +1241,87 @@ impl Family {
         }
         self.persist();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitNotice {
+    NoReply,
+    Cancelled,
+    Failed,
+}
+
+pub const EXIT_NOTICE_PREVIEW_CHARS: usize = 160;
+
+impl Family {
+    fn post_exit_notice(&self, id: &str, notice: ExitNotice) {
+        let timestamp_ms = Timestamp::now();
+        let (parent_inbox, content, child_session) = {
+            let mut inner = self.lock();
+            let Some(node) = inner.children.get_mut(id) else {
+                return;
+            };
+            if node.replied {
+                return;
+            }
+            node.replied = true;
+            let name = node.summary.name.clone();
+            let parent = node.summary.parent.clone();
+            let session = node.summary.session_id.clone();
+            let content = match notice {
+                ExitNotice::NoReply => match node.summary.answer.as_deref() {
+                    Some(answer) if !answer.trim().is_empty() => format!(
+                        "[child-exited: no-reply child:{name}]\n\nLast assistant text: {}",
+                        compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS)
+                    ),
+                    _ => format!("[child-exited: no-reply child:{name}]"),
+                },
+                ExitNotice::Cancelled => format!("[child-exited: cancelled child:{name}]"),
+                ExitNotice::Failed => format!(
+                    "[child-failed child:{name}]\n\n{}",
+                    node.summary.error.as_deref().unwrap_or("unknown error")
+                ),
+            };
+            let inbox = match &parent {
+                Some(parent) => inner
+                    .children
+                    .get(parent)
+                    .and_then(|node| node.inbox.clone()),
+                None => inner.root_inbox.clone(),
+            };
+            (inbox, content, session)
+        };
+        let Some(inbox) = parent_inbox else {
+            return;
+        };
+        let _ = inbox.send(Delivery {
+            event: EventMessage {
+                content,
+                timestamp_ms,
+                kind: EventKind::Message,
+                receipts: vec![EventReceipt {
+                    id: format!("child-exit-{}", mush_ai::types::SessionId::new()).into(),
+                    timestamp_ms,
+                    kind: EventKind::Message,
+                    origin: EventOrigin::Agent {
+                        session_id: child_session,
+                        name: id.to_string(),
+                        relationship: "child".into(),
+                    },
+                }],
+            },
+            mode: DeliveryMode::Auto,
+            receipt: None,
+        });
+    }
+}
+
+fn compact_preview(text: &str, max: usize) -> String {
+    let normalised = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalised.chars().count() <= max {
+        return normalised;
+    }
+    let head: String = normalised.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
 }
 
 fn view_of(
@@ -2222,6 +2323,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_child_that_finishes_without_replying_wakes_its_parent() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        let (mut root_connection, _root_requests) = crate::testing::echo_connection();
+        root_connection.attach_agent_inbox(family.root_inbox());
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        let mut injected = Vec::new();
+        for _ in 0..50 {
+            root_connection.start_pending().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            while let Some(event) = root_connection.try_next_event() {
+                if let ClientEvent::MessageInjected(event) = event {
+                    injected.push(event.content);
+                }
+            }
+        }
+        assert_eq!(
+            injected,
+            vec![
+                "[child-exited: no-reply child:auth]\n\nLast assistant text: child says hi"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_child_message_reaches_an_idle_parent_as_a_prompt() {
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let family = family(Arc::clone(&requests), 2, None);
@@ -2232,9 +2365,8 @@ mod tests {
             .spawn(&root, "task".into(), "auth".into(), None, None, &family)
             .await
             .unwrap();
-        let children = settle(&family, &root).await;
         let child = Identity {
-            id: Some(children[0].id.clone()),
+            id: Some(family.children_of(&root)[0].id.clone()),
             name: "auth".into(),
             depth: 1,
         };
@@ -2272,6 +2404,15 @@ mod tests {
             EventOrigin::Agent { ref name, ref relationship, .. } if name == "auth" && relationship == "child"
         ));
         assert!(root_connection.state().turn_active || root_connection.state().context_len >= 1);
+
+        settle(&family, &root).await;
+        assert!(
+            !std::iter::from_fn(|| root_connection.try_next_event()).any(|event| {
+                matches!(event, ClientEvent::MessageInjected(event)
+                    if event.content.starts_with("[child-exited"))
+            }),
+            "a child that replied gets no exit notice"
+        );
     }
 
     #[tokio::test]
