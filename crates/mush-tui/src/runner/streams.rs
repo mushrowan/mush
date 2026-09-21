@@ -1139,6 +1139,7 @@ mod tests {
             save_thinking_prefs: None,
             last_models: super::super::LastModels::default(),
             save_last_models: None,
+            feature_hints: true,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,

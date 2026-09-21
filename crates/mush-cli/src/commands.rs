@@ -56,6 +56,7 @@ pub fn open_config() -> Result<()> {
              # show_usage_lines = false  # render usage lines under each message\n\
              # show_token_counters = false  # ↑/↓/R/W token counters in status bar\n\
              # cache_timer = true  # cache warmth countdown + notifications (on by default)\n\
+             # feature_hints = true  # dim tips above the composer while the agent works\n\
              # system_prompt = \"\"\n\
              \n\
              # [keys]\n\

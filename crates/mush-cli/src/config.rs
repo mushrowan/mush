@@ -224,6 +224,8 @@ pub struct Config {
     #[serde(default)]
     pub kernel: KernelConfig,
     pub confirm_tools: bool,
+    #[serde(default = "default_feature_hints")]
+    pub feature_hints: bool,
     pub show_cost: bool,
     pub show_usage_lines: bool,
     pub show_token_counters: bool,
@@ -273,6 +275,10 @@ fn default_cache_timer() -> bool {
     true
 }
 
+fn default_feature_hints() -> bool {
+    true
+}
+
 fn default_rlm() -> bool {
     true
 }
@@ -300,6 +306,7 @@ impl Default for Config {
             rlm_max_depth: None,
             kernel: KernelConfig::default(),
             confirm_tools: false,
+            feature_hints: default_feature_hints(),
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,

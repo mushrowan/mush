@@ -1159,6 +1159,10 @@
       },
       "type": "array"
     },
+    "feature_hints": {
+      "default": true,
+      "type": "boolean"
+    },
     "forbidden_char_classes": {
       "default": [],
       "items": {

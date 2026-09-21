@@ -325,9 +325,11 @@ impl App {
     }
 
     fn feature_hint_due(&self) -> bool {
-        self.turn
-            .elapsed()
-            .is_some_and(|elapsed| elapsed >= crate::feature_hints::FEATURE_HINT_DELAY)
+        self.interaction.feature_hints
+            && self
+                .turn
+                .elapsed()
+                .is_some_and(|elapsed| elapsed >= crate::feature_hints::FEATURE_HINT_DELAY)
             && self.is_busy()
     }
 

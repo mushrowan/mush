@@ -1563,6 +1563,7 @@ fn client_config(
         save_last_models: Some(std::sync::Arc::new(|models| {
             config::save_last_models(models);
         })),
+        feature_hints: client.cfg.feature_hints,
         show_cost: client.cfg.show_cost,
         show_usage_lines: client.cfg.show_usage_lines,
         show_token_counters: client.cfg.show_token_counters,

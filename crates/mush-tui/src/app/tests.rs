@@ -1289,6 +1289,17 @@ fn an_idle_app_never_shows_a_hint_even_after_the_delay() {
 }
 
 #[test]
+fn disabling_feature_hints_keeps_the_row_empty_through_a_busy_turn() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.interaction.feature_hints = false;
+    app.begin_turn();
+    app.start_streaming();
+    app.turn.backdate(std::time::Duration::from_secs(6));
+    app.tick_animation();
+    assert_eq!(app.feature_hint(), None);
+}
+
+#[test]
 fn activity_label_uses_tool_name_when_one_running() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.active_tools

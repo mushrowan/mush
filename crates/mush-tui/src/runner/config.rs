@@ -32,6 +32,7 @@ pub struct TuiConfig {
     pub save_thinking_prefs: Option<super::ThinkingPrefsSaver>,
     pub last_models: super::LastModels,
     pub save_last_models: Option<super::LastModelsSaver>,
+    pub feature_hints: bool,
     pub show_cost: bool,
     pub show_usage_lines: bool,
     pub show_token_counters: bool,
@@ -89,6 +90,7 @@ impl TuiConfig {
         app.theme = self.theme.clone();
         app.keymap = self.keymap.clone();
         app.session_title = self.initial_title.clone();
+        app.interaction.feature_hints = self.feature_hints;
         app.interaction.show_cost = self.show_cost;
         app.interaction.show_usage_lines = self.show_usage_lines;
         app.interaction.show_token_counters = self.show_token_counters;
@@ -143,6 +145,7 @@ impl TuiConfig {
             save_thinking_prefs: None,
             last_models: super::LastModels::default(),
             save_last_models: None,
+            feature_hints: true,
             show_cost: false,
             show_usage_lines: false,
             show_token_counters: false,
