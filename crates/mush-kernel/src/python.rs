@@ -16,14 +16,29 @@ impl PythonPlan {
         explicit: Option<&Path>,
         managed: Option<&crate::venv::ManagedVenv>,
     ) -> Result<Self, KernelError> {
+        let environment = std::env::var_os(PYTHON_ENV);
+        Self::resolve_with(
+            explicit,
+            environment.as_deref().map(Path::new),
+            managed,
+            crate::venv::find_uv().is_some(),
+        )
+    }
+
+    fn resolve_with(
+        explicit: Option<&Path>,
+        environment: Option<&Path>,
+        managed: Option<&crate::venv::ManagedVenv>,
+        uv_available: bool,
+    ) -> Result<Self, KernelError> {
         if let Some(path) = explicit {
             return check(path).map(Self::Explicit);
         }
-        if let Some(path) = std::env::var_os(PYTHON_ENV) {
-            return check(Path::new(&path)).map(Self::Explicit);
+        if let Some(path) = environment {
+            return check(path).map(Self::Explicit);
         }
         if let Some(venv) = managed
-            && (venv.is_current() || crate::venv::find_uv().is_some())
+            && (venv.is_current() || uv_available)
         {
             return Ok(Self::Managed(venv.clone()));
         }
@@ -94,19 +109,30 @@ mod tests {
     }
 
     #[test]
-    fn a_managed_venv_is_planned_when_current_even_without_uv() {
+    fn python_selection_precedence() {
         let dir = tempfile::tempdir().unwrap();
         let venv = crate::venv::ManagedVenv::at(dir.path().join("venv"));
 
-        let plan = PythonPlan::resolve(Some(Path::new("/definitely/not/python")), Some(&venv));
+        let plan = PythonPlan::resolve_with(
+            Some(Path::new("/definitely/not/python")),
+            None,
+            Some(&venv),
+            true,
+        );
         assert!(matches!(plan, Err(KernelError::PythonMissing(_))));
 
-        let plan = PythonPlan::resolve(None, Some(&venv)).unwrap();
-        if crate::venv::find_uv().is_some() {
-            assert_eq!(plan, PythonPlan::Managed(venv));
-        } else {
-            assert!(matches!(plan, PythonPlan::System(_)));
-        }
+        let plan = PythonPlan::resolve_with(None, None, Some(&venv), true).unwrap();
+        assert_eq!(plan, PythonPlan::Managed(venv));
+    }
+
+    #[test]
+    fn environment_python_precedes_managed_venv() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = crate::venv::ManagedVenv::at(dir.path().join("venv"));
+        let current_exe = std::env::current_exe().unwrap();
+
+        let plan = PythonPlan::resolve_with(None, Some(&current_exe), Some(&venv), true).unwrap();
+        assert_eq!(plan, PythonPlan::Explicit(current_exe));
     }
 
     #[test]
