@@ -128,7 +128,7 @@ self: {
     topLevelExtraOverrides = {
       package = {
         type = lib.types.package;
-        inherit (self.packages.${pkgs.system}) default;
+        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) default;
         defaultText = lib.literalExpression "pkgs.mush";
         description = "the mush package to install";
       };
