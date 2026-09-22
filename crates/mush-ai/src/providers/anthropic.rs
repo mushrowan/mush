@@ -13,12 +13,12 @@ use crate::types::*;
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_DIRECT_API: &str = "api.anthropic.com";
-const CLAUDE_CODE_VERSION: &str = "2.1.257";
+const CLAUDE_CODE_VERSION: &str = "2.1.280";
 const CLAUDE_CODE_VERSION_SALT: &str = "59cf53e54c78";
-const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 64_000;
+const CLAUDE_CODE_MAX_OUTPUT_TOKENS: u64 = 128_000;
 const ADVISOR_TOOL_TYPE: &str = "advisor_20260301";
 const ADVISOR_TOOL_NAME: &str = "advisor";
-const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-4-8";
+const DEFAULT_ADVISOR_MODEL: &str = "claude-opus-5-5";
 
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -449,6 +449,7 @@ enum RequestTool {
         tool_type: &'static str,
         name: &'static str,
         model: &'static str,
+        defer_loading: bool,
     },
 }
 
@@ -662,6 +663,10 @@ fn build_request_headers(
         );
         headers.insert("x-app", HeaderValue::from_static("cli"));
         headers.insert(
+            "x-claude-code-request-class",
+            HeaderValue::from_static("main"),
+        );
+        headers.insert(
             "anthropic-dangerous-direct-browser-access",
             HeaderValue::from_static("true"),
         );
@@ -787,6 +792,7 @@ fn convert_tools(
                 tool_type: ADVISOR_TOOL_TYPE,
                 name: ADVISOR_TOOL_NAME,
                 model,
+                defer_loading: true,
             },
         ));
     }
@@ -1360,7 +1366,6 @@ fn inject_synthetic_results(
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-#[expect(dead_code)]
 enum SseEvent {
     #[serde(rename = "message_start")]
     MessageStart { message: MessageStartData },
@@ -1437,11 +1442,12 @@ enum ContentBlockData {
         tool_use_id: String,
         content: serde_json::Value,
     },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-#[expect(clippy::enum_variant_names)]
 enum DeltaData {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
@@ -1451,6 +1457,10 @@ enum DeltaData {
     InputJsonDelta { partial_json: String },
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },
+    #[serde(rename = "citations_delta")]
+    CitationsDelta,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1509,8 +1519,13 @@ impl ErrorData {
 use super::StreamBlock;
 use super::sse::safe_preview_text;
 
+struct AnthropicBlock {
+    output_index: Option<usize>,
+    block: StreamBlock,
+}
+
 struct AnthropicProcessor {
-    blocks: Vec<StreamBlock>,
+    blocks: Vec<AnthropicBlock>,
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
 }
@@ -1562,7 +1577,7 @@ fn parse_sse_stream(
 fn process_sse_event(
     event: SseEvent,
     output: &mut AssistantMessage,
-    blocks: &mut Vec<StreamBlock>,
+    blocks: &mut Vec<AnthropicBlock>,
     is_oauth: bool,
     tools: &[ToolDefinition],
 ) -> Vec<StreamEvent> {
@@ -1585,40 +1600,56 @@ fn process_sse_event(
             });
         }
         SseEvent::ContentBlockStart {
-            index: _,
+            index,
             content_block,
         } => {
-            let content_index = blocks.len();
+            if blocks.len() <= index {
+                blocks.resize_with(index + 1, || AnthropicBlock {
+                    output_index: None,
+                    block: StreamBlock::ServerSideTranscript,
+                });
+            }
+            let output_index = output.content.len();
+            let block = &mut blocks[index];
             match content_block {
                 ContentBlockData::Text { text } => {
-                    blocks.push(StreamBlock::Text { text: text.clone() });
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::Text { text: text.clone() };
                     output
                         .content
                         .push(AssistantContentPart::Text(TextContent { text }));
-                    events.push(StreamEvent::TextStart { content_index });
+                    events.push(StreamEvent::TextStart {
+                        content_index: output_index,
+                    });
                 }
                 ContentBlockData::Thinking { thinking } => {
-                    blocks.push(StreamBlock::Thinking {
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::Thinking {
                         text: thinking.clone(),
                         signature: None,
-                    });
+                    };
                     output.content.push(AssistantContentPart::Thinking(
                         ThinkingContent::Thinking {
                             thinking,
                             signature: None,
                         },
                     ));
-                    events.push(StreamEvent::ThinkingStart { content_index });
+                    events.push(StreamEvent::ThinkingStart {
+                        content_index: output_index,
+                    });
                 }
                 ContentBlockData::RedactedThinking { data } => {
-                    blocks.push(StreamBlock::Thinking {
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::Thinking {
                         text: "[reasoning redacted]".into(),
                         signature: Some(data.clone()),
-                    });
+                    };
                     output.content.push(AssistantContentPart::Thinking(
                         ThinkingContent::Redacted { data },
                     ));
-                    events.push(StreamEvent::ThinkingStart { content_index });
+                    events.push(StreamEvent::ThinkingStart {
+                        content_index: output_index,
+                    });
                 }
                 ContentBlockData::ToolUse { id, name } => {
                     let resolved_name = if is_oauth {
@@ -1626,11 +1657,12 @@ fn process_sse_event(
                     } else {
                         name.clone()
                     };
-                    blocks.push(StreamBlock::ToolCall {
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::ToolCall {
                         id: id.clone(),
                         name: resolved_name.clone(),
                         args_buf: String::new(),
-                    });
+                    };
                     output
                         .content
                         .push(AssistantContentPart::ToolCall(ToolCall {
@@ -1638,10 +1670,13 @@ fn process_sse_event(
                             name: ToolName::from(resolved_name),
                             arguments: serde_json::Value::Object(Default::default()),
                         }));
-                    events.push(StreamEvent::ToolCallStart { content_index });
+                    events.push(StreamEvent::ToolCallStart {
+                        content_index: output_index,
+                    });
                 }
                 ContentBlockData::ServerToolUse { id, name, input } => {
-                    blocks.push(StreamBlock::ServerSideTranscript);
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::ServerSideTranscript;
                     output
                         .content
                         .push(AssistantContentPart::ServerToolUse(ServerToolUse {
@@ -1654,7 +1689,8 @@ fn process_sse_event(
                     tool_use_id,
                     content,
                 } => {
-                    blocks.push(StreamBlock::ServerSideTranscript);
+                    block.output_index = Some(output_index);
+                    block.block = StreamBlock::ServerSideTranscript;
                     output.content.push(AssistantContentPart::AdvisorToolResult(
                         AdvisorToolResult {
                             tool_use_id: ToolCallId::from(tool_use_id),
@@ -1662,14 +1698,23 @@ fn process_sse_event(
                         },
                     ));
                 }
+                ContentBlockData::Unknown => {
+                    block.output_index = None;
+                    block.block = StreamBlock::ServerSideTranscript;
+                }
             }
         }
-        SseEvent::ContentBlockDelta { index: _, delta } => {
-            let content_index = blocks.len().saturating_sub(1);
+        SseEvent::ContentBlockDelta { index, delta } => {
+            let Some(block) = blocks.get_mut(index) else {
+                return events;
+            };
+            let Some(content_index) = block.output_index else {
+                return events;
+            };
 
             match delta {
                 DeltaData::TextDelta { text } => {
-                    if let Some(StreamBlock::Text { text: buf }) = blocks.last_mut() {
+                    if let StreamBlock::Text { text: buf } = &mut block.block {
                         buf.push_str(&text);
                     }
                     if let Some(AssistantContentPart::Text(tc)) =
@@ -1683,7 +1728,7 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::ThinkingDelta { thinking } => {
-                    if let Some(StreamBlock::Thinking { text: buf, .. }) = blocks.last_mut() {
+                    if let StreamBlock::Thinking { text: buf, .. } = &mut block.block {
                         buf.push_str(&thinking);
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
@@ -1698,7 +1743,7 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::InputJsonDelta { partial_json } => {
-                    if let Some(StreamBlock::ToolCall { args_buf, .. }) = blocks.last_mut() {
+                    if let StreamBlock::ToolCall { args_buf, .. } = &mut block.block {
                         args_buf.push_str(&partial_json);
                     }
                     events.push(StreamEvent::ToolCallDelta {
@@ -1707,7 +1752,7 @@ fn process_sse_event(
                     });
                 }
                 DeltaData::SignatureDelta { signature } => {
-                    if let Some(StreamBlock::Thinking { signature: sig, .. }) = blocks.last_mut() {
+                    if let StreamBlock::Thinking { signature: sig, .. } = &mut block.block {
                         sig.get_or_insert_with(String::new).push_str(&signature);
                     }
                     if let Some(AssistantContentPart::Thinking(tc)) =
@@ -1717,12 +1762,14 @@ fn process_sse_event(
                         sig.get_or_insert_with(String::new).push_str(&signature);
                     }
                 }
+                DeltaData::CitationsDelta | DeltaData::Unknown => {}
             }
         }
-        SseEvent::ContentBlockStop { index: _ } => {
-            if let Some(block) = blocks.last() {
-                let content_index = blocks.len() - 1;
-                match block {
+        SseEvent::ContentBlockStop { index } => {
+            if let Some(block) = blocks.get(index)
+                && let Some(content_index) = block.output_index
+            {
+                match &block.block {
                     StreamBlock::Text { text } => {
                         events.push(StreamEvent::TextEnd {
                             content_index,
@@ -2791,6 +2838,84 @@ mod tests {
     }
 
     #[test]
+    fn unknown_blocks_do_not_shift_later_indexes() {
+        let mut output = test_output();
+        let mut blocks = Vec::new();
+        let unknown: SseEvent = serde_json::from_str(
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"new_block"}}"#,
+        )
+        .unwrap();
+        process_sse_event(unknown, &mut output, &mut blocks, false, &[]);
+        process_sse_event(
+            SseEvent::ContentBlockStart {
+                index: 1,
+                content_block: ContentBlockData::Text {
+                    text: String::new(),
+                },
+            },
+            &mut output,
+            &mut blocks,
+            false,
+            &[],
+        );
+        let events = process_sse_event(
+            SseEvent::ContentBlockDelta {
+                index: 1,
+                delta: DeltaData::TextDelta {
+                    text: "hello".into(),
+                },
+            },
+            &mut output,
+            &mut blocks,
+            false,
+            &[],
+        );
+
+        assert!(matches!(
+            events[0],
+            StreamEvent::TextDelta {
+                content_index: 0,
+                ..
+            }
+        ));
+        assert_eq!(output.text(), "hello");
+    }
+
+    #[test]
+    fn citations_delta_is_ignored_without_losing_the_text_block() {
+        let mut output = test_output();
+        let mut blocks = Vec::new();
+        process_sse_event(
+            SseEvent::ContentBlockStart {
+                index: 0,
+                content_block: ContentBlockData::Text {
+                    text: "answer".into(),
+                },
+            },
+            &mut output,
+            &mut blocks,
+            false,
+            &[],
+        );
+        let citation: SseEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"char_location"}}}"#,
+        )
+        .unwrap();
+        assert!(process_sse_event(citation, &mut output, &mut blocks, false, &[]).is_empty());
+        let events = process_sse_event(
+            SseEvent::ContentBlockStop { index: 0 },
+            &mut output,
+            &mut blocks,
+            false,
+            &[],
+        );
+        assert!(matches!(
+            &events[0],
+            StreamEvent::TextEnd { text, .. } if text == "answer"
+        ));
+    }
+
+    #[test]
     fn process_text_block_lifecycle() {
         let mut output = test_output();
         let mut blocks = Vec::new();
@@ -3103,12 +3228,12 @@ mod tests {
 
     #[test]
     fn version_suffix_hashes_three_characters_of_the_prompt() {
-        assert_eq!(claude_code_version_suffix("test test 1212 hello"), "d64");
+        assert_eq!(claude_code_version_suffix("test test 1212 hello"), "335");
         assert_eq!(
             claude_code_version_suffix("hello world, this is a longer prompt"),
-            "580"
+            "2f6"
         );
-        assert_eq!(claude_code_version_suffix(""), "9c3");
+        assert_eq!(claude_code_version_suffix(""), "d7b");
     }
 
     #[test]
@@ -3210,7 +3335,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3303,7 +3428,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3338,7 +3463,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
         );
     }
 
@@ -3362,7 +3487,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000; cc_prompt_id=af566db0-4832-4c55-bfe2-c807d443d91f;"
         );
     }
 
@@ -3396,7 +3521,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000; cc_prev_req=req_011CegEdLttts7Bw3ZRVuax3;"
         );
     }
 
@@ -3419,7 +3544,7 @@ mod tests {
 
         assert_eq!(
             body.system.unwrap()[0].text,
-            "x-anthropic-billing-header: cc_version=2.1.257.d64; cc_entrypoint=cli; cch=00000;"
+            "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000;"
         );
     }
 
@@ -3434,7 +3559,7 @@ mod tests {
 
         assert_eq!(
             headers["anthropic-beta"],
-            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,thinking-display-updates-2026-08-18,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
+            "claude-code-20250219,oauth-2025-04-20,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,dangerous-tool-use-2026-09-03,thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
         );
     }
 
@@ -3471,6 +3596,7 @@ mod tests {
     #[test]
     fn the_node_runtime_version_is_reported() {
         let headers = oauth_test_headers();
+        assert_eq!(headers["x-claude-code-request-class"], "main");
         assert_eq!(headers["x-stainless-runtime-version"], "v26.3.0");
     }
 
@@ -3489,10 +3615,10 @@ mod tests {
 
         assert_eq!(
             claude_cli_user_agent(),
-            "claude-cli/2.1.257 (external, cli)"
+            "claude-cli/2.1.280 (external, cli)"
         );
         assert!(
-            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.257."),
+            billing.starts_with("x-anthropic-billing-header: cc_version=2.1.280."),
             "billing={billing}"
         );
     }
@@ -4026,7 +4152,7 @@ mod tests {
                 {
                     "type": "advisor_20260301",
                     "name": "advisor",
-                    "model": "claude-opus-4-8"
+                    "model": "claude-opus-5-5", "defer_loading": true
                 }
             ])
         );
@@ -4103,7 +4229,7 @@ mod tests {
                 {
                     "type": "advisor_20260301",
                     "name": "advisor",
-                    "model": "claude-opus-4-8"
+                    "model": "claude-opus-5-5", "defer_loading": true
                 }
             ])
         );

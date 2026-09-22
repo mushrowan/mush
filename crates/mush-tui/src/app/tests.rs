@@ -955,7 +955,7 @@ fn cache_ttl_secs_by_provider() {
 
     assert_eq!(cache_ttl_secs(&Provider::OpenRouter, None, false), 300);
     assert_eq!(
-        cache_ttl_secs(&Provider::Custom("xai".into()), None, false),
+        cache_ttl_secs(&Provider::Custom("custom".into()), None, false),
         300
     );
 }

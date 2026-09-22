@@ -877,8 +877,8 @@ debug_cache = true
 anthropic = "sk-ant-test"
 openrouter = "sk-or-test"
 openai = "sk-openai-test"
-groq = "sk-groq-test"
-xai = "sk-xai-test"
+custom = "sk-custom-test"
+local = "sk-local-test"
 "#;
 
         let config: Config = toml::from_str(toml).unwrap();
@@ -901,20 +901,23 @@ xai = "sk-xai-test"
         assert_eq!(
             config
                 .api_keys
-                .get("groq")
+                .get("custom")
                 .map(mush_ai::types::ApiKey::expose),
-            Some("sk-groq-test")
+            Some("sk-custom-test")
         );
         assert_eq!(
             config
                 .api_keys
-                .get("xai")
+                .get("local")
                 .map(mush_ai::types::ApiKey::expose),
-            Some("sk-xai-test")
+            Some("sk-local-test")
         );
         assert!(config.api_keys.get("unknown-provider").is_none());
         let map = config.api_keys.to_map();
-        assert_eq!(map.get("groq").map(|k| k.expose()), Some("sk-groq-test"));
+        assert_eq!(
+            map.get("custom").map(|k| k.expose()),
+            Some("sk-custom-test")
+        );
         assert_eq!(
             map.get("anthropic").map(|k| k.expose()),
             Some("sk-ant-test")
@@ -926,7 +929,7 @@ xai = "sk-xai-test"
         let toml = r#"
 [api_keys]
 anthropic = "sk-ant-VERY-SECRET-DO-NOT-LEAK-abc123"
-xai = "sk-xai-ALSO-SECRET-xyz789"
+local = "sk-local-ALSO-SECRET-xyz789"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         let debug = format!("{:?}", config.api_keys);
@@ -936,7 +939,7 @@ xai = "sk-xai-ALSO-SECRET-xyz789"
         );
         assert!(
             !debug.contains("ALSO-SECRET-xyz789"),
-            "xai secret leaked in Debug: {debug}"
+            "local secret leaked in Debug: {debug}"
         );
     }
 

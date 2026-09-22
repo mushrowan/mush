@@ -186,28 +186,6 @@ pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Re
         println!("{}", Style::Dim.stdout(" - not configured"));
     }
 
-    for provider in [
-        "groq",
-        "deepseek",
-        "xai",
-        "cerebras",
-        "mistral",
-        "together",
-        "deepinfra",
-    ] {
-        let env_name = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
-        let has_env = std::env::var(&env_name).is_ok();
-        let has_cfg = cfg.api_keys.get(provider).is_some();
-        print!("  {provider:<13}");
-        if has_env {
-            println!("{}", Style::Green.stdout("✓ env var"));
-        } else if has_cfg {
-            println!("{}", Style::Green.stdout("✓ config file"));
-        } else {
-            println!("{}", Style::Dim.stdout("- not configured"));
-        }
-    }
-
     let store = SessionStore::new(SessionStore::default_dir());
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);
     println!("\n{}\n", Style::Bold.stdout("sessions"));

@@ -267,7 +267,7 @@ impl Default for AnthropicBetas {
             thinking_updates: true,
             advisor: true,
             advanced_tool_use: true,
-            fallback_credit: true,
+            fallback_credit: false,
         }
     }
 }
@@ -293,15 +293,14 @@ impl AnthropicBetas {
         if self.thinking_token_count {
             betas.push("thinking-token-count-2026-05-13");
         }
-        if self.thinking_updates {
-            betas.push("thinking-display-updates-2026-08-18");
-        }
         if self.context_management {
             betas.push("context-management-2025-06-27");
         }
         betas.extend([
             "prompt-caching-scope-2026-01-05",
             "mid-conversation-system-2026-04-07",
+            "per-turn-control-2026-07-01",
+            "mid-conversation-tool-changes-2026-07-01",
         ]);
         if self.advisor {
             betas.push("advisor-tool-2026-03-01");
@@ -309,13 +308,22 @@ impl AnthropicBetas {
         if self.advanced_tool_use {
             betas.push("advanced-tool-use-2025-11-20");
         }
+        betas.push("mid-conversation-system-clear-at-2026-08-21");
         if self.effort {
             betas.push("effort-2025-11-24");
         }
         if self.fallback_credit {
-            betas.push("fallback-credit-2026-06-01");
+            betas.push("fallback-credit-2026-07-01");
         }
         betas.extend([
+            "dangerous-tool-use-2026-09-03",
+            "thinking-binding-controls-2026-08-01",
+        ]);
+        if self.thinking_updates {
+            betas.push("thinking-display-updates-2026-08-18");
+        }
+        betas.extend([
+            "afk-mode-2026-01-31",
             "extended-cache-ttl-2025-04-11",
             "cache-diagnosis-2026-04-07",
         ]);

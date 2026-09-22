@@ -141,11 +141,11 @@ mod picker_ordering_tests {
             other("sonnet", "anthropic"),
             codex("low", 1, None),
             codex("high", 9, None),
-            other("mistral", "openrouter"),
+            other("other", "openrouter"),
         ];
         sort_codex_priority(&mut items);
         let order: Vec<&str> = items.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(order, vec!["opus", "sonnet", "high", "low", "mistral"]);
+        assert_eq!(order, vec!["opus", "sonnet", "high", "low", "other"]);
     }
 
     #[test]

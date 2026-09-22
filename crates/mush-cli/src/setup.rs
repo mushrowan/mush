@@ -1034,14 +1034,14 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     let has_openai_codex_auth = oauth_store.providers.contains_key("openai-codex");
 
     if has_anthropic_auth {
-        return "claude-opus-4-7".into();
+        return "claude-opus-5-5".into();
     }
 
     if has_openai_codex_auth {
         return "gpt-5.4".into();
     }
 
-    "claude-opus-4-7".into()
+    "claude-opus-5-5".into()
 }
 
 pub fn list_models_short() -> String {
@@ -1414,7 +1414,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_auth_defaults_to_opus_4_7() {
+    fn anthropic_auth_defaults_to_opus_5_5() {
         let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
@@ -1427,7 +1427,7 @@ mod tests {
 
         let cfg: config::Config = toml::from_str("").unwrap();
 
-        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
+        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-5-5");
     }
 
     #[test]
@@ -1449,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn no_auth_defaults_to_opus_4_7() {
+    fn no_auth_defaults_to_opus_5_5() {
         let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
@@ -1462,7 +1462,7 @@ mod tests {
 
         let cfg: config::Config = toml::from_str("").unwrap();
 
-        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-4-7");
+        assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-5-5");
     }
 
     fn dummy_model_with_default(level: Option<ThinkingLevel>) -> Model {

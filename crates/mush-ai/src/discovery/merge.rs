@@ -279,9 +279,9 @@ mod tests {
 
     #[test]
     fn merge_preserves_unrelated_static_providers() {
-        let groq = Model {
-            provider: Provider::Custom("groq".into()),
-            ..anthropic_model("groq-llama", "Llama (Groq)", 0.5)
+        let custom = Model {
+            provider: Provider::Custom("custom".into()),
+            ..anthropic_model("custom-model", "Custom", 0.5)
         };
         let mut cache = DiscoveryCache::default();
         cache.apply_report(DiscoveryReport {
@@ -290,13 +290,13 @@ mod tests {
             models: vec![anthropic_model("a", "A", 0.0).into()],
         });
 
-        let merged = merge(vec![groq], &cache, vec![]);
+        let merged = merge(vec![custom], &cache, vec![]);
         assert_eq!(merged.len(), 2);
         let by_id: BTreeMap<_, _> = merged
             .iter()
             .map(|m| (m.model.id.as_str().to_string(), m))
             .collect();
-        assert_eq!(by_id["groq-llama"].source, ModelSource::Static);
+        assert_eq!(by_id["custom-model"].source, ModelSource::Static);
         assert_eq!(by_id["a"].source, ModelSource::Discovered);
     }
 

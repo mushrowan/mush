@@ -44,22 +44,7 @@ pub fn serving_provider_cache(name: &str) -> Option<ServingProviderCache> {
             mode: CacheMode::Implicit,
             min_tokens: 2048,
         }),
-        "deepseek" => Some(ServingProviderCache {
-            ttl_secs: 3600,
-            mode: CacheMode::Implicit,
-            min_tokens: 0,
-        }),
-        "xai" => Some(ServingProviderCache {
-            ttl_secs: 300,
-            mode: CacheMode::Implicit,
-            min_tokens: 0,
-        }),
         "moonshot" | "moonshotai" => Some(ServingProviderCache {
-            ttl_secs: 300,
-            mode: CacheMode::Implicit,
-            min_tokens: 0,
-        }),
-        "groq" => Some(ServingProviderCache {
             ttl_secs: 300,
             mode: CacheMode::Implicit,
             min_tokens: 0,
@@ -105,13 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_caches_for_hours() {
-        let b = serving_provider_cache("DeepSeek").expect("known");
-        assert_eq!(b.ttl_secs, 3600);
-        assert_eq!(b.mode, CacheMode::Implicit);
-    }
-
-    #[test]
     fn lookup_is_insensitive_to_case_and_punctuation() {
         assert!(serving_provider_cache("anthropic").is_some());
         assert!(serving_provider_cache("ANTHROPIC").is_some());
@@ -119,13 +97,12 @@ mod tests {
         assert!(serving_provider_cache("amazon-bedrock").is_some());
         assert!(serving_provider_cache("Amazon Bedrock").is_some());
         assert!(serving_provider_cache("Moonshot AI").is_some());
-        assert!(serving_provider_cache("xAI").is_some());
     }
 
     #[test]
     fn unknown_provider_returns_none() {
         assert!(serving_provider_cache("NeverHeardOfYou").is_none());
         assert!(serving_provider_cache("").is_none());
-        assert!(serving_provider_cache("Together").is_none());
+        assert!(serving_provider_cache("Unknown").is_none());
     }
 }

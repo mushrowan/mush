@@ -566,9 +566,6 @@ mod tests {
         let baseline = resolve_cache_ttl_secs(&model, &opts, true, None);
         assert_eq!(baseline, 300);
 
-        let with_deepseek = resolve_cache_ttl_secs(&model, &opts, true, Some("DeepSeek"));
-        assert_eq!(with_deepseek, 3600);
-
         let with_openai = resolve_cache_ttl_secs(&model, &opts, true, Some("OpenAI"));
         assert_eq!(with_openai, 600);
     }
@@ -577,7 +574,7 @@ mod tests {
     fn resolve_falls_back_when_serving_provider_unknown() {
         let model = openrouter_model_with_caching();
         let opts = StreamOptions::default();
-        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("Together"));
+        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("Unknown"));
         assert_eq!(ttl, 300);
     }
 
@@ -587,7 +584,7 @@ mod tests {
         model.cost.cache_read = 0.0;
         model.cost.cache_write = 0.0;
         let opts = StreamOptions::default();
-        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("DeepSeek"));
+        let ttl = resolve_cache_ttl_secs(&model, &opts, true, Some("Unknown"));
         assert_eq!(ttl, 0);
     }
 
@@ -602,8 +599,8 @@ mod tests {
             Some("openai")
         );
         assert_eq!(
-            direct_route_serving_provider(&Provider::Custom("deepseek".into())).as_deref(),
-            Some("deepseek")
+            direct_route_serving_provider(&Provider::Custom("custom".into())).as_deref(),
+            Some("custom")
         );
     }
 
@@ -656,9 +653,9 @@ mod tests {
         let model = openrouter_model_with_caching();
         let opts = StreamOptions::default();
         let mut timer = CacheTimer::new(300);
-        timer.apply_serving_provider("DeepSeek", &model, &opts, true);
-        assert_eq!(timer.last_serving_provider.as_deref(), Some("DeepSeek"));
-        assert_eq!(timer.ttl_secs, 3600);
+        timer.apply_serving_provider("Unknown", &model, &opts, true);
+        assert_eq!(timer.last_serving_provider.as_deref(), Some("Unknown"));
+        assert_eq!(timer.ttl_secs, 300);
         timer.apply_serving_provider("OpenAI", &model, &opts, true);
         assert_eq!(timer.last_serving_provider.as_deref(), Some("OpenAI"));
         assert_eq!(timer.ttl_secs, 600);

@@ -119,7 +119,7 @@ impl MenuItemKind {
             Self::AdvancedToolUse => {
                 "advanced-tool-use-2025-11-20: advanced tool-use (experimental)"
             }
-            Self::FallbackCredit => "fallback-credit-2026-06-01: reprice refusal retries",
+            Self::FallbackCredit => "fallback-credit-2026-07-01: reprice refusal retries",
         }
     }
 
@@ -297,7 +297,7 @@ mod tests {
         for expected in [
             ("thinking_token_count", "on"),
             ("thinking_updates", "on"),
-            ("fallback_credit", "on"),
+            ("fallback_credit", "off"),
         ] {
             assert!(
                 listed
