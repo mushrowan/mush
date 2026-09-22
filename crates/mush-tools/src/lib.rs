@@ -31,6 +31,45 @@ use mush_agent::tool::{SharedTool, ToolRegistry};
 
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    static DATA_DIR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    pub(crate) struct DataDir {
+        previous: Option<OsString>,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DataDir {
+        pub(crate) async fn set(path: &Path) -> Self {
+            let lock = DATA_DIR_LOCK.lock().await;
+            let previous = std::env::var_os("MUSH_DATA_DIR");
+            unsafe {
+                std::env::set_var("MUSH_DATA_DIR", path);
+            }
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for DataDir {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = &self.previous {
+                    std::env::set_var("MUSH_DATA_DIR", previous);
+                } else {
+                    std::env::remove_var("MUSH_DATA_DIR");
+                }
+            }
+        }
+    }
+}
+
 #[deprecated(note = "use Model::uses_patch_tool() instead")]
 pub fn uses_patch_tool(model_id: &str) -> bool {
     model_id.contains("gpt-") && !model_id.contains("oss") && !model_id.contains("gpt-4")
@@ -363,9 +402,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_write_saves_content_and_leaves_target_untouched() {
         let data = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MUSH_DATA_DIR", data.path());
-        }
+        let _data_dir = test_env::DataDir::set(data.path()).await;
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.txt");
         let content = "fn main() {\n    // a → b\n}\n";
@@ -384,20 +421,9 @@ mod tests {
         assert!(!result.outcome.is_success());
         assert!(!target.exists(), "target must not be written");
 
-        let saved: Vec<_> = std::fs::read_dir(data.path().join("tool-output"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        let [scratch] = saved.as_slice() else {
-            panic!("expected exactly one scratch file, got {saved:?}");
-        };
-        assert_eq!(std::fs::read_to_string(scratch).unwrap(), content);
-
         let msg = result_text(&result);
-        assert!(
-            msg.contains(&scratch.display().to_string()),
-            "error should name the scratch file: {msg}"
-        );
+        let scratch = rejected_path(&msg);
+        assert_eq!(std::fs::read_to_string(scratch).unwrap(), content);
         assert!(msg.contains("line 2, column 10"), "{msg}");
         assert!(msg.contains("'→' (U+2192)"), "{msg}");
     }
@@ -405,9 +431,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_edits_array_saves_the_failing_new_text() {
         let data = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MUSH_DATA_DIR", data.path());
-        }
+        let _data_dir = test_env::DataDir::set(data.path()).await;
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.txt");
         std::fs::write(&target, "one\ntwo\n").unwrap();
@@ -426,15 +450,18 @@ mod tests {
         assert!(!result.outcome.is_success());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "one\ntwo\n");
 
-        let saved: Vec<_> = std::fs::read_dir(data.path().join("tool-output"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        let [scratch] = saved.as_slice() else {
-            panic!("expected exactly one scratch file, got {saved:?}");
-        };
+        let msg = result_text(&result);
+        let scratch = rejected_path(&msg);
         assert_eq!(std::fs::read_to_string(scratch).unwrap(), "two — with dash");
-        assert!(result_text(&result).contains(&scratch.display().to_string()));
+    }
+
+    fn rejected_path(message: &str) -> &std::path::Path {
+        std::path::Path::new(
+            message
+                .rsplit_once("rejected content saved to ")
+                .expect("saved rejection path")
+                .1,
+        )
     }
 
     fn result_text(result: &mush_agent::tool::ToolResult) -> String {

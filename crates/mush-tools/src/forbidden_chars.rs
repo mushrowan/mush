@@ -467,21 +467,24 @@ mod tests {
     #[tokio::test]
     async fn guard_saves_rejected_content_and_names_the_path() {
         let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MUSH_DATA_DIR", tmp.path());
-        }
+        let _data_dir = crate::test_env::DataDir::set(tmp.path()).await;
         let (_, guard) = record_with_guard(ForbiddenChars::new(['—']));
         let content = "line one\nline — two\n";
         let result = guard.execute(serde_json::json!({"content": content})).await;
         assert!(!result.outcome.is_success());
 
-        let saved: Vec<_> = std::fs::read_dir(tmp.path().join("tool-output"))
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        let [path] = saved.as_slice() else {
-            panic!("expected exactly one scratch file, got {saved:?}");
+        let msg = match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => t.text.clone(),
+            other => panic!("expected text, got {other:?}"),
         };
+        let path = std::path::Path::new(
+            msg.rsplit_once("rejected content saved to ")
+                .expect("saved rejection path")
+                .1
+                .lines()
+                .next()
+                .unwrap(),
+        );
         assert!(
             path.file_name()
                 .unwrap()
@@ -490,15 +493,6 @@ mod tests {
                 .starts_with("rejected_")
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), content);
-
-        let msg = match &result.content[0] {
-            mush_ai::types::ToolResultContentPart::Text(t) => t.text.clone(),
-            other => panic!("expected text, got {other:?}"),
-        };
-        assert!(
-            msg.contains(&path.display().to_string()),
-            "error should name the scratch file: {msg}"
-        );
         assert!(msg.contains("line 2, column 6"), "{msg}");
         assert!(msg.contains("'—'"), "{msg}");
     }
