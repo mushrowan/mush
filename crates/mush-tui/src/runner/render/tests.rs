@@ -480,3 +480,36 @@ fn a_trailing_slash_does_not_blank_the_cwd() {
 
     assert_eq!(terminal_title(&app), "mush - work");
 }
+
+#[test]
+fn resizing_a_long_scrolled_log_keeps_the_same_message() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for index in 0..400 {
+        app.push_user_message(format!(
+            "marker-{index:03} {}",
+            "words that wrap differently when the terminal becomes narrow ".repeat(3)
+        ));
+    }
+    let mut screen = Screen::new();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    draw(&mut terminal, &mut screen, &mut app);
+    switch_focus(&mut app);
+    app.viewport.page_by(-200);
+    draw(&mut terminal, &mut screen, &mut app);
+    let cursor_message = app.viewport.cursor().line;
+    let before = crate::selection::transcript_rows(&app)[cursor_message]
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+
+    terminal.backend_mut().resize(50, 24);
+    draw(&mut terminal, &mut screen, &mut app);
+    let after = crate::selection::transcript_rows(&app)[app.viewport.cursor().line]
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(after, before);
+}

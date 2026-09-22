@@ -2241,8 +2241,12 @@ fn k_moves_the_cursor_up_one_row_while_navigating() {
 
 fn app_with_log() -> App {
     let app = App::new("test".into(), TokenCount::new(200_000));
-    app.viewport
-        .place(&vec![Line::raw("xxxxxxxxxx"); 200], Rect::new(0, 0, 80, 20));
+    let lines = vec![Line::raw("xxxxxxxxxx"); 200];
+    let transcript = crate::widgets::message_list::Transcript {
+        lines: lines.iter().collect(),
+        chunks: Vec::new(),
+    };
+    app.viewport.place(&transcript, Rect::new(0, 0, 80, 20));
     app
 }
 

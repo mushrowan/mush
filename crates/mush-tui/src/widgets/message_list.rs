@@ -167,26 +167,97 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TranscriptChunkId {
+    Message(usize),
+    Streaming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TranscriptChunk {
+    pub(crate) id: TranscriptChunkId,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+pub(crate) struct Transcript<'a> {
+    pub(crate) lines: Vec<&'a Line<'static>>,
+    pub(crate) chunks: Vec<TranscriptChunk>,
+}
+
+impl<'a> std::ops::Deref for Transcript<'a> {
+    type Target = [&'a Line<'static>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
 pub(crate) struct TranscriptGuards<'a> {
     blank: Line<'static>,
-    settled: Vec<Ref<'a, [Line<'static>]>>,
+    settled: Vec<(usize, Ref<'a, [Line<'static>]>)>,
     streaming: Vec<Line<'static>>,
-    queued: Vec<Ref<'a, [Line<'static>]>>,
+    queued: Vec<(usize, Ref<'a, [Line<'static>]>)>,
 }
 
 impl TranscriptGuards<'_> {
-    pub(crate) fn flatten(&self) -> Vec<&Line<'static>> {
-        let mut lines = Vec::new();
-        for chunk in &self.settled {
-            lines.extend(chunk.iter());
+    pub(crate) fn flatten(&self) -> Transcript<'_> {
+        let chunks = self.chunks();
+        let capacity = self
+            .settled
+            .iter()
+            .chain(&self.queued)
+            .map(|(_, lines)| lines.len() + 1)
+            .sum::<usize>()
+            + self.streaming.len();
+        let mut lines = Vec::with_capacity(capacity);
+        for (_, message) in &self.settled {
+            lines.extend(message.iter());
             lines.push(&self.blank);
         }
-        lines.extend(self.streaming.iter());
-        for chunk in &self.queued {
-            lines.extend(chunk.iter());
+        if !self.streaming.is_empty() {
+            lines.extend(&self.streaming);
+        }
+        for (_, message) in &self.queued {
+            lines.extend(message.iter());
             lines.push(&self.blank);
         }
-        lines
+        Transcript { lines, chunks }
+    }
+
+    pub(crate) fn chunks(&self) -> Vec<TranscriptChunk> {
+        let mut chunks = Vec::with_capacity(
+            self.settled.len() + self.queued.len() + usize::from(!self.streaming.is_empty()),
+        );
+        let mut start = 0;
+        for (index, message) in &self.settled {
+            let end = start + message.len() + 1;
+            chunks.push(TranscriptChunk {
+                id: TranscriptChunkId::Message(*index),
+                start,
+                end,
+            });
+            start = end;
+        }
+        if !self.streaming.is_empty() {
+            let end = start + self.streaming.len();
+            chunks.push(TranscriptChunk {
+                id: TranscriptChunkId::Streaming,
+                start,
+                end,
+            });
+            start = end;
+        }
+        for (index, message) in &self.queued {
+            let end = start + message.len() + 1;
+            chunks.push(TranscriptChunk {
+                id: TranscriptChunkId::Message(*index),
+                start,
+                end,
+            });
+            start = end;
+        }
+        chunks
     }
 }
 
@@ -195,8 +266,9 @@ pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
     let chunks = |queued: bool| {
         app.messages
             .iter()
-            .filter(move |m| m.queued == queued)
-            .map(|m| cached_message_lines(m, &style, width))
+            .enumerate()
+            .filter(move |(_, message)| message.queued == queued)
+            .map(|(index, message)| (index, cached_message_lines(message, &style, width)))
             .collect()
     };
     TranscriptGuards {

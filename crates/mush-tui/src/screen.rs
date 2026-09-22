@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
+#[cfg(test)]
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use crate::app::App;
 use crate::ui::{input_height, layout, status_bar_height};
 use crate::widgets::input_box::InputBox;
-use crate::widgets::message_list::transcript_guards;
+use crate::widgets::message_list::{Transcript, TranscriptChunk, transcript_guards};
 use crate::widgets::status_bar::StatusBar;
 use crate::widgets::top_bar::TopBar;
 
@@ -39,6 +40,7 @@ pub struct Viewport {
     moved: Cell<Option<Instant>>,
     cursor: Cell<Cursor>,
     widths: RefCell<Vec<usize>>,
+    chunks: RefCell<Vec<TranscriptChunk>>,
     area: Cell<Rect>,
     anchor: Cell<Option<(usize, usize)>>,
     kind: Cell<SelectionKind>,
@@ -54,6 +56,7 @@ impl Default for Viewport {
             moved: Cell::new(None),
             cursor: Cell::new(Cursor::default()),
             widths: RefCell::new(Vec::new()),
+            chunks: RefCell::new(Vec::new()),
             area: Cell::new(Rect::default()),
             anchor: Cell::new(None),
             kind: Cell::new(SelectionKind::Char),
@@ -62,27 +65,46 @@ impl Default for Viewport {
 }
 
 impl Viewport {
-    pub fn place<L: std::borrow::Borrow<Line<'static>>>(
-        &self,
-        lines: &[L],
-        area: Rect,
-    ) -> Range<usize> {
+    pub(crate) fn place(&self, transcript: &Transcript<'_>, area: Rect) -> Range<usize> {
         self.area.set(area);
-        let window = self.window(lines.len(), usize::from(area.height));
+        self.remap(&transcript.chunks);
+        let window = self.window(transcript.len(), usize::from(area.height));
         self.widths.replace(
-            lines[window.clone()]
+            transcript[window.clone()]
                 .iter()
                 .map(|line| {
-                    line.borrow()
-                        .spans
+                    line.spans
                         .iter()
-                        .map(|s| s.content.chars().count())
+                        .map(|span| span.content.chars().count())
                         .sum()
                 })
                 .collect(),
         );
         self.hold_cursor_on_screen();
         window
+    }
+
+    fn remap(&self, chunks: &[TranscriptChunk]) {
+        self.remap_chunks(chunks);
+    }
+
+    pub(crate) fn remap_chunks(&self, chunks: &[TranscriptChunk]) {
+        let previous = self.chunks.borrow();
+        if previous.is_empty() || self.following.get() {
+            drop(previous);
+            self.chunks.replace(chunks.to_vec());
+            return;
+        }
+        let map = |line| remap_line(line, &previous, chunks);
+        self.scroll_top.set(map(self.scroll_top.get()));
+        let mut cursor = self.cursor.get();
+        cursor.line = map(cursor.line);
+        self.cursor.set(cursor);
+        if let Some((line, column)) = self.anchor.get() {
+            self.anchor.set(Some((map(line), column)));
+        }
+        drop(previous);
+        self.chunks.replace(chunks.to_vec());
     }
 
     pub fn window(&self, total: usize, height: usize) -> Range<usize> {
@@ -308,6 +330,27 @@ impl Viewport {
     }
 }
 
+fn remap_line(line: usize, previous: &[TranscriptChunk], current: &[TranscriptChunk]) -> usize {
+    let Some(chunk) = chunk_at(previous, line) else {
+        return line;
+    };
+    let offset = line.saturating_sub(chunk.start);
+    current
+        .iter()
+        .find(|candidate| candidate.id == chunk.id)
+        .map_or(line, |candidate| {
+            candidate.start + offset.min(candidate.end.saturating_sub(candidate.start + 1))
+        })
+}
+
+fn chunk_at(chunks: &[TranscriptChunk], line: usize) -> Option<TranscriptChunk> {
+    let index = chunks.partition_point(|chunk| chunk.start <= line);
+    chunks
+        .get(index.saturating_sub(1))
+        .copied()
+        .filter(|chunk| line < chunk.end)
+}
+
 fn redraw_stitched_row(row: Rect, buf: &mut Buffer) {
     let stitched = row
         .columns()
@@ -420,12 +463,110 @@ mod tests {
         widths.iter().map(|w| Line::raw("x".repeat(*w))).collect()
     }
 
+    fn place(viewport: &Viewport, lines: &[Line<'static>], area: Rect) -> Range<usize> {
+        let references = lines.iter().collect::<Vec<_>>();
+        viewport.place(
+            &Transcript {
+                lines: references,
+                chunks: Vec::new(),
+            },
+            area,
+        )
+    }
+
+    #[test]
+    fn resize_remaps_the_cursor_and_selection_anchor() {
+        let viewport = Viewport::default();
+        let previous = vec![
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+                start: 0,
+                end: 10,
+            },
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
+                start: 10,
+                end: 20,
+            },
+        ];
+        let current = vec![
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+                start: 0,
+                end: 100,
+            },
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
+                start: 100,
+                end: 120,
+            },
+        ];
+        viewport.window(20, 5);
+        viewport.pause();
+        viewport.scroll_by(-2);
+        viewport.cursor_to(13);
+        viewport.start_selection(SelectionKind::Char);
+        viewport.chunks.replace(previous);
+
+        viewport.remap_chunks(&current);
+
+        assert_eq!(viewport.cursor().line, 103);
+        assert_eq!(viewport.selection().unwrap().start().0, 103);
+        assert_eq!(viewport.scroll_top.get(), 103);
+    }
+
+    #[test]
+    fn wrapped_lines_remap_to_the_same_message() {
+        let previous = [
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+                start: 0,
+                end: 10,
+            },
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
+                start: 10,
+                end: 20,
+            },
+        ];
+        let current = [
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+                start: 0,
+                end: 100,
+            },
+            TranscriptChunk {
+                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
+                start: 100,
+                end: 120,
+            },
+        ];
+
+        assert_eq!(remap_line(13, &previous, &current), 103);
+    }
+
+    #[test]
+    fn wrapped_line_offsets_clamp_inside_the_message() {
+        let previous = [TranscriptChunk {
+            id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+            start: 0,
+            end: 20,
+        }];
+        let current = [TranscriptChunk {
+            id: crate::widgets::message_list::TranscriptChunkId::Message(0),
+            start: 0,
+            end: 5,
+        }];
+
+        assert_eq!(remap_line(13, &previous, &current), 4);
+    }
+
     #[test]
     fn a_zero_height_area_leaves_the_cursor_on_the_last_line() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
 
-        let window = viewport.place(&lines(&[10; 200]), log_area(0));
+        let window = place(&viewport, &lines(&[10; 200]), log_area(0));
 
         assert!(window.is_empty());
         assert_eq!(viewport.cursor().line, 199);
@@ -434,7 +575,7 @@ mod tests {
     #[test]
     fn the_cursor_can_be_put_on_a_column() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(7, 0);
 
@@ -446,7 +587,7 @@ mod tests {
     #[test]
     fn a_blockwise_selection_covers_the_same_columns_on_every_row() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
         viewport.start_selection(SelectionKind::Block);
@@ -462,7 +603,7 @@ mod tests {
     #[test]
     fn a_linewise_selection_covers_the_whole_row() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
 
@@ -475,7 +616,7 @@ mod tests {
     #[test]
     fn a_fresh_selection_covers_the_cursor_cell() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
 
@@ -488,7 +629,7 @@ mod tests {
     #[test]
     fn a_selection_over_several_lines_runs_each_to_its_end() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.cursor_to(190);
         viewport.move_cursor(3, 0);
         viewport.start_selection(SelectionKind::Char);
@@ -506,7 +647,7 @@ mod tests {
     fn placing_records_the_log_area() {
         let viewport = Viewport::default();
 
-        viewport.place(&lines(&[10; 200]), Rect::new(0, 3, 80, 20));
+        place(&viewport, &lines(&[10; 200]), Rect::new(0, 3, 80, 20));
 
         assert_eq!(viewport.area(), Rect::new(0, 3, 80, 20));
     }
@@ -608,7 +749,7 @@ mod tests {
     #[test]
     fn the_cursor_starts_on_the_last_row_of_the_window() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
 
         viewport.pause();
 
@@ -619,7 +760,7 @@ mod tests {
     #[test]
     fn the_cursor_stops_at_the_start_of_a_line() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.pause();
 
         viewport.move_cursor(-1, 0);
@@ -631,7 +772,7 @@ mod tests {
     fn a_short_line_clamps_the_cursor_and_the_wanted_column_comes_back() {
         let viewport = Viewport::default();
         let transcript = lines(&[60, 12, 60]);
-        viewport.place(&transcript, log_area(20));
+        place(&viewport, &transcript, log_area(20));
         viewport.pause();
         viewport.cursor_to(0);
         viewport.move_cursor(40, 0);
@@ -647,7 +788,7 @@ mod tests {
     #[test]
     fn moving_off_the_top_scrolls_one_line() {
         let viewport = Viewport::default();
-        viewport.place(&lines(&[10; 200]), log_area(20));
+        place(&viewport, &lines(&[10; 200]), log_area(20));
         viewport.pause();
         viewport.cursor_to(180);
 
@@ -661,11 +802,11 @@ mod tests {
     fn a_scroll_that_would_strand_the_cursor_parks_it() {
         let viewport = Viewport::default();
         let transcript = lines(&[10; 200]);
-        viewport.place(&transcript, log_area(20));
+        place(&viewport, &transcript, log_area(20));
         viewport.pause();
 
         viewport.scroll_by(1);
-        viewport.place(&transcript, log_area(20));
+        place(&viewport, &transcript, log_area(20));
 
         assert_eq!(viewport.cursor().line, 199);
         assert_eq!(viewport.cursor_row(), 19);
@@ -675,7 +816,7 @@ mod tests {
     fn a_scroll_under_the_cursor_keeps_its_line() {
         let viewport = Viewport::default();
         let transcript = lines(&[10; 200]);
-        viewport.place(&transcript, log_area(20));
+        place(&viewport, &transcript, log_area(20));
         viewport.pause();
         viewport.cursor_to(190);
 

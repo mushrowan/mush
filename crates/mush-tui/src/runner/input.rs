@@ -15,6 +15,41 @@ use super::streams::{
 use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
+const RESIZE_QUIET: std::time::Duration = std::time::Duration::from_millis(16);
+const RESIZE_MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+const MAX_TERMINAL_EVENTS_PER_ITERATION: usize = 64;
+
+#[derive(Debug, Default)]
+pub(super) struct ResizeState {
+    first: Option<std::time::Instant>,
+    latest: Option<(std::time::Instant, u16, u16)>,
+}
+
+impl ResizeState {
+    fn note(&mut self, now: std::time::Instant, width: u16, height: u16) {
+        self.first.get_or_insert(now);
+        self.latest = Some((now, width, height));
+    }
+
+    pub(super) fn deadline(&self) -> Option<std::time::Instant> {
+        let latest = self.latest?.0;
+        let first = self.first.unwrap_or(latest);
+        Some((latest + RESIZE_QUIET).min(first + RESIZE_MAX_WAIT))
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        self.latest.is_some()
+    }
+
+    pub(super) fn take_due(&mut self, now: std::time::Instant) -> Option<(u16, u16)> {
+        if !self.deadline().is_some_and(|deadline| now >= deadline) {
+            return None;
+        }
+        self.first = None;
+        self.latest.take().map(|(_, width, height)| (width, height))
+    }
+}
+
 pub(super) enum LoopAction {
     Continue,
     Redraw,
@@ -38,7 +73,7 @@ pub(super) struct InputDeps<'a> {
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
-    pub size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
+    pub resize: &'a mut ResizeState,
 }
 
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
@@ -325,8 +360,10 @@ pub(super) async fn handle_streaming_terminal_events(
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
     let mut changed = false;
-    while event::poll(std::time::Duration::ZERO)? {
+    let mut handled = 0;
+    while handled < MAX_TERMINAL_EVENTS_PER_ITERATION && event::poll(std::time::Duration::ZERO)? {
         let event = event::read()?;
+        handled += 1;
         cancel_signal_for_event(stream_state, &event);
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -345,8 +382,7 @@ pub(super) async fn handle_streaming_terminal_events(
                 changed = true;
             }
             Event::Resize(w, h) => {
-                apply_resize(deps.size_cache);
-                changed = true;
+                deps.resize.note(std::time::Instant::now(), w, h);
                 tracing::info!(
                     target: "mush_tui::resize",
                     phase = "streaming",
@@ -460,13 +496,26 @@ pub(super) async fn handle_idle_terminal_events(
     stream_state: &mut StreamState,
     deps: &mut InputDeps<'_>,
 ) -> io::Result<LoopAction> {
-    if !event::poll(std::time::Duration::from_millis(50))? {
+    let now = std::time::Instant::now();
+    let wait = deps
+        .resize
+        .deadline()
+        .map_or(std::time::Duration::from_millis(50), |deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .min(std::time::Duration::from_millis(50))
+        });
+    if !event::poll(wait)? {
         return Ok(LoopAction::Continue);
     }
 
+    let mut changed = false;
+    let mut handled = 0;
     loop {
         let event = event::read()?;
+        handled += 1;
         cancel_signal_for_event(stream_state, &event);
+        changed |= !matches!(&event, Event::Resize(..));
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 let app_event = handle_key(&mut session.app, key);
@@ -584,7 +633,7 @@ pub(super) async fn handle_idle_terminal_events(
                 session.app.handle_paste(&text);
             }
             Event::Resize(w, h) => {
-                apply_resize(deps.size_cache);
+                deps.resize.note(std::time::Instant::now(), w, h);
                 tracing::info!(
                     target: "mush_tui::resize",
                     phase = "idle",
@@ -596,12 +645,17 @@ pub(super) async fn handle_idle_terminal_events(
             event => trace_dropped_event(event, "idle"),
         }
 
-        if !event::poll(std::time::Duration::ZERO)? {
+        if handled >= MAX_TERMINAL_EVENTS_PER_ITERATION || !event::poll(std::time::Duration::ZERO)?
+        {
             break;
         }
     }
 
-    Ok(LoopAction::Redraw)
+    Ok(if changed {
+        LoopAction::Redraw
+    } else {
+        LoopAction::Continue
+    })
 }
 
 fn cancel_signal_for_event(stream_state: &mut StreamState, event: &Event) {
@@ -661,6 +715,40 @@ async fn paste_clipboard_image(app: &mut App) {
         Err(_) => {
             app.status = Some("failed to read clipboard".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn resize_waits_for_a_quiet_window() {
+        let start = std::time::Instant::now();
+        let mut resize = ResizeState::default();
+        resize.note(start, 80, 24);
+        resize.note(start + std::time::Duration::from_millis(8), 90, 30);
+
+        assert_eq!(
+            resize.take_due(start + std::time::Duration::from_millis(23)),
+            None
+        );
+        assert_eq!(
+            resize.take_due(start + std::time::Duration::from_millis(24)),
+            Some((90, 30))
+        );
+        assert!(!resize.pending());
+    }
+
+    #[test]
+    fn continuous_resize_has_a_maximum_wait() {
+        let start = std::time::Instant::now();
+        let mut resize = ResizeState::default();
+        resize.note(start, 80, 24);
+        resize.note(start + std::time::Duration::from_millis(45), 100, 40);
+
+        assert_eq!(resize.deadline(), Some(start + RESIZE_MAX_WAIT));
+        assert_eq!(resize.take_due(start + RESIZE_MAX_WAIT), Some((100, 40)));
     }
 }
 
@@ -846,7 +934,7 @@ mod tests {
             let mut tui_config = streaming_test_config();
             let mut pending_prompt = None;
             let image_picker = None;
-            let size_cache = Rc::new(CachedSizeState::default());
+            let mut resize = ResizeState::default();
             let mut deps = InputDeps {
                 tui_config: &mut tui_config,
                 thinking_prefs: &mut ThinkingPrefs::default(),
@@ -854,7 +942,7 @@ mod tests {
                 cwd: std::path::Path::new(""),
                 pending_prompt: &mut pending_prompt,
                 image_picker: &image_picker,
-                size_cache: &size_cache,
+                resize: &mut resize,
             };
             let action = handle_streaming_key_event(&mut session, &mut state, &mut deps, key(code))
                 .await
@@ -982,7 +1070,7 @@ mod tests {
         let mut tui_config = streaming_test_config();
         let mut pending_prompt = None;
         let image_picker = None;
-        let size_cache = Rc::new(CachedSizeState::default());
+        let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
             thinking_prefs: &mut ThinkingPrefs::default(),
@@ -990,7 +1078,7 @@ mod tests {
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
-            size_cache: &size_cache,
+            resize: &mut resize,
         };
 
         let action = handle_streaming_key_event(
@@ -1018,7 +1106,7 @@ mod tests {
         let mut tui_config = streaming_test_config();
         let mut pending_prompt = None;
         let image_picker = None;
-        let size_cache = Rc::new(CachedSizeState::default());
+        let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
             thinking_prefs: &mut ThinkingPrefs::default(),
@@ -1026,7 +1114,7 @@ mod tests {
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
-            size_cache: &size_cache,
+            resize: &mut resize,
         };
 
         handle_streaming_key_event(

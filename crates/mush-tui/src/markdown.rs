@@ -1,12 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::buffer::CellWidth;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use std::sync::LazyLock;
-use tabled::builder::Builder;
-use tabled::settings::Width;
-use tabled::settings::peaker::Priority;
-use tabled::settings::style::Style as TableStyle;
 
 use crate::theme::Theme;
 
@@ -26,7 +21,6 @@ const HORIZONTAL_RULE_WIDTH: usize = 80;
 #[cfg(test)]
 thread_local! {
     static RENDER_CALLS: Cell<usize> = const { Cell::new(0) };
-    static PARSE_INLINE_CALLS: Cell<usize> = const { Cell::new(0) };
     static HIGHLIGHT_CODE_BLOCK_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -83,8 +77,8 @@ fn render_pulldown(
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
     let mut renderer = MarkdownRenderer::new(theme, width, code_highlighting);
-    for event in Parser::new_ext(&source, options) {
-        renderer.handle(event);
+    for (event, range) in Parser::new_ext(&source, options).into_offset_iter() {
+        renderer.handle(event, &source[range]);
     }
     renderer.finish()
 }
@@ -113,7 +107,7 @@ struct MarkdownRenderer<'a> {
     pending_marker: Option<String>,
     quote_depth: usize,
     code_block: Option<(String, String)>,
-    table: Option<TableCapture>,
+    in_table: bool,
     link_stack: Vec<LinkCapture>,
     code_highlighting: CodeHighlighting,
 }
@@ -121,16 +115,6 @@ struct MarkdownRenderer<'a> {
 struct LinkCapture {
     destination: String,
     text: String,
-}
-
-#[derive(Default)]
-struct TableCapture {
-    rows: Vec<Vec<String>>,
-    current_row: Option<Vec<String>>,
-    current_cell: String,
-    in_cell: bool,
-    in_head: bool,
-    head_row: Option<Vec<String>>,
 }
 
 impl<'a> MarkdownRenderer<'a> {
@@ -145,14 +129,26 @@ impl<'a> MarkdownRenderer<'a> {
             pending_marker: None,
             quote_depth: 0,
             code_block: None,
-            table: None,
+            in_table: false,
             link_stack: Vec::new(),
             code_highlighting,
         }
     }
 
-    fn handle(&mut self, event: Event<'_>) {
-        if self.handle_code_block(&event) || self.handle_table(&event) {
+    fn handle(&mut self, event: Event<'_>, source: &str) {
+        if self.in_table {
+            if matches!(event, Event::End(TagEnd::Table)) {
+                self.in_table = false;
+            }
+            return;
+        }
+        if self.handle_code_block(&event) {
+            return;
+        }
+        if matches!(event, Event::Start(Tag::Table(_))) {
+            self.separate();
+            self.lines.extend(render_source_table(source, self.theme));
+            self.in_table = true;
             return;
         }
 
@@ -228,10 +224,6 @@ impl<'a> MarkdownRenderer<'a> {
                 self.code_block = Some((lang, String::new()));
             }
             Tag::CodeBlock(CodeBlockKind::Indented) => {}
-            Tag::Table(_) => {
-                self.separate();
-                self.table = Some(TableCapture::default());
-            }
             Tag::Link { dest_url, .. } => self.link_stack.push(LinkCapture {
                 destination: dest_url.to_string(),
                 text: String::new(),
@@ -284,97 +276,6 @@ impl<'a> MarkdownRenderer<'a> {
             return true;
         }
         false
-    }
-
-    fn handle_table(&mut self, event: &Event<'_>) -> bool {
-        let Some(table) = &mut self.table else {
-            return false;
-        };
-
-        match event {
-            Event::Start(Tag::Table(_)) => true,
-            Event::Start(Tag::TableHead) => {
-                table.in_head = true;
-                table.current_row = Some(Vec::new());
-                true
-            }
-            Event::Start(Tag::TableRow) => {
-                table.current_row = Some(Vec::new());
-                true
-            }
-            Event::Start(Tag::TableCell) => {
-                table.current_cell.clear();
-                table.in_cell = true;
-                true
-            }
-            Event::Start(Tag::Strong) if table.in_cell => {
-                table.current_cell.push_str("**");
-                true
-            }
-            Event::Start(Tag::Emphasis) if table.in_cell => {
-                table.current_cell.push('*');
-                true
-            }
-            Event::Text(text) if table.in_cell => {
-                table.current_cell.push_str(text);
-                true
-            }
-            Event::Code(text) if table.in_cell => {
-                table.current_cell.push('`');
-                table.current_cell.push_str(text);
-                table.current_cell.push('`');
-                true
-            }
-            Event::SoftBreak | Event::HardBreak if table.in_cell => {
-                table.current_cell.push(' ');
-                true
-            }
-            Event::End(TagEnd::TableCell) => {
-                table.in_cell = false;
-                if let Some(row) = &mut table.current_row {
-                    row.push(table.current_cell.trim().to_string());
-                }
-                true
-            }
-            Event::End(TagEnd::TableRow) => {
-                if let Some(row) = table.current_row.take() {
-                    if table.in_head {
-                        table.head_row = Some(row);
-                    } else {
-                        table.rows.push(row);
-                    }
-                }
-                true
-            }
-            Event::End(TagEnd::TableHead) => {
-                table.in_head = false;
-                if let Some(row) = table.current_row.take().or_else(|| table.head_row.take()) {
-                    table.rows.insert(0, row);
-                }
-                true
-            }
-            Event::End(TagEnd::Table) => {
-                let table = self.table.take().unwrap_or_default();
-                if !table.rows.is_empty() {
-                    let rendered = render_records_with_tabled(table.rows, self.width);
-                    self.lines.extend(
-                        rendered
-                            .lines()
-                            .map(|line| styled_table_line(line, self.theme)),
-                    );
-                }
-                true
-            }
-            Event::End(TagEnd::Strong) if table.in_cell => {
-                table.current_cell.push_str("**");
-                true
-            }
-            Event::End(TagEnd::Emphasis) if table.in_cell => {
-                table.current_cell.push('*');
-                true
-            }
-            _ => true,
-        }
     }
 
     fn push_text(&mut self, text: &str) {
@@ -476,14 +377,6 @@ fn render_plain_text(source: &str) -> Text<'static> {
     Text::from(lines)
 }
 
-fn render_inline_spans(text: &str, theme: &Theme) -> Vec<Span<'static>> {
-    if needs_inline_parsing(text) {
-        parse_inline(text, theme)
-    } else {
-        vec![Span::raw(text.to_string())]
-    }
-}
-
 fn is_plain_text_document(source: &str) -> bool {
     source.lines().all(is_plain_text_line)
 }
@@ -519,177 +412,49 @@ fn numbered_list_item(line: &str) -> Option<(&str, &str)> {
     Some((&line[..=dot_pos], &line[dot_pos + 2..]))
 }
 
-#[cfg(test)]
-fn pulldown_table_rows(source: &str) -> Option<Vec<Vec<String>>> {
-    let mut options = Options::empty();
-    options.insert(Options::ENABLE_TABLES);
-    let parser = Parser::new_ext(source, options);
-
-    let mut rows = Vec::new();
-    let mut current_row: Option<Vec<String>> = None;
-    let mut current_cell = String::new();
-    let mut in_cell = false;
-    let mut saw_table = false;
-    let mut in_table_head = false;
-    let mut head_row: Option<Vec<String>> = None;
-
-    for event in parser {
-        match event {
-            Event::Start(Tag::Table(_)) => saw_table = true,
-            Event::Start(Tag::TableHead) => {
-                in_table_head = true;
-                current_row = Some(Vec::new());
-            }
-            Event::Start(Tag::TableRow) => current_row = Some(Vec::new()),
-            Event::Start(Tag::TableCell) => {
-                current_cell.clear();
-                in_cell = true;
-            }
-            Event::Start(Tag::Strong) if in_cell => current_cell.push_str("**"),
-            Event::Start(Tag::Emphasis) if in_cell => current_cell.push('*'),
-            Event::Text(text) if in_cell => current_cell.push_str(&text),
-            Event::Code(text) if in_cell => {
-                current_cell.push('`');
-                current_cell.push_str(&text);
-                current_cell.push('`');
-            }
-            Event::SoftBreak | Event::HardBreak if in_cell => current_cell.push(' '),
-            Event::End(TagEnd::TableCell) => {
-                in_cell = false;
-                if let Some(row) = &mut current_row {
-                    row.push(current_cell.trim().to_string());
-                }
-            }
-            Event::End(TagEnd::TableRow) => {
-                if let Some(row) = current_row.take() {
-                    if in_table_head {
-                        head_row = Some(row);
-                    } else {
-                        rows.push(row);
-                    }
-                }
-            }
-            Event::End(TagEnd::TableHead) => {
-                in_table_head = false;
-                if let Some(row) = current_row.take().or_else(|| head_row.take()) {
-                    rows.insert(0, row);
-                }
-            }
-            Event::End(TagEnd::Strong) if in_cell => current_cell.push_str("**"),
-            Event::End(TagEnd::Emphasis) if in_cell => current_cell.push('*'),
-            _ => {}
-        }
-    }
-
-    (saw_table && !rows.is_empty()).then_some(rows)
-}
-
-fn render_records_with_tabled(records: Vec<Vec<String>>, width: Option<usize>) -> String {
-    if width.is_some_and(|width| width < 24) {
-        return render_records_as_list(records);
-    }
-
-    let Some(width) = width else {
-        return render_records_with_tabled_width(&records, None);
-    };
-
-    let mut wrap_width = width;
-    loop {
-        let rendered = render_records_with_tabled_width(&records, Some(wrap_width));
-        let rendered_width = rendered_table_cell_width(&rendered);
-        if rendered_width <= width || wrap_width <= 1 {
-            return rendered;
-        }
-
-        let overflow = rendered_width - width;
-        wrap_width = wrap_width.saturating_sub(overflow.max(1)).max(1);
-    }
-}
-
-fn render_records_with_tabled_width(records: &[Vec<String>], width: Option<usize>) -> String {
-    let mut builder = Builder::new();
-    for record in records {
-        builder.push_record(record.iter().cloned());
-    }
-    let mut table = builder.build();
-    table.with(TableStyle::sharp());
-    if let Some(width) = width {
-        table.with(
-            Width::wrap(width)
-                .keep_words(true)
-                .priority(Priority::max(true)),
-        );
-    }
-    table.to_string()
-}
-
-fn rendered_table_cell_width(table: &str) -> usize {
-    table
+fn render_source_table(source: &str, theme: &Theme) -> Vec<Line<'static>> {
+    source
         .lines()
-        .map(|line| usize::from(line.cell_width()))
-        .max()
-        .unwrap_or(0)
-}
-
-fn render_records_as_list(records: Vec<Vec<String>>) -> String {
-    let Some((header, rows)) = records.split_first() else {
-        return String::new();
-    };
-
-    let mut out = String::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        if row_index > 0 {
-            out.push('\n');
-        }
-        for (idx, cell) in row.iter().enumerate() {
-            let key = header.get(idx).filter(|key| !key.trim().is_empty());
-            match key {
-                Some(key) => out.push_str(&format!("- {}: {}\n", key.trim(), cell.trim())),
-                None => out.push_str(&format!("- {}\n", cell.trim())),
+        .enumerate()
+        .map(|(index, line)| {
+            if index == 1 {
+                Line::styled(line.to_string(), theme.horizontal_rule)
+            } else {
+                source_table_line(line, theme, index == 0)
             }
-        }
-    }
-    out.trim_end().to_string()
+        })
+        .collect()
 }
 
-fn styled_table_line(line: &str, theme: &Theme) -> Line<'static> {
-    if is_table_border_line(line) {
-        return Line::styled(line.to_string(), theme.horizontal_rule);
-    }
+fn source_table_line(line: &str, theme: &Theme, header: bool) -> Line<'static> {
+    let content_style = if header { theme.bold } else { Style::default() };
     let mut spans = Vec::new();
-    for segment in line.split_inclusive('│') {
-        if segment == "│" {
-            spans.push(Span::styled("│", theme.horizontal_rule));
-        } else if let Some(cell) = segment.strip_suffix('│') {
-            spans.extend(render_inline_spans(cell, theme));
-            spans.push(Span::styled("│", theme.horizontal_rule));
+    let mut content = String::new();
+    let mut backslashes = 0;
+    let mut code = false;
+    for ch in line.chars() {
+        let escaped = backslashes % 2 == 1;
+        if ch == '|' && !escaped && !code {
+            if !content.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut content), content_style));
+            }
+            spans.push(Span::styled("|", theme.horizontal_rule));
         } else {
-            spans.extend(render_inline_spans(segment, theme));
+            content.push(ch);
         }
+        if ch == '`' && !escaped {
+            code = !code;
+        }
+        if ch == '\\' {
+            backslashes += 1;
+        } else {
+            backslashes = 0;
+        }
+    }
+    if !content.is_empty() {
+        spans.push(Span::styled(content, content_style));
     }
     Line::from(spans)
-}
-
-fn is_table_border_line(line: &str) -> bool {
-    line.chars()
-        .all(|c| matches!(c, '┌' | '┬' | '┐' | '├' | '┼' | '┤' | '└' | '┴' | '┘' | '─'))
-}
-
-#[cfg(test)]
-fn render_markdown_table_with_tabled(source: &str) -> Option<String> {
-    let rows = pulldown_table_rows(source)?;
-    let table = render_records_with_tabled(rows, None);
-    let lines = table
-        .lines()
-        .map(|line| styled_table_line(line, &Theme::default()))
-        .collect::<Vec<_>>();
-    Some(
-        lines
-            .iter()
-            .map(Line::to_string)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
 }
 
 fn render_code_block(
@@ -802,84 +567,6 @@ fn syntect_to_style(style: highlighting::Style) -> Style {
     s
 }
 
-fn parse_inline(text: &str, theme: &Theme) -> Vec<Span<'static>> {
-    #[cfg(test)]
-    PARSE_INLINE_CALLS.with(|calls| calls.set(calls.get() + 1));
-
-    let mut spans = Vec::new();
-    let mut buf = String::new();
-    let mut offset = 0;
-
-    while offset < text.len() {
-        let rest = &text[offset..];
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-
-        match ch {
-            '`' => {
-                let code_rest = &rest[ch.len_utf8()..];
-                if let Some(end) = code_rest.find('`') {
-                    if !buf.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut buf)));
-                    }
-                    spans.push(Span::styled(
-                        code_rest[..end].to_string(),
-                        theme.inline_code,
-                    ));
-                    offset += ch.len_utf8() + end + ch.len_utf8();
-                } else {
-                    buf.push(ch);
-                    offset += ch.len_utf8();
-                }
-            }
-            '*' | '_' => {
-                let run_len = rest
-                    .chars()
-                    .take_while(|candidate| *candidate == ch)
-                    .take(3)
-                    .count();
-                let marker_width = ch.len_utf8();
-
-                let (delimiter_len, style) = if run_len >= 3 {
-                    (3, theme.bold.patch(theme.italic))
-                } else if run_len >= 2 {
-                    (2, theme.bold)
-                } else {
-                    (1, theme.italic)
-                };
-
-                let delimiter = ch.to_string().repeat(delimiter_len);
-                let inner_rest = &rest[delimiter_len * marker_width..];
-                if let Some(end) = inner_rest.find(&delimiter) {
-                    if !buf.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut buf)));
-                    }
-                    spans.push(Span::styled(inner_rest[..end].to_string(), style));
-                    offset += delimiter_len * marker_width + end + delimiter_len * marker_width;
-                } else {
-                    buf.push_str(&delimiter);
-                    offset += delimiter_len * marker_width;
-                }
-            }
-            _ => {
-                buf.push(ch);
-                offset += ch.len_utf8();
-            }
-        }
-    }
-
-    if !buf.is_empty() {
-        spans.push(Span::raw(buf));
-    }
-
-    if spans.is_empty() {
-        spans.push(Span::raw(""));
-    }
-
-    spans
-}
-
 #[cfg(test)]
 pub(crate) fn reset_render_call_count() {
     RENDER_CALLS.with(|calls| calls.set(0));
@@ -888,16 +575,6 @@ pub(crate) fn reset_render_call_count() {
 #[cfg(test)]
 pub(crate) fn render_call_count() -> usize {
     RENDER_CALLS.with(Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn reset_parse_inline_call_count() {
-    PARSE_INLINE_CALLS.with(|calls| calls.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn parse_inline_call_count() -> usize {
-    PARSE_INLINE_CALLS.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -916,10 +593,6 @@ mod tests {
 
     fn t() -> Theme {
         Theme::default()
-    }
-
-    fn rendered_width(line: &Line<'_>) -> u16 {
-        line.to_string().as_str().cell_width()
     }
 
     #[test]
@@ -1204,220 +877,76 @@ mod tests {
     }
 
     #[test]
-    fn plain_lines_skip_inline_parser() {
-        reset_parse_inline_call_count();
-
-        let text = render("alpha\nbeta\ngamma", &t());
-
-        assert_eq!(text.lines.len(), 3);
-        assert_eq!(parse_inline_call_count(), 0);
-    }
-
-    #[test]
-    fn only_formatted_lines_use_inline_parser() {
-        reset_parse_inline_call_count();
-
-        let text = render("alpha\n**beta**\ngamma", &t());
-
-        assert_eq!(text.lines.len(), 1);
-        assert_eq!(parse_inline_call_count(), 0);
-    }
-
-    #[test]
     fn mixed_content() {
         let text = render("# title\n\nsome **bold** and `code`\n\n- a list item", &t());
         assert!(text.lines.len() >= 3);
     }
 
     #[test]
-    fn table_renders_as_aligned_grid() {
-        let source = "\
-| Name  | Age |
-|-------|-----|
-| Alice | 30  |
-| Bob   | 25  |";
+    fn table_keeps_its_source_characters() {
+        let source = "Name | Age\n:--- | ---:\nAlice | 30";
         let text = render(source, &t());
-        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
-        assert_eq!(
-            rendered.len(),
-            6,
-            "expected 6 grid lines, got {}: {rendered:?}",
-            rendered.len()
-        );
-        assert!(
-            rendered[0].starts_with('┌') && rendered[0].contains('┬') && rendered[0].ends_with('┐')
-        );
-        assert!(
-            rendered[1].contains("Name")
-                && rendered[1].contains("Age")
-                && rendered[1].starts_with('│')
-        );
-        assert!(
-            rendered[2].starts_with('├') && rendered[2].contains('┼') && rendered[2].ends_with('┤')
-        );
-        assert!(rendered[3].contains("Alice") && rendered[3].contains("30"));
-        assert!(rendered[4].contains("Bob") && rendered[4].contains("25"));
-        assert!(
-            rendered[5].starts_with('└') && rendered[5].contains('┴') && rendered[5].ends_with('┘')
-        );
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
 
-        assert_eq!(rendered[1].chars().count(), rendered[3].chars().count());
-        assert_eq!(rendered[3].chars().count(), rendered[4].chars().count());
+        assert_eq!(rendered, source.lines().collect::<Vec<_>>());
+        assert!(rendered.iter().all(|line| !line.contains('│')));
+    }
+
+    #[test]
+    fn table_colours_structure_and_header() {
+        let theme = t();
+        let source = "| Name | Age |\n|:-----|----:|\n| Ada  | 36  |";
+        let text = render(source, &theme);
+
+        assert_eq!(text.lines[1].style, theme.horizontal_rule);
+        assert!(text.lines[0].spans.iter().any(|span| {
+            span.content.contains("Name") && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .filter(|span| span.content == "|")
+                .all(|span| { span.style == theme.horizontal_rule })
+        );
+    }
+
+    #[test]
+    fn table_keeps_markdown_markers_and_literal_pipes() {
+        let source = "| Name | Note |\n|------|------|\n| Ada  | **bold** and `a|b` and a \\| b |";
+        let text = render(source, &t());
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert_eq!(rendered, source.lines().collect::<Vec<_>>());
     }
 
     #[test]
     fn table_in_mixed_content() {
-        let source = "\
-here is a table:
-
-| a | b |
-|---|---|
-| 1 | 2 |
-
-done.";
+        let source = "here is a table:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\ndone.";
         let text = render(source, &t());
-        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
-        assert!(rendered.iter().any(|l| l.contains("here is a table:")));
-        assert!(rendered.iter().any(|l| l.contains("done.")));
-        assert!(
-            rendered.iter().filter(|l| l.starts_with('│')).count() == 2,
-            "expected 2 grid content rows, got: {rendered:?}"
-        );
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line == "here is a table:"));
+        assert!(rendered.iter().any(|line| line == "|---|---|"));
+        assert!(rendered.iter().any(|line| line == "| 1 | 2 |"));
+        assert!(rendered.iter().any(|line| line == "done."));
     }
 
     #[test]
     fn incomplete_table_falls_back_to_plain() {
         let source = "| just | one | line |";
         let text = render(source, &t());
-        let rendered: Vec<String> = text.lines.iter().map(Line::to_string).collect();
-        assert_eq!(rendered.len(), 1);
-        assert_eq!(rendered[0], "| just | one | line |");
+        let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+
+        assert_eq!(rendered, [source]);
     }
 
     #[test]
-    fn tabled_dependency_is_used_for_markdown_tables() {
-        let source = "\
-| Name | Age |
-|------|-----|
-| Ada  | 36  |";
-        let rendered = render_markdown_table_with_tabled(source).expect("table should render");
-
-        assert!(rendered.contains('┌'));
-        assert!(rendered.contains("Ada"));
-    }
-
-    #[test]
-    fn tabled_table_preserves_inline_formatting_in_cells() {
-        let source = "\
-| Name | Note |
-|------|------|
-| Ada  | **bold** |";
-        let text = render(source, &t());
-
-        let data_row = text
-            .lines
-            .iter()
-            .find(|line| line.to_string().contains("bold"))
-            .expect("table data row should render");
-        assert!(data_row.spans.iter().any(|span| {
-            span.content.as_ref() == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
-        }));
-    }
-
-    #[test]
-    fn table_wraps_to_requested_width() {
-        let source = "\
-| Name | Notes |
-|------|-------|
-| Ada  | this is a very long table cell that should wrap |";
-        let text = render_with_width(source, &t(), Some(28));
-
-        for line in &text.lines {
-            let width = rendered_width(line);
-            assert!(width <= 28, "line exceeded width 28: {line:?}");
-        }
-        assert!(
-            text.lines.len() > 5,
-            "wrapped table should use extra physical rows: {:?}",
-            text.lines
-        );
-    }
-
-    #[test]
-    fn table_wraps_long_unspaced_cells_to_requested_width() {
-        let source = "\
-| Path | Digest |
-|------|--------|
-| crate | abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz |";
-        let text = render_with_width(source, &t(), Some(30));
-
-        for line in &text.lines {
-            let width = rendered_width(line);
-            assert!(width <= 30, "line exceeded width 30: {line:?}");
-        }
-    }
-
-    #[test]
-    fn table_wraps_halfwidth_dakuten_to_requested_cell_width() {
-        let source = "\
-| Name | Notes |
-|------|-------|
-| Ada  | abcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞabcｶﾞ |";
-        let text = render_with_width(source, &t(), Some(30));
-
-        for line in &text.lines {
-            let width = rendered_width(line);
-            assert!(width <= 30, "line exceeded width 30: {line:?}");
-        }
-    }
-
-    #[test]
-    fn narrow_table_falls_back_to_key_value_list() {
-        let source = "\
-| Name | Notes |
-|------|-------|
-| Ada  | this is a long table cell |";
+    fn narrow_tables_keep_markdown_syntax() {
+        let source = "| Name | Notes |\n|------|-------|\n| Ada  | this is a long table cell |";
         let text = render_with_width(source, &t(), Some(20));
         let rendered = text.lines.iter().map(Line::to_string).collect::<Vec<_>>();
 
-        assert_eq!(rendered[0], "- Name: Ada");
-        assert_eq!(rendered[1], "- Notes: this is a long table cell");
-        assert!(rendered.iter().all(|line| !line.contains('│')));
-    }
-
-    #[test]
-    fn markdown_uses_pulldown_cmark_for_tables() {
-        assert!(pulldown_table_rows("| a | b |\n|---|---|\n| c | d |").is_some());
-    }
-
-    #[test]
-    fn imbalanced_table_keeps_first_column_content() {
-        let source = "\
-| what the two vars actually mean today | actually configures |
-|---|---|
-| `spectral_base_domain` | the standalone spectral API endpoint when studio is NOT deployed. caddy renders one site: `<spectral_domain>` -> `spectral:8000`. |
-| `spectral_domain` | studio's root domain. studio UI lives at the root, with `api.` / `kratos.` / `hydra.` subdomains hanging off it. when studio is present, spectral's API also routes via this domain (studio owns the root, spectral piggybacks). |";
-
-        for width in [60usize, 70, 80, 90, 100, 120] {
-            let text = render_with_width(source, &t(), Some(width));
-            let rendered = text
-                .lines
-                .iter()
-                .map(Line::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(
-                rendered.contains("spectral_base_domain"),
-                "first-column content was dropped at width {width}:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("spectral_domain"),
-                "first-column content was dropped at width {width}:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("two vars"),
-                "first-column header was dropped at width {width}:\n{rendered}"
-            );
-        }
+        assert_eq!(rendered, source.lines().collect::<Vec<_>>());
     }
 }

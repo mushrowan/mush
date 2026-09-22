@@ -28,19 +28,17 @@ pub(super) async fn run_loop_iteration(
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     note_closed_connection(runtime);
-    let action = if runtime.connection_closed || !runtime.session.connection.state().turn_active {
-        handle_idle_iteration(stream_state, runtime, tui_config, image_picker, size_cache).await
+    let mut action = if runtime.connection_closed || !runtime.session.connection.state().turn_active
+    {
+        handle_idle_iteration(stream_state, runtime, tui_config, image_picker).await
     } else {
-        handle_streaming_iteration(
-            stream_state,
-            runtime,
-            tui_config,
-            image_picker,
-            size_cache,
-            last_redraw,
-        )
-        .await
+        handle_streaming_iteration(stream_state, runtime, tui_config, image_picker, last_redraw)
+            .await
     }?;
+    if runtime.resize.take_due(std::time::Instant::now()).is_some() {
+        super::input::apply_resize(size_cache);
+        action = LoopAction::Redraw;
+    }
     let store = super::subagents::store(tui_config);
     let panel_changed = runtime
         .session
@@ -48,18 +46,24 @@ pub(super) async fn run_loop_iteration(
         .subagents
         .poll(store, std::time::Instant::now())
         .await;
-    Ok(if panel_changed && matches!(action, LoopAction::Continue) {
+    let action = if panel_changed && matches!(action, LoopAction::Continue) {
         LoopAction::Redraw
     } else {
         action
-    })
+    };
+    Ok(
+        if runtime.resize.pending() && matches!(action, LoopAction::Redraw) {
+            LoopAction::Continue
+        } else {
+            action
+        },
+    )
 }
 
 fn input_parts<'a>(
     runtime: &'a mut RunnerRuntime,
     tui_config: &'a mut TuiConfig,
     image_picker: &'a Option<ratatui_image::picker::Picker>,
-    size_cache: &'a std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> (&'a mut crate::session::Session, InputDeps<'a>) {
     let RunnerRuntime {
         session,
@@ -67,6 +71,7 @@ fn input_parts<'a>(
         thinking_saver,
         cwd,
         pending_prompt,
+        resize,
         ..
     } = runtime;
     (
@@ -78,7 +83,7 @@ fn input_parts<'a>(
             cwd,
             pending_prompt,
             image_picker,
-            size_cache,
+            resize,
         },
     )
 }
@@ -89,7 +94,6 @@ async fn handle_streaming_iteration(
     runtime: &mut RunnerRuntime,
     tui_config: &mut TuiConfig,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
     let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
@@ -132,7 +136,7 @@ async fn handle_streaming_iteration(
                 }
             }
 
-            let (session, mut deps) = input_parts(runtime, tui_config, image_picker, size_cache);
+            let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
             let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
@@ -162,7 +166,7 @@ async fn handle_streaming_iteration(
                 trace_draw_reason("browser_login");
             }
 
-            let (session, mut deps) = input_parts(runtime, tui_config, image_picker, size_cache);
+            let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
             let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
             if matches!(action, LoopAction::Quit) {
                 return Ok(LoopAction::Quit);
@@ -460,7 +464,6 @@ async fn handle_idle_iteration(
     runtime: &mut RunnerRuntime,
     tui_config: &mut TuiConfig,
     image_picker: &Option<ratatui_image::picker::Picker>,
-    size_cache: &std::rc::Rc<super::size_cached_backend::CachedSizeState>,
 ) -> io::Result<LoopAction> {
     let mut events_seen = false;
     while let Some(event) = runtime.session.connection.try_next_event() {
@@ -470,7 +473,7 @@ async fn handle_idle_iteration(
     let picker_changed = drain_session_picker(&mut runtime.session);
     let login_changed = drain_browser_logins(&mut runtime.session, tui_config).await;
 
-    let (session, mut deps) = input_parts(runtime, tui_config, image_picker, size_cache);
+    let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
     let action = handle_idle_terminal_events(session, stream_state, &mut deps).await?;
     if matches!(action, LoopAction::Continue) && (picker_changed || login_changed || events_seen) {
         Ok(LoopAction::Redraw)

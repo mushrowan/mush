@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mush_ai::types::{ImageMimeType, TokenCount};
 use mush_tui::app::{
     App, DisplayMessage, DisplayToolCall, IMAGE_PLACEHOLDER, InputBuffer, MessageRole,
@@ -29,6 +29,33 @@ fn bench_transcript_scaling(c: &mut Criterion) {
                 screen.render(black_box(&app), area, &mut buf);
                 black_box(&buf);
             })
+        });
+    }
+    group.finish();
+}
+
+fn bench_transcript_resize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transcript_resize");
+    let wide = Rect::new(0, 0, 100, 40);
+    let narrow = Rect::new(0, 0, 80, 40);
+
+    for &count in &[16usize, 64, 256, 1024] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let app = conversation_app(count);
+                    let mut screen = Screen::new();
+                    let mut buf = Buffer::empty(wide);
+                    screen.render(&app, wide, &mut buf);
+                    (app, screen, Buffer::empty(narrow))
+                },
+                |(app, mut screen, mut buf)| {
+                    screen.render(black_box(&app), narrow, &mut buf);
+                    black_box(buf);
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     group.finish();
@@ -221,6 +248,7 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
 criterion_group!(
     benches,
     bench_transcript_scaling,
+    bench_transcript_resize,
     bench_transcript_with_tool_output,
     bench_markdown,
     bench_code_blocks,
