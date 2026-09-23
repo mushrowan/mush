@@ -1,5 +1,6 @@
 use clap::Parser;
 mod headless;
+mod json_events;
 use color_eyre::eyre::{Result, eyre};
 use futures::StreamExt;
 
@@ -580,14 +581,17 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         session.meta.model_id = model.clone().into();
     }
     status.model = Some(session.meta.model_id.to_string());
-    if !prompt.is_empty() {
-        session.push_message(Message::User(
+    let prompt_message = (!prompt.is_empty()).then(|| {
+        Message::User(
             UserMessage::builder()
                 .content(UserContent::Text(prompt))
                 .timestamp_ms(Timestamp::now())
                 .prompt_id(PromptId::new())
                 .build(),
-        ));
+        )
+    });
+    if let Some(message) = &prompt_message {
+        session.push_message(message.clone());
         session.auto_title();
     }
     status.session_id = Some(session.meta.id.clone());
@@ -761,17 +765,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         .clone()
         .ok_or_else(|| eyre!("missing cancellation token"))?;
     let json = cli.mode == OutputMode::Json;
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "session",
-                "id": session.meta.id,
-                "model": session.meta.model_id,
-                "cwd": setup.client.cwd,
-            })
-        );
-    }
+    let mut json_events = json.then(|| {
+        println!("{}", json_events::header(&session));
+        json_events::JsonEvents::new(setup.client.model.clone(), prompt_message)
+    });
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
     let mut transcript = headless::Transcript::default();
     let mut signalled = None;
@@ -806,8 +803,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         if transcript.apply(&mut session, &event) && !cli.no_session {
             store.save(&session)?;
         }
-        if json {
-            println!("{}", serde_json::to_string(&event)?);
+        if let Some(json_events) = &mut json_events {
+            for line in json_events.apply(&event) {
+                println!("{line}");
+            }
         }
         match event {
             AgentEvent::AgentEnd => ended = true,

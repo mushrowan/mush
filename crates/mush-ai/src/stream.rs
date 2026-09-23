@@ -145,6 +145,14 @@ impl PartialMessage {
     }
 
     #[must_use]
+    pub fn snapshot(&self) -> AssistantMessage {
+        AssistantMessage {
+            content: self.parts.values().cloned().collect(),
+            ..self.message.clone()
+        }
+    }
+
+    #[must_use]
     pub fn has_content(&self) -> bool {
         !self.parts.is_empty()
     }
@@ -243,6 +251,7 @@ mod tests {
             partial.apply(&event);
         }
         assert!(partial.has_content());
+        assert_eq!(partial.snapshot().text(), "hello");
         let message = partial.finish(StopReason::Aborted, ABORTED_MESSAGE);
         assert_eq!(message.stop_reason, StopReason::Aborted);
         assert_eq!(message.error_message.as_deref(), Some(ABORTED_MESSAGE));

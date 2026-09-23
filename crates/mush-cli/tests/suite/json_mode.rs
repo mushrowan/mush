@@ -123,18 +123,51 @@ fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
         .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}")))
         .collect();
     assert_eq!(lines[0]["type"], "session");
-    assert_eq!(lines[0]["model"], "gpt-fixture");
-    let types: Vec<&str> = lines
+    assert!(lines[0]["id"].is_string(), "{}", lines[0]);
+    assert!(lines[0]["timestamp"].is_string(), "{}", lines[0]);
+    assert!(lines[0]["cwd"].is_string(), "{}", lines[0]);
+    assert!(lines[0].get("model").is_none(), "{}", lines[0]);
+    let mut types: Vec<&str> = lines[1..]
         .iter()
         .filter_map(|line| line["type"].as_str())
         .collect();
-    assert!(types.contains(&"message_end"), "{types:?}");
-    assert!(types.contains(&"stream_event"), "{types:?}");
-    assert_eq!(types.last(), Some(&"agent_end"), "{types:?}");
-    assert!(
-        lines.iter().any(|line| line["event"]["delta"] == "done"),
+    types.dedup();
+    assert_eq!(
+        types,
+        [
+            "agent_start",
+            "turn_start",
+            "message_start",
+            "message_end",
+            "message_start",
+            "message_update",
+            "message_end",
+            "turn_end",
+            "agent_end",
+        ],
         "{stdout}"
     );
+    assert_eq!(lines[3]["message"]["role"], "user");
+    assert_eq!(lines[3]["message"]["content"], "hello");
+    let update = lines
+        .iter()
+        .find(|line| line["assistantMessageEvent"]["type"] == "text_delta")
+        .unwrap_or_else(|| panic!("no text delta in {stdout}"));
+    assert_eq!(update["assistantMessageEvent"]["delta"], "done");
+    assert_eq!(update["message"]["role"], "assistant");
+    let end = &lines[lines.len() - 1];
+    let messages = end["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "{end}");
+    let answer = &messages[1];
+    assert_eq!(answer["role"], "assistant");
+    assert_eq!(answer["stopReason"], "stop");
+    assert_eq!(
+        answer["content"][0],
+        serde_json::json!({"type": "text", "text": "done"})
+    );
+    assert_eq!(answer["usage"]["output"], 1);
+    assert_eq!(answer["api"], "openai-responses");
+    assert_eq!(answer["provider"], "fixture");
 }
 
 #[test]
