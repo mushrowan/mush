@@ -742,27 +742,22 @@ fn attached_images(
         let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&attachment.data) else {
             continue;
         };
-        if bytes.len() <= crate::read::DEFAULT_MAX_IMAGE_BYTES {
-            parts.push(ToolResultContentPart::Image(ImageContent {
-                data: attachment.data.clone(),
-                mime_type,
-            }));
-            continue;
-        }
-        match crate::read::resize_image_to_fit(&bytes, crate::read::DEFAULT_MAX_IMAGE_BYTES) {
-            Ok(resized) => {
-                let (ow, oh) = resized.orig_dimensions;
-                let (nw, nh) = resized.new_dimensions;
-                text.push_str(&format!(
-                    "\n[image {} downscaled from {ow}x{oh} to {nw}x{nh}]",
-                    attachment.path.as_deref().unwrap_or("attachment")
-                ));
+        let name = attachment.path.as_deref().unwrap_or("attachment");
+        match crate::attachment::shrink(&bytes) {
+            Ok(crate::attachment::Shrunk::Jpeg { bytes, note }) => {
+                text.push_str(&format!("\n[image {name}: {note}]"));
                 parts.push(ToolResultContentPart::Image(ImageContent {
-                    data: base64::engine::general_purpose::STANDARD.encode(&resized.bytes),
-                    mime_type: resized.mime,
+                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    mime_type: ImageMimeType::Jpeg,
                 }));
             }
-            Err(error) => text.push_str(&format!("\n[image dropped: {error}]")),
+            Ok(crate::attachment::Shrunk::Unchanged) => {
+                parts.push(ToolResultContentPart::Image(ImageContent {
+                    data: attachment.data.clone(),
+                    mime_type,
+                }))
+            }
+            Err(error) => text.push_str(&format!("\n[image {name} dropped: {error}]")),
         }
     }
     parts
@@ -1279,6 +1274,48 @@ mod tests {
         assert_eq!(images[0].mime_type, mush_ai::types::ImageMimeType::Png);
         let details = CellDetails::from_value(result.details.as_ref().unwrap()).unwrap();
         assert_eq!(details.images, 1);
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_large_attached_image_is_shrunk_to_jpeg_and_noted() {
+        use mush_ai::types::ToolResultContentPart;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2000,
+            100,
+            image::Rgb([0, 128, 255]),
+        ))
+        .save(&path)
+        .unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": format!("attach_image({:?})", path.display().to_string())
+            }))
+            .await;
+
+        let text = extract_text(&result);
+        assert!(result.outcome.is_success(), "{text}");
+        assert!(
+            text.contains(&format!(
+                "[image {}: original 2000x100; attached 1200x60 JPEG at quality 82]",
+                path.display()
+            )),
+            "{text}"
+        );
+        let images: Vec<_> = result
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ToolResultContentPart::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, mush_ai::types::ImageMimeType::Jpeg);
         tool.shutdown().await;
     }
 
