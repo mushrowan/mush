@@ -1711,11 +1711,10 @@ impl SaverThread {
             .name("session-saver".into())
             .spawn(move || {
                 let store = SessionStore::new(SessionStore::default_dir());
-                while let Ok(mut snapshot) = rx.recv() {
-                    while let Ok(newer) = rx.try_recv() {
-                        snapshot = newer;
+                while let Ok(snapshot) = rx.recv() {
+                    for snapshot in latest_per_session(snapshot, &rx) {
+                        let _ = store.save(&session_from_snapshot(snapshot, &cwd));
                     }
-                    let _ = store.save(&session_from_snapshot(snapshot, &cwd));
                 }
             })?;
         Ok(Self { tx, thread })
@@ -1732,6 +1731,23 @@ impl SaverThread {
         drop(self.tx);
         let _ = self.thread.join();
     }
+}
+
+fn latest_per_session(
+    first: mush_tui::SessionSnapshot,
+    rx: &std::sync::mpsc::Receiver<mush_tui::SessionSnapshot>,
+) -> Vec<mush_tui::SessionSnapshot> {
+    let mut latest = vec![first];
+    while let Ok(newer) = rx.try_recv() {
+        match latest
+            .iter_mut()
+            .find(|snapshot| snapshot.session_id == newer.session_id)
+        {
+            Some(slot) => *slot = newer,
+            None => latest.push(newer),
+        }
+    }
+    latest
 }
 
 fn fork_session(source: Session, cwd: &str) -> Session {
@@ -1855,6 +1871,25 @@ mod tests {
             parent: None,
             subagent_model: None,
         }
+    }
+
+    #[test]
+    fn the_saver_keeps_the_newest_snapshot_of_every_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let parent = snapshot(Some("parent one"));
+        let child = snapshot(Some("child"));
+        let mut newer_parent = snapshot(Some("parent two"));
+        newer_parent.session_id = parent.session_id.clone();
+        tx.send(child).unwrap();
+        tx.send(newer_parent).unwrap();
+
+        let saved = latest_per_session(parent, &rx);
+
+        let titles: Vec<_> = saved
+            .iter()
+            .map(|snapshot| snapshot.title.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(titles, vec!["parent two", "child"]);
     }
 
     #[test]
