@@ -121,8 +121,14 @@ fn build_request_body(
         }));
     }
 
+    let trimming =
+        if options.cache_retention.unwrap_or(CacheRetention::Short) == CacheRetention::None {
+            ToolResultTrimming::SlidingWindow
+        } else {
+            ToolResultTrimming::Preserve
+        };
     let mut visitor = OpenaiVisitor {
-        trimming: ToolResultTrimming::SlidingWindow,
+        trimming,
         out: &mut all_messages,
     };
     super::walk_messages(messages, &mut visitor);
@@ -814,6 +820,66 @@ mod tests {
         assert!(body.messages[0]["tool_calls"].is_array());
         assert_eq!(body.messages[1]["role"], "tool");
         assert_eq!(body.messages[1]["tool_call_id"], "tc_1");
+    }
+
+    fn user_turn(text: &str) -> Message {
+        Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn old_tool_turn(output: &str) -> Vec<Message> {
+        let mut messages = vec![
+            user_turn("run it"),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({}),
+                    })])
+                    .model("test".into())
+                    .provider(Provider::Custom("test".into()))
+                    .api(Api::OpenaiCompletions)
+                    .stop_reason(StopReason::ToolUse)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: "tc_1".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: output.into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+                details: None,
+            }),
+        ];
+        messages.extend((0..4).map(|i| user_turn(&format!("turn {i}"))));
+        messages
+    }
+
+    #[test]
+    fn old_tool_results_are_trimmed_only_when_caching_is_off() {
+        let output = "x".repeat(5_000);
+        let messages = old_tool_turn(&output);
+        let tool_content = |options: &StreamOptions| {
+            build_request_body(&test_model(), &None, &messages, &[], options).messages[2]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(tool_content(&StreamOptions::default()), output);
+        let uncached = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..StreamOptions::default()
+        };
+        assert!(tool_content(&uncached).contains("chars trimmed from old tool result"));
     }
 
     #[test]
