@@ -273,6 +273,11 @@ impl Nursery {
         }
     }
 
+    fn read_descriptor(&self, name: &str) -> Option<WorkerDescriptor> {
+        let bytes = std::fs::read(self.descriptor_path(name)).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
     fn read_recipe(&self, name: &str) -> Option<Recipe> {
         let bytes = std::fs::read(self.recipe_path(name)).ok()?;
         serde_json::from_slice(&bytes).ok()
@@ -299,7 +304,12 @@ impl Nursery {
                     let nursery = std::sync::Arc::clone(self);
                     tokio::spawn(async move {
                         nursery
-                            .recover(name, recipe, "no daemon was watching".into())
+                            .recover(
+                                name,
+                                recipe,
+                                "no daemon was watching".into(),
+                                descriptor.turn_active,
+                            )
                             .await;
                     });
                 }
@@ -430,7 +440,7 @@ impl Nursery {
         args: &[String],
         cwd: &Path,
         env: &[(String, String)],
-        recovered: bool,
+        interrupted: bool,
     ) -> io::Result<WorkerDescriptor> {
         std::fs::create_dir_all(&self.workers_dir)?;
         std::fs::create_dir_all(&self.log_dir)?;
@@ -453,7 +463,7 @@ impl Nursery {
                 command.arg("--fork").arg(id);
             }
         }
-        if recovered {
+        if interrupted {
             command.arg("--recovered");
         }
         command
@@ -531,7 +541,11 @@ impl Nursery {
         };
         tracing::warn!(name, %reason, "worker died, recovering");
         reap_group(pid);
-        self.recover(name.to_string(), recipe, reason).await;
+        let interrupted = self
+            .read_descriptor(name)
+            .is_some_and(|descriptor| descriptor.turn_active);
+        self.recover(name.to_string(), recipe, reason, interrupted)
+            .await;
     }
 
     fn recover(
@@ -539,13 +553,20 @@ impl Nursery {
         name: String,
         recipe: Recipe,
         died: String,
+        interrupted: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(async move {
-            self.recover_inner(&name, &recipe, &died).await;
+            self.recover_inner(&name, &recipe, &died, interrupted).await;
         })
     }
 
-    async fn recover_inner(self: std::sync::Arc<Self>, name: &str, recipe: &Recipe, died: &str) {
+    async fn recover_inner(
+        self: std::sync::Arc<Self>,
+        name: &str,
+        recipe: &Recipe,
+        died: &str,
+        interrupted: bool,
+    ) {
         let mut last = died.to_string();
         for delay in RETRY_DELAYS {
             tokio::time::sleep(delay).await;
@@ -563,7 +584,7 @@ impl Nursery {
                     &recipe.args,
                     &recipe.cwd,
                     &recipe.env,
-                    true,
+                    interrupted,
                 )
                 .await;
             match started {

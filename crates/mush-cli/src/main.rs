@@ -1339,6 +1339,8 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     })
 }
 
+const WORKER_INTERRUPTED: &str = "The isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.";
+
 fn worker_config(
     cli: &Cli,
     setup: &AppSetup,
@@ -1512,8 +1514,7 @@ fn worker_config(
         setup.client.cwd.clone(),
     )));
     if cli.recovered {
-        worker.recovery_notice =
-            Some("the worker restarted after a crash. an unfinished turn was not resumed".into());
+        worker.recovery_notice = Some(WORKER_INTERRUPTED.into());
     }
     worker
 }

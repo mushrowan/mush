@@ -731,23 +731,17 @@ async fn shutdown_needs_a_force_flag_when_agents_are_running() {
     assert!(!alive(descriptor.pid));
 }
 
-#[tokio::test]
-async fn a_killed_worker_comes_back_on_the_same_socket() {
-    let daemon = Daemon::start();
-    let SupervisorReply::Worker { descriptor, .. } =
-        daemon.request(daemon.open_saved(OpenTarget::New)).await
-    else {
-        panic!("expected a worker")
-    };
-    assert!(alive(descriptor.pid));
-
+async fn kill_and_await_recovery(
+    daemon: &Daemon,
+    descriptor: &mush_daemon::WorkerDescriptor,
+) -> Vec<mush_ai::types::Message> {
     let pid = rustix::process::Pid::from_raw(i32::try_from(descriptor.pid).unwrap()).unwrap();
     rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let recovered = loop {
-        let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await
-        else {
-            panic!("expected a roster")
+        let reply = daemon.request(SupervisorRequest::List).await;
+        let SupervisorReply::Workers(workers) = &reply else {
+            unreachable!("expected a roster, got {reply:?}")
         };
         if let Some(worker) = workers
             .iter()
@@ -766,15 +760,59 @@ async fn a_killed_worker_comes_back_on_the_same_socket() {
     let mut client = mush_daemon::DaemonConnection::connect(&recovered.socket)
         .await
         .unwrap();
-    let transcript = client.transcript().await;
-    assert!(
-        transcript.iter().any(|message| matches!(
-            message,
+    client.transcript().await
+}
+
+fn recovery_markers(transcript: &[mush_ai::types::Message]) -> Vec<String> {
+    transcript
+        .iter()
+        .filter_map(|message| match message {
             mush_ai::types::Message::Event(event)
-                if event.kind == mush_ai::types::EventKind::Recovery
-        )),
-        "{transcript:?}"
-    );
+                if event.kind == mush_ai::types::EventKind::Recovery =>
+            {
+                Some(event.content.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_killed_idle_worker_comes_back_on_the_same_socket_without_a_marker() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    assert!(alive(descriptor.pid));
+
+    let transcript = kill_and_await_recovery(&daemon, &descriptor).await;
+    assert!(recovery_markers(&transcript).is_empty(), "{transcript:?}");
+}
+
+#[tokio::test]
+async fn a_worker_killed_mid_turn_comes_back_with_an_interrupted_marker() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let busy = mush_daemon::WorkerDescriptor {
+        turn_active: true,
+        ..*descriptor.clone()
+    };
+    std::fs::write(
+        descriptor.socket.with_extension("json"),
+        serde_json::to_vec(&busy).unwrap(),
+    )
+    .unwrap();
+
+    let transcript = kill_and_await_recovery(&daemon, &descriptor).await;
+    let markers = recovery_markers(&transcript);
+    assert_eq!(markers.len(), 1, "{transcript:?}");
+    assert!(markers[0].contains("Inspect external side effects"));
 }
 
 #[tokio::test]
