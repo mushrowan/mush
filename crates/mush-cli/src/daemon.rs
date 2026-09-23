@@ -5,39 +5,83 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, eyre};
 use mush_daemon::{OpenTarget, SupervisorReply, SupervisorRequest, WorkerDescriptor};
 
-use crate::output::Style;
-
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub async fn ensure_running() -> io::Result<PathBuf> {
-    let socket = mush_daemon::daemon_socket_path();
-    if answers(&socket) {
-        match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Status).await {
-            Ok(SupervisorReply::Status { build, workers }) if build == mush_daemon::build_id() => {
-                let _ = workers;
-                return Ok(socket);
-            }
-            Ok(SupervisorReply::Status { workers, .. }) if workers > 0 => {
-                eprintln!(
-                    "{}",
-                    Style::Dim.stderr(format_args!(
-                        "the daemon is from another build and has {workers} worker(s) running; mush shutdown to replace it"
-                    ))
-                );
-                return Ok(socket);
-            }
-            Ok(_) => {
-                let _ =
-                    mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await;
-                wait_until_gone(&socket).await;
-            }
-            Err(error) => {
-                return Err(io::Error::other(format!(
-                    "the daemon on {} did not answer a status request: {error}",
-                    socket.display()
-                )));
-            }
+#[derive(Debug)]
+pub struct StaleDaemon {
+    pub socket: PathBuf,
+    pub busy: Option<usize>,
+}
+
+impl std::fmt::Display for StaleDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.busy {
+            Some(busy) => write!(
+                f,
+                "a daemon from another build of mush is running with {busy} busy session(s)"
+            ),
+            None => write!(
+                f,
+                "a daemon from another build of mush is running and its sessions could not be listed"
+            ),
         }
+    }
+}
+
+impl std::error::Error for StaleDaemon {}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Disposition {
+    Absent,
+    Current,
+    Stopped,
+    Busy(Option<usize>),
+}
+
+async fn probe(socket: &Path) -> io::Result<Disposition> {
+    if !answers(socket) {
+        return Ok(Disposition::Absent);
+    }
+    match mush_daemon::supervisor::request(socket, &SupervisorRequest::Status).await {
+        Ok(SupervisorReply::Status { build, .. }) if build == mush_daemon::build_id() => {
+            return Ok(Disposition::Current);
+        }
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Err(io::Error::other(format!(
+                "the daemon on {} accepted a connection but did not answer, it was left running so no work is lost: {error}",
+                socket.display()
+            )));
+        }
+        Ok(_) | Err(_) => {}
+    }
+    let busy = match mush_daemon::supervisor::request(socket, &SupervisorRequest::List).await {
+        Ok(SupervisorReply::Workers(workers)) => workers
+            .iter()
+            .filter(|worker| worker.failed.is_none() && worker.turn_active)
+            .count(),
+        Ok(_) | Err(_) => return Ok(Disposition::Busy(None)),
+    };
+    if busy > 0 {
+        return Ok(Disposition::Busy(Some(busy)));
+    }
+    Ok(stop_stale(socket).await)
+}
+
+async fn stop_stale(socket: &Path) -> Disposition {
+    let _ = mush_daemon::supervisor::request(socket, &SupervisorRequest::Shutdown).await;
+    if wait_until_gone(socket).await {
+        Disposition::Stopped
+    } else {
+        Disposition::Busy(None)
+    }
+}
+
+pub async fn ensure_running() -> Result<PathBuf> {
+    let socket = mush_daemon::daemon_socket_path();
+    match probe(&socket).await? {
+        Disposition::Current => return Ok(socket),
+        Disposition::Busy(busy) => return Err(StaleDaemon { socket, busy }.into()),
+        Disposition::Absent | Disposition::Stopped => {}
     }
     mush_daemon::election::elect(
         &socket,
@@ -51,12 +95,31 @@ pub async fn ensure_running() -> io::Result<PathBuf> {
             return Ok(socket);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("the daemon did not answer on {}", socket.display()),
-            ));
+            return Err(eyre!("the daemon did not answer on {}", socket.display()));
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+pub async fn take_over(stale: &StaleDaemon) -> Result<()> {
+    if !atty::is(atty::Stream::Stdin) {
+        return Err(eyre!(
+            "{stale}. run mush shutdown to stop it, then try again"
+        ));
+    }
+    eprint!("{stale}. stopping it interrupts that work. stop it and continue? [y/N] ");
+    std::io::Write::flush(&mut std::io::stderr())?;
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        return Err(eyre!("left the other daemon running"));
+    }
+    match stop_stale(&stale.socket).await {
+        Disposition::Stopped => Ok(()),
+        Disposition::Absent | Disposition::Current | Disposition::Busy(_) => Err(eyre!(
+            "could not stop the daemon on {}, run mush shutdown and try again",
+            stale.socket.display()
+        )),
     }
 }
 
@@ -64,11 +127,15 @@ fn answers(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
-async fn wait_until_gone(socket: &Path) {
+async fn wait_until_gone(socket: &Path) -> bool {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
-    while answers(socket) && tokio::time::Instant::now() < deadline {
+    while answers(socket) {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    true
 }
 
 pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescriptor> {
@@ -333,6 +400,122 @@ fn with_model(args: Vec<String>, model: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn descriptor(turn_active: bool, failed: bool) -> WorkerDescriptor {
+        WorkerDescriptor {
+            session_id: "abc".into(),
+            model_id: String::new(),
+            build: "other".into(),
+            pid: 1,
+            start_id: None,
+            cwd: PathBuf::new(),
+            socket: PathBuf::new(),
+            started_at: 0,
+            title: None,
+            turn_active,
+            paused: false,
+            messages: 0,
+            updated_at: 0,
+            clients: 0,
+            failed: failed.then(|| "gone".to_string()),
+        }
+    }
+
+    fn fake_daemon(
+        socket: PathBuf,
+        build: String,
+        list: Option<Vec<WorkerDescriptor>>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let Ok(Some(line)) = tokio::io::BufReader::new(reader).lines().next_line().await
+                else {
+                    continue;
+                };
+                let request: SupervisorRequest = serde_json::from_str(&line).unwrap();
+                let reply = match &request {
+                    SupervisorRequest::Status => serde_json::to_string(&SupervisorReply::Status {
+                        build: build.clone(),
+                        workers: 1,
+                    })
+                    .unwrap(),
+                    SupervisorRequest::List => match &list {
+                        Some(workers) => {
+                            serde_json::to_string(&SupervisorReply::Workers(workers.clone()))
+                                .unwrap()
+                        }
+                        None => "{\"type\":\"something_new\"}".into(),
+                    },
+                    other => {
+                        seen.push(format!("{other:?}"));
+                        serde_json::to_string(&SupervisorReply::Done).unwrap()
+                    }
+                };
+                let _ = writer.write_all(format!("{reply}\n").as_bytes()).await;
+                if matches!(request, SupervisorRequest::Shutdown) {
+                    drop(listener);
+                    let _ = std::fs::remove_file(&socket);
+                    return seen;
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn no_daemon_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            probe(&dir.path().join("daemon.sock")).await.unwrap(),
+            Disposition::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn a_daemon_of_this_build_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let fake = fake_daemon(socket.clone(), mush_daemon::build_id(), Some(Vec::new()));
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Current);
+        assert!(answers(&socket));
+        fake.abort();
+    }
+
+    #[tokio::test]
+    async fn an_idle_daemon_of_another_build_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let workers = vec![descriptor(false, false), descriptor(true, true)];
+        let fake = fake_daemon(socket.clone(), "other".into(), Some(workers));
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Stopped);
+        assert_eq!(fake.await.unwrap(), ["Shutdown"]);
+        assert!(!answers(&socket));
+    }
+
+    #[tokio::test]
+    async fn a_busy_daemon_of_another_build_is_left_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let workers = vec![descriptor(true, false), descriptor(false, false)];
+        let fake = fake_daemon(socket.clone(), "other".into(), Some(workers));
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(Some(1)));
+        assert!(answers(&socket));
+        fake.abort();
+    }
+
+    #[tokio::test]
+    async fn a_daemon_whose_sessions_cannot_be_listed_counts_as_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let fake = fake_daemon(socket.clone(), "other".into(), None);
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(None));
+        assert!(answers(&socket));
+        fake.abort();
+    }
 
     fn strings(args: &[&str]) -> Vec<String> {
         args.iter().map(ToString::to_string).collect()

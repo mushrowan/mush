@@ -233,7 +233,11 @@ impl Supervisor {
             SupervisorRequest::List => SupervisorReply::Workers(self.roster()),
             SupervisorRequest::Status => SupervisorReply::Status {
                 build: crate::build::build_id(),
-                workers: self.roster().len(),
+                workers: self
+                    .roster()
+                    .iter()
+                    .filter(|worker| worker.failed.is_none())
+                    .count(),
             },
             SupervisorRequest::Stop { session_id } => {
                 let worker = match select(self.roster(), &session_id) {

@@ -886,6 +886,11 @@ async fn a_worker_that_cannot_restart_is_marked_failed() {
     };
     assert_eq!(failed.session_id, descriptor.session_id);
     assert_eq!(failed.pid, 0);
+    let SupervisorReply::Status { workers, .. } = daemon.request(SupervisorRequest::Status).await
+    else {
+        panic!("expected a status")
+    };
+    assert_eq!(workers, 0, "a failed descriptor is not a live worker");
 
     let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
     let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();

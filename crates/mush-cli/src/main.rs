@@ -1090,7 +1090,14 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
                 SessionTarget::Fork(id) => mush_daemon::OpenTarget::Fork(id.clone()),
                 SessionTarget::New | SessionTarget::Pick => mush_daemon::OpenTarget::New,
             };
-            let descriptor = daemon::open(open, cli.worker_args()).await?;
+            let descriptor = match daemon::open(open.clone(), cli.worker_args()).await {
+                Ok(descriptor) => descriptor,
+                Err(error) => {
+                    let stale = error.downcast::<daemon::StaleDaemon>()?;
+                    daemon::take_over(&stale).await?;
+                    daemon::open(open, cli.worker_args()).await?
+                }
+            };
             let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
             let mut tui_config = client_config(&cli, &client, &log_buffer, None, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
