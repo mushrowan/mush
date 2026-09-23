@@ -266,18 +266,16 @@ fn entry_to_message(entry: &SessionEntry) -> Message {
         }),
         EntryKind::BranchSummary { summary, .. } => Message::User(
             UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "Context from a previous conversation branch:\n\n\
-                 <branch_summary>\n{summary}\n</branch_summary>"
+                .content(UserContent::Text(mush_ai::types::branch_summary_text(
+                    summary,
                 )))
                 .timestamp_ms(entry.timestamp)
                 .build(),
         ),
         EntryKind::Compaction { summary, .. } => Message::User(
             UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "The conversation history before this point was compacted \
-                 into the following summary:\n\n<summary>\n{summary}\n</summary>"
+                .content(UserContent::Text(mush_ai::types::compaction_summary_text(
+                    summary,
                 )))
                 .timestamp_ms(entry.timestamp)
                 .build(),
@@ -971,7 +969,11 @@ mod tests {
         assert_eq!(ctx.len(), 2);
         if let Message::User(u) = &ctx[1] {
             match &u.content {
-                UserContent::Text(t) => assert!(t.contains("topic A briefly")),
+                UserContent::Text(t) => assert_eq!(
+                    t,
+                    "[branch-summary]\n\nThe following is a summary of a branch that this \
+                     conversation came back from:\n\n<summary>\ndiscussed topic A briefly\n</summary>"
+                ),
                 _ => panic!("expected text"),
             }
         }

@@ -10,7 +10,7 @@ use crate::session::SessionRuntime;
 
 #[must_use]
 pub fn extract_compaction_summary(text: &str) -> Option<String> {
-    let rest = text.strip_prefix(mush_session::COMPACTION_SUMMARY_PREFIX)?;
+    let rest = mush_ai::types::strip_compaction_summary_prefix(text)?;
     let rest = rest.trim_start();
     let inner = rest
         .strip_prefix("<summary>")
@@ -298,5 +298,18 @@ mod tests {
             Some("kept the gist")
         );
         assert_eq!(extract_compaction_summary("plain text"), None);
+        assert_eq!(
+            extract_compaction_summary(&mush_ai::types::compaction_summary_text("new form"))
+                .as_deref(),
+            Some("new form")
+        );
+        assert_eq!(
+            extract_compaction_summary(
+                "The conversation history before this point was compacted into the following \
+                 summary:\n\n<summary>\nold form\n</summary>"
+            )
+            .as_deref(),
+            Some("old form")
+        );
     }
 }

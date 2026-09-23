@@ -137,7 +137,7 @@ fn branch_summary_retains_the_abandoned_branch_event_origin() {
     assert!(
         summary
             .text()
-            .contains("branch this conversation came back from")
+            .contains("a branch that this conversation came back from")
     );
     assert_eq!(summary.receipts.len(), 1);
     assert_eq!(summary.receipts[0].timestamp_ms.as_ms(), 1789431450123);

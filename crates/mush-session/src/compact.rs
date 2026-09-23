@@ -479,9 +479,8 @@ pub fn compact_with_summary(
     } else {
         Message::User(
             UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "{COMPACTION_SUMMARY_PREFIX}\n\n\
-             <summary>\n{summary}\n</summary>"
+                .content(UserContent::Text(mush_ai::types::compaction_summary_text(
+                    summary,
                 )))
                 .timestamp_ms(Timestamp::now())
                 .build(),
@@ -1050,7 +1049,7 @@ fn fallback_prior_summaries(messages: &[Message]) -> Vec<String> {
         .filter_map(|message| match message {
             Message::User(user) => {
                 let text = user.text();
-                text.strip_prefix(COMPACTION_SUMMARY_PREFIX)
+                mush_ai::types::strip_compaction_summary_prefix(&text)
                     .map(str::trim)
                     .filter(|summary| !summary.is_empty())
                     .map(str::to_string)
@@ -1072,7 +1071,7 @@ fn fallback_recent_user_requests(
         .filter_map(|message| match message {
             Message::User(user) => {
                 let text = user.text();
-                if text.starts_with(COMPACTION_SUMMARY_PREFIX) {
+                if mush_ai::types::strip_compaction_summary_prefix(&text).is_some() {
                     None
                 } else {
                     Some(truncate_with_ellipsis(&text, 240))
@@ -1687,7 +1686,13 @@ mod tests {
 
         if let Message::User(u) = &result.messages[0] {
             if let UserContent::Text(t) = &u.content {
-                assert!(t.contains("summary"));
+                assert_eq!(
+                    t,
+                    "[compaction-summary]\n\nThe conversation history before this point was \
+                     compacted into the following summary.\nThe retained messages below are \
+                     authoritative; this summary may lag behind them.\n\n<summary>\nthis is the \
+                     summary\n</summary>"
+                );
             } else {
                 panic!("expected text content");
             }
