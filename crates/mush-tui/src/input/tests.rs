@@ -1380,6 +1380,29 @@ fn message_picker_enter_forks_before_the_highlighted_message() {
 }
 
 #[test]
+fn message_picker_esc_clears_the_filter_before_closing() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.open_message_picker(
+        crate::message_picker::MessagePickerPurpose::Tree,
+        message_items(),
+    );
+    for c in "ship".chars() {
+        handle_key(&mut app, key(KeyCode::Char(c)));
+    }
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    let picker = app.interaction.message_picker.as_ref().expect("still open");
+    assert!(picker.filter.is_empty());
+    assert_eq!(app.interaction.mode, AppMode::MessagePicker);
+
+    handle_key(&mut app, key(KeyCode::Esc));
+
+    assert!(app.interaction.message_picker.is_none());
+    assert_eq!(app.interaction.mode, AppMode::Insert);
+}
+
+#[test]
 fn message_picker_filter_then_enter_branches_before_the_match() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.open_message_picker(

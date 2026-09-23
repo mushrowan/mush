@@ -1215,7 +1215,11 @@ fn handle_message_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     use crate::keybinds::{Action, KeyScope};
     let picker = app.interaction.message_picker.as_mut()?;
     if app.keymap.matches(Action::QuitOrAbort, key) || app.keymap.matches(Action::Cancel, key) {
-        app.close_message_picker();
+        if picker.filter.is_empty() {
+            app.close_message_picker();
+        } else {
+            picker.clear_filter();
+        }
         return None;
     }
     if app.keymap.matches(Action::Confirm, key) {

@@ -114,6 +114,11 @@ impl MessagePickerState {
         self.filter.pop();
         self.selected = 0;
     }
+
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.selected = 0;
+    }
 }
 
 #[must_use]
