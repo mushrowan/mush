@@ -96,6 +96,8 @@ struct RequestTool {
     #[serde(rename = "type")]
     tool_type: String,
     function: RequestToolFunction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -133,7 +135,7 @@ fn build_request_body(
     };
     super::walk_messages(messages, &mut visitor);
 
-    let converted_tools = if tools.is_empty() {
+    let mut converted_tools = if tools.is_empty() {
         None
     } else {
         Some(
@@ -146,10 +148,18 @@ fn build_request_body(
                         description: t.description.clone(),
                         parameters: t.parameters.clone(),
                     },
+                    cache_control: None,
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         )
     };
+    if let Some(cache_control) = anthropic_cache_control(model, options) {
+        apply_anthropic_cache_control(
+            &mut all_messages,
+            converted_tools.as_deref_mut(),
+            &cache_control,
+        );
+    }
 
     let reasoning_effort = super::requested_effort(options)
         .as_ref()
@@ -170,6 +180,64 @@ fn build_request_body(
         stream_options: StreamOpts {
             include_usage: true,
         },
+    }
+}
+
+fn anthropic_cache_control(model: &Model, options: &StreamOptions) -> Option<serde_json::Value> {
+    if model.provider != Provider::OpenRouter || !model.id.as_str().starts_with("anthropic/") {
+        return None;
+    }
+    match options.cache_retention.unwrap_or(CacheRetention::Short) {
+        CacheRetention::None => None,
+        CacheRetention::Short => Some(serde_json::json!({ "type": "ephemeral" })),
+        CacheRetention::Long => Some(serde_json::json!({ "type": "ephemeral", "ttl": "1h" })),
+    }
+}
+
+fn apply_anthropic_cache_control(
+    messages: &mut [serde_json::Value],
+    tools: Option<&mut [RequestTool]>,
+    cache_control: &serde_json::Value,
+) {
+    if let Some(system) = messages
+        .iter_mut()
+        .find(|message| message["role"] == "system")
+    {
+        mark_last_text(system, cache_control);
+    }
+    if let Some(last) = tools.and_then(|tools| tools.last_mut()) {
+        last.cache_control = Some(cache_control.clone());
+    }
+    for message in messages.iter_mut().rev() {
+        let conversational = matches!(
+            message["role"].as_str(),
+            Some("user" | "assistant" | "tool")
+        );
+        if conversational && mark_last_text(message, cache_control) {
+            break;
+        }
+    }
+}
+
+fn mark_last_text(message: &mut serde_json::Value, cache_control: &serde_json::Value) -> bool {
+    match &mut message["content"] {
+        serde_json::Value::String(text) if !text.is_empty() => {
+            let text = std::mem::take(text);
+            message["content"] = serde_json::json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control,
+            }]);
+            true
+        }
+        serde_json::Value::Array(parts) => {
+            let Some(part) = parts.iter_mut().rev().find(|part| part["type"] == "text") else {
+                return false;
+            };
+            part["cache_control"] = cache_control.clone();
+            true
+        }
+        _ => false,
     }
 }
 
@@ -861,6 +929,48 @@ mod tests {
         ];
         messages.extend((0..4).map(|i| user_turn(&format!("turn {i}"))));
         messages
+    }
+
+    #[test]
+    fn openrouter_claude_gets_cache_breakpoints_on_system_last_tool_and_last_message() {
+        let tools: Vec<ToolDefinition> = ["read", "edit"]
+            .into_iter()
+            .map(|name| ToolDefinition {
+                name: name.into(),
+                description: name.into(),
+                parameters: serde_json::json!({"type": "object"}),
+            })
+            .collect();
+        let messages = [user_turn("first"), user_turn("second")];
+        let body = build_request_body(
+            &test_model(),
+            &Some("be helpful".into()),
+            &messages,
+            &tools,
+            &StreamOptions::default(),
+        );
+        let ephemeral = serde_json::json!({"type": "ephemeral"});
+        assert_eq!(body.messages[0]["content"][0]["cache_control"], ephemeral);
+        assert_eq!(body.messages[1]["content"], "first");
+        assert_eq!(body.messages[2]["content"][0]["text"], "second");
+        assert_eq!(body.messages[2]["content"][0]["cache_control"], ephemeral);
+        let tools = body.tools.unwrap();
+        assert!(tools[0].cache_control.is_none());
+        assert_eq!(tools[1].cache_control.as_ref(), Some(&ephemeral));
+
+        let long = StreamOptions {
+            cache_retention: Some(CacheRetention::Long),
+            ..StreamOptions::default()
+        };
+        let body = build_request_body(&test_model(), &None, &messages, &[], &long);
+        assert_eq!(body.messages[1]["content"][0]["cache_control"]["ttl"], "1h");
+
+        let other = Model {
+            id: "openai/gpt-5".into(),
+            ..test_model()
+        };
+        let body = build_request_body(&other, &None, &messages, &[], &StreamOptions::default());
+        assert_eq!(body.messages[1]["content"], "second");
     }
 
     #[test]
