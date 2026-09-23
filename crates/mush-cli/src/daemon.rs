@@ -5,6 +5,8 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, eyre};
 use mush_daemon::{OpenTarget, SupervisorReply, SupervisorRequest, WorkerDescriptor};
 
+use crate::agents::Selected;
+
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -163,35 +165,61 @@ async fn open_in(
 
 pub async fn stop(selector: &str, json: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
-    let session_id = if answers(&socket) {
-        let workers = crate::agents::live().await?;
-        let Some(worker) = crate::agents::matching(&workers, selector)? else {
-            return Err(eyre!("no worker for session {selector}"));
-        };
-        let request = SupervisorRequest::Stop {
-            session_id: worker.session_id.clone(),
-        };
-        match mush_daemon::supervisor::request(&socket, &request).await? {
-            SupervisorReply::Done => worker.session_id.clone(),
-            SupervisorReply::Error(error) => return Err(eyre!("{error}")),
-            other => return Err(eyre!("unexpected daemon reply: {other:?}")),
-        }
+    let supervised = answers(&socket);
+    let workers = if supervised {
+        crate::agents::live().await?
     } else {
-        let running = mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir());
-        let Some(worker) = crate::agents::matching(&running, selector)? else {
-            if json {
-                return Err(eyre!("no worker for session {selector}"));
-            }
+        mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir())
+    };
+    let Some(target) = crate::agents::selected(&workers, selector)? else {
+        if !supervised && !json {
             println!("no daemon running");
             return Ok(());
-        };
-        mush_daemon::supervisor::stop_unsupervised(worker).await?;
-        worker.session_id.clone()
+        }
+        return Err(eyre!("no worker for session {selector}"));
     };
+    match target {
+        Selected::Child(worker, child) => {
+            let mut connection = crate::agents::connect(worker).await?;
+            mush_runtime::AgentConnection::send(
+                &mut connection,
+                mush_runtime::ClientCommand::StopChild {
+                    session_id: child.session_id.clone(),
+                },
+            )
+            .await?;
+        }
+        Selected::Root(worker) => {
+            if supervised {
+                let request = SupervisorRequest::Stop {
+                    session_id: worker.session_id.clone(),
+                };
+                match mush_daemon::supervisor::request(&socket, &request).await? {
+                    SupervisorReply::Done => {}
+                    SupervisorReply::Error(error) => return Err(eyre!("{error}")),
+                    other => return Err(eyre!("unexpected daemon reply: {other:?}")),
+                }
+            } else {
+                mush_daemon::supervisor::stop_unsupervised(worker).await?;
+            }
+            archive(&worker.session_id)?;
+        }
+    }
     if json {
-        println!("{}", serde_json::json!({ "stopped": session_id }));
+        println!("{}", serde_json::json!({ "stopped": target.session_id() }));
     }
     Ok(())
+}
+
+fn archive(session_id: &str) -> Result<()> {
+    let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+    match store.set_lifecycle(
+        &mush_session::SessionId::from(session_id.to_string()),
+        mush_session::Lifecycle::Archived,
+    ) {
+        Ok(()) | Err(mush_session::StoreError::NotFound(_)) => Ok(()),
+        Err(error) => Err(eyre!("stopped, but could not archive the session: {error}")),
+    }
 }
 
 pub async fn shutdown(force: bool, json: bool) -> Result<()> {

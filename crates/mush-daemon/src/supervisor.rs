@@ -101,6 +101,18 @@ pub struct WorkerDescriptor {
     pub heard_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_heard_from_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildDescriptor>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildDescriptor {
+    pub session_id: String,
+    pub name: String,
+    pub model_id: String,
+    pub working: bool,
+    pub paused: bool,
+    pub updated_at: u64,
 }
 
 impl WorkerDescriptor {

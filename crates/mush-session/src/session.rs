@@ -21,6 +21,23 @@ pub struct SessionMeta {
     pub paused: Option<Pause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Lifecycle::is_live")]
+    pub lifecycle: Lifecycle,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    #[default]
+    Live,
+    Archived,
+}
+
+impl Lifecycle {
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        matches!(self, Self::Live)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +86,7 @@ impl Session {
                 subagent_model: None,
                 paused: None,
                 rlm_max_depth: None,
+                lifecycle: Lifecycle::Live,
             },
             conversation: ConversationState::new(),
             panes: vec![],

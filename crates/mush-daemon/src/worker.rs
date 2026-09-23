@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::protocol::{
     ClientId, CommandId, Cursor, ENVELOPE_VERSION, Envelope, Frame, Reply, Request, encode,
 };
-use crate::supervisor::WorkerDescriptor;
+use crate::supervisor::{ChildDescriptor, WorkerDescriptor};
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(50);
 pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -53,11 +53,21 @@ impl Descriptor {
         }
     }
 
-    fn refresh(&mut self, state: &ConnectionState, clients: usize) {
-        self.refresh_at(state, clients, now_secs());
+    fn refresh(&mut self, connection: &InProcessConnection, clients: usize) {
+        let children = connection
+            .family()
+            .map(|family| family.map_children(child_descriptor))
+            .unwrap_or_default();
+        self.refresh_at(&connection.state(), clients, children, now_secs());
     }
 
-    fn refresh_at(&mut self, state: &ConnectionState, clients: usize, now: u64) {
+    fn refresh_at(
+        &mut self,
+        state: &ConnectionState,
+        clients: usize,
+        children: Vec<ChildDescriptor>,
+        now: u64,
+    ) {
         let next = WorkerDescriptor {
             session_id: state.session_id.to_string(),
             model_id: state.model_id.clone(),
@@ -66,6 +76,7 @@ impl Descriptor {
             paused: state.paused.is_some(),
             messages: state.context_len,
             clients,
+            children,
             ..self.written.clone()
         };
         let changed = next != self.written || !self.path.exists();
@@ -86,6 +97,17 @@ impl Descriptor {
     fn remove(&self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+fn child_descriptor(child: &mush_runtime::ChildSummary) -> Option<ChildDescriptor> {
+    child.status.alive().then(|| ChildDescriptor {
+        session_id: child.session_id.clone(),
+        name: child.name.clone(),
+        model_id: child.model_id.clone(),
+        working: !child.status.settled(),
+        paused: child.paused.is_some(),
+        updated_at: child.updated_at.as_ms() / 1000,
+    })
 }
 
 #[derive(Default)]
@@ -392,7 +414,7 @@ impl Worker {
         loop {
             connection.start_pending().await;
             if let Some(descriptor) = descriptor.as_deref_mut() {
-                descriptor.refresh(&connection.state(), self.hub.clients.len());
+                descriptor.refresh(connection, self.hub.clients.len());
             }
             tokio::select! {
                 accepted = listener.accept() => {
@@ -644,25 +666,69 @@ mod tests {
         let path = dir.path().join("w.json");
         let mut descriptor = Descriptor::new(path.clone(), dir.path().join("w.sock"), "/".into());
         let state = state();
-        descriptor.refresh_at(&state, 0, 100);
+        descriptor.refresh_at(&state, 0, Vec::new(), 100);
         let first: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((first.heard_at, first.updated_at), (100, 100));
 
-        descriptor.refresh_at(&state, 0, 114);
+        descriptor.refresh_at(&state, 0, Vec::new(), 114);
         let quiet: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(quiet.heard_at, 100);
 
-        descriptor.refresh_at(&state, 0, 115);
+        descriptor.refresh_at(&state, 0, Vec::new(), 115);
         let beat: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((beat.heard_at, beat.updated_at), (115, 100));
 
-        descriptor.refresh_at(&state, 1, 120);
+        descriptor.refresh_at(&state, 1, Vec::new(), 120);
         let attached: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((attached.heard_at, attached.updated_at), (120, 120));
+    }
+
+    fn child(status: mush_runtime::ChildStatus) -> mush_runtime::ChildSummary {
+        mush_runtime::ChildSummary {
+            id: "c".into(),
+            name: "helper".into(),
+            parent: None,
+            depth: 1,
+            session_id: "child-session".into(),
+            model_id: "m".into(),
+            thinking: None,
+            status,
+            spawned_at: mush_ai::types::Timestamp::zero(),
+            updated_at: mush_ai::types::Timestamp::from_ms(5_000),
+            answer: None,
+            error: None,
+            progress_note: None,
+            usage: mush_ai::types::Usage::default(),
+            cost: mush_ai::types::Cost::default(),
+            turns: 1,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
+            paused: None,
+        }
+    }
+
+    #[test]
+    fn only_live_children_become_roster_rows() {
+        use mush_runtime::ChildStatus;
+        let running = child_descriptor(&child(ChildStatus::Running)).unwrap();
+        assert_eq!(running.session_id, "child-session");
+        assert_eq!(running.name, "helper");
+        assert!(running.working);
+        assert_eq!(running.updated_at, 5);
+        assert!(!child_descriptor(&child(ChildStatus::Idle)).unwrap().working);
+        for gone in [
+            ChildStatus::Failed,
+            ChildStatus::Cancelled,
+            ChildStatus::Interrupted,
+            ChildStatus::Deleted,
+        ] {
+            assert!(child_descriptor(&child(gone)).is_none(), "{gone:?}");
+        }
     }
 
     #[tokio::test]

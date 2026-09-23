@@ -108,6 +108,11 @@ impl SessionPickerState {
 }
 
 #[must_use]
+pub fn listed(meta: &SessionMeta) -> bool {
+    meta.parent.is_none() && meta.lifecycle.is_live()
+}
+
+#[must_use]
 pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
     let scope_filtered: Vec<&SessionMeta> = match picker.scope {
         SessionScope::ThisDir => picker

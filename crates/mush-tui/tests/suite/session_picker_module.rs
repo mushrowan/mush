@@ -1,6 +1,6 @@
 use mush_ai::types::Timestamp;
 use mush_session::{SessionId, SessionMeta};
-use mush_tui::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
+use mush_tui::session_picker::{SessionPickerState, SessionScope, filtered_sessions, listed};
 
 #[test]
 fn session_picker_module_exposes_state_and_filtering() {
@@ -17,6 +17,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             cwd: "/tmp/project".into(),
             parent: None,
             subagent_model: None,
+            lifecycle: mush_session::Lifecycle::Live,
         },
         SessionMeta {
             paused: None,
@@ -30,6 +31,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             cwd: "/tmp/other".into(),
             parent: None,
             subagent_model: None,
+            lifecycle: mush_session::Lifecycle::Live,
         },
     ];
 
@@ -66,6 +68,7 @@ fn drain_incoming_appends_and_flips_loading() {
         cwd: "/tmp/project".into(),
         parent: None,
         subagent_model: None,
+        lifecycle: mush_session::Lifecycle::Live,
     };
     let newer = SessionMeta {
         paused: None,
@@ -79,6 +82,7 @@ fn drain_incoming_appends_and_flips_loading() {
         cwd: "/tmp/project".into(),
         parent: None,
         subagent_model: None,
+        lifecycle: mush_session::Lifecycle::Live,
     };
     tx.send(older).unwrap();
     tx.send(newer).unwrap();
@@ -114,6 +118,7 @@ fn meta(id: &str, cwd: &str) -> SessionMeta {
         cwd: cwd.into(),
         parent: None,
         subagent_model: None,
+        lifecycle: mush_session::Lifecycle::Live,
     }
 }
 
@@ -152,4 +157,20 @@ fn arming_with_nothing_visible_does_nothing() {
 
     assert!(!picker.arm_delete());
     assert!(picker.confirm_delete.is_none());
+}
+
+#[test]
+fn the_agents_view_lists_neither_archived_nor_child_sessions() {
+    let live = meta("live", "/tmp");
+    let archived = SessionMeta {
+        lifecycle: mush_session::Lifecycle::Archived,
+        ..meta("archived", "/tmp")
+    };
+    let child = SessionMeta {
+        parent: Some(SessionId::from("live")),
+        ..meta("child", "/tmp")
+    };
+    assert!(listed(&live));
+    assert!(!listed(&archived));
+    assert!(!listed(&child));
 }

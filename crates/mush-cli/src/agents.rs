@@ -1,6 +1,6 @@
 use color_eyre::eyre::{Result, eyre};
 use mush_ai::types::Timestamp;
-use mush_daemon::{SupervisorReply, SupervisorRequest, WorkerDescriptor};
+use mush_daemon::{ChildDescriptor, SupervisorReply, SupervisorRequest, WorkerDescriptor};
 use mush_session::SessionMeta;
 use mush_session::SessionStore;
 use serde::Serialize;
@@ -17,6 +17,7 @@ pub enum AgentStatus {
     Paused,
     Idle,
     Saved,
+    Archived,
 }
 
 impl AgentStatus {
@@ -28,6 +29,7 @@ impl AgentStatus {
             Self::Paused => "paused",
             Self::Idle => "idle",
             Self::Saved => "saved",
+            Self::Archived => "archived",
         }
     }
 
@@ -39,6 +41,7 @@ impl AgentStatus {
             Self::Paused => Style::Dim,
             Self::Idle => Style::Cyan,
             Self::Saved => Style::Dim,
+            Self::Archived => Style::Dim,
         }
     }
 }
@@ -47,9 +50,10 @@ impl AgentStatus {
 pub struct AgentRow {
     pub name: String,
     pub id: String,
+    pub parent: Option<String>,
     pub status: AgentStatus,
     pub model: String,
-    pub messages: usize,
+    pub messages: Option<usize>,
     pub updated_at: u64,
     pub pid: Option<u32>,
     pub cwd: String,
@@ -97,63 +101,115 @@ fn age(updated_at: u64) -> String {
     Timestamp::from_ms(updated_at.saturating_mul(1000)).age_display()
 }
 
+fn order(left: &AgentRow, right: &AgentRow) -> std::cmp::Ordering {
+    left.status
+        .cmp(&right.status)
+        .then(right.updated_at.cmp(&left.updated_at))
+}
+
+fn worker_row(worker: &WorkerDescriptor) -> AgentRow {
+    AgentRow {
+        name: worker.title.clone().unwrap_or_default(),
+        id: short_id(&worker.session_id),
+        parent: None,
+        status: match (
+            &worker.failed,
+            worker.last_heard_from_at,
+            worker.turn_active,
+            worker.paused,
+        ) {
+            (Some(_), _, _, _) => AgentStatus::Failed,
+            (None, Some(_), _, _) => AgentStatus::Stale,
+            (None, None, true, _) => AgentStatus::Working,
+            (None, None, false, true) => AgentStatus::Paused,
+            (None, None, false, false) => AgentStatus::Idle,
+        },
+        model: worker.model_id.clone(),
+        messages: Some(worker.messages),
+        updated_at: worker.updated_at.max(worker.started_at),
+        pid: Some(worker.pid),
+        cwd: worker.cwd.display().to_string(),
+        other_build: worker.build != mush_daemon::build_id(),
+        clients: worker.clients,
+        failed: worker.failed.clone(),
+        last_heard_from_at: worker.last_heard_from_at,
+    }
+}
+
+fn child_row(worker: &WorkerDescriptor, child: &ChildDescriptor) -> AgentRow {
+    AgentRow {
+        name: child.name.clone(),
+        id: short_id(&child.session_id),
+        parent: Some(short_id(&worker.session_id)),
+        status: match (worker.last_heard_from_at, child.paused, child.working) {
+            (Some(_), _, _) => AgentStatus::Stale,
+            (None, true, _) => AgentStatus::Paused,
+            (None, false, true) => AgentStatus::Working,
+            (None, false, false) => AgentStatus::Idle,
+        },
+        model: child.model_id.clone(),
+        messages: None,
+        updated_at: child.updated_at,
+        pid: Some(worker.pid),
+        cwd: worker.cwd.display().to_string(),
+        other_build: worker.build != mush_daemon::build_id(),
+        clients: 0,
+        failed: None,
+        last_heard_from_at: worker.last_heard_from_at,
+    }
+}
+
+fn saved_row(meta: &SessionMeta) -> AgentRow {
+    AgentRow {
+        name: meta.title.clone().unwrap_or_default(),
+        id: short_id(meta.id.as_str()),
+        parent: None,
+        status: if meta.lifecycle.is_live() {
+            AgentStatus::Saved
+        } else {
+            AgentStatus::Archived
+        },
+        model: meta.model_id.to_string(),
+        messages: Some(meta.message_count),
+        updated_at: meta.updated_at.as_ms() / 1000,
+        pid: None,
+        cwd: meta.cwd.clone(),
+        other_build: false,
+        clients: 0,
+        failed: None,
+        last_heard_from_at: None,
+    }
+}
+
 #[must_use]
 pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow> {
-    let mut rows: Vec<AgentRow> = workers
+    let mut roots: Vec<(AgentRow, &WorkerDescriptor)> = workers
         .iter()
-        .map(|worker| AgentRow {
-            name: worker.title.clone().unwrap_or_default(),
-            id: short_id(&worker.session_id),
-            status: match (
-                &worker.failed,
-                worker.last_heard_from_at,
-                worker.turn_active,
-                worker.paused,
-            ) {
-                (Some(_), _, _, _) => AgentStatus::Failed,
-                (None, Some(_), _, _) => AgentStatus::Stale,
-                (None, None, true, _) => AgentStatus::Working,
-                (None, None, false, true) => AgentStatus::Paused,
-                (None, None, false, false) => AgentStatus::Idle,
-            },
-            model: worker.model_id.clone(),
-            messages: worker.messages,
-            updated_at: worker.updated_at.max(worker.started_at),
-            pid: Some(worker.pid),
-            cwd: worker.cwd.display().to_string(),
-            other_build: worker.build != mush_daemon::build_id(),
-            clients: worker.clients,
-            failed: worker.failed.clone(),
-            last_heard_from_at: worker.last_heard_from_at,
-        })
+        .map(|worker| (worker_row(worker), worker))
         .collect();
-    for meta in saved {
-        if workers
+    roots.sort_by(|(left, _), (right, _)| order(left, right));
+    let mut rows = Vec::with_capacity(roots.len() + saved.len());
+    for (row, worker) in roots {
+        rows.push(row);
+        let mut children: Vec<AgentRow> = worker
+            .children
             .iter()
-            .any(|worker| worker.session_id == meta.id.as_str())
-        {
-            continue;
-        }
-        rows.push(AgentRow {
-            name: meta.title.clone().unwrap_or_default(),
-            id: short_id(meta.id.as_str()),
-            status: AgentStatus::Saved,
-            model: meta.model_id.to_string(),
-            messages: meta.message_count,
-            updated_at: meta.updated_at.as_ms() / 1000,
-            pid: None,
-            cwd: meta.cwd.clone(),
-            other_build: false,
-            clients: 0,
-            failed: None,
-            last_heard_from_at: None,
-        });
+            .map(|child| child_row(worker, child))
+            .collect();
+        children.sort_by(order);
+        rows.extend(children);
     }
-    rows.sort_by(|left, right| {
-        left.status
-            .cmp(&right.status)
-            .then(right.updated_at.cmp(&left.updated_at))
-    });
+    let mut stored: Vec<AgentRow> = saved
+        .iter()
+        .filter(|meta| {
+            !workers
+                .iter()
+                .any(|worker| worker.session_id == meta.id.as_str())
+        })
+        .map(saved_row)
+        .collect();
+    stored.sort_by(order);
+    rows.extend(stored);
     rows
 }
 
@@ -163,7 +219,10 @@ pub fn table(rows: &[AgentRow]) -> String {
         .iter()
         .map(|row| {
             [
-                clip(&cell(&row.name), NAME_WIDTH),
+                match &row.parent {
+                    Some(_) => format!("↳ {}", clip(&cell(&row.name), NAME_WIDTH - 2)),
+                    None => clip(&cell(&row.name), NAME_WIDTH),
+                },
                 if row.other_build {
                     format!("{} *", cell(&row.id))
                 } else {
@@ -172,7 +231,9 @@ pub fn table(rows: &[AgentRow]) -> String {
                 row.status.label().to_string(),
                 age(row.updated_at),
                 cell(&row.model),
-                row.messages.to_string(),
+                row.messages
+                    .map(|count| count.to_string())
+                    .unwrap_or_default(),
                 row.clients.to_string(),
                 match (&row.failed, row.last_heard_from_at) {
                     (Some(reason), _) => cell(reason),
@@ -253,6 +314,44 @@ pub fn matching<'a>(
     let mut found = workers
         .iter()
         .filter(|worker| worker.session_id.starts_with(selector));
+    let first = found.next();
+    if found.next().is_some() {
+        return Err(eyre!("{selector} matches more than one agent"));
+    }
+    Ok(first)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Selected<'a> {
+    Root(&'a WorkerDescriptor),
+    Child(&'a WorkerDescriptor, &'a ChildDescriptor),
+}
+
+impl Selected<'_> {
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Root(worker) => &worker.session_id,
+            Self::Child(_, child) => &child.session_id,
+        }
+    }
+}
+
+pub fn selected<'a>(
+    workers: &'a [WorkerDescriptor],
+    selector: &str,
+) -> Result<Option<Selected<'a>>> {
+    let mut found = workers
+        .iter()
+        .flat_map(|worker| {
+            std::iter::once(Selected::Root(worker)).chain(
+                worker
+                    .children
+                    .iter()
+                    .map(move |child| Selected::Child(worker, child)),
+            )
+        })
+        .filter(|candidate| candidate.session_id().starts_with(selector));
     let first = found.next();
     if found.next().is_some() {
         return Err(eyre!("{selector} matches more than one agent"));
@@ -361,6 +460,7 @@ mod tests {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            lifecycle: mush_session::Lifecycle::Live,
         }
     }
 
@@ -385,6 +485,83 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].status, AgentStatus::Idle);
         assert_eq!(rows[1].status, AgentStatus::Saved);
+    }
+
+    fn child(session_id: &str, name: &str, working: bool) -> ChildDescriptor {
+        ChildDescriptor {
+            session_id: session_id.into(),
+            name: name.into(),
+            model_id: "m".into(),
+            working,
+            paused: false,
+            updated_at: 50,
+        }
+    }
+
+    #[test]
+    fn children_are_listed_under_their_worker() {
+        let mut parent = worker("aaaaaaaa1", false, 100);
+        parent.children = vec![
+            child("cccccccc1", "idle-helper", false),
+            child("dddddddd1", "busy-helper", true),
+        ];
+        let rows = rows(
+            &[worker("bbbbbbbb2", true, 10), parent],
+            &[meta("eeeeeeee3")],
+        );
+        let order: Vec<(&str, Option<&str>, AgentStatus)> = rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.parent.as_deref(), row.status))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("bbbbbbbb", None, AgentStatus::Working),
+                ("aaaaaaaa", None, AgentStatus::Idle),
+                ("dddddddd", Some("aaaaaaaa"), AgentStatus::Working),
+                ("cccccccc", Some("aaaaaaaa"), AgentStatus::Idle),
+                ("eeeeeeee", None, AgentStatus::Saved),
+            ]
+        );
+        let rendered = table(&rows);
+        assert!(rendered.contains("↳ busy-helper"), "{rendered}");
+    }
+
+    #[test]
+    fn the_children_of_a_silent_worker_are_stale_too() {
+        let mut parent = worker("aaaaaaaa1", false, 100);
+        parent.last_heard_from_at = Some(1);
+        parent.children = vec![child("cccccccc1", "helper", true)];
+        let rows = rows(&[parent], &[]);
+        assert_eq!(rows[1].status, AgentStatus::Stale);
+    }
+
+    #[test]
+    fn an_archived_session_is_listed_last_as_archived() {
+        let mut archived = meta("ffffffff4");
+        archived.lifecycle = mush_session::Lifecycle::Archived;
+        let rows = rows(&[], &[archived, meta("eeeeeeee3")]);
+        let statuses: Vec<_> = rows.iter().map(|row| row.status).collect();
+        assert_eq!(statuses, [AgentStatus::Saved, AgentStatus::Archived]);
+        assert!(table(&rows).contains("archived"));
+    }
+
+    #[test]
+    fn a_selector_reaches_a_child_and_refuses_ambiguity_across_rows() {
+        let mut parent = worker("aaaaaaaa1", false, 100);
+        parent.children = vec![child("cccccccc1", "helper", true)];
+        let workers = [parent, worker("abbbbbbb2", false, 100)];
+        let Some(Selected::Child(owner, found)) = selected(&workers, "ccc").unwrap() else {
+            panic!("expected the child")
+        };
+        assert_eq!(owner.session_id, "aaaaaaaa1");
+        assert_eq!(found.session_id, "cccccccc1");
+        assert!(matches!(
+            selected(&workers, "aaa").unwrap(),
+            Some(Selected::Root(root)) if root.session_id == "aaaaaaaa1"
+        ));
+        assert!(selected(&workers, "a").is_err());
+        assert!(selected(&workers, "z").unwrap().is_none());
     }
 
     #[test]

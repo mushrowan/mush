@@ -275,6 +275,36 @@ impl SessionStore {
         Ok(session)
     }
 
+    pub fn set_lifecycle(
+        &self,
+        id: &SessionId,
+        lifecycle: crate::Lifecycle,
+    ) -> Result<(), StoreError> {
+        let path = self.session_path(id);
+        if !path.exists() {
+            return Err(StoreError::NotFound(id.to_string()));
+        }
+        let mut stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        let Some(meta) = stored
+            .get_mut("meta")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Err(StoreError::Io(std::io::Error::other(
+                "the session has no meta",
+            )));
+        };
+        match lifecycle {
+            crate::Lifecycle::Live => {
+                meta.remove("lifecycle");
+            }
+            crate::Lifecycle::Archived => {
+                meta.insert("lifecycle".into(), serde_json::to_value(lifecycle)?);
+            }
+        }
+        mush_ai::private_io::write_private(&path, serde_json::to_string_pretty(&stored)?)?;
+        Ok(())
+    }
+
     pub fn resolve(&self, prefix: &str) -> Result<SessionMeta, StoreError> {
         let sessions = self.list()?;
         if let Some(exact) = sessions.iter().find(|s| s.id.as_str() == prefix) {
@@ -407,6 +437,34 @@ mod tests {
                 .timestamp_ms(Timestamp::from_ms(1000))
                 .build(),
         )
+    }
+
+    #[test]
+    fn archiving_a_session_marks_only_its_lifecycle_and_live_clears_it() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("keep me"));
+        store.save(&session).unwrap();
+
+        store
+            .set_lifecycle(&session.meta.id, crate::Lifecycle::Archived)
+            .unwrap();
+        let archived = store.load(&session.meta.id).unwrap();
+        assert_eq!(archived.meta.lifecycle, crate::Lifecycle::Archived);
+        assert_eq!(archived.meta.message_count, 1);
+        assert_eq!(archived.context().len(), 1);
+        assert_eq!(archived.meta.updated_at, session.meta.updated_at);
+
+        store
+            .set_lifecycle(&session.meta.id, crate::Lifecycle::Live)
+            .unwrap();
+        let json = std::fs::read_to_string(store.session_path(&session.meta.id)).unwrap();
+        assert!(!json.contains("lifecycle"), "{json}");
+        assert!(
+            store
+                .set_lifecycle(&SessionId::from("missing"), crate::Lifecycle::Archived)
+                .is_err()
+        );
     }
 
     #[test]

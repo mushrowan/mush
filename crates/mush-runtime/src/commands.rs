@@ -143,6 +143,9 @@ impl SessionRuntime {
                         ))];
                     }
                 };
+                if lease.is_some() && !loaded.meta.lifecycle.is_live() {
+                    let _ = store.set_lifecycle(&id, mush_session::Lifecycle::Live);
+                }
                 self.save_now();
                 let previous = self.session_id.clone();
                 self.snapshot_kernel(&previous).await;

@@ -27,6 +27,7 @@ pub const MESSAGE_BURST: u32 = 3;
 pub const MESSAGE_REFILL: Duration = Duration::from_secs(1);
 pub const TASK_LABEL: &str = "[task from parent]";
 const DELETED_REASON: &str = "Deleted by parent orchestrator";
+const STOPPED_REASON: &str = "Stopped by the user";
 const TICK: Duration = Duration::from_millis(50);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -566,6 +567,15 @@ impl Family {
         }
     }
 
+    pub fn map_children<T>(&self, row: impl FnMut(&ChildSummary) -> Option<T>) -> Vec<T> {
+        self.lock()
+            .children
+            .values()
+            .map(|node| &node.summary)
+            .filter_map(row)
+            .collect()
+    }
+
     #[must_use]
     pub fn all(&self) -> Vec<ChildSummary> {
         self.lock()
@@ -722,6 +732,46 @@ impl Family {
             .await
             .map_err(|_| format!("{target} did not answer in time"))?
             .map_err(|_| format!("{target} stopped listening"))
+    }
+
+    pub fn stop_session(&self, session_id: &str) -> Result<ChildSummary, String> {
+        let id = self
+            .lock()
+            .children
+            .values()
+            .find(|node| {
+                node.summary.session_id == session_id && node.summary.status != ChildStatus::Deleted
+            })
+            .map(|node| node.summary.id.clone())
+            .ok_or_else(|| format!("no subagent has session {session_id}"))?;
+        self.cancel(&id, STOPPED_REASON)?;
+        self.lock()
+            .children
+            .get(&id)
+            .map(|node| node.summary.clone())
+            .ok_or_else(|| format!("{id} vanished"))
+    }
+
+    fn cancel(&self, id: &str, reason: &str) -> Result<(), String> {
+        let (shutdown, running) = {
+            let mut inner = self.lock();
+            let Some(node) = inner.children.get_mut(id) else {
+                return Err(format!("{id} vanished"));
+            };
+            let running = !node.summary.status.settled();
+            if running {
+                node.cancel_reason = Some(reason.into());
+            }
+            (node.shutdown.take(), running)
+        };
+        if let Some(shutdown) = shutdown {
+            let _ = shutdown.send(());
+        }
+        self.update(id, |child| child.status = ChildStatus::Deleted);
+        if running {
+            self.post_exit_notice(id, ExitNotice::Cancelled);
+        }
+        Ok(())
     }
 
     fn resolve(&self, caller: &Identity, target: &str) -> Result<ChildId, String> {
@@ -1184,24 +1234,7 @@ impl Family {
 
     pub async fn delete(&self, caller: &Identity, target: &str) -> Result<ChildSummary, String> {
         let id = self.resolve(caller, target)?;
-        let (shutdown, running) = {
-            let mut inner = self.lock();
-            let Some(node) = inner.children.get_mut(&id) else {
-                return Err(format!("{id} vanished"));
-            };
-            let running = !node.summary.status.settled();
-            if running {
-                node.cancel_reason = Some(DELETED_REASON.into());
-            }
-            (node.shutdown.take(), running)
-        };
-        if let Some(shutdown) = shutdown {
-            let _ = shutdown.send(());
-        }
-        self.update(&id, |child| child.status = ChildStatus::Deleted);
-        if running {
-            self.post_exit_notice(&id, ExitNotice::Cancelled);
-        }
+        self.cancel(&id, DELETED_REASON)?;
         let task = self
             .lock()
             .children
@@ -3181,6 +3214,44 @@ mod tests {
             notices(&mut root_inbox),
             vec!["[child-exited: cancelled child:slow]\n\nDeleted by parent orchestrator"]
         );
+    }
+
+    #[tokio::test]
+    async fn stopping_a_child_by_session_cancels_only_that_child() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        let other = family
+            .spawn(&root, "task".into(), "other".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+
+        let stopped = family.stop_session(&slow.session_id).unwrap();
+        assert_eq!(stopped.status, ChildStatus::Deleted);
+        assert!(
+            notices(&mut root_inbox)
+                .contains(&"[child-exited: cancelled child:slow]\n\nStopped by the user".into())
+        );
+        let survivor = family
+            .all()
+            .into_iter()
+            .find(|child| child.id == other.rlm_child_id)
+            .unwrap();
+        assert_ne!(survivor.status, ChildStatus::Deleted);
+        assert!(family.stop_session(&slow.session_id).is_err());
+        assert!(family.stop_session("no-such-session").is_err());
     }
 
     #[tokio::test]

@@ -1203,7 +1203,7 @@ async fn open_session(
 ) -> Result<OpenedSession> {
     let cwd_str = setup.client.cwd.display().to_string();
     let store = SessionStore::new(SessionStore::default_dir());
-    let session = match target {
+    let mut session = match target {
         SessionTarget::Resume(id) => {
             let meta = store.resolve(id)?;
             store.load(&meta.id)?
@@ -1221,6 +1221,12 @@ async fn open_session(
     } else {
         Some(store.acquire(&session.meta.id)?)
     };
+    if !session.meta.lifecycle.is_live() {
+        session.meta.lifecycle = mush_session::Lifecycle::Live;
+        if lease.is_some() {
+            store.set_lifecycle(&session.meta.id, mush_session::Lifecycle::Live)?;
+        }
+    }
     let saver = (!no_session)
         .then(|| SaverThread::spawn(cwd_str))
         .transpose()?;

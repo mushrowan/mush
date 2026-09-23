@@ -514,6 +514,52 @@ async fn the_cli_lists_and_renames_a_live_agent() {
 }
 
 #[tokio::test]
+async fn stop_archives_the_session_and_resuming_it_brings_it_back() {
+    let daemon = Daemon::start();
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let mut saved =
+        mush_session::Session::new("claude-opus-4-7", &daemon.dir.path().display().to_string());
+    saved.meta.title = Some("keeper".into());
+    store.save(&saved).unwrap();
+    let id = saved.meta.id.to_string();
+    let SupervisorReply::Worker { descriptor, .. } = daemon
+        .request(daemon.open_saved(OpenTarget::Resume(id.clone())))
+        .await
+    else {
+        panic!("expected a worker")
+    };
+
+    let stopped = daemon.cli().args(["stop", &id[..8]]).output().unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    assert!(!alive(descriptor.pid));
+    let meta = store.resolve(&id).unwrap();
+    assert_eq!(meta.lifecycle, mush_session::Lifecycle::Archived);
+
+    let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows, serde_json::json!([]));
+    let listed = daemon
+        .cli()
+        .args(["list", "--all", "--json"])
+        .output()
+        .unwrap();
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(rows[0]["id"], id[..8]);
+    assert_eq!(rows[0]["status"], "archived");
+
+    let SupervisorReply::Worker { .. } = daemon
+        .request(daemon.open_saved(OpenTarget::Resume(id.clone())))
+        .await
+    else {
+        panic!("expected a worker")
+    };
+    assert_eq!(
+        store.resolve(&id).unwrap().lifecycle,
+        mush_session::Lifecycle::Live
+    );
+}
+
+#[tokio::test]
 async fn doctor_reports_a_live_worker_and_clears_a_dead_one() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =

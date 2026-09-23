@@ -70,6 +70,9 @@ pub enum ClientCommand {
     Goal(crate::goal::GoalCommand),
     Schedule(crate::schedule::ScheduleCommand),
     Autonomous(crate::autonomous::AutonomousCommand),
+    StopChild {
+        session_id: String,
+    },
     Shutdown,
 }
 
@@ -1949,6 +1952,14 @@ impl AgentConnection for InProcessConnection {
                 let event = self.fallback_compaction().await?;
                 self.queued.push_back(event);
             }
+            ClientCommand::StopChild { session_id } => {
+                let family = self.family.as_ref().ok_or_else(|| {
+                    ConnectionError::Refused("this agent has no subagents".into())
+                })?;
+                family
+                    .stop_session(&session_id)
+                    .map_err(ConnectionError::Refused)?;
+            }
             ClientCommand::Shutdown => {
                 if let Some(family) = self.family.clone() {
                     family.shutdown().await;
@@ -3297,6 +3308,36 @@ mod tests {
 
         assert!(matches!(outcome, Err(ConnectionError::TooShortToCompact)));
         assert!(!connection.state().compacting);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_child_reaches_the_family_and_names_what_is_missing() {
+        let (mut connection, _) = connection();
+        assert!(matches!(
+            connection
+                .send(ClientCommand::StopChild {
+                    session_id: "nobody".into(),
+                })
+                .await,
+            Err(ConnectionError::Refused(_))
+        ));
+
+        connection.set_family(Some(crate::family::Family::new(
+            crate::family::Identity::root("root"),
+            "root".into(),
+            2,
+            None,
+            None,
+        )));
+        let Err(ConnectionError::Refused(error)) = connection
+            .send(ClientCommand::StopChild {
+                session_id: "nobody".into(),
+            })
+            .await
+        else {
+            panic!("an unknown child is refused")
+        };
+        assert!(error.contains("nobody"), "{error}");
     }
 
     #[tokio::test]

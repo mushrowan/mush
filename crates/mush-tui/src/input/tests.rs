@@ -1611,6 +1611,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            lifecycle: mush_session::Lifecycle::Live,
         },
         mush_session::SessionMeta {
             paused: None,
@@ -1624,6 +1625,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            lifecycle: mush_session::Lifecycle::Live,
         },
     ]
 }
