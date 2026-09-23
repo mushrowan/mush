@@ -844,6 +844,70 @@ fn with_file_operations(mut summary: String, summarised: &[Message]) -> String {
     summary
 }
 
+const BRANCH_SUMMARY_MAX_TOKENS: u64 = 2048;
+
+const BRANCH_SUMMARY_PREAMBLE: &str = "\
+The user explored a different conversation branch before returning here.
+Summary of that exploration:
+
+";
+
+const BRANCH_SUMMARY_INSTRUCTIONS: &str = "\
+Create a structured summary of this conversation branch for context when returning later.
+
+Use this EXACT format:
+
+## Goal
+[What was the user trying to accomplish in this branch?]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned]
+- [Or \"(none)\" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Work that was started but not finished]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [What should happen next to continue this work]
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.";
+
+fn branch_summary_context(abandoned: &[Message], budget_tokens: usize) -> Option<LlmContext> {
+    let input: Vec<Message> = abandoned
+        .iter()
+        .filter(|message| !matches!(message, Message::ToolResult(_)) && !is_regenerated(message))
+        .cloned()
+        .collect();
+    let mut start = 0;
+    while start + 1 < input.len() && estimate_tokens(&input[start..]) > budget_tokens {
+        start += 1;
+    }
+    let input = input.get(start..).filter(|input| !input.is_empty())?;
+    Some(LlmContext {
+        system_prompt: Some(COMPACTION_PROMPT.to_string()),
+        messages: vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(format!(
+                    "<conversation>\n{}\n</conversation>\n\n{BRANCH_SUMMARY_INSTRUCTIONS}",
+                    serialize_conversation(input)
+                )))
+                .timestamp_ms(Timestamp::now())
+                .build(),
+        )],
+        tools: vec![],
+    })
+}
+
 pub async fn summarise_branch(
     abandoned: &[Message],
     registry: &ApiRegistry,
@@ -851,17 +915,22 @@ pub async fn summarise_branch(
     options: &StreamOptions,
     settings: &CompactionSettings,
 ) -> Result<String, String> {
-    let focus = CompactionFocus::default();
     let budget = settings.threshold(model.compaction_window()).get() as usize;
-    let mut start = 0;
-    while start + 1 < abandoned.len() && estimate_tokens(&abandoned[start..]) > budget {
-        start += 1;
-    }
-    let context = compaction_context(&abandoned[start..], &[], &focus, None);
-    let compact_options = compaction_stream_options(options, false, settings);
-    call_for_text(registry, model, &context, &compact_options)
+    let Some(context) = branch_summary_context(abandoned, budget) else {
+        return Ok("No content to summarise".into());
+    };
+    let mut branch_options = compaction_stream_options(options, false, settings);
+    branch_options.max_tokens = Some(TokenCount::new(
+        BRANCH_SUMMARY_MAX_TOKENS.min(model.max_output_tokens.get().max(1)),
+    ));
+    call_for_text(registry, model, &context, &branch_options)
         .await
-        .map(|outcome| with_file_operations(outcome.text, abandoned))
+        .map(|outcome| {
+            with_file_operations(
+                format!("{BRANCH_SUMMARY_PREAMBLE}{}", outcome.text),
+                abandoned,
+            )
+        })
         .map_err(|error| error.failure.to_string())
 }
 
@@ -2318,6 +2387,35 @@ mod tests {
             panic!("{:?}", result.messages[0]);
         };
         assert!(first.text().contains("<modified-files>"));
+    }
+
+    #[test]
+    fn branch_summaries_use_the_branch_prompt_without_tool_results() {
+        let mut msgs = vec![
+            user_msg("try the other approach"),
+            assistant_parts(vec![tool_call(
+                "tc",
+                "read",
+                serde_json::json!({"path": "a.rs"}),
+            )]),
+            tool_result("tc", "read", "file body", ToolOutcome::Success),
+            crate::harness::digest_message(&crate::harness::State::default()),
+        ];
+        msgs.push(assistant_msg("it did not work"));
+
+        let context = branch_summary_context(&msgs, 100_000).unwrap();
+
+        assert_eq!(context.system_prompt.as_deref(), Some(COMPACTION_PROMPT));
+        let Message::User(request) = &context.messages[0] else {
+            panic!()
+        };
+        let text = request.text();
+        assert!(text.contains("[User]: try the other approach"));
+        assert!(text.contains("#1 read(path=\"a.rs\")"));
+        assert!(!text.contains("file body"));
+        assert!(!text.contains(crate::harness::DIGEST_PREFIX));
+        assert!(text.ends_with(BRANCH_SUMMARY_INSTRUCTIONS));
+        assert!(branch_summary_context(&msgs[2..3], 100_000).is_none());
     }
 
     #[test]
