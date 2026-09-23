@@ -258,7 +258,7 @@ fn convert_input_messages(
         trimming,
         out: &mut converted,
     };
-    walk_messages(messages, &mut visitor);
+    walk_messages(&super::replayable_history(messages, model), &mut visitor);
 
     fix_orphaned_function_calls(converted)
 }

@@ -555,7 +555,12 @@ fn build_request_body(
     } else {
         ToolResultTrimming::SlidingWindow
     };
-    let converted_messages = convert_messages(messages, is_oauth, cache_control.clone(), trimming);
+    let converted_messages = convert_messages(
+        &super::replayable_history(messages, model),
+        is_oauth,
+        cache_control.clone(),
+        trimming,
+    );
 
     let converted_tools = convert_tools(
         tools,
@@ -2420,6 +2425,102 @@ mod tests {
         assert_eq!(blocks[0]["type"], "thinking");
         assert_eq!(blocks[0]["thinking"], "let me think about this");
         assert_eq!(blocks[0]["signature"], "sig_xyz");
+    }
+
+    fn signed_history(model: &str, provider: Provider, api: Api, signature: &str) -> Vec<Message> {
+        vec![
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("hi".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![
+                        AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                            thinking: "private chain".into(),
+                            signature: Some(signature.into()),
+                        }),
+                        AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                            data: "opaque".into(),
+                        }),
+                        AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                            thinking: " ".into(),
+                            signature: Some(signature.into()),
+                        }),
+                        AssistantContentPart::Text(TextContent {
+                            text: "answer".into(),
+                        }),
+                    ])
+                    .model(model.into())
+                    .provider(provider)
+                    .api(api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn foreign_thinking_replays_as_text_without_signatures() {
+        let origins = [
+            (
+                "claude-opus-4-1",
+                Provider::Anthropic,
+                Api::AnthropicMessages,
+                "sig_other_model",
+            ),
+            (
+                "claude-sonnet-4-20250514",
+                Provider::OpenRouter,
+                Api::OpenaiCompletions,
+                "reasoning_content",
+            ),
+        ];
+        for (id, provider, api, signature) in origins {
+            let messages = signed_history(id, provider, api, signature);
+            let options = StreamOptions {
+                cache_retention: Some(CacheRetention::None),
+                ..Default::default()
+            };
+            let body = build_request_body(&test_model(), &None, &messages, &[], &options, false);
+            let wire = serde_json::to_string(&body.messages).unwrap();
+            assert!(!wire.contains(signature), "{wire}");
+            assert!(!wire.contains("opaque"), "{wire}");
+            assert!(!wire.contains("thinking"), "{wire}");
+            assert_eq!(
+                body.messages[1].content,
+                serde_json::json!([
+                    {"type": "text", "text": "private chain"},
+                    {"type": "text", "text": "answer"},
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn same_model_thinking_keeps_its_signature() {
+        let model = test_model();
+        let messages = signed_history(
+            model.id.as_str(),
+            model.provider.clone(),
+            model.api,
+            "sig_same_model",
+        );
+        let body = build_request_body(
+            &model,
+            &None,
+            &messages,
+            &[],
+            &StreamOptions::default(),
+            false,
+        );
+        let blocks = body.messages[1].content.as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["signature"], "sig_same_model");
+        assert_eq!(blocks[1]["type"], "redacted_thinking");
+        assert_eq!(blocks[1]["data"], "opaque");
     }
 
     #[test]

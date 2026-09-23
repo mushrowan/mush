@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::content::{AssistantContentPart, ToolResultContentPart, UserContent};
-use super::model::{Api, Provider};
+use super::model::{Api, Model, Provider};
 use super::newtypes::{Dollars, ModelId, PromptId, Timestamp, TokenCount, ToolCallId, ToolName};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -95,6 +95,11 @@ impl AssistantMessage {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    #[must_use]
+    pub fn produced_by(&self, model: &Model) -> bool {
+        self.provider == model.provider && self.api == model.api && self.model == model.id
     }
 
     #[must_use]

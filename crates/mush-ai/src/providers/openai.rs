@@ -137,7 +137,7 @@ fn build_request_body(
         out: &mut all_messages,
         pending_images: Vec::new(),
     };
-    super::walk_messages(messages, &mut visitor);
+    super::walk_messages(&super::replayable_history(messages, model), &mut visitor);
     visitor.flush_images();
 
     let mut converted_tools = if tools.is_empty() {

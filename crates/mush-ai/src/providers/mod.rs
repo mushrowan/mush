@@ -4,10 +4,13 @@ pub mod openai;
 pub mod openai_responses;
 pub mod sse;
 
+use std::borrow::Cow;
+
 use crate::registry::ApiRegistry;
 use crate::types::{
-    AssistantMessage, EffortLevel, Message, Model, StreamOptions, ThinkingLevel, ToolResultMessage,
-    ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
+    AssistantContentPart, AssistantMessage, EffortLevel, Message, Model, StreamOptions,
+    TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage, ToolResultTrimming, TurnPivot,
+    UserMessage, find_recent_boundary,
 };
 
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
@@ -58,6 +61,43 @@ pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], vi
                     .build(),
             ),
         }
+    }
+}
+
+pub(crate) fn replayable_history<'a>(messages: &'a [Message], model: &Model) -> Cow<'a, [Message]> {
+    let foreign_thinking = |message: &Message| {
+        matches!(message, Message::Assistant(asst) if !asst.produced_by(model)
+            && asst.content.iter().any(|part| matches!(part, AssistantContentPart::Thinking(_))))
+    };
+    if !messages.iter().any(foreign_thinking) {
+        return Cow::Borrowed(messages);
+    }
+    Cow::Owned(
+        messages
+            .iter()
+            .map(|message| match message {
+                Message::Assistant(asst) if foreign_thinking(message) => {
+                    let mut asst = asst.clone();
+                    asst.content = std::mem::take(&mut asst.content)
+                        .into_iter()
+                        .filter_map(foreign_part_as_text)
+                        .collect();
+                    Message::Assistant(asst)
+                }
+                other => other.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn foreign_part_as_text(part: AssistantContentPart) -> Option<AssistantContentPart> {
+    match part {
+        AssistantContentPart::Thinking(ThinkingContent::Redacted { .. }) => None,
+        AssistantContentPart::Thinking(ThinkingContent::Thinking { thinking, .. }) => {
+            (!thinking.trim().is_empty())
+                .then_some(AssistantContentPart::Text(TextContent { text: thinking }))
+        }
+        other => Some(other),
     }
 }
 
@@ -322,6 +362,80 @@ mod tests {
             .max_output_tokens(TokenCount::new(16384))
             .reasoning(true)
             .build()
+    }
+
+    fn thinking_history(model: &Model) -> Vec<Message> {
+        vec![Message::Assistant(
+            AssistantMessage::builder()
+                .content(vec![
+                    AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                        thinking: "reasoned".into(),
+                        signature: Some("sig".into()),
+                    }),
+                    AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("sig".into()),
+                    }),
+                    AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                        data: "opaque".into(),
+                    }),
+                    AssistantContentPart::Text(TextContent {
+                        text: "done".into(),
+                    }),
+                ])
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )]
+    }
+
+    #[test]
+    fn same_model_history_is_replayed_untouched() {
+        let model = reasoning_model();
+        let messages = thinking_history(&model);
+        assert!(matches!(
+            replayable_history(&messages, &model),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn a_different_provider_api_or_model_turns_thinking_into_text() {
+        let model = reasoning_model();
+        let messages = thinking_history(&model);
+        let others = [
+            Model {
+                id: "other".into(),
+                ..model.clone()
+            },
+            Model {
+                provider: Provider::OpenRouter,
+                ..model.clone()
+            },
+            Model {
+                api: Api::OpenaiResponses,
+                ..model.clone()
+            },
+        ];
+        for other in others {
+            let replayed = replayable_history(&messages, &other);
+            let Message::Assistant(asst) = &replayed[0] else {
+                panic!("expected assistant")
+            };
+            assert_eq!(
+                asst.content,
+                vec![
+                    AssistantContentPart::Text(TextContent {
+                        text: "reasoned".into(),
+                    }),
+                    AssistantContentPart::Text(TextContent {
+                        text: "done".into(),
+                    }),
+                ]
+            );
+        }
     }
 
     #[test]
