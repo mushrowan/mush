@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use color_eyre::eyre::{Result, eyre};
@@ -791,10 +792,7 @@ pub fn build_rlm_system_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(extra.content.trim_end());
     }
-    for agents in &context.agents_md {
-        prompt.push_str("\n\n# Project Context\n\n");
-        prompt.push_str(&agents.content);
-    }
+    push_project_context(&mut prompt, &context.agents_md);
     if context
         .skills
         .iter()
@@ -825,10 +823,7 @@ pub fn build_system_prompt_from_context(
         prompt.push_str(extra.content.trim_end());
     }
 
-    for agents in &context.agents_md {
-        prompt.push_str("\n\n# Project Context\n\n");
-        prompt.push_str(&agents.content);
-    }
+    push_project_context(&mut prompt, &context.agents_md);
 
     if context
         .skills
@@ -844,6 +839,21 @@ pub fn build_system_prompt_from_context(
     }
 
     prompt
+}
+
+fn push_project_context(prompt: &mut String, agents: &[loader::AgentsMd]) {
+    if agents.is_empty() {
+        return;
+    }
+    prompt.push_str("\n\n# Project Context\n\nProject-specific instructions and guidelines:");
+    for agents in agents {
+        let _ = write!(
+            prompt,
+            "\n\n## {}\n\n{}",
+            agents.path.display(),
+            agents.content.trim_end()
+        );
+    }
 }
 
 fn format_nested_agents(cwd: &std::path::Path, agents: &[loader::AgentsMd]) -> Option<String> {
@@ -1204,7 +1214,10 @@ mod tests {
         assert!(prompt.contains("end your turn"));
         assert!(prompt.contains("await edit(path, old, new)"));
         assert!(prompt.contains("Working directory: /repo"));
-        assert!(prompt.contains("# Project Context\n\nproject rules"));
+        assert!(prompt.contains(
+            "# Project Context\n\nProject-specific instructions and guidelines:\n\n\
+             ## /repo/AGENTS.md\n\nproject rules"
+        ));
         assert!(prompt.contains("read_text()"));
         assert!(prompt.contains("<name>nix</name>"));
         assert!(!prompt.contains("Use the skill tool"));
@@ -1271,7 +1284,33 @@ mod tests {
 
         assert!(prompt.starts_with("you are a terse reviewer\n\nalways answer in british english"));
         assert!(!prompt.contains("You are running inside mush"));
-        assert!(prompt.contains("# Project Context\n\nproject rules"));
+        assert!(prompt.contains("## /repo/AGENTS.md\n\nproject rules"));
+    }
+
+    #[test]
+    fn context_files_share_one_header_and_name_their_paths() {
+        let context = ProjectContext {
+            agents_md: vec![
+                mush_ext::AgentsMd {
+                    path: "/home/u/.config/mush/AGENTS.md".into(),
+                    content: "global rules\n".into(),
+                },
+                mush_ext::AgentsMd {
+                    path: "/repo/AGENTS.md".into(),
+                    content: "repo rules".into(),
+                },
+            ],
+            ..ProjectContext::default()
+        };
+
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+
+        assert_eq!(prompt.matches("# Project Context").count(), 1);
+        assert!(prompt.ends_with(
+            "# Project Context\n\nProject-specific instructions and guidelines:\n\n\
+             ## /home/u/.config/mush/AGENTS.md\n\nglobal rules\n\n\
+             ## /repo/AGENTS.md\n\nrepo rules"
+        ));
     }
 
     #[test]
