@@ -206,6 +206,11 @@ fn is_openrouter(model: &Model) -> bool {
     model.provider == Provider::OpenRouter || model.base_url.contains("openrouter.ai")
 }
 
+fn requires_reasoning_content(model: &Model) -> bool {
+    matches!(&model.provider, Provider::Custom(name) if name == "deepseek")
+        || model.base_url.contains("deepseek.com")
+}
+
 fn accepts_reasoning_effort(model: &Model) -> bool {
     let base_url = model.base_url.as_str();
     ![
@@ -358,19 +363,56 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
         self.flush_images();
         let mut msg_obj = serde_json::json!({ "role": "assistant" });
 
-        let text_parts: Vec<&str> = asst
+        let text = asst
             .content
             .iter()
             .filter_map(|p| match p {
                 AssistantContentPart::Text(t) if !t.text.is_empty() => Some(t.text.as_str()),
                 _ => None,
             })
-            .collect();
+            .collect::<String>();
 
-        if text_parts.is_empty() {
-            msg_obj["content"] = serde_json::Value::Null;
+        let mut replay_details = Vec::new();
+        let mut traces = Vec::new();
+        let mut trace_field = None;
+        for part in &asst.content {
+            let AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking,
+                signature,
+            }) = part
+            else {
+                continue;
+            };
+            match signature.as_deref().and_then(decode_reasoning_details) {
+                Some(details) => replay_details.extend(details),
+                None if thinking.trim().is_empty() => {}
+                None => {
+                    if traces.is_empty() {
+                        trace_field = signature.as_deref().and_then(ReasoningField::parse);
+                    }
+                    traces.push(thinking.as_str());
+                }
+            }
+        }
+
+        let requires_reasoning_content = requires_reasoning_content(self.model);
+        if requires_reasoning_content {
+            trace_field = Some(ReasoningField::ReasoningContent);
+        }
+        let reasoning = (!traces.is_empty()).then(|| traces.join("\n"));
+        let (content, replayed) = match (reasoning, trace_field) {
+            (Some(reasoning), Some(field)) => (text, Some((field, reasoning))),
+            (Some(reasoning), None) if text.is_empty() => (reasoning, None),
+            (Some(reasoning), None) => (format!("{reasoning}\n\n{text}"), None),
+            (None, _) => (text, None),
+        };
+        msg_obj["content"] = if content.is_empty() {
+            serde_json::Value::Null
         } else {
-            msg_obj["content"] = serde_json::json!(text_parts.join(""));
+            serde_json::json!(content)
+        };
+        if let Some((field, reasoning)) = replayed {
+            msg_obj[field.as_str()] = serde_json::json!(reasoning);
         }
 
         let tool_calls: Vec<serde_json::Value> = asst
@@ -389,6 +431,18 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
             })
             .collect();
 
+        if requires_reasoning_content
+            && self.model.reasoning
+            && msg_obj.get("reasoning_content").is_none()
+        {
+            msg_obj["reasoning_content"] = serde_json::json!("");
+        }
+        if !replay_details.is_empty() {
+            if msg_obj["content"].is_null() && tool_calls.is_empty() {
+                msg_obj["content"] = serde_json::json!("");
+            }
+            msg_obj["reasoning_details"] = serde_json::Value::Array(replay_details);
+        }
         if !tool_calls.is_empty() {
             msg_obj["tool_calls"] = serde_json::Value::Array(tool_calls);
         }
@@ -467,46 +521,130 @@ struct ChunkDelta {
     #[serde(default)]
     reasoning_text: Option<String>,
     #[serde(default)]
-    reasoning_details: Option<Vec<ReasoningDetail>>,
+    reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     tool_calls: Option<Vec<ChunkToolCall>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReasoningDetail {
-    #[serde(rename = "type", default)]
-    detail_type: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasoningField {
+    ReasoningContent,
+    Reasoning,
+    ReasoningText,
+}
+
+impl ReasoningField {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::Reasoning => "reasoning",
+            Self::ReasoningText => "reasoning_text",
+        }
+    }
+
+    fn parse(field: &str) -> Option<Self> {
+        match field {
+            "reasoning_content" => Some(Self::ReasoningContent),
+            "reasoning" => Some(Self::Reasoning),
+            "reasoning_text" => Some(Self::ReasoningText),
+            _ => None,
+        }
+    }
 }
 
 impl ChunkDelta {
-    fn reasoning_delta(&self) -> Option<String> {
-        let mut delta = [
-            self.reasoning_content.as_deref(),
-            self.reasoning.as_deref(),
-            self.reasoning_text.as_deref(),
+    fn reasoning_field(&self) -> Option<(ReasoningField, &str)> {
+        [
+            (ReasoningField::ReasoningContent, &self.reasoning_content),
+            (ReasoningField::Reasoning, &self.reasoning),
+            (ReasoningField::ReasoningText, &self.reasoning_text),
         ]
         .into_iter()
-        .flatten()
-        .collect::<String>();
-
-        if let Some(details) = &self.reasoning_details {
-            delta.extend(
-                details
-                    .iter()
-                    .filter(|detail| {
-                        detail
-                            .detail_type
-                            .as_deref()
-                            .is_none_or(|ty| ty == "reasoning.text")
-                    })
-                    .filter_map(|detail| detail.text.as_deref()),
-            );
-        }
-
-        (!delta.is_empty()).then_some(delta)
+        .find_map(|(field, text)| {
+            text.as_deref()
+                .filter(|text| !text.is_empty())
+                .map(|text| (field, text))
+        })
     }
+
+    fn details_text(&self) -> Option<String> {
+        let text = self
+            .reasoning_details
+            .iter()
+            .flatten()
+            .filter(|detail| {
+                detail["type"]
+                    .as_str()
+                    .is_none_or(|ty| ty == "reasoning.text")
+            })
+            .filter_map(|detail| detail["text"].as_str())
+            .collect::<String>();
+        (!text.is_empty()).then_some(text)
+    }
+}
+
+const REASONING_DETAILS_SIGNATURE_TYPE: &str = "openai-completions.reasoning_details.v1";
+
+#[derive(Debug, Default)]
+struct ReasoningDetails {
+    by_index: std::collections::BTreeMap<u64, serde_json::Map<String, serde_json::Value>>,
+    next_index: u64,
+    content_index: Option<usize>,
+}
+
+impl ReasoningDetails {
+    fn merge(&mut self, detail: serde_json::Map<String, serde_json::Value>) {
+        let index = detail
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(self.next_index);
+        self.next_index = self.next_index.max(index + 1);
+        let merged = self.by_index.entry(index).or_default();
+        for (key, value) in detail {
+            let fragment = matches!(key.as_str(), "text" | "summary");
+            match (merged.get_mut(&key), value) {
+                (Some(serde_json::Value::String(prev)), serde_json::Value::String(next))
+                    if fragment =>
+                {
+                    prev.push_str(&next);
+                }
+                (_, value) => {
+                    merged.insert(key, value);
+                }
+            }
+        }
+    }
+
+    fn encode(&self) -> Option<String> {
+        if self.by_index.is_empty() {
+            return None;
+        }
+        let details: Vec<_> = self.by_index.values().collect();
+        Some(
+            serde_json::json!({
+                "type": REASONING_DETAILS_SIGNATURE_TYPE,
+                "details": details,
+            })
+            .to_string(),
+        )
+    }
+}
+
+fn decode_reasoning_details(signature: &str) -> Option<Vec<serde_json::Value>> {
+    if !signature.starts_with('{') {
+        return None;
+    }
+    let mut parsed: serde_json::Value = serde_json::from_str(signature).ok()?;
+    if parsed["type"] != REASONING_DETAILS_SIGNATURE_TYPE {
+        return None;
+    }
+    let serde_json::Value::Array(details) = parsed["details"].take() else {
+        return None;
+    };
+    details
+        .iter()
+        .all(serde_json::Value::is_object)
+        .then_some(details)
 }
 
 #[derive(Debug, Deserialize)]
@@ -552,9 +690,11 @@ struct ToolBlock {
     args_buf: String,
 }
 
+#[derive(Default)]
 struct OpenAiCompletionsProcessor {
     current: Option<StreamBlock>,
     tool_blocks: Vec<ToolBlock>,
+    reasoning_details: ReasoningDetails,
 }
 
 impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
@@ -568,7 +708,7 @@ impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
         }
         match serde_json::from_str::<ChunkResponse>(&raw.data) {
             Ok(chunk) => {
-                let events = process_chunk(chunk, output, &mut self.current, &mut self.tool_blocks);
+                let events = self.process_chunk(chunk, output);
                 super::sse::ProcessResult::Events(events)
             }
             Err(_) => super::sse::ProcessResult::Skip,
@@ -592,174 +732,233 @@ fn parse_sse_stream(
     api: Api,
     call_id: u64,
 ) -> EventStream {
-    let processor = OpenAiCompletionsProcessor {
-        current: None,
-        tool_blocks: Vec::new(),
-    };
-    super::sse::run_sse_stream(response, model_id, provider_name, api, call_id, processor)
+    super::sse::run_sse_stream(
+        response,
+        model_id,
+        provider_name,
+        api,
+        call_id,
+        OpenAiCompletionsProcessor::default(),
+    )
 }
 
-fn process_chunk(
-    chunk: ChunkResponse,
-    output: &mut AssistantMessage,
-    current: &mut Option<StreamBlock>,
-    tool_blocks: &mut Vec<ToolBlock>,
-) -> Vec<StreamEvent> {
-    let mut events = Vec::new();
+impl OpenAiCompletionsProcessor {
+    fn process_chunk(
+        &mut self,
+        chunk: ChunkResponse,
+        output: &mut AssistantMessage,
+    ) -> Vec<StreamEvent> {
+        let mut events = Vec::new();
 
-    if output.generation_id.is_none()
-        && let Some(id) = chunk.id
-    {
-        output.generation_id = Some(id);
-    }
-
-    if let Some(usage) = chunk.usage {
-        let cached = usage
-            .prompt_tokens_details
-            .as_ref()
-            .map_or(0, |d| d.cached_tokens);
-        output.usage = Usage {
-            input_tokens: TokenCount::new(usage.prompt_tokens.saturating_sub(cached)),
-            output_tokens: TokenCount::new(usage.completion_tokens),
-            cache_read_tokens: TokenCount::new(cached),
-            cache_write_tokens: TokenCount::ZERO,
-        };
-    }
-
-    let Some(choice) = chunk.choices.into_iter().next() else {
-        return events;
-    };
-
-    if let Some(reason) = choice.finish_reason {
-        let (stop_reason, message) = map_stop_reason(&reason);
-        output.stop_reason = stop_reason;
-        if let Some(message) = message {
-            tracing::warn!(finish_reason = %reason, %message, "openai ended the turn");
-            output.error_message = Some(message);
+        if output.generation_id.is_none()
+            && let Some(id) = chunk.id
+        {
+            output.generation_id = Some(id);
         }
-    }
 
-    if let Some(reasoning) = choice.delta.reasoning_delta() {
-        match current {
-            Some(StreamBlock::Thinking { text, .. }) => {
-                text.push_str(&reasoning);
-                let idx = output.content.len().saturating_sub(1);
-                if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx)
-                    && let Some(buf) = tc.text_mut()
-                {
-                    buf.push_str(&reasoning);
-                }
-                events.push(StreamEvent::ThinkingDelta {
-                    content_index: idx,
-                    delta: reasoning,
-                });
-            }
-            _ => {
-                finish_block_events(current, output, &mut events);
-                let content_index = output.content.len();
-                *current = Some(StreamBlock::Thinking {
-                    text: reasoning.clone(),
-                    signature: None,
-                });
-                output
-                    .content
-                    .push(AssistantContentPart::Thinking(ThinkingContent::Thinking {
-                        thinking: reasoning.clone(),
-                        signature: None,
-                    }));
-                events.push(StreamEvent::ThinkingStart { content_index });
-                events.push(StreamEvent::ThinkingDelta {
-                    content_index,
-                    delta: reasoning,
-                });
-            }
-        }
-    }
-
-    if let Some(text) = choice.delta.content
-        && !text.is_empty()
-    {
-        match current {
-            Some(StreamBlock::Text { text: buf }) => {
-                buf.push_str(&text);
-                let idx = output.content.len().saturating_sub(1);
-                if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
-                    tc.text.push_str(&text);
-                }
-                events.push(StreamEvent::TextDelta {
-                    content_index: idx,
-                    delta: text,
-                });
-            }
-            _ => {
-                finish_block_events(current, output, &mut events);
-                let content_index = output.content.len();
-                *current = Some(StreamBlock::Text { text: text.clone() });
-                output.content.push(AssistantContentPart::Text(TextContent {
-                    text: text.clone(),
-                }));
-                events.push(StreamEvent::TextStart { content_index });
-                events.push(StreamEvent::TextDelta {
-                    content_index,
-                    delta: text,
-                });
-            }
-        }
-    }
-
-    if let Some(tool_calls) = choice.delta.tool_calls {
-        if matches!(
-            current,
-            Some(StreamBlock::Text { .. } | StreamBlock::Thinking { .. })
-        ) {
-            finish_block_events(current, output, &mut events);
-        }
-        for tc in tool_calls {
-            let openai_idx = tc.index.unwrap_or(0);
-            let block_pos = match tool_blocks
-                .iter()
-                .position(|b| b.openai_index == openai_idx)
-            {
-                Some(pos) => pos,
-                None => {
-                    let id = tc.id.clone().unwrap_or_default();
-                    let name = tc
-                        .function
-                        .as_ref()
-                        .and_then(|f| f.name.clone())
-                        .unwrap_or_default();
-                    let content_index = output.content.len();
-                    output
-                        .content
-                        .push(AssistantContentPart::ToolCall(ToolCall {
-                            id: ToolCallId::from(id),
-                            name: ToolName::from(name),
-                            arguments: serde_json::Value::Object(Default::default()),
-                        }));
-                    events.push(StreamEvent::ToolCallStart { content_index });
-                    tool_blocks.push(ToolBlock {
-                        openai_index: openai_idx,
-                        content_index,
-                        args_buf: String::new(),
-                    });
-                    tool_blocks.len() - 1
-                }
+        if let Some(usage) = chunk.usage {
+            let cached = usage
+                .prompt_tokens_details
+                .as_ref()
+                .map_or(0, |d| d.cached_tokens);
+            output.usage = Usage {
+                input_tokens: TokenCount::new(usage.prompt_tokens.saturating_sub(cached)),
+                output_tokens: TokenCount::new(usage.completion_tokens),
+                cache_read_tokens: TokenCount::new(cached),
+                cache_write_tokens: TokenCount::ZERO,
             };
+        }
 
-            if let Some(func) = tc.function
-                && let Some(args) = func.arguments
-            {
-                tool_blocks[block_pos].args_buf.push_str(&args);
-                let content_index = tool_blocks[block_pos].content_index;
-                events.push(StreamEvent::ToolCallDelta {
-                    content_index,
-                    delta: args,
-                });
+        let Some(choice) = chunk.choices.into_iter().next() else {
+            return events;
+        };
+
+        if let Some(reason) = choice.finish_reason {
+            let (stop_reason, message) = map_stop_reason(&reason);
+            output.stop_reason = stop_reason;
+            if let Some(message) = message {
+                tracing::warn!(finish_reason = %reason, %message, "openai ended the turn");
+                output.error_message = Some(message);
             }
         }
+
+        let field = choice.delta.reasoning_field();
+        if let Some(reasoning) = field
+            .map(|(_, text)| text.to_owned())
+            .or_else(|| choice.delta.details_text())
+        {
+            let signature = field.map(|(field, _)| field.as_str().to_owned());
+            self.push_reasoning(reasoning, signature, output, &mut events);
+        }
+
+        if let Some(details) = choice.delta.reasoning_details {
+            self.record_reasoning_details(details, output, &mut events);
+        }
+
+        if let Some(text) = choice.delta.content
+            && !text.is_empty()
+        {
+            match &mut self.current {
+                Some(StreamBlock::Text { text: buf }) => {
+                    buf.push_str(&text);
+                    let idx = output.content.len().saturating_sub(1);
+                    if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
+                        tc.text.push_str(&text);
+                    }
+                    events.push(StreamEvent::TextDelta {
+                        content_index: idx,
+                        delta: text,
+                    });
+                }
+                _ => {
+                    finish_block_events(&mut self.current, output, &mut events);
+                    let content_index = output.content.len();
+                    self.current = Some(StreamBlock::Text { text: text.clone() });
+                    output.content.push(AssistantContentPart::Text(TextContent {
+                        text: text.clone(),
+                    }));
+                    events.push(StreamEvent::TextStart { content_index });
+                    events.push(StreamEvent::TextDelta {
+                        content_index,
+                        delta: text,
+                    });
+                }
+            }
+        }
+
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            if matches!(
+                self.current,
+                Some(StreamBlock::Text { .. } | StreamBlock::Thinking { .. })
+            ) {
+                finish_block_events(&mut self.current, output, &mut events);
+            }
+            for tc in tool_calls {
+                let openai_idx = tc.index.unwrap_or(0);
+                let block_pos = match self
+                    .tool_blocks
+                    .iter()
+                    .position(|b| b.openai_index == openai_idx)
+                {
+                    Some(pos) => pos,
+                    None => {
+                        let id = tc.id.clone().unwrap_or_default();
+                        let name = tc
+                            .function
+                            .as_ref()
+                            .and_then(|f| f.name.clone())
+                            .unwrap_or_default();
+                        let content_index = output.content.len();
+                        output
+                            .content
+                            .push(AssistantContentPart::ToolCall(ToolCall {
+                                id: ToolCallId::from(id),
+                                name: ToolName::from(name),
+                                arguments: serde_json::Value::Object(Default::default()),
+                            }));
+                        events.push(StreamEvent::ToolCallStart { content_index });
+                        self.tool_blocks.push(ToolBlock {
+                            openai_index: openai_idx,
+                            content_index,
+                            args_buf: String::new(),
+                        });
+                        self.tool_blocks.len() - 1
+                    }
+                };
+
+                if let Some(func) = tc.function
+                    && let Some(args) = func.arguments
+                {
+                    self.tool_blocks[block_pos].args_buf.push_str(&args);
+                    let content_index = self.tool_blocks[block_pos].content_index;
+                    events.push(StreamEvent::ToolCallDelta {
+                        content_index,
+                        delta: args,
+                    });
+                }
+            }
+        }
+
+        events
     }
 
-    events
+    fn push_reasoning(
+        &mut self,
+        reasoning: String,
+        signature: Option<String>,
+        output: &mut AssistantMessage,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        if let Some(StreamBlock::Thinking { text, .. }) = &mut self.current {
+            text.push_str(&reasoning);
+            let idx = output.content.len().saturating_sub(1);
+            if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx)
+                && let Some(buf) = tc.text_mut()
+            {
+                buf.push_str(&reasoning);
+            }
+            events.push(StreamEvent::ThinkingDelta {
+                content_index: idx,
+                delta: reasoning,
+            });
+            return;
+        }
+        let content_index = self.start_thinking(reasoning.clone(), signature, output, events);
+        events.push(StreamEvent::ThinkingDelta {
+            content_index,
+            delta: reasoning,
+        });
+    }
+
+    fn start_thinking(
+        &mut self,
+        thinking: String,
+        signature: Option<String>,
+        output: &mut AssistantMessage,
+        events: &mut Vec<StreamEvent>,
+    ) -> usize {
+        finish_block_events(&mut self.current, output, events);
+        let content_index = output.content.len();
+        self.current = Some(StreamBlock::Thinking {
+            text: thinking.clone(),
+            signature: None,
+        });
+        output
+            .content
+            .push(AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking,
+                signature,
+            }));
+        events.push(StreamEvent::ThinkingStart { content_index });
+        content_index
+    }
+
+    fn record_reasoning_details(
+        &mut self,
+        details: Vec<serde_json::Value>,
+        output: &mut AssistantMessage,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        for detail in details {
+            if let serde_json::Value::Object(detail) = detail {
+                self.reasoning_details.merge(detail);
+            }
+        }
+        let Some(signature) = self.reasoning_details.encode() else {
+            return;
+        };
+        let content_index = match (self.reasoning_details.content_index, &self.current) {
+            (Some(idx), _) => idx,
+            (None, Some(StreamBlock::Thinking { .. })) => output.content.len().saturating_sub(1),
+            (None, _) => self.start_thinking(String::new(), None, output, events),
+        };
+        self.reasoning_details.content_index = Some(content_index);
+        if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(content_index)
+            && let Some(slot) = tc.signature_mut()
+        {
+            *slot = Some(signature);
+        }
+    }
 }
 
 fn finish_block_events(
@@ -834,8 +1033,7 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
         .api(Api::OpenaiCompletions)
         .timestamp_ms(Timestamp::zero())
         .build();
-    let mut current = None;
-    let mut tool_blocks = Vec::new();
+    let mut state = OpenAiCompletionsProcessor::default();
 
     for (index, fragment) in fragments.into_iter().enumerate() {
         let chunk = ChunkResponse {
@@ -856,10 +1054,10 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
             }],
             usage: None,
         };
-        let _ = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        let _ = state.process_chunk(chunk, &mut output);
     }
 
-    finish_tool_blocks_silent(&mut tool_blocks, &mut output);
+    finish_tool_blocks_silent(&mut state.tool_blocks, &mut output);
 
     match output.content.first() {
         Some(AssistantContentPart::ToolCall(tc)) => tc
@@ -1191,8 +1389,7 @@ mod tests {
     #[test]
     fn process_text_chunk() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk = ChunkResponse {
             id: None,
@@ -1206,18 +1403,17 @@ mod tests {
             usage: None,
         };
 
-        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        let events = state.process_chunk(chunk, &mut output);
         assert!(events.len() >= 2);
         assert!(matches!(events[0], StreamEvent::TextStart { .. }));
         assert!(matches!(events[1], StreamEvent::TextDelta { .. }));
-        assert!(current.is_some());
+        assert!(state.current.is_some());
     }
 
     #[test]
     fn process_reasoning_then_text() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk = ChunkResponse {
             id: None,
@@ -1230,8 +1426,8 @@ mod tests {
             }],
             usage: None,
         };
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
-        assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
+        state.process_chunk(chunk, &mut output);
+        assert!(matches!(state.current, Some(StreamBlock::Thinking { .. })));
 
         let chunk = ChunkResponse {
             id: None,
@@ -1244,7 +1440,7 @@ mod tests {
             }],
             usage: None,
         };
-        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        let events = state.process_chunk(chunk, &mut output);
         assert!(
             events
                 .iter()
@@ -1268,8 +1464,7 @@ mod tests {
     #[test]
     fn process_openrouter_reasoning_details_as_thinking() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{
@@ -1284,9 +1479,9 @@ mod tests {
         }))
         .unwrap();
 
-        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        let events = state.process_chunk(chunk, &mut output);
 
-        assert!(matches!(current, Some(StreamBlock::Thinking { .. })));
+        assert!(matches!(state.current, Some(StreamBlock::Thinking { .. })));
         assert!(events.iter().any(|event| {
             matches!(
                 event,
@@ -1299,8 +1494,7 @@ mod tests {
     #[test]
     fn process_tool_call_chunk() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk = ChunkResponse {
             id: None,
@@ -1320,7 +1514,7 @@ mod tests {
             }],
             usage: None,
         };
-        let events = process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        let events = state.process_chunk(chunk, &mut output);
         assert!(
             events
                 .iter()
@@ -1345,7 +1539,7 @@ mod tests {
             }],
             usage: None,
         };
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
 
         match &output.content[0] {
             AssistantContentPart::ToolCall(tc) => {
@@ -1354,7 +1548,7 @@ mod tests {
             other => panic!("expected tool call, got {other:?}"),
         }
 
-        finish_tool_blocks_silent(&mut tool_blocks, &mut output);
+        finish_tool_blocks_silent(&mut state.tool_blocks, &mut output);
 
         match &output.content[0] {
             AssistantContentPart::ToolCall(tc) => {
@@ -1368,8 +1562,7 @@ mod tests {
     #[test]
     fn parallel_tool_calls_with_interleaved_deltas_keep_args_separate() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
@@ -1377,7 +1570,7 @@ mod tests {
             ]}}]
         }))
         .unwrap();
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
@@ -1385,7 +1578,7 @@ mod tests {
             ]}}]
         }))
         .unwrap();
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
@@ -1393,7 +1586,7 @@ mod tests {
             ]}}]
         }))
         .unwrap();
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"tool_calls": [
@@ -1401,9 +1594,9 @@ mod tests {
             ]}}]
         }))
         .unwrap();
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
 
-        finish_tool_blocks_silent(&mut tool_blocks, &mut output);
+        finish_tool_blocks_silent(&mut state.tool_blocks, &mut output);
 
         assert_eq!(
             output.content.len(),
@@ -1437,43 +1630,40 @@ mod tests {
     #[test]
     fn process_chunk_captures_top_level_id_for_generation_lookup() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk: ChunkResponse = serde_json::from_value(serde_json::json!({
             "id": "gen-abc123",
             "choices": [{"delta": {"content": "hi"}}]
         }))
         .expect("chunk parses");
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
         assert_eq!(output.generation_id.as_deref(), Some("gen-abc123"));
     }
 
     #[test]
     fn process_chunk_id_is_sticky_across_chunks() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let with_id: ChunkResponse = serde_json::from_value(serde_json::json!({
             "id": "gen-keep-me",
             "choices": [{"delta": {"content": "a"}}]
         }))
         .unwrap();
-        process_chunk(with_id, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(with_id, &mut output);
         let without_id: ChunkResponse = serde_json::from_value(serde_json::json!({
             "choices": [{"delta": {"content": "b"}}]
         }))
         .unwrap();
-        process_chunk(without_id, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(without_id, &mut output);
         assert_eq!(output.generation_id.as_deref(), Some("gen-keep-me"));
     }
 
     #[test]
     fn process_usage_chunk() {
         let mut output = test_output();
-        let mut current = None;
-        let mut tool_blocks = Vec::new();
+        let mut state = OpenAiCompletionsProcessor::default();
 
         let chunk = ChunkResponse {
             id: None,
@@ -1485,7 +1675,7 @@ mod tests {
             }),
         };
 
-        process_chunk(chunk, &mut output, &mut current, &mut tool_blocks);
+        state.process_chunk(chunk, &mut output);
         assert_eq!(output.usage.input_tokens, TokenCount::new(50));
         assert_eq!(output.usage.output_tokens, TokenCount::new(50));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(100));
@@ -1494,6 +1684,243 @@ mod tests {
     #[test]
     fn benchmark_tool_call_deltas_returns_payload_size() {
         assert_eq!(benchmark_tool_call_deltas(8, 1024), 1024);
+    }
+
+    fn reasoning_model(provider: &str, base_url: &str) -> Model {
+        Model {
+            id: "reasoner".into(),
+            provider: Provider::Custom(provider.into()),
+            base_url: base_url.into(),
+            reasoning: true,
+            ..test_model()
+        }
+    }
+
+    fn streamed(model: &Model, chunks: &[serde_json::Value]) -> AssistantMessage {
+        let mut output = AssistantMessage::builder()
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let mut state = OpenAiCompletionsProcessor::default();
+        for chunk in chunks {
+            let chunk = serde_json::from_value(serde_json::json!({
+                "choices": [{ "delta": chunk }]
+            }))
+            .unwrap();
+            state.process_chunk(chunk, &mut output);
+        }
+        super::super::sse::SseProcessor::finish(&mut state, &mut output);
+        output
+    }
+
+    fn replayed(model: &Model, history: Vec<Message>) -> serde_json::Value {
+        let mut messages = vec![user_turn("go")];
+        messages.extend(history);
+        let options = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..StreamOptions::default()
+        };
+        build_request_body(model, &None, &messages, &[], &options).messages[1].clone()
+    }
+
+    const REASONING_KEYS: [&str; 4] = [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_text",
+        "reasoning_details",
+    ];
+
+    #[test]
+    fn reasoning_replays_in_the_field_it_streamed_in() {
+        let model = reasoning_model("local", "http://localhost:8080/v1");
+        for field in ["reasoning_content", "reasoning", "reasoning_text"] {
+            let output = streamed(
+                &model,
+                &[
+                    serde_json::json!({ field: "let me " }),
+                    serde_json::json!({ field: "think" }),
+                    serde_json::json!({ "content": "answer" }),
+                ],
+            );
+            assert_eq!(
+                output.content[0],
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: "let me think".into(),
+                    signature: Some(field.into()),
+                })
+            );
+            let message = replayed(&model, vec![Message::Assistant(output)]);
+            assert_eq!(message["content"], "answer");
+            assert_eq!(message[field], "let me think");
+            for other in REASONING_KEYS.iter().filter(|key| **key != field) {
+                assert!(message.get(other).is_none(), "{other} in {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_non_empty_reasoning_field_wins() {
+        let model = reasoning_model("chutes", "https://llm.chutes.ai/v1");
+        let output = streamed(
+            &model,
+            &[serde_json::json!({
+                "reasoning_content": "",
+                "reasoning": "once",
+                "reasoning_text": "once",
+            })],
+        );
+        assert_eq!(output.thinking().as_deref(), Some("once"));
+        assert_eq!(
+            replayed(&model, vec![Message::Assistant(output)])["reasoning"],
+            "once"
+        );
+    }
+
+    #[test]
+    fn openrouter_reasoning_details_are_merged_and_replayed_whole() {
+        let model = test_model();
+        let output = streamed(
+            &model,
+            &[
+                serde_json::json!({
+                    "reasoning": "think ",
+                    "reasoning_details": [{
+                        "type": "reasoning.text", "text": "think ", "format": "anthropic", "index": 0
+                    }],
+                }),
+                serde_json::json!({
+                    "reasoning": "more",
+                    "reasoning_details": [{ "type": "reasoning.text", "text": "more", "index": 0 }],
+                }),
+                serde_json::json!({ "content": "hi" }),
+                serde_json::json!({
+                    "reasoning_details": [{ "type": "reasoning.encrypted", "data": "enc", "index": 1 }],
+                }),
+            ],
+        );
+        assert_eq!(output.content.len(), 2);
+        assert_eq!(output.thinking().as_deref(), Some("think more"));
+        let message = replayed(&model, vec![Message::Assistant(output)]);
+        assert_eq!(message["content"], "hi");
+        assert_eq!(
+            message["reasoning_details"],
+            serde_json::json!([
+                { "type": "reasoning.text", "text": "think more", "format": "anthropic", "index": 0 },
+                { "type": "reasoning.encrypted", "data": "enc", "index": 1 },
+            ])
+        );
+        assert!(message.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn details_arriving_after_text_get_their_own_thinking_block() {
+        let model = test_model();
+        let output = streamed(
+            &model,
+            &[
+                serde_json::json!({ "content": "hi" }),
+                serde_json::json!({
+                    "reasoning_details": [{ "type": "reasoning.encrypted", "data": "enc" }],
+                }),
+            ],
+        );
+        assert!(matches!(
+            &output.content[1],
+            AssistantContentPart::Thinking(ThinkingContent::Thinking { thinking, signature: Some(_) })
+                if thinking.is_empty()
+        ));
+        let message = replayed(&model, vec![Message::Assistant(output)]);
+        assert_eq!(message["content"], "hi");
+        assert_eq!(message["reasoning_details"][0]["data"], "enc");
+    }
+
+    #[test]
+    fn deepseek_always_gets_reasoning_content() {
+        let model = reasoning_model("deepseek", "https://api.deepseek.com");
+        let output = streamed(
+            &model,
+            &[
+                serde_json::json!({ "reasoning": "hmm" }),
+                serde_json::json!({ "content": "ok" }),
+            ],
+        );
+        let message = replayed(&model, vec![Message::Assistant(output)]);
+        assert_eq!(message["reasoning_content"], "hmm");
+        assert!(message.get("reasoning").is_none());
+
+        let plain = streamed(&model, &[serde_json::json!({ "content": "ok" })]);
+        assert_eq!(
+            replayed(&model, vec![Message::Assistant(plain)])["reasoning_content"],
+            ""
+        );
+    }
+
+    #[test]
+    fn unsigned_reasoning_stays_visible_as_text() {
+        let model = reasoning_model("local", "http://localhost:8080/v1");
+        let mut output = streamed(
+            &model,
+            &[
+                serde_json::json!({ "reasoning": "trace" }),
+                serde_json::json!({ "content": "answer" }),
+            ],
+        );
+        if let AssistantContentPart::Thinking(thinking) = &mut output.content[0] {
+            *thinking.signature_mut().unwrap() = None;
+        }
+        let message = replayed(&model, vec![Message::Assistant(output)]);
+        assert_eq!(message["content"], "trace\n\nanswer");
+        for key in REASONING_KEYS {
+            assert!(message.get(key).is_none(), "{key} in {message}");
+        }
+    }
+
+    #[test]
+    fn foreign_thinking_never_sends_its_signature() {
+        let model = reasoning_model("local", "http://localhost:8080/v1");
+        let anthropic = AssistantMessage::builder()
+            .content(vec![
+                AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking: "private chain".into(),
+                    signature: Some("sig_anthropic".into()),
+                }),
+                AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                    data: "opaque".into(),
+                }),
+                AssistantContentPart::Text(TextContent {
+                    text: "answer".into(),
+                }),
+            ])
+            .model("claude-sonnet-4-20250514".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let other_completions = streamed(
+            &Model {
+                id: "other".into(),
+                ..model.clone()
+            },
+            &[
+                serde_json::json!({
+                    "reasoning_content": "private chain",
+                    "reasoning_details": [{ "type": "reasoning.encrypted", "data": "opaque" }],
+                }),
+                serde_json::json!({ "content": "answer" }),
+            ],
+        );
+        for foreign in [anthropic, other_completions] {
+            let message = replayed(&model, vec![Message::Assistant(foreign)]);
+            let wire = message.to_string();
+            assert!(!wire.contains("sig_anthropic"), "{wire}");
+            assert!(!wire.contains("opaque"), "{wire}");
+            for key in REASONING_KEYS {
+                assert!(message.get(key).is_none(), "{key} in {wire}");
+            }
+            assert_eq!(message["content"], "private chainanswer");
+        }
     }
 
     fn test_model() -> Model {

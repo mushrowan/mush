@@ -2477,6 +2477,12 @@ mod tests {
                 Api::OpenaiCompletions,
                 "reasoning_content",
             ),
+            (
+                "anthropic/claude-sonnet-4",
+                Provider::OpenRouter,
+                Api::OpenaiCompletions,
+                r#"{"type":"openai-completions.reasoning_details.v1","details":[{"type":"reasoning.encrypted","data":"enc"}]}"#,
+            ),
         ];
         for (id, provider, api, signature) in origins {
             let messages = signed_history(id, provider, api, signature);
