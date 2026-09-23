@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import base64
+import codecs
 import contextvars
 import inspect
 import io
@@ -40,39 +41,146 @@ def emit(event: dict) -> None:
         _proto.write(line + "\n")
 
 
+_STREAM_FRAME_TEXT_CAP = 64 * 1024
+
+
+class _TaggedBuffer(io.RawIOBase):
+    def __init__(self, fallback_fd: int):
+        self._fallback_fd = fallback_fd
+
+    def write(self, data) -> int:
+        view = memoryview(data).cast("B")
+        total = len(view)
+        while view:
+            view = view[os.write(self._fallback_fd, view) :]
+        return total
+
+    def fileno(self) -> int:
+        return self._fallback_fd
+
+    def writable(self) -> bool:
+        return True
+
+
 class _TaggedWriter(io.TextIOBase):
-    def __init__(self, stream: str):
+    def __init__(self, stream: str, fallback_fd: int):
         self._stream = stream
-        self._buffer = ""
+        self._fallback_fd = fallback_fd
+        self._frame_lock = threading.Lock()
+        self._raw = _TaggedBuffer(fallback_fd)
 
     def writable(self) -> bool:
         return True
 
     def write(self, text: str) -> int:
-        text = str(text)
-        self._buffer += text
-        cut = self._buffer.rfind("\n")
-        if cut >= 0:
-            self._emit(self._buffer[: cut + 1])
-            self._buffer = self._buffer[cut + 1 :]
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        if text:
+            cell_id = _current_cell.get()
+            with self._frame_lock:
+                for start in range(0, len(text), _STREAM_FRAME_TEXT_CAP):
+                    emit({"type": self._stream, "id": cell_id, "text": text[start : start + _STREAM_FRAME_TEXT_CAP]})
         return len(text)
 
     def flush(self) -> None:
-        if self._buffer:
-            self._emit(self._buffer)
-            self._buffer = ""
+        pass
 
-    def _emit(self, text: str) -> None:
-        emit({"type": self._stream, "id": _current_cell.get(), "text": text})
+    def fileno(self) -> int:
+        return self._fallback_fd
+
+    @property
+    def buffer(self) -> _TaggedBuffer:
+        return self._raw
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    @property
+    def errors(self) -> str:
+        return "replace"
 
 
-def _pump(fd: int, stream: str) -> None:
-    with os.fdopen(fd, "rb", buffering=0) as raw:
+class _Pump:
+    def __init__(self, read_fd: int, write_fd: int, stream: str):
+        self._read_fd = read_fd
+        self._token_fd = os.dup(write_fd)
+        self._stream = stream
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._lock = threading.Lock()
+        self._watch = None
+        self._held = b""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def drain(self) -> None:
+        token = b"\xff<drain:" + uuid.uuid4().hex.encode() + b">\xff"
+        seen = threading.Event()
+        with self._lock:
+            self._watch = (token, seen)
+        try:
+            os.write(self._token_fd, token)
+            while not seen.wait(0.1):
+                if not self._thread.is_alive():
+                    return
+        except OSError:
+            return
+        finally:
+            with self._lock:
+                self._watch = None
+
+    def _run(self) -> None:
         while True:
-            chunk = raw.read(4096)
+            try:
+                chunk = os.read(self._read_fd, 65536)
+            except OSError:
+                return
             if not chunk:
                 return
-            emit({"type": stream, "id": None, "text": chunk.decode("utf-8", "replace")})
+            self._feed(chunk)
+
+    def _feed(self, chunk: bytes) -> None:
+        data = self._held + chunk
+        self._held = b""
+        with self._lock:
+            watch = self._watch
+        if watch is None:
+            self._emit(data)
+            return
+        token, seen = watch
+        while True:
+            at = data.find(token)
+            if at == -1:
+                break
+            self._emit(data[:at])
+            self._finish_decode()
+            seen.set()
+            data = data[at + len(token) :]
+        hold = 0
+        for size in range(min(len(data), len(token) - 1), 0, -1):
+            if data.endswith(token[:size]):
+                hold = size
+                break
+        if hold:
+            self._held = data[len(data) - hold :]
+            data = data[: len(data) - hold]
+        self._emit(data)
+
+    def _emit(self, data: bytes) -> None:
+        if not data:
+            return
+        text = self._decoder.decode(data)
+        if text:
+            emit({"type": self._stream, "id": None, "text": text})
+
+    def _finish_decode(self) -> None:
+        text = self._decoder.decode(b"", final=True)
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        if text:
+            emit({"type": self._stream, "id": None, "text": text})
+
+
+_pumps: list = []
 
 
 def _capture_fds() -> None:
@@ -80,12 +188,22 @@ def _capture_fds() -> None:
         read_end, write_end = os.pipe()
         os.dup2(write_end, fd)
         os.close(write_end)
-        threading.Thread(target=_pump, args=(read_end, stream), daemon=True).start()
-    sys.stdout = _TaggedWriter("stdout")
-    sys.stderr = _TaggedWriter("stderr")
+        _pumps.append(_Pump(read_end, fd, stream))
+    sys.stdout = _TaggedWriter("stdout", os.dup(1))
+    sys.stderr = _TaggedWriter("stderr", os.dup(2))
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
     os.close(devnull)
+
+
+def _drain_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+    for pump in _pumps:
+        pump.drain()
 
 
 async def host_request(kind: str, payload=None):
@@ -718,13 +836,13 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
             }
         )
     finally:
-        sys.stdout.flush()
-        sys.stderr.flush()
-        _current_cell.reset(token)
-        _current_origin.reset(origin_token)
         with _interrupt_lock:
             _running["id"] = None
             _running["task"] = None
+        _drain_output()
+        _current_cell.reset(token)
+        _current_origin.reset(origin_token)
+        with _interrupt_lock:
             _finish_locked(cell_id)
         emit({"type": "done", "id": cell_id, "ok": ok})
 

@@ -55,6 +55,7 @@ pub struct CellDetails {
     pub images: usize,
     pub kernel_restarted: bool,
     pub sent_messages: Vec<SentMessage>,
+    pub background: String,
 }
 
 impl CellDetails {
@@ -74,6 +75,7 @@ impl CellDetails {
         for part in [self.stdout.as_str(), self.stderr.as_str()]
             .into_iter()
             .chain(self.result.as_deref())
+            .chain([self.background.as_str()])
         {
             if part.trim().is_empty() {
                 continue;
@@ -632,6 +634,13 @@ pub fn format_cell_output(output: &CellOutput) -> String {
             text.push_str(&error.traceback.join("\n"));
         }
     }
+    if !output.background.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("[background output (unattributed)]\n");
+        text.push_str(&output.background);
+    }
     if text.is_empty() {
         text.push_str("(no output)");
     }
@@ -703,6 +712,7 @@ impl AgentTool for IpythonTool {
                         .as_ref()
                         .map(|host| host.take_sent_messages(&exec_id))
                         .unwrap_or_default(),
+                    background: run.output.background.clone(),
                 };
                 let images = attached_images(&run.output.attachments, &mut text);
                 let mut details = details;
@@ -1138,7 +1148,8 @@ mod tests {
         assert!(result.outcome.is_success(), "{}", extract_text(&result));
         let seen = seen.lock().unwrap().clone();
         assert!(seen.len() >= 2, "{seen:?}");
-        assert_eq!(seen[0], "tick 0", "{seen:?}");
+        assert!(seen[0].starts_with("tick"), "{seen:?}");
+        assert!(!seen[0].contains("tick 1"), "{seen:?}");
         assert_eq!(seen.last().unwrap(), "tick 0\ntick 1\ntick 2", "{seen:?}");
         tool.shutdown().await;
     }
@@ -1180,6 +1191,7 @@ mod tests {
         let output = CellOutput {
             stdout: "out".into(),
             attachments: Vec::new(),
+            background: "late\n".into(),
             stderr: "warn".into(),
             result: Some("7".into()),
             error: Some(CellError {
@@ -1193,7 +1205,7 @@ mod tests {
 
         assert_eq!(
             format_cell_output(&output),
-            "out\n[stderr]\nwarn\n7\nKeyboardInterrupt: interrupted"
+            "out\n[stderr]\nwarn\n7\nKeyboardInterrupt: interrupted\n[background output (unattributed)]\nlate\n"
         );
     }
 }

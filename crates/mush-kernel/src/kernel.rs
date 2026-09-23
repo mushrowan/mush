@@ -16,6 +16,7 @@ use crate::protocol::{Event, PROTOCOL_VERSION, Request};
 const SHIM: &str = include_str!("../shim/mush_kernel.py");
 const STDERR_TAIL_LINES: usize = 200;
 const BUSY_INTERRUPT_INTERVAL: Duration = Duration::from_millis(500);
+pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
@@ -88,6 +89,7 @@ pub struct CellOutput {
     pub result: Option<String>,
     pub error: Option<CellError>,
     pub attachments: Vec<Attachment>,
+    pub background: String,
     pub ok: bool,
     pub duration: Duration,
 }
@@ -112,8 +114,16 @@ impl CellOutput {
     }
 }
 
+#[derive(Default)]
+struct Background {
+    text: String,
+    chars: usize,
+    truncated: bool,
+}
+
 struct Shared {
     cells: Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
+    background: Mutex<Background>,
     current: Mutex<Option<String>>,
     running: Mutex<Option<String>>,
     idle: tokio::sync::Notify,
@@ -184,6 +194,7 @@ impl Kernel {
 
         let shared = Arc::new(Shared {
             cells: Mutex::new(HashMap::new()),
+            background: Mutex::new(Background::default()),
             current: Mutex::new(None),
             running: Mutex::new(None),
             idle: tokio::sync::Notify::new(),
@@ -289,6 +300,7 @@ impl Kernel {
         while let Some(event) = rx.recv().await {
             on_event(&event);
             match event {
+                Event::Stdout { id: None, .. } | Event::Stderr { id: None, .. } => {}
                 Event::Stdout { text, .. } => output.stdout.push_str(&text),
                 Event::Stderr { text, .. } => output.stderr.push_str(&text),
                 Event::Result { text, .. } => output.result = Some(text),
@@ -319,6 +331,7 @@ impl Kernel {
                 }
                 Event::Done { ok, .. } => {
                     output.ok = ok;
+                    output.background = self.shared.take_background();
                     finished = true;
                     break;
                 }
@@ -597,10 +610,69 @@ impl Shared {
         }
     }
 
+    fn owns(&self, id: Option<&str>) -> bool {
+        id.is_some_and(|id| {
+            self.cells
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(id)
+        })
+    }
+
+    fn push_background(&self, text: &str) {
+        let mut background = self
+            .background
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if background.truncated {
+            return;
+        }
+        let room = MAX_BACKGROUND_OUTPUT_CHARS - background.chars;
+        let mut chars = text.char_indices();
+        match chars.nth(room) {
+            Some((cut, _)) => {
+                background.text.push_str(&text[..cut]);
+                background.chars = MAX_BACKGROUND_OUTPUT_CHARS;
+                background.truncated = true;
+            }
+            None => {
+                background.text.push_str(text);
+                background.chars += text.chars().count();
+            }
+        }
+    }
+
+    fn take_background(&self) -> String {
+        let background = std::mem::take(
+            &mut *self
+                .background
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        let mut text = background.text;
+        if background.truncated {
+            text.push_str(&format!(
+                "\n[... background output truncated at {MAX_BACKGROUND_OUTPUT_CHARS} chars ...]"
+            ));
+        }
+        text
+    }
+
     fn route(&self, event: Event) {
         if let Event::Done { id, .. } = &event {
             self.finish_running(id);
         }
+        let event = match event {
+            Event::Stdout { id, text } if !self.owns(id.as_deref()) => {
+                self.push_background(&text);
+                Event::Stdout { id: None, text }
+            }
+            Event::Stderr { id, text } if !self.owns(id.as_deref()) => {
+                self.push_background(&text);
+                Event::Stderr { id: None, text }
+            }
+            other => other,
+        };
         let target = event.cell_id().map(str::to_string).or_else(|| {
             self.current
                 .lock()

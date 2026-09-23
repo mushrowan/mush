@@ -74,7 +74,7 @@ async fn top_level_await_works() {
 }
 
 #[tokio::test]
-async fn raw_fd_writes_from_subprocesses_are_captured_not_mixed_into_the_protocol() {
+async fn raw_fd_writes_from_subprocesses_are_background_output_not_mixed_into_the_protocol() {
     let kernel = kernel().await;
 
     let output = kernel
@@ -82,9 +82,66 @@ async fn raw_fd_writes_from_subprocesses_are_captured_not_mixed_into_the_protoco
         .await
         .unwrap();
 
-    assert!(output.stdout.contains("raw\n"), "{:?}", output.stdout);
-    assert!(output.stdout.contains("tagged\n"), "{:?}", output.stdout);
+    assert_eq!(output.background, "raw\n");
+    assert_eq!(output.stdout, "tagged\n");
     assert!(output.ok);
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn raw_output_at_the_end_of_a_cell_is_drained_before_done() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute("import os\nos.write(1, b'last words\\n')\nx = 1")
+        .await
+        .unwrap();
+    let next = kernel.execute("2").await.unwrap();
+
+    assert_eq!(output.background, "last words\n");
+    assert_eq!(next.background, "");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stdout_behaves_like_a_real_stream() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute(
+            "import sys, subprocess\nsys.stdout.buffer.write(b'bytes\\n')\nsubprocess.run(['echo', 'child'], stdout=sys.stdout)\n(sys.stdout.encoding, sys.stdout.fileno() > 2)",
+        )
+        .await
+        .unwrap();
+
+    assert!(output.ok, "{output:?}");
+    assert_eq!(output.result.as_deref(), Some("('utf-8', True)"));
+    assert!(output.background.contains("bytes\n"), "{output:?}");
+    assert!(output.background.contains("child\n"), "{output:?}");
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_partial_line_streams_before_the_cell_ends() {
+    let kernel = kernel().await;
+    let mut first = None;
+
+    let output = kernel
+        .execute_streaming(
+            "import time\nprint('a', end='')\ntime.sleep(0.2)\nprint('b')",
+            |event| {
+                if first.is_none()
+                    && let mush_kernel::Event::Stdout { text, .. } = event
+                {
+                    first = Some(text.clone());
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first.as_deref(), Some("a"));
+    assert_eq!(output.stdout, "ab\n");
     kernel.shutdown().await.unwrap();
 }
 

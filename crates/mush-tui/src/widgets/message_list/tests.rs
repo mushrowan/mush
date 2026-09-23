@@ -1730,6 +1730,7 @@ fn cell_details() -> mush_tools::ipython::CellDetails {
         images: 2,
         kernel_restarted: false,
         sent_messages: vec![],
+        background: String::new(),
     }
 }
 
@@ -1794,6 +1795,7 @@ fn a_sent_agent_message_shows_as_a_row_and_hides_the_receipt_dict() {
             status: "delivered".into(),
             text: "check the regression test too".into(),
         }],
+        background: String::new(),
     };
     app.messages.push(cell_message(cell, ToolCallStatus::Done));
 
@@ -1830,6 +1832,7 @@ fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
         images: 0,
         kernel_restarted: false,
         sent_messages: vec![],
+        background: String::new(),
     };
     app.messages.push(cell_message(cell, ToolCallStatus::Error));
 

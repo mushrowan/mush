@@ -215,6 +215,7 @@ impl CellOutputView {
                     };
                     push(&traceback, theme.dim, &mut blocks);
                 }
+                push(&cell.background, theme.dim, &mut blocks);
             }
             None => {
                 if let Some(output) = &tc.output {
