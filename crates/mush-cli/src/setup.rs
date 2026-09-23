@@ -209,7 +209,8 @@ impl AppSetup {
     #[tracing::instrument(name = "startup", skip_all)]
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
-        let client = ClientSetup::init(args.client, timer.as_mut()).await?;
+        let mut client = ClientSetup::init(args.client, timer.as_mut()).await?;
+        apply_prompt_overrides(&mut client.project_context, args.append_system.as_deref());
         let ClientSetup {
             cfg,
             model,
@@ -278,7 +279,7 @@ impl AppSetup {
 
         init_skill_tools(project_context, !classic_tools, &mut tools);
 
-        let mut system_prompt = args
+        let system_prompt = args
             .system
             .or(cfg.system_prompt.clone())
             .unwrap_or_else(|| {
@@ -293,10 +294,6 @@ impl AppSetup {
                     build_system_prompt_from_context(project_context, cwd)
                 }
             });
-        if let Some(extra) = args.append_system.as_deref().map(str::trim) {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(extra);
-        }
         if let Some(t) = &mut timer {
             t.phase("system prompt");
         }
@@ -788,10 +785,6 @@ pub fn build_rlm_system_prompt(
         prompt.push_str("\n\n");
         prompt.push_str(OBSERVE_PROMPT);
     }
-    if let Some(extra) = &context.append_system_prompt {
-        prompt.push_str("\n\n");
-        prompt.push_str(extra.content.trim_end());
-    }
     push_project_context(&mut prompt, &context.agents_md);
     if context
         .skills
@@ -806,6 +799,7 @@ pub fn build_rlm_system_prompt(
         );
         prompt.push_str(&format_available_skills(&context.skills));
     }
+    push_append(&mut prompt, context);
     prompt
 }
 
@@ -818,10 +812,6 @@ pub fn build_system_prompt_from_context(
         Some(file) => file.content.trim_end().to_string(),
         None => default_system_prompt(&cwd_str),
     };
-    if let Some(extra) = &context.append_system_prompt {
-        prompt.push_str("\n\n");
-        prompt.push_str(extra.content.trim_end());
-    }
 
     push_project_context(&mut prompt, &context.agents_md);
 
@@ -837,8 +827,42 @@ pub fn build_system_prompt_from_context(
         );
         prompt.push_str(&format_available_skills(&context.skills));
     }
-
+    push_append(&mut prompt, context);
     prompt
+}
+
+fn push_append(prompt: &mut String, context: &loader::ProjectContext) {
+    if let Some(extra) = &context.append_system_prompt {
+        prompt.push_str("\n\n");
+        prompt.push_str(extra.content.trim_end());
+    }
+}
+
+fn prompt_input(value: &str) -> mush_ext::PromptFile {
+    let path = std::path::Path::new(value);
+    if path.is_file() {
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                return mush_ext::PromptFile {
+                    path: path.to_path_buf(),
+                    content,
+                };
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = value, "could not read the prompt file, using the text itself");
+            }
+        }
+    }
+    mush_ext::PromptFile {
+        path: std::path::PathBuf::new(),
+        content: value.to_string(),
+    }
+}
+
+pub fn apply_prompt_overrides(context: &mut loader::ProjectContext, append: Option<&str>) {
+    if let Some(append) = append.filter(|text| !text.trim().is_empty()) {
+        context.append_system_prompt = Some(prompt_input(append));
+    }
 }
 
 fn push_project_context(prompt: &mut String, agents: &[loader::AgentsMd]) {
@@ -1282,9 +1306,47 @@ mod tests {
 
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
-        assert!(prompt.starts_with("you are a terse reviewer\n\nalways answer in british english"));
+        assert!(prompt.starts_with("you are a terse reviewer"));
+        assert!(prompt.ends_with("\n\nalways answer in british english"));
         assert!(!prompt.contains("You are running inside mush"));
         assert!(prompt.contains("## /repo/AGENTS.md\n\nproject rules"));
+    }
+
+    #[test]
+    fn the_append_prompt_comes_last_and_the_cli_value_replaces_the_file() {
+        let mut context = ProjectContext {
+            agents_md: vec![mush_ext::AgentsMd {
+                path: "/repo/AGENTS.md".into(),
+                content: "repo rules".into(),
+            }],
+            skills: vec![Skill {
+                name: "nix".into(),
+                description: "nix things".into(),
+                path: "/skills/nix/SKILL.md".into(),
+                source: mush_ext::SkillSource::User,
+                disable_model_invocation: false,
+            }],
+            append_system_prompt: Some(mush_ext::PromptFile {
+                path: "/repo/.mush/APPEND_SYSTEM.md".into(),
+                content: "from the file".into(),
+            }),
+            ..ProjectContext::default()
+        };
+        let root = RlmRole::root(2);
+        let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"), &[], &root);
+        assert!(prompt.ends_with("</available_skills>\n\nfrom the file"));
+
+        apply_prompt_overrides(&mut context, Some("from the cli"));
+        let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"), &[], &root);
+        assert!(prompt.ends_with("</available_skills>\n\nfrom the cli"));
+        assert!(!prompt.contains("from the file"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("extra.md");
+        std::fs::write(&file, "read from disk\n").unwrap();
+        apply_prompt_overrides(&mut context, file.to_str());
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        assert!(prompt.ends_with("\n\nread from disk"));
     }
 
     #[test]
