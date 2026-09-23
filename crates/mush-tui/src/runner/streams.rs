@@ -1194,6 +1194,7 @@ mod tests {
             skills: Default::default(),
             autonomous: Default::default(),
             worker_opener: None,
+            agent_roster: None,
         }
     }
 

@@ -25,8 +25,8 @@ use mush_runtime::AgentConnection;
 use crate::screen::Screen;
 
 pub use self::config::{
-    ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot,
-    SkillCatalogue, TuiConfig, WorkerOpener, WorkerTarget,
+    AgentRoster, ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver,
+    SessionSnapshot, SkillCatalogue, TuiConfig, WorkerOpener, WorkerTarget,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver, canonical_dir};
@@ -139,7 +139,10 @@ async fn run_tui_with(
         runtime.install_discovery_updates(rx);
     }
     if tui_config.open_session_picker {
-        crate::slash::commands::open_sessions_picker(&mut runtime.session.app);
+        crate::slash::commands::open_sessions_picker(
+            &mut runtime.session.app,
+            tui_config.agent_roster.clone(),
+        );
     }
     if let Some(notice) = tui_config.startup_notice.take() {
         runtime.session.app.push_system_message(notice);

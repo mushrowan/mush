@@ -107,7 +107,7 @@ pub async fn handle(
             None
         }
         SlashAction::Sessions => {
-            open_sessions_picker(app);
+            open_sessions_picker(app, tui_config.agent_roster.clone());
             None
         }
         SlashAction::Model {
@@ -362,7 +362,7 @@ fn open_message_picker(
     app.open_message_picker(purpose, items);
 }
 
-pub fn open_sessions_picker(app: &mut App) {
+pub fn open_sessions_picker(app: &mut App, roster: Option<crate::runner::AgentRoster>) {
     let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
     match store.list_paths() {
         Ok(paths) => {
@@ -372,6 +372,15 @@ pub fn open_sessions_picker(app: &mut App) {
                 .into_owned();
             let (tx, rx) = std::sync::mpsc::channel();
             app.open_session_picker_streaming(rx, cwd);
+            if let Some(roster) = roster
+                && let Some(picker) = app.interaction.session_picker.as_mut()
+            {
+                let (live_tx, live_rx) = std::sync::mpsc::channel();
+                picker.watch_roster(live_rx);
+                std::thread::spawn(move || {
+                    let _ = live_tx.send(roster());
+                });
+            }
             std::thread::spawn(move || {
                 for path in paths {
                     if let Ok(meta) = mush_session::load_meta(&path)

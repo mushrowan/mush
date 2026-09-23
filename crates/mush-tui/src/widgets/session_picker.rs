@@ -119,8 +119,12 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         } else {
             String::new()
         };
+        let live = picker.live.get(&meta.id).copied();
+        let live_label = live
+            .map(|live| format!("{}  ", live.label()))
+            .unwrap_or_default();
         let meta_right = format!("{cwd_display}{msgs}  {age}");
-        let meta_width = meta_right.len() + 1;
+        let meta_width = live_label.len() + meta_right.len() + 1;
 
         let max_title = (list_area.width as usize).saturating_sub(prefix.len() + meta_width);
         let title_display = if title.chars().count() > max_title {
@@ -134,13 +138,26 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         };
 
         let padding = (list_area.width as usize)
-            .saturating_sub(prefix.len() + title_display.len() + meta_right.len())
+            .saturating_sub(
+                prefix.len() + title_display.len() + live_label.len() + meta_right.len(),
+            )
             .max(1);
+        let live_style = match live {
+            Some(
+                crate::session_picker::Liveness::Stale | crate::session_picker::Liveness::Failed,
+            ) => theme.tool_error,
+            Some(crate::session_picker::Liveness::Working) => theme.selection_marker,
+            Some(
+                crate::session_picker::Liveness::Idle | crate::session_picker::Liveness::Paused,
+            )
+            | None => theme.dim,
+        };
 
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
             Span::styled(title_display, style),
             Span::raw(" ".repeat(padding)),
+            Span::styled(live_label, live_style),
             Span::styled(meta_right, theme.dim),
         ]));
     }
@@ -160,6 +177,54 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meta(id: &str, title: &str) -> mush_session::SessionMeta {
+        mush_session::SessionMeta {
+            id: mush_ai::types::SessionId::from(id.to_string()),
+            title: Some(title.into()),
+            model_id: "m".into(),
+            created_at: mush_ai::types::Timestamp::now(),
+            updated_at: mush_ai::types::Timestamp::now(),
+            message_count: 3,
+            cwd: "/tmp".into(),
+            parent: None,
+            subagent_model: None,
+            paused: None,
+            rlm_max_depth: None,
+            lifecycle: mush_session::Lifecycle::Live,
+        }
+    }
+
+    #[test]
+    fn a_session_with_a_live_worker_shows_its_liveness() {
+        let mut picker = SessionPickerState::new(
+            vec![meta("hung", "hung agent"), meta("saved", "saved agent")],
+            "/tmp".into(),
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        picker.watch_roster(rx);
+        tx.send(vec![(
+            mush_ai::types::SessionId::from("hung".to_string()),
+            crate::session_picker::Liveness::Stale,
+        )])
+        .unwrap();
+        assert!(picker.drain_incoming());
+
+        let buffer = crate::test_support::draw_to_buffer(90, 20, |frame| {
+            render(frame, &picker, &Theme::default());
+        });
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let hung = rows.iter().find(|row| row.contains("hung agent")).unwrap();
+        let saved = rows.iter().find(|row| row.contains("saved agent")).unwrap();
+        assert!(hung.contains("stale"), "{hung}");
+        assert!(!saved.contains("stale"), "{saved}");
+    }
 
     #[test]
     fn shorten_non_home_path() {

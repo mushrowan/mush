@@ -285,6 +285,45 @@ pub fn table(rows: &[AgentRow]) -> String {
     out
 }
 
+fn liveness(status: AgentStatus) -> Option<mush_tui::session_picker::Liveness> {
+    use mush_tui::session_picker::Liveness;
+    match status {
+        AgentStatus::Working => Some(Liveness::Working),
+        AgentStatus::Failed => Some(Liveness::Failed),
+        AgentStatus::Stale => Some(Liveness::Stale),
+        AgentStatus::Paused => Some(Liveness::Paused),
+        AgentStatus::Idle => Some(Liveness::Idle),
+        AgentStatus::Saved | AgentStatus::Archived => None,
+    }
+}
+
+#[must_use]
+pub fn roster_rows(workers: &[WorkerDescriptor]) -> mush_tui::session_picker::Roster {
+    workers
+        .iter()
+        .filter_map(|worker| {
+            let live = liveness(worker_row(worker).status)?;
+            Some((
+                mush_ai::types::SessionId::from(worker.session_id.clone()),
+                live,
+            ))
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn roster() -> mush_tui::AgentRoster {
+    std::sync::Arc::new(|| {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return Vec::new();
+        };
+        roster_rows(&runtime.block_on(live()).unwrap_or_default())
+    })
+}
+
 pub async fn live() -> Result<Vec<WorkerDescriptor>> {
     let socket = mush_daemon::daemon_socket_path();
     if std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -562,6 +601,28 @@ mod tests {
         ));
         assert!(selected(&workers, "a").is_err());
         assert!(selected(&workers, "z").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_agents_view_roster_carries_each_workers_liveness() {
+        use mush_tui::session_picker::Liveness;
+        let mut silent = worker("aaaaaaaa1", false, 100);
+        silent.last_heard_from_at = Some(1);
+        let mut failed = worker("cccccccc3", false, 100);
+        failed.failed = Some("gone".into());
+        let roster = roster_rows(&[silent, worker("bbbbbbbb2", true, 100), failed]);
+        let found: Vec<(String, Liveness)> = roster
+            .into_iter()
+            .map(|(id, live)| (id.to_string(), live))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("aaaaaaaa1".to_string(), Liveness::Stale),
+                ("bbbbbbbb2".to_string(), Liveness::Working),
+                ("cccccccc3".to_string(), Liveness::Failed),
+            ]
+        );
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub enum WorkerTarget {
     Resume(mush_ai::types::SessionId),
 }
 
+pub type AgentRoster = std::sync::Arc<dyn Fn() -> crate::session_picker::Roster + Send + Sync>;
+
 pub type WorkerOpener = std::sync::Arc<
     dyn Fn(
             WorkerTarget,
@@ -79,6 +81,7 @@ pub struct TuiConfig {
     pub skills: SkillCatalogue,
     pub autonomous: mush_runtime::AutonomousDefaults,
     pub worker_opener: Option<WorkerOpener>,
+    pub agent_roster: Option<AgentRoster>,
 }
 
 impl TuiConfig {
@@ -191,6 +194,7 @@ impl TuiConfig {
             skills: SkillCatalogue::default(),
             autonomous: Default::default(),
             worker_opener: None,
+            agent_roster: None,
         }
     }
 }

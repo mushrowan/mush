@@ -1102,6 +1102,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let mut tui_config = client_config(&cli, &client, &log_buffer, None, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             tui_config.worker_opener = Some(daemon::worker_opener(cli.worker_args()));
+            tui_config.agent_roster = Some(agents::roster());
             if connection.worker_build() != mush_daemon::build_id() {
                 tui_config.startup_notice = Some(format!(
                     "this worker is from another build of mush. mush stop {} and start again to pick up the new one",
@@ -1739,6 +1740,7 @@ fn client_config(
         skills: client.skills(),
         autonomous: client.cfg.autonomous.settings(),
         worker_opener: None,
+        agent_roster: None,
     }
 }
 
