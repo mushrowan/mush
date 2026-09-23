@@ -254,6 +254,7 @@ mod tests {
                 before_user_message: 2,
             }),
             ClientCommand::Abort,
+            ClientCommand::AbortAndSendQueued,
         ];
         for command in commands {
             let line = encode(&command).unwrap();

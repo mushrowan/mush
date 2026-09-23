@@ -41,6 +41,7 @@ pub enum ClientCommand {
         text: String,
     },
     Abort,
+    AbortAndSendQueued,
     ConfirmTool {
         allow: bool,
     },
@@ -1381,6 +1382,31 @@ impl InProcessConnection {
         events
     }
 
+    async fn take_user_steers(&mut self) -> Vec<Message> {
+        self.runtime
+            .steering_queue
+            .lock()
+            .await
+            .drain(..)
+            .filter(|message| matches!(message, Message::User(_)))
+            .collect()
+    }
+
+    async fn send_steers(&mut self, steers: Vec<Message>) {
+        if steers.is_empty() || self.compaction.is_some() {
+            return;
+        }
+        for steer in steers {
+            self.runtime.conversation.append_message(steer);
+        }
+        if self.runtime.pending_prompt.is_none() {
+            let mut prompt = PendingPrompt::text("");
+            prompt.mark_persisted();
+            self.runtime.pending_prompt = Some(prompt);
+        }
+        self.start_pending_prompt().await;
+    }
+
     fn try_poll_confirm(&mut self) -> Option<ClientEvent> {
         let meta = self.runtime.turns.meta_mut(PRIMARY_PANE)?;
         if meta.cancel.is_cancelled() {
@@ -1780,6 +1806,12 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::Abort => {
                 let events = self.abort().await;
                 self.queued.extend(events);
+            }
+            ClientCommand::AbortAndSendQueued => {
+                let steers = self.take_user_steers().await;
+                let events = self.abort().await;
+                self.queued.extend(events);
+                self.send_steers(steers).await;
             }
             ClientCommand::ConfirmTool { allow } => self.confirm(allow).await,
             ClientCommand::AnswerKernelBusy(choice) => {
@@ -2662,6 +2694,107 @@ mod tests {
         let asked = requests.lock().unwrap();
         assert_eq!(asked.len(), 2, "{asked:?}");
         assert!(matches!(asked[1].messages.last(), Some(Message::User(u)) if u.text() == "again"));
+    }
+
+    #[tokio::test]
+    async fn aborting_with_queued_steers_sends_them_together_in_a_new_turn() {
+        let (mut connection, requests) = crate::testing::hanging_tool_connection();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        wait_for(&mut connection, |event| {
+            matches!(
+                event,
+                ClientEvent::Agent {
+                    event: AgentEvent::ToolExecStart { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+        for text in ["first", "second"] {
+            connection
+                .send(ClientCommand::Steer {
+                    text: text.into(),
+                    images: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let events = connection
+            .send(ClientCommand::AbortAndSendQueued)
+            .await
+            .unwrap();
+        let ended = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::TurnEnded { cancelled: true }));
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ClientEvent::TurnStarted));
+        assert!(
+            matches!((ended, started), (Some(ended), Some(started)) if ended < started),
+            "{events:?}"
+        );
+
+        drain_turn(&mut connection).await;
+        assert!(connection.runtime.steering_queue.lock().await.is_empty());
+        let asked = requests.lock().unwrap();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        let texts: Vec<String> = asked[1]
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["start", "first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn aborting_with_no_steers_only_aborts() {
+        let (mut connection, requests) = crate::testing::hanging_tool_connection();
+        connection
+            .send(ClientCommand::Prompt {
+                text: "start".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        wait_for(&mut connection, |event| {
+            matches!(
+                event,
+                ClientEvent::Agent {
+                    event: AgentEvent::ToolExecStart { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+
+        let events = connection
+            .send(ClientCommand::AbortAndSendQueued)
+            .await
+            .unwrap();
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnStarted)),
+            "{events:?}"
+        );
+        assert!(!connection.state().turn_active, "{:?}", connection.state());
+        assert!(
+            !connection.state().pending_prompt,
+            "{:?}",
+            connection.state()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

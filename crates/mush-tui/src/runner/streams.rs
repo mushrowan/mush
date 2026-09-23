@@ -234,12 +234,15 @@ async fn reconcile_openrouter_generation(
 pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
     let events = session
         .connection
-        .send(mush_runtime::ClientCommand::Abort)
+        .send(mush_runtime::ClientCommand::AbortAndSendQueued)
         .await
         .unwrap_or_default();
+    let mut restarted = false;
     for event in events {
-        if let mush_runtime::ClientEvent::ToolsCancelled(ids) = event {
-            show_cancelled_tools(session, &ids);
+        match event {
+            mush_runtime::ClientEvent::ToolsCancelled(ids) => show_cancelled_tools(session, &ids),
+            mush_runtime::ClientEvent::TurnStarted => restarted = true,
+            _ => {}
         }
     }
 
@@ -256,6 +259,12 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
         }
         .into(),
     );
+    if restarted {
+        pane.app.promote_queued_messages();
+        pane.app.begin_turn();
+        pane.app.start_streaming();
+        return;
+    }
     let restored = pane.app.take_queued_messages();
     if !restored.is_empty() {
         let text = restored.join("\n");
@@ -1284,7 +1293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn abort_focused_stream_restores_queued_messages_without_duplicates() {
+    async fn abort_focused_stream_sends_queued_steers_as_one_new_turn() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
         let mut stream_state = StreamState::new();
@@ -1333,11 +1342,32 @@ mod tests {
 
         abort_focused_stream(&mut session, &mut stream_state).await;
 
-        let restored_input = &session.app.input.text;
-        assert_eq!(
-            restored_input, "first steer\nsecond steer",
-            "abort must restore each queued message exactly once, got: {restored_input:?}"
+        assert!(
+            session.app.input.text.is_empty(),
+            "{:?}",
+            session.app.input.text
         );
+        let users: Vec<&str> = session
+            .app
+            .messages
+            .iter()
+            .filter(|m| matches!(m.role, crate::app::MessageRole::User))
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(users, ["first steer", "second steer"]);
+        assert!(session.app.stream.active);
+        let sent: Vec<String> = session
+            .in_process()
+            .runtime
+            .conversation
+            .context()
+            .iter()
+            .filter_map(|message| match message {
+                mush_ai::types::Message::User(user) => Some(user.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, ["first steer", "second steer"]);
         assert!(
             session
                 .in_process()

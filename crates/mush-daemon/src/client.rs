@@ -27,6 +27,7 @@ fn timeout_for(command: &ClientCommand) -> Duration {
     match command {
         ClientCommand::Prompt { .. }
         | ClientCommand::QueuePrompt { .. }
+        | ClientCommand::AbortAndSendQueued
         | ClientCommand::Compact { .. }
         | ClientCommand::CompactionRetry
         | ClientCommand::CompactionFallback
