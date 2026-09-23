@@ -140,6 +140,7 @@ pub struct App {
     pub session_title: Option<String>,
     pub detail: ChatDetail,
     pub children: Vec<mush_runtime::ChildSummary>,
+    children_spend: (TokenCount, Dollars),
     pub goal: Option<mush_runtime::Goal>,
     pub jobs: Vec<mush_runtime::Job>,
     pub autonomous: Option<mush_runtime::AutonomousStatus>,
@@ -234,6 +235,7 @@ impl App {
             session_title: None,
             detail: ChatDetail::default(),
             children: Vec::new(),
+            children_spend: (TokenCount::ZERO, Dollars::ZERO),
             goal: None,
             jobs: Vec::new(),
             autonomous: None,
@@ -313,15 +315,24 @@ impl App {
             Some(known) => *known = child,
             None => self.children.push(child),
         }
+        self.children_spend = self.children.iter().fold(
+            (TokenCount::ZERO, Dollars::ZERO),
+            |(tokens, cost), child| {
+                (
+                    tokens + child.usage.total_tokens(),
+                    cost + child.cost.total(),
+                )
+            },
+        );
     }
 
     #[must_use]
-    pub fn session_spend(&self) -> mush_ai::types::Dollars {
-        self.children
-            .iter()
-            .fold(self.stats.total_cost, |total, child| {
-                total + child.cost.total()
-            })
+    pub fn session_spend(&self) -> (TokenCount, Dollars) {
+        let (tokens, cost) = self.children_spend;
+        (
+            self.stats.total_tokens + tokens,
+            self.stats.total_cost + cost,
+        )
     }
 
     #[must_use]

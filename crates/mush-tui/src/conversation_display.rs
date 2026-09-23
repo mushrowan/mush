@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use mush_agent::summarise_tool_args;
 use mush_ai::types::{
     AssistantContentPart, AssistantMessage, Dollars, Message, Model, ModelId, Provider, ToolCallId,
-    ToolOutcome, ToolResultContentPart, ToolResultMessage,
+    ToolOutcome, ToolResultContentPart, ToolResultMessage, Usage,
 };
 
 use crate::app::{
@@ -168,15 +168,20 @@ fn assistant_cost(models: &mut ModelCache, assistant: &AssistantMessage) -> Opti
 }
 
 #[must_use]
-pub fn session_cost(conversation: &[Message]) -> Dollars {
+pub fn session_spend(conversation: &[Message]) -> (Usage, Dollars) {
     let mut models = ModelCache::new();
-    conversation
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant(assistant) => assistant_cost(&mut models, assistant),
-            _ => None,
-        })
-        .fold(Dollars::ZERO, |total, cost| total + cost)
+    let mut usage = Usage::default();
+    let mut cost = Dollars::ZERO;
+    for message in conversation {
+        if let Message::Assistant(assistant) = message {
+            usage.input_tokens += assistant.usage.input_tokens;
+            usage.output_tokens += assistant.usage.output_tokens;
+            usage.cache_read_tokens += assistant.usage.cache_read_tokens;
+            usage.cache_write_tokens += assistant.usage.cache_write_tokens;
+            cost += assistant_cost(&mut models, assistant).unwrap_or_default();
+        }
+    }
+    (usage, cost)
 }
 
 pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
@@ -646,7 +651,9 @@ mod tests {
 
         let expected = Dollars::new(model.cost.input * 2.0);
         assert!((app.stats.total_cost.get() - expected.get()).abs() < 1e-9);
-        assert!((session_cost(&conversation).get() - expected.get()).abs() < 1e-9);
+        let (usage, cost) = session_spend(&conversation);
+        assert!((cost.get() - expected.get()).abs() < 1e-9);
+        assert_eq!(usage.input_tokens, TokenCount::new(2_000_000));
     }
 
     #[test]
@@ -664,7 +671,7 @@ mod tests {
                 .build(),
         )];
 
-        assert_eq!(session_cost(&conversation), Dollars::ZERO);
+        assert_eq!(session_spend(&conversation).1, Dollars::ZERO);
     }
 
     fn compaction_summary_message(body: &str) -> Message {

@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
-use mush_ai::types::Dollars;
+use mush_ai::types::{Dollars, TokenCount};
 
 use crate::app::App;
 
@@ -29,9 +29,14 @@ pub fn sanitise_title(raw: &str) -> String {
         .join(" ")
 }
 
-fn cost_label(cost: Dollars) -> Option<String> {
+fn spend_label(tokens: TokenCount, cost: Dollars) -> String {
+    let tokens = format!("{} tok", crate::turn_activity::format_tokens(tokens.get()));
     let amount = cost.get();
-    (amount.is_finite() && amount >= 0.0).then(|| format!("${amount:.2}"))
+    if amount.is_finite() && amount >= 0.0 {
+        format!("{tokens} \u{b7} ${amount:.2}")
+    } else {
+        tokens
+    }
 }
 
 fn cwd_name(cwd: &str) -> &str {
@@ -53,9 +58,11 @@ pub fn top_bar_line(app: &App, width: u16) -> Line<'static> {
         Span::raw(" ".repeat(start)),
         Span::styled(title, app.theme.status_model),
     ];
-    if let Some(cost) = cost_label(app.session_spend()) {
-        spans.push(Span::styled(format!("  {cost}"), app.theme.dim));
-    }
+    let (tokens, cost) = app.session_spend();
+    spans.push(Span::styled(
+        format!("  {}", spend_label(tokens, cost)),
+        app.theme.dim,
+    ));
     Line::from(spans)
 }
 
@@ -73,7 +80,6 @@ impl Widget for TopBar<'_> {
 mod tests {
     use super::*;
     use crate::test_support::buffer_to_string;
-    use mush_ai::types::TokenCount;
 
     fn app() -> App {
         App::new("test".into(), TokenCount::new(200_000))
@@ -94,7 +100,11 @@ mod tests {
             answer: None,
             error: None,
             progress_note: None,
-            usage: mush_ai::types::Usage::default(),
+            usage: mush_ai::types::Usage {
+                input_tokens: TokenCount::new(150_000),
+                output_tokens: TokenCount::new(50_000),
+                ..Default::default()
+            },
             cost: mush_ai::types::Cost {
                 input: Dollars::new(dollars),
                 ..Default::default()
@@ -117,32 +127,37 @@ mod tests {
         let mut app = app();
         app.session_title = Some("hello".into());
 
-        let row = render(&app, 21);
+        let row = render(&app, 41);
 
-        assert_eq!(row.trim_end(), format!("{}hello  $0.00", " ".repeat(8)));
+        assert_eq!(
+            row.trim_end(),
+            format!("{}hello  0 tok \u{b7} $0.00", " ".repeat(18))
+        );
     }
 
     #[test]
-    fn the_cost_trails_the_title() {
+    fn the_tokens_and_cost_trail_the_title() {
         let mut app = app();
         app.session_title = Some("hello".into());
         app.stats.total_cost = Dollars::new(1.2345);
+        app.stats.total_tokens = TokenCount::new(45_000);
 
         let row = render(&app, 40);
 
-        assert!(row.contains("hello  $1.23"), "{row:?}");
+        assert!(row.contains("hello  45k tok \u{b7} $1.23"), "{row:?}");
     }
 
     #[test]
-    fn the_cost_counts_subagent_spend() {
+    fn the_tokens_and_cost_count_subagent_spend() {
         let mut app = app();
         app.session_title = Some("hello".into());
         app.stats.total_cost = Dollars::new(1.0);
-        app.children.push(child_with_cost(0.5));
+        app.stats.total_tokens = TokenCount::new(1_000_000);
+        app.note_child(child_with_cost(0.5));
 
         let row = render(&app, 40);
 
-        assert!(row.contains("hello  $1.50"), "{row:?}");
+        assert!(row.contains("hello  1.2m tok \u{b7} $1.50"), "{row:?}");
     }
 
     #[test]
@@ -152,7 +167,7 @@ mod tests {
 
         let row = render(&app, 40);
 
-        assert!(row.contains("hello  $0.00"), "{row:?}");
+        assert!(row.contains("hello  0 tok \u{b7} $0.00"), "{row:?}");
     }
 
     #[test]
@@ -162,7 +177,7 @@ mod tests {
 
         let row = render(&app, 40);
 
-        assert_eq!(row.trim(), "mush  $0.00");
+        assert_eq!(row.trim(), "mush  0 tok \u{b7} $0.00");
     }
 
     #[test]

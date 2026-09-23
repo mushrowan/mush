@@ -441,7 +441,8 @@ fn replay_history(app: &mut App, history: &[Message], context: &[Message]) {
     }
     crate::conversation_display::rebuild_display(app, history);
     crate::conversation_display::accumulate_session_stats(app, context);
-    app.stats.total_cost = crate::conversation_display::session_cost(history);
+    let (usage, cost) = crate::conversation_display::session_spend(history);
+    app.stats.restore_totals(&usage, cost);
     app.status = Some(format!("resumed session ({} messages)", history.len()).into());
 }
 
@@ -624,6 +625,7 @@ mod tests {
 
         let expected = model.cost.input * 6.0;
         assert!((app.stats.total_cost.get() - expected).abs() < 1e-9);
+        assert_eq!(app.stats.total_tokens, TokenCount::new(6_000_000));
     }
 
     #[test]

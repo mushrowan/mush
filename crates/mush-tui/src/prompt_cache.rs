@@ -402,6 +402,15 @@ impl TokenStats {
         anomalies
     }
 
+    pub fn restore_totals(&mut self, usage: &Usage, cost: Dollars) {
+        self.total_cost = cost;
+        self.total_tokens = usage.total_tokens();
+        self.input_tokens = usage.input_tokens;
+        self.output_tokens = usage.output_tokens;
+        self.cache_read_tokens = usage.cache_read_tokens;
+        self.cache_write_tokens = usage.cache_write_tokens;
+    }
+
     pub fn reset(&mut self) {
         let window = self.context_window;
         *self = Self::new(window);
