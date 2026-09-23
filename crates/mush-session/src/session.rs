@@ -19,6 +19,8 @@ pub struct SessionMeta {
     pub subagent_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<Pause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlm_max_depth: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +68,7 @@ impl Session {
                 parent: None,
                 subagent_model: None,
                 paused: None,
+                rlm_max_depth: None,
             },
             conversation: ConversationState::new(),
             panes: vec![],

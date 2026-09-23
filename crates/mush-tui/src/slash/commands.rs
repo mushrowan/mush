@@ -197,20 +197,40 @@ pub async fn handle(
             ));
             None
         }
-        SlashAction::RlmMaxDepth { max_depth: None } => {
+        SlashAction::RlmMaxDepth {
+            max_depth: None, ..
+        } => {
             app.push_system_message(format!(
-                "rlm max depth: {} (depth {})",
-                state.rlm_max_depth, state.rlm_depth
+                "rlm max depth: {} ({}, depth {})",
+                state.rlm_max_depth, state.rlm_max_depth_source, state.rlm_depth
             ));
             None
         }
         SlashAction::RlmMaxDepth {
             max_depth: Some(max_depth),
+            global,
         } => {
-            let _ = connection
+            if let Err(error) = connection
                 .send(mush_runtime::ClientCommand::SetRlmMaxDepth(*max_depth))
-                .await;
-            app.status = Some(format!("rlm max depth set: {max_depth}").into());
+                .await
+            {
+                app.push_system_message(format!("rlm max depth not set: {error}"));
+                return None;
+            }
+            let saved = global.then(|| crate::settings::save_global_rlm_max_depth(*max_depth));
+            match saved {
+                Some(Err(error)) => app.push_system_message(format!(
+                    "rlm max depth set for this chat, but the global default was not saved: \
+                     {error}"
+                )),
+                Some(Ok(_)) => {
+                    app.status = Some(
+                        format!("rlm max depth set: {max_depth} and saved as global default")
+                            .into(),
+                    );
+                }
+                None => app.status = Some(format!("rlm max depth set: {max_depth}").into()),
+            }
             None
         }
         SlashAction::Name { title: None } => {
@@ -529,7 +549,9 @@ fn help_text() -> String {
     help.push_str("  /context       - tokens, cost and context for this agent and its children\n");
     help.push_str("  /name [title]  - show or set the session title\n");
     help.push_str("  /session       - show the session id, file and message counts\n");
-    help.push_str("  /rlm-max-depth - show or set how deep subagents may nest\n");
+    help.push_str(
+        "  /rlm-max-depth [n [--global]] - show or set how deep subagents may nest in this chat\n",
+    );
     help.push_str("  /btw <q>       - ask a side question without adding it to the session\n");
     help.push_str("  /skills        - list loaded skills, their sources and any warnings\n");
     help.push_str("  /credits       - show openrouter credit balance\n");

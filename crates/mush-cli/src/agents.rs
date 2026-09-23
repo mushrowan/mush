@@ -337,6 +337,7 @@ mod tests {
     fn meta(id: &str) -> SessionMeta {
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_ai::types::SessionId::from(id.to_string()),
             title: None,
             model_id: "gpt-5.4".into(),

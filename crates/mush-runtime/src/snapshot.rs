@@ -11,6 +11,7 @@ pub struct SessionSnapshot {
     pub parent: Option<SessionId>,
     pub subagent_model: Option<String>,
     pub paused: Option<mush_session::Pause>,
+    pub rlm_max_depth: Option<u32>,
 }
 
 pub struct PaneSnapshot {

@@ -60,7 +60,7 @@ pub enum SlashParseError {
         "usage: /schedule add \"in 30m\"|\"every 10m\"|\"0 9 * * *\" [--label name] <prompt> | /schedule list|pause|resume|cancel <id>"
     )]
     ScheduleUsage,
-    #[error("usage: /rlm-max-depth [<non-negative integer>]")]
+    #[error("usage: /rlm-max-depth [<non-negative integer> [--global]]")]
     RlmMaxDepthUsage,
     #[error("usage: /compaction-model [same|<model-id>]")]
     CompactionModelUsage,
@@ -139,6 +139,7 @@ pub enum SlashAction {
     SessionInfo,
     RlmMaxDepth {
         max_depth: Option<u32>,
+        global: bool,
     },
     Side {
         question: String,
@@ -555,6 +556,21 @@ fn parse_new(args: &str) -> Result<SlashAction, SlashParseError> {
     Err(new_usage("expected -- before the prompt"))
 }
 
+fn parse_rlm_max_depth(args: &str) -> Result<SlashAction, SlashParseError> {
+    let mut words = args.split_whitespace();
+    let (max_depth, global) = match (words.next(), words.next(), words.next()) {
+        (None, _, _) => (None, false),
+        (Some(depth), None, _) => (Some(depth), false),
+        (Some(depth), Some("--global"), None) => (Some(depth), true),
+        _ => return Err(SlashParseError::RlmMaxDepthUsage),
+    };
+    let max_depth = max_depth
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| SlashParseError::RlmMaxDepthUsage)?;
+    Ok(SlashAction::RlmMaxDepth { max_depth, global })
+}
+
 fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
     let args = args.trim();
     match args {
@@ -669,13 +685,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "context" | "usage" => Ok(SlashAction::Context),
         "skills" => Ok(SlashAction::Skills),
         "session" => Ok(SlashAction::SessionInfo),
-        "rlm-max-depth" if args.is_empty() => Ok(SlashAction::RlmMaxDepth { max_depth: None }),
-        "rlm-max-depth" => args
-            .parse()
-            .map(|max_depth| SlashAction::RlmMaxDepth {
-                max_depth: Some(max_depth),
-            })
-            .map_err(|_| SlashParseError::RlmMaxDepthUsage),
+        "rlm-max-depth" => parse_rlm_max_depth(args),
         "goal" => parse_goal(args).map(SlashAction::Goal),
         "heartbeat" => parse_heartbeat(args).map(SlashAction::Heartbeat),
         "autonomous" => parse_autonomous(args).map(SlashAction::Autonomous),
@@ -888,16 +898,36 @@ mod tests {
     fn parse_rlm_max_depth_shows_or_sets() {
         assert_eq!(
             parse("/rlm-max-depth").unwrap(),
-            SlashAction::RlmMaxDepth { max_depth: None }
+            SlashAction::RlmMaxDepth {
+                max_depth: None,
+                global: false
+            }
         );
         assert_eq!(
             parse("/rlm-max-depth 3").unwrap(),
-            SlashAction::RlmMaxDepth { max_depth: Some(3) }
+            SlashAction::RlmMaxDepth {
+                max_depth: Some(3),
+                global: false
+            }
         );
-        assert!(matches!(
-            parse("/rlm-max-depth -1"),
-            Err(SlashParseError::RlmMaxDepthUsage)
-        ));
+        assert_eq!(
+            parse("/rlm-max-depth 0 --global").unwrap(),
+            SlashAction::RlmMaxDepth {
+                max_depth: Some(0),
+                global: true
+            }
+        );
+        for bad in [
+            "/rlm-max-depth -1",
+            "/rlm-max-depth --global",
+            "/rlm-max-depth 3 --local",
+            "/rlm-max-depth 3 --global 4",
+        ] {
+            assert!(
+                matches!(parse(bad), Err(SlashParseError::RlmMaxDepthUsage)),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

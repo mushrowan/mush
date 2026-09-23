@@ -224,6 +224,8 @@ pub struct SessionRuntime {
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub rlm_depth: u32,
     pub rlm_max_depth: u32,
+    pub rlm_max_depth_source: RlmMaxDepthSource,
+    pub rlm_max_depth_base: (u32, RlmMaxDepthSource),
     pub thinking_level: mush_ai::types::ThinkingLevel,
     pub parent: Option<SessionId>,
     pub context_tokens: mush_ai::types::TokenCount,
@@ -245,6 +247,36 @@ pub const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from
 pub const CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
 pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RlmMaxDepthSource {
+    #[default]
+    Default,
+    Env,
+    Global,
+    Inherited,
+    Chat,
+}
+
+impl RlmMaxDepthSource {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Env => "env",
+            Self::Global => "global",
+            Self::Inherited => "inherited",
+            Self::Chat => "chat",
+        }
+    }
+}
+
+impl std::fmt::Display for RlmMaxDepthSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl SessionRuntime {
     #[must_use]
     pub fn new(conversation: ConversationState) -> Self {
@@ -264,6 +296,8 @@ impl SessionRuntime {
             kernel_state: None,
             rlm_depth: 0,
             rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
+            rlm_max_depth_source: RlmMaxDepthSource::Default,
+            rlm_max_depth_base: (DEFAULT_RLM_MAX_DEPTH, RlmMaxDepthSource::Default),
             thinking_level: mush_ai::types::ThinkingLevel::Off,
             parent: None,
             context_tokens: mush_ai::types::TokenCount::ZERO,

@@ -648,6 +648,7 @@ fn session_picker_open_close() {
 
     let sessions = vec![SessionMeta {
         paused: None,
+        rlm_max_depth: None,
         id: mush_session::SessionId::from("abc"),
         title: Some("test session".into()),
         model_id: "claude-sonnet".into(),
@@ -673,6 +674,7 @@ fn session_picker_filter() {
     let sessions = vec![
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("a"),
             title: Some("rust project".into()),
             model_id: "m".into(),
@@ -685,6 +687,7 @@ fn session_picker_filter() {
         },
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("b"),
             title: Some("python script".into()),
             model_id: "m".into(),
@@ -712,6 +715,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
     let sessions = vec![
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("a"),
             title: Some("rust project".into()),
             model_id: "m".into(),
@@ -724,6 +728,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
         },
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("b"),
             title: Some("python script".into()),
             model_id: "m".into(),
@@ -755,6 +760,7 @@ fn session_picker_scope_filter() {
     let sessions = vec![
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("a"),
             title: Some("local session".into()),
             model_id: "m".into(),
@@ -767,6 +773,7 @@ fn session_picker_scope_filter() {
         },
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: mush_session::SessionId::from("b"),
             title: Some("other session".into()),
             model_id: "m".into(),

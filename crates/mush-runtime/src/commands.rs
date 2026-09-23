@@ -112,6 +112,7 @@ impl SessionRuntime {
                 }
                 let id = SessionId::new();
                 let lease = self.next_lease(&id);
+                self.restore_rlm_max_depth(None);
                 self.replace_session(id, ConversationState::new(), None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
@@ -152,6 +153,7 @@ impl SessionRuntime {
                     self.system_prompt = Some(prompt);
                 }
                 let title = loaded.meta.title.clone();
+                self.restore_rlm_max_depth(loaded.meta.rlm_max_depth);
                 self.replace_session(id, loaded.conversation, title.clone(), lease);
                 self.begin_kernel_restore();
                 self.title_generated = title.is_some();
@@ -311,6 +313,8 @@ impl SessionRuntime {
             parent: self.parent.clone(),
             subagent_model: self.subagent_model.clone(),
             paused: self.paused.clone(),
+            rlm_max_depth: (self.rlm_max_depth_source == crate::session::RlmMaxDepthSource::Chat)
+                .then_some(self.rlm_max_depth),
         }
     }
 
@@ -353,7 +357,16 @@ impl SessionRuntime {
 
     pub fn set_rlm_max_depth(&mut self, max_depth: u32) {
         self.rlm_max_depth = max_depth;
+        self.rlm_max_depth_source = crate::session::RlmMaxDepthSource::Chat;
         self.attach_kernel_session();
+        self.save_now();
+    }
+
+    pub fn restore_rlm_max_depth(&mut self, chat: Option<u32>) {
+        (self.rlm_max_depth, self.rlm_max_depth_source) = match chat {
+            Some(max_depth) => (max_depth, crate::session::RlmMaxDepthSource::Chat),
+            None => self.rlm_max_depth_base,
+        };
     }
 
     #[must_use]
@@ -528,13 +541,14 @@ mod tests {
     async fn the_kernel_learns_the_session_dir_and_depth_on_every_switch() {
         let kernel = Arc::new(RecordingKernel(std::sync::Mutex::new(Vec::new())));
         let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.rlm_max_depth_base = (4, crate::session::RlmMaxDepthSource::Global);
         runtime.set_kernel_state(Some(kernel.clone()));
-        runtime.set_rlm_max_depth(4);
+        runtime.set_rlm_max_depth(1);
         runtime.handle(SessionCommand::New).await;
 
         let seen = kernel.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 3);
-        assert_eq!(seen[1].max_depth, 4);
+        assert_eq!(seen[1].max_depth, 1);
         assert_eq!(seen[2].depth, 0);
         assert_eq!(
             seen[2].session_dir,
@@ -544,6 +558,40 @@ mod tests {
         let env = seen[2].env();
         assert!(env.iter().any(|(k, v)| k == "RLM_MAX_DEPTH" && v == "4"));
         assert!(env.iter().any(|(k, v)| k == "RLM_DEPTH" && v == "0"));
+    }
+
+    #[tokio::test]
+    async fn a_chat_max_depth_is_saved_and_a_new_session_falls_back() {
+        let saved = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.rlm_max_depth_base = (2, crate::session::RlmMaxDepthSource::Global);
+        runtime.restore_rlm_max_depth(None);
+        runtime.saver = Some(Arc::new({
+            let saved = Arc::clone(&saved);
+            move |snapshot: crate::snapshot::SessionSnapshot| {
+                saved.lock().unwrap().push(snapshot.rlm_max_depth);
+            }
+        }));
+        assert_eq!(runtime.snapshot().rlm_max_depth, None);
+
+        runtime.set_rlm_max_depth(0);
+        assert_eq!(saved.lock().unwrap().last(), Some(&Some(0)));
+        assert_eq!(
+            runtime.rlm_max_depth_source,
+            crate::session::RlmMaxDepthSource::Chat
+        );
+
+        runtime.handle(SessionCommand::New).await;
+        assert_eq!(runtime.rlm_max_depth, 2);
+        assert_eq!(
+            runtime.rlm_max_depth_source,
+            crate::session::RlmMaxDepthSource::Global
+        );
+        assert_eq!(runtime.snapshot().rlm_max_depth, None);
+
+        runtime.restore_rlm_max_depth(Some(5));
+        assert_eq!(runtime.rlm_max_depth, 5);
+        assert_eq!(runtime.snapshot().rlm_max_depth, Some(5));
     }
 
     fn user(text: &str) -> Message {

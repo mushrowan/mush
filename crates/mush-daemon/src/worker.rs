@@ -604,6 +604,7 @@ mod tests {
             tree_len: 0,
             rlm_depth: 0,
             rlm_max_depth: 2,
+            rlm_max_depth_source: Default::default(),
             turn_active: false,
             turn_model: None,
             active_turns: 0,

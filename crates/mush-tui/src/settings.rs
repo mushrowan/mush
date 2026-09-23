@@ -232,12 +232,15 @@ impl SettingsMenuState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSettings {
     pub anthropic_betas: AnthropicBetas,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlm_max_depth: Option<u32>,
 }
 
 impl From<&ScopedSettings> for PersistedSettings {
     fn from(s: &ScopedSettings) -> Self {
         Self {
             anthropic_betas: s.anthropic_betas.clone(),
+            rlm_max_depth: None,
         }
     }
 }
@@ -266,12 +269,42 @@ fn write_settings_file(path: &std::path::Path, settings: &ScopedSettings) -> Res
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let persisted = PersistedSettings::from(settings);
-    let body =
-        toml::to_string_pretty(&persisted).map_err(|e| format!("serialise settings: {e}"))?;
+    let persisted = toml::Table::try_from(PersistedSettings::from(settings))
+        .map_err(|e| format!("serialise settings: {e}"))?;
+    merge_settings_file(path, persisted)
+}
+
+fn merge_settings_file(path: &std::path::Path, entries: toml::Table) -> Result<(), String> {
+    let mut table = match std::fs::read_to_string(path) {
+        Ok(body) => body
+            .parse::<toml::Table>()
+            .map_err(|e| format!("read {}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    table.extend(entries);
+    let body = toml::to_string_pretty(&table).map_err(|e| format!("serialise settings: {e}"))?;
     mush_ai::private_io::write_atomic(path, body)
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
+}
+
+pub fn save_global_rlm_max_depth(max_depth: u32) -> Result<std::path::PathBuf, String> {
+    let path = global_settings_path().ok_or("could not resolve config dir")?;
+    save_rlm_max_depth_to(&path, max_depth)?;
+    Ok(path)
+}
+
+fn save_rlm_max_depth_to(path: &std::path::Path, max_depth: u32) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let mut entries = toml::Table::new();
+    entries.insert(
+        "rlm_max_depth".into(),
+        toml::Value::Integer(i64::from(max_depth)),
+    );
+    merge_settings_file(path, entries)
 }
 
 fn global_settings_path() -> Option<std::path::PathBuf> {
@@ -365,5 +398,26 @@ mod tests {
         let loaded: PersistedSettings = toml::from_str(&body).unwrap();
         assert!(!loaded.anthropic_betas.context_1m);
         assert!(loaded.anthropic_betas.effort);
+    }
+
+    #[test]
+    fn the_saved_rlm_max_depth_and_the_betas_keep_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("settings.toml");
+        save_rlm_max_depth_to(&path, 4).unwrap();
+        let settings = ScopedSettings {
+            scope: SettingsScope::Global,
+            anthropic_betas: AnthropicBetas {
+                context_1m: false,
+                ..Default::default()
+            },
+        };
+        write_settings_file(&path, &settings).unwrap();
+        save_rlm_max_depth_to(&path, 1).unwrap();
+
+        let loaded: PersistedSettings =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.rlm_max_depth, Some(1));
+        assert!(!loaded.anthropic_betas.context_1m);
     }
 }

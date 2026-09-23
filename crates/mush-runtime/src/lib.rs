@@ -46,8 +46,9 @@ pub use models::{ModelSelection, child_thinking};
 pub use notes::Notes;
 pub use schedule::{Delivery, Job, JobSource, JobStatus, ScheduleCommand, ScheduleKind, Scheduler};
 pub use session::{
-    ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime,
-    StreamGeneration, StreamMeta, TurnEvent, TurnEvents, TurnStream,
+    ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt,
+    RlmMaxDepthSource, SessionRuntime, StreamGeneration, StreamMeta, TurnEvent, TurnEvents,
+    TurnStream,
 };
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
 pub use turn::{CompactionTarget, TurnConfig, TurnDeps, TurnRequest};

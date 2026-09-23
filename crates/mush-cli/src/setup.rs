@@ -65,10 +65,17 @@ pub fn rlm_depth() -> u32 {
 }
 
 #[must_use]
-pub fn rlm_max_depth(cfg: &config::Config) -> u32 {
-    cfg.rlm_max_depth
-        .or_else(|| env_depth("RLM_MAX_DEPTH"))
-        .unwrap_or(mush_runtime::session::DEFAULT_RLM_MAX_DEPTH)
+pub fn rlm_max_depth(cfg: &config::Config) -> (u32, mush_runtime::RlmMaxDepthSource) {
+    if let Some(max_depth) = cfg.rlm_max_depth {
+        return (max_depth, mush_runtime::RlmMaxDepthSource::Global);
+    }
+    match env_depth("RLM_MAX_DEPTH") {
+        Some(max_depth) => (max_depth, mush_runtime::RlmMaxDepthSource::Env),
+        None => (
+            mush_runtime::session::DEFAULT_RLM_MAX_DEPTH,
+            mush_runtime::RlmMaxDepthSource::Default,
+        ),
+    }
 }
 
 pub fn kernel_plan(cfg: &config::Config) -> Result<mush_kernel::PythonPlan> {
@@ -290,7 +297,7 @@ impl AppSetup {
                 project_context,
                 cwd,
                 &kernel_packages,
-                &RlmRole::root(rlm_max_depth(cfg)),
+                &RlmRole::root(rlm_max_depth(cfg).0),
             )
         } else {
             build_system_prompt_from_context(project_context, cwd)
@@ -1251,6 +1258,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_max_depth_comes_from_settings_then_env_then_the_default() {
+        use mush_runtime::RlmMaxDepthSource;
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(&[("RLM_MAX_DEPTH", Some("5"))]);
+        let mut cfg = config::Config::default();
+        assert_eq!(rlm_max_depth(&cfg), (5, RlmMaxDepthSource::Env));
+        cfg.rlm_max_depth = Some(1);
+        assert_eq!(rlm_max_depth(&cfg), (1, RlmMaxDepthSource::Global));
+        drop(_guard);
+        let _guard = EnvGuard::set(&[("RLM_MAX_DEPTH", None)]);
+        cfg.rlm_max_depth = None;
+        assert_eq!(rlm_max_depth(&cfg), (2, RlmMaxDepthSource::Default));
     }
 
     #[test]

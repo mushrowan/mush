@@ -134,6 +134,8 @@ pub struct ConnectionState {
     pub tree_len: usize,
     pub rlm_depth: u32,
     pub rlm_max_depth: u32,
+    #[serde(default)]
+    pub rlm_max_depth_source: crate::session::RlmMaxDepthSource,
     pub turn_active: bool,
     pub turn_model: Option<mush_ai::types::Model>,
     pub active_turns: usize,
@@ -504,6 +506,25 @@ impl InProcessConnection {
     pub fn set_notes(&mut self, notes: Option<std::sync::Arc<crate::notes::Notes>>) {
         self.runtime.notes = notes.clone();
         self.notes = notes;
+    }
+
+    fn follow_rlm_max_depth(&mut self, could_spawn: bool) {
+        let depth = self.runtime.rlm_max_depth;
+        if self.family_member.is_none()
+            && let Some(family) = &self.family
+        {
+            family.set_max_depth(depth);
+        }
+        if could_spawn != (self.runtime.rlm_depth < depth)
+            && let Some(build) = &self.system_prompt_builder
+        {
+            let prompt = build();
+            self.runtime.system_prompt = Some(prompt.clone());
+            self.queued
+                .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
+                    Some(prompt),
+                )));
+        }
     }
 
     fn rebind_artifacts(&mut self) {
@@ -1888,21 +1909,7 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetRlmMaxDepth(depth) => {
                 let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
                 self.runtime.set_rlm_max_depth(depth);
-                if self.family_member.is_none()
-                    && let Some(family) = &self.family
-                {
-                    family.set_max_depth(depth);
-                }
-                if could_spawn != (self.runtime.rlm_depth < depth)
-                    && let Some(build) = &self.system_prompt_builder
-                {
-                    let prompt = build();
-                    self.runtime.system_prompt = Some(prompt.clone());
-                    self.queued
-                        .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
-                            Some(prompt),
-                        )));
-                }
+                self.follow_rlm_max_depth(could_spawn);
             }
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::ReloadSystemPrompt => {
@@ -1921,6 +1928,7 @@ impl AgentConnection for InProcessConnection {
             }
             ClientCommand::Session(command) => {
                 let before = self.runtime.session_id.clone();
+                let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
                 let events = self.runtime.handle(command).await;
                 self.sync_control_target();
                 if self.runtime.session_id != before {
@@ -1929,6 +1937,7 @@ impl AgentConnection for InProcessConnection {
                 self.runtime.save_now_and_settle();
                 self.queued
                     .extend(events.into_iter().map(ClientEvent::Session));
+                self.follow_rlm_max_depth(could_spawn);
             }
             ClientCommand::SummariseAndNavigate { entry_id } => {
                 self.summarise_and_navigate(entry_id).await;
@@ -2007,6 +2016,7 @@ impl AgentConnection for InProcessConnection {
             tree_len: self.runtime.conversation.tree().len(),
             rlm_depth: self.runtime.rlm_depth,
             rlm_max_depth: self.runtime.rlm_max_depth,
+            rlm_max_depth_source: self.runtime.rlm_max_depth_source,
             turn_active: self.turn_active(),
             turn_model: self
                 .runtime
@@ -3807,6 +3817,25 @@ mod tests {
             event,
             ClientEvent::Session(SessionEvent::SystemPromptChanged(Some(_)))
         )));
+        assert_eq!(
+            connection.state().rlm_max_depth_source,
+            crate::session::RlmMaxDepthSource::Chat
+        );
+
+        connection
+            .send(ClientCommand::Session(SessionCommand::New))
+            .await
+            .unwrap();
+        assert_eq!(family.max_depth(), 2);
+        assert_eq!(connection.state().rlm_max_depth, 2);
+        assert_eq!(
+            connection.state().rlm_max_depth_source,
+            crate::session::RlmMaxDepthSource::Default
+        );
+        assert_eq!(
+            connection.runtime.system_prompt.as_deref(),
+            Some("max depth 2")
+        );
     }
 
     struct ModelKernel(std::sync::Mutex<Vec<(String, bool)>>);

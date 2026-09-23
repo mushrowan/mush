@@ -19,6 +19,8 @@ pub struct WorkerConfig {
     pub thinking_level: ThinkingLevel,
     pub rlm_depth: u32,
     pub rlm_max_depth: u32,
+    pub rlm_max_depth_source: crate::session::RlmMaxDepthSource,
+    pub rlm_max_depth_chat: Option<u32>,
     pub kernel_state: Option<Arc<dyn mush_kernel::KernelState>>,
     pub saver: Option<SessionSaver>,
     pub lease: Option<mush_session::SessionLease>,
@@ -54,6 +56,8 @@ impl WorkerConfig {
             thinking_level: ThinkingLevel::Off,
             rlm_depth: 0,
             rlm_max_depth: DEFAULT_RLM_MAX_DEPTH,
+            rlm_max_depth_source: crate::session::RlmMaxDepthSource::Default,
+            rlm_max_depth_chat: None,
             kernel_state: None,
             saver: None,
             lease: None,
@@ -104,7 +108,8 @@ impl WorkerConfig {
         runtime.models = self.models;
         runtime.system_prompt = self.system_prompt;
         runtime.rlm_depth = self.rlm_depth;
-        runtime.rlm_max_depth = self.rlm_max_depth;
+        runtime.rlm_max_depth_base = (self.rlm_max_depth, self.rlm_max_depth_source);
+        runtime.restore_rlm_max_depth(self.rlm_max_depth_chat);
         runtime.thinking_level = thinking_level;
         runtime.parent = self.parent;
         runtime.set_kernel_state(self.kernel_state);

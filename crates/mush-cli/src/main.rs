@@ -1390,6 +1390,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 .normalize_visible();
             worker.rlm_depth = spec.depth;
             worker.rlm_max_depth = max_depth;
+            worker.rlm_max_depth_source = mush_runtime::RlmMaxDepthSource::Inherited;
             worker.kernel_state = Some(ipython.clone());
             worker.saver = seed.saver.clone();
             worker.injections = mush_agent::AgentInjections {
@@ -1428,6 +1429,8 @@ fn worker_config(
         setup.client.model.id.to_string(),
         session.meta.subagent_model.clone(),
     );
+    let (base_depth, base_source) = setup::rlm_max_depth(&setup.client.cfg);
+    let max_depth = session.meta.rlm_max_depth.unwrap_or(base_depth);
     let prompt_overrides = setup::PromptOverrides {
         system: cli
             .system
@@ -1455,7 +1458,7 @@ fn worker_config(
         file_rules: setup.file_rules.clone(),
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         saver: opened.saver.as_ref().map(|saver| saver.handle()),
-        rlm_max_depth: setup::rlm_max_depth(&setup.client.cfg),
+        rlm_max_depth: max_depth,
         subagent_model: setup.client.cfg.subagent_model.clone(),
         session_dir: SessionStore::default_dir(),
         prompt_overrides: prompt_overrides.clone(),
@@ -1508,7 +1511,9 @@ fn worker_config(
             .record_thinking_level(&worker.thinking_level);
     }
     worker.rlm_depth = setup::rlm_depth();
-    worker.rlm_max_depth = seed.rlm_max_depth;
+    worker.rlm_max_depth = base_depth;
+    worker.rlm_max_depth_source = base_source;
+    worker.rlm_max_depth_chat = session.meta.rlm_max_depth;
     worker.lease = opened.lease.take();
     worker.kernel_state = setup.kernel_state.clone();
     worker.saver = seed.saver.clone();
@@ -1576,7 +1581,7 @@ fn worker_config(
     }
     let role = setup::RlmRole {
         depth: worker.rlm_depth,
-        max_depth: worker.rlm_max_depth,
+        max_depth,
         child_name: None,
     };
     worker.system_prompt_builder = Some(std::sync::Arc::new({
@@ -1776,6 +1781,7 @@ fn fork_session(source: Session, cwd: &str) -> Session {
     forked.conversation = source.conversation;
     forked.system_prompt = source.system_prompt;
     forked.panes = source.panes;
+    forked.meta.rlm_max_depth = source.meta.rlm_max_depth;
     forked.meta.message_count = forked.conversation.context_len();
     forked
 }
@@ -1789,6 +1795,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.meta.parent = snapshot.parent;
     session.meta.subagent_model = snapshot.subagent_model;
     session.meta.paused = snapshot.paused;
+    session.meta.rlm_max_depth = snapshot.rlm_max_depth;
     session.meta.message_count = session.conversation.context_len();
     session.panes = snapshot
         .panes
@@ -1891,6 +1898,7 @@ mod tests {
             system_prompt: None,
             parent: None,
             subagent_model: None,
+            rlm_max_depth: None,
         }
     }
 
@@ -1935,6 +1943,17 @@ mod tests {
             .map(|snapshot| snapshot.title.as_deref().unwrap_or_default())
             .collect();
         assert_eq!(titles, vec!["parent two", "child"]);
+    }
+
+    #[test]
+    fn a_saved_session_keeps_its_rlm_max_depth() {
+        let mut snapshot = snapshot(None);
+        snapshot.rlm_max_depth = Some(0);
+
+        let session = session_from_snapshot(snapshot, "/tmp");
+
+        assert_eq!(session.meta.rlm_max_depth, Some(0));
+        assert_eq!(fork_session(session, "/tmp").meta.rlm_max_depth, Some(0));
     }
 
     #[test]

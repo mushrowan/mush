@@ -561,6 +561,9 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
     let global = config_dir().join("settings.toml");
     if let Some(persisted) = try_load_persisted_settings(&global) {
         config.settings.anthropic_betas = persisted.anthropic_betas;
+        if persisted.rlm_max_depth.is_some() {
+            config.rlm_max_depth = persisted.rlm_max_depth;
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
         let repo = cwd.join(".mush").join("settings.toml");

@@ -7,6 +7,7 @@ fn session_picker_module_exposes_state_and_filtering() {
     let sessions = vec![
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: SessionId::from("local"),
             title: Some("local work".into()),
             model_id: "m".into(),
@@ -19,6 +20,7 @@ fn session_picker_module_exposes_state_and_filtering() {
         },
         SessionMeta {
             paused: None,
+            rlm_max_depth: None,
             id: SessionId::from("remote"),
             title: Some("remote work".into()),
             model_id: "m".into(),
@@ -54,6 +56,7 @@ fn drain_incoming_appends_and_flips_loading() {
 
     let older = SessionMeta {
         paused: None,
+        rlm_max_depth: None,
         id: SessionId::from("a"),
         title: Some("old".into()),
         model_id: "m".into(),
@@ -66,6 +69,7 @@ fn drain_incoming_appends_and_flips_loading() {
     };
     let newer = SessionMeta {
         paused: None,
+        rlm_max_depth: None,
         id: SessionId::from("b"),
         title: Some("new".into()),
         model_id: "m".into(),
@@ -100,6 +104,7 @@ fn drain_incoming_appends_and_flips_loading() {
 fn meta(id: &str, cwd: &str) -> SessionMeta {
     SessionMeta {
         paused: None,
+        rlm_max_depth: None,
         id: SessionId::from(id),
         title: Some(id.to_string()),
         model_id: "m".into(),
