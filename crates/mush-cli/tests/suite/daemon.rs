@@ -652,6 +652,91 @@ async fn a_worker_that_cannot_restart_is_marked_failed() {
 }
 
 #[tokio::test]
+async fn an_ambiguous_selector_stops_nothing() {
+    let daemon = Daemon::start();
+    let mut pids = Vec::new();
+    for _ in 0..2 {
+        let SupervisorReply::Worker { descriptor, .. } =
+            daemon.request(daemon.open(OpenTarget::New)).await
+        else {
+            panic!("expected a worker")
+        };
+        pids.push(descriptor.pid);
+    }
+
+    let SupervisorReply::Error(error) = daemon
+        .request(SupervisorRequest::Stop {
+            session_id: String::new(),
+        })
+        .await
+    else {
+        panic!("expected an error")
+    };
+    assert!(error.contains("more than one"), "{error}");
+    let SupervisorReply::Error(error) = daemon
+        .request(daemon.open(OpenTarget::Resume(String::new())))
+        .await
+    else {
+        panic!("expected an error")
+    };
+    assert!(error.contains("more than one"), "{error}");
+    assert!(pids.into_iter().all(alive));
+}
+
+#[tokio::test]
+async fn resuming_a_failed_agent_starts_a_fresh_worker() {
+    let daemon = Daemon::start();
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let session =
+        mush_session::Session::new("claude-opus-4-7", &daemon.dir.path().display().to_string());
+    store.save(&session).unwrap();
+    let id = session.meta.id.to_string();
+    let workers = daemon.dir.path().join("mush").join("workers");
+    std::fs::create_dir_all(&workers).unwrap();
+    let failed = mush_daemon::WorkerDescriptor {
+        session_id: id.clone(),
+        model_id: String::new(),
+        build: mush_daemon::build_id(),
+        pid: 0,
+        start_id: None,
+        cwd: daemon.dir.path().to_path_buf(),
+        socket: workers.join("gone.sock"),
+        started_at: 1,
+        title: None,
+        turn_active: false,
+        paused: false,
+        messages: 0,
+        updated_at: 1,
+        clients: 0,
+        failed: Some("gave up".into()),
+    };
+    std::fs::write(
+        workers.join("gone.json"),
+        serde_json::to_vec(&failed).unwrap(),
+    )
+    .unwrap();
+
+    let reply = daemon
+        .request(daemon.open_saved(OpenTarget::Resume(id[..8].to_string())))
+        .await;
+    let SupervisorReply::Worker { descriptor, fresh } = reply else {
+        panic!("expected a worker, got {reply:?}")
+    };
+    assert!(fresh);
+    assert_eq!(descriptor.session_id, id);
+    assert!(alive(descriptor.pid));
+    mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+    let SupervisorReply::Workers(listed) = daemon.request(SupervisorRequest::List).await else {
+        panic!("expected a roster")
+    };
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].pid, descriptor.pid);
+    assert!(!workers.join("gone.json").exists());
+}
+
+#[tokio::test]
 async fn a_worker_elects_a_replacement_daemon_and_it_adopts_the_worker() {
     let mut daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =

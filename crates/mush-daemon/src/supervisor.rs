@@ -174,12 +174,14 @@ impl Supervisor {
                 workers: self.roster().len(),
             },
             SupervisorRequest::Stop { session_id } => {
-                let Some(worker) = self
-                    .roster()
-                    .into_iter()
-                    .find(|worker| worker.session_id.starts_with(&session_id))
-                else {
-                    return SupervisorReply::Error(format!("no worker for session {session_id}"));
+                let worker = match select(self.roster(), &session_id) {
+                    Ok(Some(worker)) => worker,
+                    Ok(None) => {
+                        return SupervisorReply::Error(format!(
+                            "no worker for session {session_id}"
+                        ));
+                    }
+                    Err(error) => return SupervisorReply::Error(error),
                 };
                 match self.nursery.stop(&worker).await {
                     Ok(()) => SupervisorReply::Done,
@@ -204,16 +206,17 @@ impl Supervisor {
         cwd: PathBuf,
         env: Vec<(String, String)>,
     ) -> io::Result<SupervisorReply> {
-        if let OpenTarget::Resume(id) = &target
-            && let Some(worker) = self
+        if let OpenTarget::Resume(id) = &target {
+            let running = self
                 .roster()
                 .into_iter()
-                .find(|worker| worker.session_id.starts_with(id))
-        {
-            return Ok(SupervisorReply::Worker {
-                descriptor: Box::new(worker),
-                fresh: false,
-            });
+                .filter(|worker| worker.failed.is_none());
+            if let Some(worker) = select(running, id).map_err(io::Error::other)? {
+                return Ok(SupervisorReply::Worker {
+                    descriptor: Box::new(worker),
+                    fresh: false,
+                });
+            }
         }
         let name = mush_ai::types::SessionId::new().to_string();
         let descriptor = self
@@ -221,6 +224,7 @@ impl Supervisor {
             .clone()
             .start(&name, &target, &args, &cwd, &env, false)
             .await?;
+        self.nursery.forget_failed(&descriptor.session_id);
         self.nursery.remember(
             &name,
             Recipe {
@@ -376,6 +380,14 @@ impl Nursery {
         let _ = std::fs::remove_file(self.descriptor_path(name));
         let _ = std::fs::remove_file(self.recipe_path(name));
         let _ = std::fs::remove_file(&descriptor.socket);
+    }
+
+    fn forget_failed(&self, session_id: &str) {
+        for (name, descriptor) in self.descriptors() {
+            if descriptor.failed.is_some() && descriptor.session_id == session_id {
+                self.forget(&name, &descriptor);
+            }
+        }
     }
 
     fn name_of(&self, session_id: &str) -> Option<String> {
@@ -590,6 +602,20 @@ impl Nursery {
     }
 }
 
+fn select(
+    workers: impl IntoIterator<Item = WorkerDescriptor>,
+    selector: &str,
+) -> Result<Option<WorkerDescriptor>, String> {
+    let mut found = workers
+        .into_iter()
+        .filter(|worker| worker.session_id.starts_with(selector));
+    let first = found.next();
+    if found.next().is_some() {
+        return Err(format!("{selector} matches more than one agent"));
+    }
+    Ok(first)
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -707,4 +733,48 @@ pub async fn request(socket: &Path, request: &SupervisorRequest) -> io::Result<S
         .await?
         .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed"))?;
     decode(&line).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn worker(session_id: &str) -> WorkerDescriptor {
+        WorkerDescriptor {
+            session_id: session_id.into(),
+            model_id: String::new(),
+            build: String::new(),
+            pid: 0,
+            start_id: None,
+            cwd: PathBuf::new(),
+            socket: PathBuf::new(),
+            started_at: 0,
+            title: None,
+            turn_active: false,
+            paused: false,
+            messages: 0,
+            updated_at: 0,
+            clients: 0,
+            failed: None,
+        }
+    }
+
+    #[test]
+    fn a_selector_picks_the_one_worker_it_prefixes() {
+        let workers = [worker("abc1"), worker("def2")];
+        let found = select(workers, "ab").unwrap().unwrap();
+        assert_eq!(found.session_id, "abc1");
+    }
+
+    #[test]
+    fn an_ambiguous_selector_is_an_error() {
+        let workers = [worker("abc1"), worker("abd2")];
+        let error = select(workers, "ab").unwrap_err();
+        assert!(error.contains("more than one"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_selector_finds_nothing() {
+        assert!(select([worker("abc1")], "x").unwrap().is_none());
+    }
 }
