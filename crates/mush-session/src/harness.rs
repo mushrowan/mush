@@ -681,7 +681,7 @@ impl State {
                 ),
                 _ => String::new(),
             });
-            if let Some(error) = validate(edit, &entry_id) {
+            if let Some(error) = validate(edit, &entry_id).or_else(|| validate_update(edit)) {
                 applied.push(AppliedEdit::failed(edit, entry_id, None, error));
                 continue;
             }
@@ -1203,6 +1203,25 @@ fn validate(edit: &Edit, id: &str) -> Option<String> {
     None
 }
 
+fn validate_update(edit: &Edit) -> Option<String> {
+    if edit.action != Action::Update {
+        return None;
+    }
+    let blank = |field: &Option<String>| field.as_deref().is_none_or(str::is_empty);
+    if blank(&edit.title) || blank(&edit.content) {
+        return Some("update requires title and content".into());
+    }
+    if edit.kind == Kind::Skill {
+        if edit.arguments.is_none() {
+            return Some("update skill requires arguments".into());
+        }
+        if edit.reference.is_none() {
+            return Some("update skill requires a python reference".into());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedEdit {
     #[serde(flatten)]
@@ -1477,6 +1496,64 @@ mod tests {
             Some("create skill requires a python reference")
         );
         assert!(state.entries[&Kind::Skill].is_empty());
+    }
+
+    #[test]
+    fn a_proposed_update_needs_a_title_content_and_for_a_skill_its_call() {
+        let mut state = State::default();
+        let mut skill = create(Kind::Skill, "lint", "runs clippy");
+        skill.arguments = Some(Map::new());
+        skill.reference = Some(
+            serde_json::from_value(serde_json::json!({
+                "type": "python",
+                "import": "lint",
+                "callable": "run",
+            }))
+            .unwrap(),
+        );
+        state.apply(
+            &proposal(vec![create(Kind::Memory, "tests", "run them"), skill]),
+            "ref_1",
+            Scope::Local,
+            None,
+        );
+        let update = |kind: Kind, id: &str, title: Option<&str>, content: Option<&str>| Edit {
+            action: Action::Update,
+            id: Some(id.into()),
+            title: title.map(str::to_string),
+            content: content.map(str::to_string),
+            ..create(kind, "", "")
+        };
+        let result = state.apply(
+            &proposal(vec![
+                update(Kind::Memory, "tests", None, Some("run them twice")),
+                update(Kind::Memory, "tests", Some(""), Some("run them twice")),
+                update(Kind::Skill, "lint", Some("lint"), Some("runs clippy twice")),
+                Edit {
+                    arguments: Some(Map::new()),
+                    ..update(Kind::Skill, "lint", Some("lint"), Some("runs clippy twice"))
+                },
+            ]),
+            "ref_2",
+            Scope::Local,
+            None,
+        );
+        let errors: Vec<_> = result
+            .applied_edits
+            .iter()
+            .map(|edit| edit.error.as_deref())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                Some("update requires title and content"),
+                Some("update requires title and content"),
+                Some("update skill requires arguments"),
+                Some("update skill requires a python reference"),
+            ]
+        );
+        assert_eq!(state.get(Kind::Memory, "tests").unwrap().version, 1);
+        assert_eq!(state.get(Kind::Skill, "lint").unwrap().version, 1);
     }
 
     #[test]
