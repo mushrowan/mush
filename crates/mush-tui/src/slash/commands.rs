@@ -20,71 +20,7 @@ pub async fn handle(
     match action {
         SlashAction::Subagents { .. } => None,
         SlashAction::Help => {
-            let mut help = String::from("available commands:\n");
-            help.push_str("  /help          - show this message\n");
-            help.push_str("  /keys          - show keyboard shortcuts\n");
-            help.push_str("  /subagents     - show or register session supervisors\n");
-            help.push_str("  /skill:<name> [args] - send a skill's instructions as your prompt\n");
-            help.push_str("  /new           - save session, start fresh\n");
-            help.push_str(
-                "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
-            );
-            help.push_str("  /sessions      - browse and resume sessions\n");
-            help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
-            help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
-            help.push_str("  /refresh-models - refresh discovered model catalogue\n");
-            help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
-            help.push_str(
-                "  /tree          - browse the conversation tree and jump to a message\n",
-            );
-            help.push_str(
-                "  /refine [--global] [instructions] - refine the continual harness, rollback <id> undoes one\n",
-            );
-            help.push_str(
-                "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
-            );
-            help.push_str("  /export [file] - save conversation as markdown\n");
-            help.push_str("  /undo          - revert last turn\n");
-            help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
-            help.push_str("  /cost          - show session cost\n");
-            help.push_str(
-                "  /context       - tokens, cost and context for this agent and its children\n",
-            );
-            help.push_str("  /name [title]  - show or set the session title\n");
-            help.push_str("  /session       - show the session id, file and message counts\n");
-            help.push_str("  /rlm-max-depth - show or set how deep subagents may nest\n");
-            help.push_str(
-                "  /btw <q>       - ask a side question without adding it to the session\n",
-            );
-            help.push_str(
-                "  /skills        - list loaded skills, their sources and any warnings\n",
-            );
-            help.push_str("  /credits       - show openrouter credit balance\n");
-            help.push_str(
-                "  /endpoints [id] - list openrouter providers + cache support for a model\n",
-            );
-            help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
-            help.push_str(
-                "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
-            );
-            help.push_str("  /settings show - print current settings state\n");
-            help.push_str("  /login [p]     - oauth + api-key login picker (or pass id to skip)\n");
-            help.push_str(
-                "  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n",
-            );
-            help.push_str("  /close         - close focused pane\n");
-            help.push_str("  /broadcast msg - send a message to all panes\n");
-            help.push_str("  /lock <path>   - lock a file for this pane\n");
-            help.push_str("  /unlock <path> - release a file lock\n");
-            help.push_str("  /locks         - list all file locks\n");
-            help.push_str("  /label [text]  - set pane label (or auto-generate)\n");
-            help.push_str("  /panes         - list all panes with status\n");
-            help.push_str("  /card          - show agent capability card\n");
-            help.push_str("  /task claim/release/list - cross-agent task locking\n");
-            help.push_str("  /debug         - dump internal state (for bug reports)\n");
-            help.push_str("  /quit          - exit mush\n");
-            help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
-            app.push_system_message(help);
+            app.push_system_message(help_text());
             None
         }
         SlashAction::Keys => {
@@ -109,7 +45,7 @@ pub async fn handle(
             keys.push_str("  tab            - autocomplete / command menu / expand @template\n");
             keys.push_str("  ctrl+j/k       - navigate menus\n");
             keys.push_str("  ctrl+v         - paste image from clipboard\n");
-            keys.push_str("  ctrl+d         - quit (empty input) / delete char\n");
+            keys.push_str("  ctrl+d         - delete char\n");
             keys.push_str("  alt+k          - edit queued steering message\n");
             keys.push_str("\nmode switches:\n");
             keys.push_str("  ctrl+f         - search\n");
@@ -117,7 +53,8 @@ pub async fn handle(
             keys.push_str("  ctrl+o         - focus the log / back to the composer\n");
             keys.push_str("  ctrl+r         - cycle detail: overview, details, all output\n");
             keys.push_str("\nediting:\n");
-            keys.push_str("  ctrl+a / home  - start of line\n");
+            keys.push_str("  ctrl+a         - select all\n");
+            keys.push_str("  home           - start of line\n");
             keys.push_str("  ctrl+e / end   - end of line\n");
             keys.push_str("  ctrl+w         - delete word backward\n");
             keys.push_str("  alt+d          - delete word forward\n");
@@ -125,15 +62,10 @@ pub async fn handle(
             keys.push_str("  ctrl+k         - delete to end\n");
             keys.push_str("  alt+b / alt+←  - word left\n");
             keys.push_str("  alt+f / alt+→  - word right\n");
-            keys.push_str("\npanes:\n");
-            keys.push_str("  ctrl+shift+enter - fork into new pane\n");
-            keys.push_str("  ctrl+tab         - next pane\n");
-            keys.push_str("  ctrl+shift+tab   - previous pane\n");
-            keys.push_str("  alt+1..9         - focus pane by number\n");
             keys.push_str("\nmodel picker:\n");
             keys.push_str("  ctrl+f         - toggle favourite on highlighted model\n");
             keys.push_str("  ctrl+d         - delete highlighted stale model (with confirm)\n");
-            keys.push_str("  ctrl+shift+d   - delete every stale model (with confirm)\n");
+            keys.push_str("  alt+d          - delete every stale model (with confirm)\n");
             keys.push_str("  y / n          - confirm / cancel a delete prompt");
             app.push_system_message(keys);
             None
@@ -616,6 +548,52 @@ fn unix_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn help_text() -> String {
+    let mut help = String::from("available commands:\n");
+    help.push_str("  /help          - show this message\n");
+    help.push_str("  /keys          - show keyboard shortcuts\n");
+    help.push_str("  /subagents     - show or register session supervisors\n");
+    help.push_str("  /skill:<name> [args] - send a skill's instructions as your prompt\n");
+    help.push_str("  /new           - save session, start fresh\n");
+    help.push_str(
+        "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
+    );
+    help.push_str("  /sessions      - browse and resume sessions\n");
+    help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
+    help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
+    help.push_str("  /refresh-models - refresh discovered model catalogue\n");
+    help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
+    help.push_str("  /tree          - browse the conversation tree and jump to a message\n");
+    help.push_str(
+        "  /refine [--global] [instructions] - refine the continual harness, rollback <id> undoes one\n",
+    );
+    help.push_str(
+        "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
+    );
+    help.push_str("  /export [file] - save conversation as markdown\n");
+    help.push_str("  /undo          - revert last turn\n");
+    help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
+    help.push_str("  /cost          - show session cost\n");
+    help.push_str("  /context       - tokens, cost and context for this agent and its children\n");
+    help.push_str("  /name [title]  - show or set the session title\n");
+    help.push_str("  /session       - show the session id, file and message counts\n");
+    help.push_str("  /rlm-max-depth - show or set how deep subagents may nest\n");
+    help.push_str("  /btw <q>       - ask a side question without adding it to the session\n");
+    help.push_str("  /skills        - list loaded skills, their sources and any warnings\n");
+    help.push_str("  /credits       - show openrouter credit balance\n");
+    help.push_str("  /endpoints [id] - list openrouter providers + cache support for a model\n");
+    help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
+    help.push_str("  /settings      - open runtime settings overlay (j/k, space toggles)\n");
+    help.push_str("  /settings show - print current settings state\n");
+    help.push_str("  /login [p]     - oauth + api-key login picker (or pass id to skip)\n");
+    help.push_str("  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n");
+    help.push_str("  /card          - show agent capability card\n");
+    help.push_str("  /debug         - dump internal state (for bug reports)\n");
+    help.push_str("  /quit          - exit mush\n");
+    help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
+    help
 }
 
 fn handle_model_switch(
@@ -1192,6 +1170,27 @@ pub(crate) fn format_skill_catalogue(catalogue: &crate::runner::SkillCatalogue) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_help_command_parses_as_a_builtin() {
+        let help = help_text();
+        let names: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix('/'))
+            .filter_map(|rest| rest.split([' ', '<', '[']).next())
+            .filter(|name| !name.starts_with("skill:"))
+            .collect();
+        assert!(names.len() > 20, "{names:?}");
+        for name in names {
+            assert!(
+                !matches!(
+                    crate::slash::parse(&format!("/{name}")),
+                    Ok(SlashAction::Other { .. })
+                ),
+                "/{name} is in /help but does not parse"
+            );
+        }
+    }
 
     #[test]
     fn reviewer_export_keeps_event_and_human_prefix_authority_separate() {
