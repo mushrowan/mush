@@ -39,7 +39,7 @@ mush-tui = { path = "crates/mush-tui" }
 mush-treesitter = { path = "crates/mush-treesitter" }
 mush-lsp = { path = "crates/mush-lsp" }
 mush-notify = { path = "crates/mush-notify" }
-rustix = { version = "1.1.4", features = ["process", "time"] }
+rustix = { version = "1.1.5", features = ["process", "time"] }
 
 # async
 tokio = { version = "1", features = ["full"] }
@@ -87,7 +87,7 @@ derive_more = { version = "2.1", features = [
   "into",
 ] }
 # compile-time-checked builders for structs with many optional fields
-bon = "3.9"
+bon = "3.10"
 
 # logging
 tracing = "0.1"
@@ -123,7 +123,7 @@ pulldown-cmark = "0.13.4"
 # configurable keybind parsing ("ctrl-k", "alt-enter", ...). wraps
 # crossterm so bindings loaded from the user's config.toml land in the
 # same KeyEvent shape the input handlers already match against
-crokey = { version = "1.4", features = ["serde"] }
+crokey = { version = "1.5", features = ["serde"] }
 
 # cli
 anstream = "1.0.0"
@@ -152,7 +152,7 @@ rustc-hash = "2.1"
 # crypto + encoding
 sha2 = "0.11"
 getrandom = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",

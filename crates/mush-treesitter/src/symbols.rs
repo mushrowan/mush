@@ -94,7 +94,7 @@ pub fn extract_symbols(
         let mut kind = None;
         let mut definition_node = None;
 
-        for capture in m.captures {
+        for capture in m.captures() {
             let capture_name = &query.capture_names()[capture.index as usize];
             match &**capture_name {
                 "name" => {
