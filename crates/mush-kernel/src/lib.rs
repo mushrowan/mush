@@ -22,6 +22,7 @@ pub trait KernelState: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelSession {
     pub session_dir: std::path::PathBuf,
+    pub state_path: std::path::PathBuf,
     pub depth: u32,
     pub max_depth: u32,
 }
@@ -54,6 +55,8 @@ pub enum KernelError {
     Protocol(String),
     #[error("kernel request failed: {0}")]
     Request(String),
+    #[error("kernel request timed out after {0:?}")]
+    RequestTimeout(std::time::Duration),
     #[error("kernel exited{}", if .0.is_empty() { String::new() } else { format!(":\n{}", .0) })]
     Exited(String),
     #[error("an interrupted cell is still running")]

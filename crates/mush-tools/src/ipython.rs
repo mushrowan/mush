@@ -356,10 +356,41 @@ pub struct IpythonTool {
     session: std::sync::Mutex<Option<mush_kernel::KernelSession>>,
     host: Arc<dyn HostRequestHandler>,
     mush_host: Option<Arc<MushHost>>,
-    kernel: tokio::sync::Mutex<Option<Kernel>>,
+    kernel: Arc<tokio::sync::Mutex<Option<Kernel>>>,
     output_sink: Option<crate::bash::OutputSink>,
     busy_prompt: Option<BusyKernelPrompt>,
     pending_restore: tokio::sync::Mutex<Option<std::path::PathBuf>>,
+    restore_notice: std::sync::Mutex<Option<String>>,
+    snapshot_generation: Arc<std::sync::atomic::AtomicU64>,
+    snapshot_debounce: std::time::Duration,
+}
+
+const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+fn restore_notice(outcome: &Result<mush_kernel::RestoreReport, KernelError>) -> Option<String> {
+    let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
+    match outcome {
+        Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
+        Ok(report) if !report.restored.is_empty() => lines.push(format!(
+            "Your Python kernel state was revived from your previous session. These names are \
+             available again: {}.",
+            report.restored.join(", ")
+        )),
+        Ok(_) | Err(_) => lines.push(
+            "Your previous Python kernel state could not be revived; the kernel is starting \
+             fresh, so re-create any variables, imports, or loaded data you need."
+                .to_string(),
+        ),
+    }
+    if let Ok(report) = outcome
+        && !report.failed.is_empty()
+    {
+        lines.push(format!(
+            "These could not be restored and must be recreated if needed: {}.",
+            report.failed.join(", ")
+        ));
+    }
+    Some(lines.join("\n"))
 }
 
 const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -386,11 +417,87 @@ impl IpythonTool {
             session: std::sync::Mutex::new(None),
             host,
             mush_host: None,
-            kernel: tokio::sync::Mutex::new(None),
+            kernel: Arc::new(tokio::sync::Mutex::new(None)),
             output_sink: None,
             busy_prompt: None,
             pending_restore: tokio::sync::Mutex::new(None),
+            restore_notice: std::sync::Mutex::new(None),
+            snapshot_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            snapshot_debounce: SNAPSHOT_DEBOUNCE,
         }
+    }
+
+    #[must_use]
+    pub fn with_snapshot_debounce(mut self, debounce: std::time::Duration) -> Self {
+        self.snapshot_debounce = debounce;
+        self
+    }
+
+    fn set_restore_notice(&self, outcome: &Result<mush_kernel::RestoreReport, KernelError>) {
+        match outcome {
+            Ok(report) => tracing::info!(
+                restored = report.restored.len(),
+                failed = report.failed.len(),
+                "kernel state restored"
+            ),
+            Err(error) => tracing::warn!(%error, "kernel state restore failed"),
+        }
+        *self
+            .restore_notice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restore_notice(outcome);
+    }
+
+    fn take_restore_notice(&self) -> Option<String> {
+        self.restore_notice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn schedule_snapshot(&self) {
+        let Some(path) = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|session| session.state_path.clone())
+        else {
+            return;
+        };
+        let generation = self
+            .snapshot_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let current = self.snapshot_generation.clone();
+        let kernel = self.kernel.clone();
+        let debounce = self.snapshot_debounce;
+        tokio::spawn(async move {
+            tokio::time::sleep(debounce).await;
+            let still_latest = || current.load(std::sync::atomic::Ordering::SeqCst) == generation;
+            if !still_latest() {
+                return;
+            }
+            let slot = kernel.lock().await;
+            let Some(kernel) = slot.as_ref() else { return };
+            if !still_latest() || kernel.busy() {
+                return;
+            }
+            if let Some(parent) = path.parent()
+                && let Err(error) = std::fs::create_dir_all(parent)
+            {
+                tracing::warn!(%error, "kernel state directory unavailable");
+                return;
+            }
+            match kernel.snapshot(&path, None).await {
+                Ok(report) => tracing::debug!(
+                    saved = report.saved.len(),
+                    skipped = report.skipped.len(),
+                    "kernel state auto-saved"
+                ),
+                Err(error) => tracing::warn!(%error, "kernel state auto-save failed"),
+            }
+        });
     }
 
     #[must_use]
@@ -480,14 +587,7 @@ impl IpythonTool {
             if let Some(path) = self.pending_restore.lock().await.take()
                 && path.is_file()
             {
-                match kernel.restore(&path).await {
-                    Ok(report) => tracing::info!(
-                        restored = report.restored.len(),
-                        failed = report.failed.len(),
-                        "kernel state restored"
-                    ),
-                    Err(error) => tracing::warn!(%error, "kernel state restore failed"),
-                }
+                self.set_restore_notice(&kernel.restore(&path).await);
             }
             *slot = Some(kernel);
         }
@@ -546,10 +646,8 @@ impl mush_kernel::KernelState for IpythonTool {
 
     async fn restore_from(&self, path: &Path) {
         if let Some(kernel) = self.kernel.lock().await.as_ref() {
-            if path.is_file()
-                && let Err(error) = kernel.restore(path).await
-            {
-                tracing::warn!(%error, "kernel state restore failed");
+            if path.is_file() {
+                self.set_restore_notice(&kernel.restore(path).await);
             }
             return;
         }
@@ -557,13 +655,18 @@ impl mush_kernel::KernelState for IpythonTool {
     }
 
     async fn reset(&self) {
+        self.snapshot_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.pending_restore.lock().await = None;
+        self.take_restore_notice();
         if let Some(kernel) = self.kernel.lock().await.take() {
             let _ = kernel.shutdown().await;
         }
     }
 
     fn attach_session(&self, session: mush_kernel::KernelSession) {
+        self.snapshot_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self
             .session
             .lock()
@@ -695,6 +798,12 @@ impl AgentTool for IpythonTool {
                 let mut text = format_cell_output(&run.output);
                 if run.kernel_restarted {
                     text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
+                }
+                if let Some(notice) = self.take_restore_notice() {
+                    text = format!("{notice}\n\n{text}");
+                }
+                if run.output.ok {
+                    self.schedule_snapshot();
                 }
                 let details = CellDetails {
                     duration_ms: u64::try_from(run.output.duration.as_millis()).unwrap_or(u64::MAX),
@@ -1176,7 +1285,48 @@ mod tests {
 
         assert_eq!(report.saved, ["carried"]);
         assert_eq!(extract_text(&gone), "False");
-        assert_eq!(extract_text(&back), "6");
+        assert_eq!(
+            extract_text(&back),
+            "[python-state-restored]\n\nYour Python kernel state was revived from your previous \
+             session. These names are available again: carried.\n\n6"
+        );
+        let later = tool.execute(json!({ "code": "sum(carried)" })).await;
+        assert_eq!(extract_text(&later), "6");
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_successful_cell_saves_the_kernel_state_after_a_pause() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifacts/kernel-state.pickle");
+        let tool = tool(dir.path()).with_snapshot_debounce(std::time::Duration::from_millis(50));
+        tool.attach_session(mush_kernel::KernelSession {
+            session_dir: dir.path().join("artifacts"),
+            state_path: path.clone(),
+            depth: 0,
+            max_depth: 1,
+        });
+
+        let failed = tool.execute(json!({ "code": "x = 1\n1 / 0" })).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let skipped = path.exists();
+        let _ = tool.execute(json!({ "code": "kept = 41" })).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tool.reset().await;
+        tool.restore_from(&path).await;
+        let back = tool.execute(json!({ "code": "kept + x" })).await;
+
+        assert!(failed.outcome.is_error());
+        assert!(!skipped);
+        assert!(
+            extract_text(&back).ends_with("\n\n42"),
+            "{}",
+            extract_text(&back)
+        );
         tool.shutdown().await;
     }
 

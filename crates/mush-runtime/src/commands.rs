@@ -343,6 +343,7 @@ impl SessionRuntime {
     pub fn kernel_session(&self) -> mush_kernel::KernelSession {
         mush_kernel::KernelSession {
             session_dir: SessionStore::default_artifact_dir(&self.session_id),
+            state_path: SessionStore::kernel_state_path(&self.session_id),
             depth: self.rlm_depth,
             max_depth: self.rlm_max_depth,
         }

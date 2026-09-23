@@ -616,6 +616,26 @@ async fn cells_run_in_a_real_main_module() {
 }
 
 #[tokio::test]
+async fn a_snapshot_that_stalls_times_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let kernel = kernel().await;
+    kernel
+        .execute("import time\nclass Slow:\n    def __reduce__(self):\n        time.sleep(7)\n        return (Slow, ())\nslow = Slow()")
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let outcome = kernel.snapshot(&dir.path().join("s.pickle"), None).await;
+
+    assert!(
+        matches!(outcome, Err(KernelError::RequestTimeout(_))),
+        "{outcome:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(6));
+    kernel.kill().await;
+}
+
+#[tokio::test]
 async fn restoring_a_missing_snapshot_is_not_an_error() {
     let kernel = kernel().await;
 

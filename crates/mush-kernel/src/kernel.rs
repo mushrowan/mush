@@ -16,6 +16,8 @@ use crate::protocol::{Event, PROTOCOL_VERSION, Request};
 const SHIM: &str = include_str!("../shim/mush_kernel.py");
 const STDERR_TAIL_LINES: usize = 200;
 const BUSY_INTERRUPT_INTERVAL: Duration = Duration::from_millis(500);
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -460,6 +462,7 @@ impl Kernel {
                     path: path.to_string_lossy().into_owned(),
                     max_variable_bytes,
                 },
+                SNAPSHOT_TIMEOUT,
             )
             .await?;
         Ok(SnapshotReport {
@@ -477,6 +480,7 @@ impl Kernel {
                     id: id.clone(),
                     path: path.to_string_lossy().into_owned(),
                 },
+                RESTORE_TIMEOUT,
             )
             .await?;
         Ok(RestoreReport {
@@ -488,7 +492,11 @@ impl Kernel {
     pub async fn list_names(&self) -> Result<Vec<String>, KernelError> {
         let id = self.fresh_id("names");
         let extra = self
-            .request_done(&id, &Request::ListNames { id: id.clone() })
+            .request_done(
+                &id,
+                &Request::ListNames { id: id.clone() },
+                SNAPSHOT_TIMEOUT,
+            )
             .await?;
         Ok(names(&extra, "names"))
     }
@@ -523,6 +531,7 @@ impl Kernel {
         &self,
         id: &str,
         request: &Request,
+        limit: Duration,
     ) -> Result<serde_json::Map<String, Value>, KernelError> {
         let _guard = self.exec_lock.lock().await;
         let mut rx = self.shared.register(id);
@@ -530,24 +539,28 @@ impl Kernel {
             self.shared.unregister(id);
             return Err(error);
         }
-        let outcome = loop {
-            match rx.recv().await {
-                Some(Event::Done { ok, extra, .. }) => {
-                    if ok {
-                        break Ok(extra);
+        let outcome = tokio::time::timeout(limit, async {
+            loop {
+                match rx.recv().await {
+                    Some(Event::Done { ok, extra, .. }) => {
+                        if ok {
+                            break Ok(extra);
+                        }
+                        let reason = extra
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("request failed")
+                            .to_string();
+                        break Err(KernelError::Request(reason));
                     }
-                    let reason = extra
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("request failed")
-                        .to_string();
-                    break Err(KernelError::Request(reason));
+                    Some(Event::Error { evalue, .. }) => break Err(KernelError::Request(evalue)),
+                    Some(_) => continue,
+                    None => break Err(KernelError::Exited(self.shared.stderr_tail_text())),
                 }
-                Some(Event::Error { evalue, .. }) => break Err(KernelError::Request(evalue)),
-                Some(_) => continue,
-                None => break Err(KernelError::Exited(self.shared.stderr_tail_text())),
             }
-        };
+        })
+        .await
+        .unwrap_or(Err(KernelError::RequestTimeout(limit)));
         self.shared.unregister(id);
         outcome
     }
