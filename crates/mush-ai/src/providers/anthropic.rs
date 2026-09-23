@@ -572,7 +572,8 @@ fn build_request_body(
                     display: thinking_display(options, is_oauth).into(),
                 })
             } else {
-                let budget = thinking_budget(level, max_tokens.get());
+                let (_, budget) =
+                    budget_thinking_tokens(level, max_tokens.get(), model.max_output_tokens.get());
                 Some(ThinkingConfig::Enabled {
                     config_type: "enabled".into(),
                     budget_tokens: budget,
@@ -597,12 +598,12 @@ fn build_request_body(
         None
     };
 
-    let effective_max_tokens =
-        if let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = &thinking {
-            max_tokens.get().max(*budget_tokens + 1024)
-        } else {
-            max_tokens.get()
-        };
+    let effective_max_tokens = match (&options.thinking, &thinking) {
+        (Some(level), Some(ThinkingConfig::Enabled { .. })) => {
+            budget_thinking_tokens(level, max_tokens.get(), model.max_output_tokens.get()).0
+        }
+        _ => max_tokens.get(),
+    };
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
     let context_management = oauth_context_management(model, options, is_oauth, thinking.is_some());
@@ -963,16 +964,33 @@ fn anthropic_effort(effort: &EffortLevel, supported: &[ThinkingLevel]) -> Option
     Some(name.to_string())
 }
 
-fn thinking_budget(level: &ThinkingLevel, max_tokens: u64) -> u64 {
-    let base = max_tokens.max(4096);
+const MIN_THINKING_TOKENS: u64 = 1024;
+
+fn thinking_budget(level: &ThinkingLevel) -> u64 {
     match level {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal => 1024,
-        ThinkingLevel::Low => base / 4,
-        ThinkingLevel::Medium => base / 2,
-        ThinkingLevel::High | ThinkingLevel::Other(_) => base,
-        ThinkingLevel::Xhigh => base * 2,
+        ThinkingLevel::Low => 2048,
+        ThinkingLevel::Medium => 8192,
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Other(_) => 16_384,
     }
+}
+
+fn budget_thinking_tokens(level: &ThinkingLevel, base: u64, model_max: u64) -> (u64, u64) {
+    let budget = thinking_budget(level).max(MIN_THINKING_TOKENS);
+    let wanted = base + budget;
+    let max_tokens = if model_max == 0 {
+        wanted
+    } else {
+        wanted.min(model_max)
+    };
+    if max_tokens <= budget {
+        let budget = max_tokens
+            .saturating_sub(MIN_THINKING_TOKENS)
+            .max(MIN_THINKING_TOKENS);
+        return (max_tokens, budget);
+    }
+    (max_tokens, budget)
 }
 
 fn convert_messages(
@@ -2071,17 +2089,32 @@ mod tests {
 
     #[test]
     fn thinking_budget_levels() {
-        assert_eq!(thinking_budget(&ThinkingLevel::Off, 8192), 0);
-        assert_eq!(thinking_budget(&ThinkingLevel::Minimal, 8192), 1024);
-        assert_eq!(thinking_budget(&ThinkingLevel::Low, 8192), 2048);
-        assert_eq!(thinking_budget(&ThinkingLevel::Medium, 8192), 4096);
-        assert_eq!(thinking_budget(&ThinkingLevel::High, 8192), 8192);
+        assert_eq!(thinking_budget(&ThinkingLevel::Off), 0);
+        assert_eq!(thinking_budget(&ThinkingLevel::Minimal), 1024);
+        assert_eq!(thinking_budget(&ThinkingLevel::Low), 2048);
+        assert_eq!(thinking_budget(&ThinkingLevel::Medium), 8192);
+        assert_eq!(thinking_budget(&ThinkingLevel::High), 16_384);
+        assert_eq!(thinking_budget(&ThinkingLevel::Xhigh), 16_384);
     }
 
     #[test]
-    fn thinking_budget_respects_minimum() {
-        assert_eq!(thinking_budget(&ThinkingLevel::Low, 1024), 1024);
-        assert_eq!(thinking_budget(&ThinkingLevel::Medium, 1024), 2048);
+    fn budget_thinking_never_asks_past_the_model_max() {
+        assert_eq!(
+            budget_thinking_tokens(&ThinkingLevel::High, 32_000, 32_768),
+            (32_768, 16_384)
+        );
+        assert_eq!(
+            budget_thinking_tokens(&ThinkingLevel::Xhigh, 128_000, 64_000),
+            (64_000, 16_384)
+        );
+        assert_eq!(
+            budget_thinking_tokens(&ThinkingLevel::Low, 4096, 64_000),
+            (6144, 2048)
+        );
+        assert_eq!(
+            budget_thinking_tokens(&ThinkingLevel::High, 8192, 8192),
+            (8192, 7168)
+        );
     }
 
     #[test]
