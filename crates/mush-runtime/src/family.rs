@@ -1105,7 +1105,7 @@ impl Family {
         receiver_name: Option<&str>,
         text: &str,
         mode: DeliveryMode,
-    ) -> Result<Vec<(String, Receipt)>, String> {
+    ) -> Result<Vec<(String, Result<Receipt, String>)>, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("message is required".into());
@@ -1208,7 +1208,7 @@ impl Family {
                     for node in inner.children.values() {
                         if node.summary.parent == my_parent
                             && node.summary.id != my_id
-                            && !node.summary.status.settled()
+                            && node.summary.status != ChildStatus::Deleted
                         {
                             targets.push((
                                 Some(node.summary.id.clone()),
@@ -1219,7 +1219,9 @@ impl Family {
                     }
                 }
                 for node in inner.children.values() {
-                    if node.summary.parent == caller.id && !node.summary.status.settled() {
+                    if node.summary.parent == caller.id
+                        && node.summary.status != ChildStatus::Deleted
+                    {
                         targets.push((
                             Some(node.summary.id.clone()),
                             node.summary.name.clone(),
@@ -1235,22 +1237,43 @@ impl Family {
                 ));
             }
         };
-        if targets.is_empty() {
-            return Err("nobody to send to".into());
-        }
-        let mut receipts = Vec::new();
-        for (target, target_name, sender) in targets {
-            let receipt = self
-                .deliver(caller, target.as_deref(), &sender, text, mode)
-                .await?;
-            if receipt == Receipt::Rejected {
-                return Err(format!(
-                    "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
-                ));
+        if receiver_role != "all" {
+            let mut receipts = Vec::new();
+            for (target, target_name, sender) in targets {
+                let receipt = self
+                    .deliver(caller, target.as_deref(), &sender, text, mode)
+                    .await?;
+                if receipt == Receipt::Rejected {
+                    return Err(format!(
+                        "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
+                    ));
+                }
+                receipts.push((target_name, Ok(receipt)));
             }
-            receipts.push((target_name, receipt));
+            return Ok(receipts);
         }
-        Ok(receipts)
+        if let Some(id) = caller.id.as_deref()
+            && let Some(node) = self.lock().children.get_mut(id)
+        {
+            node.replied = true;
+        }
+        let sends = targets
+            .iter()
+            .map(|(target, _, sender)| self.deliver(caller, target.as_deref(), sender, text, mode));
+        let results = futures::future::join_all(sends).await;
+        Ok(targets
+            .into_iter()
+            .zip(results)
+            .map(|((_, target_name, _), result)| {
+                let result = match result {
+                    Ok(Receipt::Rejected) => Err(format!(
+                        "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
+                    )),
+                    other => other,
+                };
+                (target_name, result)
+            })
+            .collect())
     }
 
     async fn deliver(
@@ -1941,7 +1964,10 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 Ok(serde_json::json!({
                     "receipts": receipts
                         .iter()
-                        .map(|(name, receipt)| serde_json::json!({ "receiver": name, "status": receipt }))
+                        .map(|(name, receipt)| match receipt {
+                            Ok(status) => serde_json::json!({ "receiver": name, "status": status }),
+                            Err(error) => serde_json::json!({ "receiver": name, "error": error }),
+                        })
                         .collect::<Vec<_>>()
                 }))
             }
@@ -2720,7 +2746,7 @@ mod tests {
         );
 
         let receipts = receipts.unwrap();
-        assert_eq!(receipts, vec![("root".to_string(), Receipt::Delivered)]);
+        assert_eq!(receipts, vec![("root".to_string(), Ok(Receipt::Delivered))]);
         let injected = std::iter::from_fn(|| root_connection.try_next_event())
             .find_map(|event| match event {
                 ClientEvent::MessageInjected(event) => Some(event),
@@ -2745,6 +2771,37 @@ mod tests {
             }),
             "a child that replied gets no exit notice"
         );
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_reaches_idle_children_and_one_failure_spares_the_rest() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let root = Identity::root("root");
+        for name in ["alpha", "beta"] {
+            family
+                .spawn(&root, "task".into(), name.into(), None, None, &family)
+                .await
+                .unwrap();
+        }
+        settle(&family, &root).await;
+        let beta = family
+            .children_of(&root)
+            .into_iter()
+            .find(|child| child.name == "beta")
+            .unwrap();
+        if let Some(node) = family.lock().children.get_mut(&beta.id) {
+            node.inbox = None;
+        }
+
+        let mut receipts = family
+            .send_message(&root, "all", None, "status please", DeliveryMode::Auto)
+            .await
+            .unwrap();
+        receipts.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(receipts[0], ("alpha".to_string(), Ok(Receipt::Delivered)));
+        assert_eq!(receipts[1].0, "beta");
+        assert!(receipts[1].1.is_err());
     }
 
     #[tokio::test]
@@ -2796,7 +2853,7 @@ mod tests {
             .send_message(&root, "child", Some("slow"), "hurry up", DeliveryMode::Auto)
             .await
             .unwrap();
-        assert_eq!(receipts, vec![("slow".to_string(), Receipt::Delivered)]);
+        assert_eq!(receipts, vec![("slow".to_string(), Ok(Receipt::Delivered))]);
 
         let queued = family
             .send_message(
@@ -2808,7 +2865,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(queued, vec![("slow".to_string(), Receipt::Queued)]);
+        assert_eq!(queued, vec![("slow".to_string(), Ok(Receipt::Queued))]);
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !family.children_of(&root)[0].status.settled() {
