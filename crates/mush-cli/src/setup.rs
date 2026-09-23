@@ -527,18 +527,33 @@ fn format_available_skills(skills: &[loader::Skill]) -> String {
     let mut out = String::from("<available_skills>\n");
     for skill in skills {
         out.push_str("  <skill>\n");
-        out.push_str(&format!("    <name>{}</name>\n", skill.name));
+        out.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
         out.push_str(&format!(
             "    <description>{}</description>\n",
-            skill.description
+            escape_xml(&skill.description)
         ));
         out.push_str(&format!(
             "    <location>{}</location>\n",
-            skill.path.display()
+            escape_xml(&skill.path.display().to_string())
         ));
         out.push_str("  </skill>\n");
     }
     out.push_str("</available_skills>");
+    out
+}
+
+fn escape_xml(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
     out
 }
 
@@ -1383,6 +1398,25 @@ mod tests {
         assert!(prompt.contains("$skill-name"));
         assert!(!prompt.contains("load_skill"));
         assert!(alpha < zeta);
+    }
+
+    #[test]
+    fn skill_fields_are_xml_escaped() {
+        let skills = [Skill {
+            name: "a&b".into(),
+            description: "use <this> when \"x\" isn't y".into(),
+            path: "/tmp/a&b/SKILL.md".into(),
+            source: mush_ext::SkillSource::User,
+            disable_model_invocation: false,
+        }];
+
+        let block = format_available_skills(&skills);
+
+        assert!(block.contains("<name>a&amp;b</name>"));
+        assert!(block.contains(
+            "<description>use &lt;this&gt; when &quot;x&quot; isn&apos;t y</description>"
+        ));
+        assert!(block.contains("<location>/tmp/a&amp;b/SKILL.md</location>"));
     }
 
     #[test]
