@@ -209,6 +209,7 @@ impl KernelJobs {
         command: &str,
         timeout: Option<Duration>,
         origin: Option<&str>,
+        env: Option<&[(String, String)]>,
     ) -> Result<(String, Option<u32>), String> {
         let id = format!(
             "job-{}",
@@ -221,7 +222,18 @@ impl KernelJobs {
         let stderr = writer.try_clone().map_err(|e| format!("pipe: {e}"))?;
 
         let mut cmd = tokio::process::Command::new("bash");
-        mush_agent::exec_context::apply_control_environment(&mut cmd);
+        match env {
+            Some(env) => {
+                let path = env
+                    .iter()
+                    .find(|(key, _)| key == "PATH")
+                    .map(|(_, value)| value.into())
+                    .unwrap_or_default();
+                cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
+                mush_agent::exec_context::apply_control_environment_with_path(&mut cmd, path);
+            }
+            None => mush_agent::exec_context::apply_control_environment(&mut cmd),
+        }
         cmd.arg("-c")
             .arg(crate::bash::command_with_direnv(command))
             .current_dir(cwd)
@@ -474,7 +486,7 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, pid) = jobs
-            .start(&cwd(), "echo one; echo two >&2; exit 4", None, None)
+            .start(&cwd(), "echo one; echo two >&2; exit 4", None, None, None)
             .await
             .unwrap();
         let done = jobs.wait(&id).await.unwrap();
@@ -490,7 +502,13 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, _) = jobs
-            .start(&cwd(), "echo started; sleep 30; echo never", None, None)
+            .start(
+                &cwd(),
+                "echo started; sleep 30; echo never",
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -512,7 +530,13 @@ mod tests {
         let jobs = KernelJobs::default();
 
         let (id, _) = jobs
-            .start(&cwd(), "sleep 30", Some(Duration::from_millis(200)), None)
+            .start(
+                &cwd(),
+                "sleep 30",
+                Some(Duration::from_millis(200)),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let done = tokio::time::timeout(Duration::from_secs(5), jobs.wait(&id))
@@ -534,10 +558,13 @@ mod tests {
         });
 
         let (_, pid) = jobs
-            .start(&cwd(), "exit 2", None, Some("call_7"))
+            .start(&cwd(), "exit 2", None, Some("call_7"), None)
             .await
             .unwrap();
-        let (read, _) = jobs.start(&cwd(), "sleep 0.3", None, None).await.unwrap();
+        let (read, _) = jobs
+            .start(&cwd(), "sleep 0.3", None, None, None)
+            .await
+            .unwrap();
         let _ = jobs.wait(&read).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -565,7 +592,7 @@ mod tests {
         });
 
         let (id, pid) = jobs
-            .start(&cwd(), "sleep 0.3; exit 1", None, None)
+            .start(&cwd(), "sleep 0.3; exit 1", None, None, None)
             .await
             .unwrap();
         let early = jobs.snapshot(&id).await.unwrap();
@@ -606,7 +633,10 @@ mod tests {
         let jobs = KernelJobs::default();
         jobs.set_orphan_journal(crate::orphans::OrphanJournal::at(&path));
 
-        let (id, pid) = jobs.start(&cwd(), "sleep 0.2", None, None).await.unwrap();
+        let (id, pid) = jobs
+            .start(&cwd(), "sleep 0.2", None, None, None)
+            .await
+            .unwrap();
         let running = std::fs::read_to_string(&path).unwrap();
         let _ = jobs.wait(&id).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -652,6 +682,7 @@ mod tests {
                 "echo $TERM $PAGER $NO_COLOR $GIT_ASKPASS",
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -664,7 +695,10 @@ mod tests {
     async fn kill_reaches_a_group_left_behind_after_the_shell_exits() {
         let jobs = KernelJobs::default();
 
-        let (id, pid) = jobs.start(&cwd(), "sleep 30 &", None, None).await.unwrap();
+        let (id, pid) = jobs
+            .start(&cwd(), "sleep 30 &", None, None, None)
+            .await
+            .unwrap();
         let done = tokio::time::timeout(Duration::from_secs(5), jobs.wait(&id))
             .await
             .unwrap()

@@ -145,7 +145,7 @@ class BashHandle:
         self.command = command
         self.job_id: str | None = None
         self.pid: int | None = None
-        payload = {"command": command}
+        payload = {"command": command, "cwd": os.getcwd(), "env": dict(os.environ)}
         if timeout is not None:
             payload["timeout"] = timeout
         if _current_origin.get() is not None:
@@ -530,7 +530,7 @@ agent_observe = _AgentObserve()
 
 
 async def edit(path: str, old: str, new: str) -> str:
-    payload = {"path": path, "old": old, "new": new}
+    payload = {"path": os.path.abspath(os.path.expanduser(os.fspath(path))), "old": old, "new": new}
     if _current_origin.get() is not None:
         payload["origin"] = _current_origin.get()
     reply = await host_request("edit", payload)

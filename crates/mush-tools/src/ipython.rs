@@ -233,9 +233,21 @@ impl HostRequestHandler for MushHost {
                     ),
                 };
                 let origin = payload.get("origin").and_then(Value::as_str);
+                let cwd = payload
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map_or_else(|| self.cwd.to_path_buf(), std::path::PathBuf::from);
+                let env: Option<Vec<(String, String)>> =
+                    payload.get("env").and_then(Value::as_object).map(|env| {
+                        env.iter()
+                            .filter_map(|(key, value)| {
+                                Some((key.clone(), value.as_str()?.to_string()))
+                            })
+                            .collect()
+                    });
                 let (job_id, pid) = self
                     .jobs
-                    .start(&self.cwd, command, timeout, origin)
+                    .start(&cwd, command, timeout, origin, env.as_deref())
                     .await
                     .map_err(HostError)?;
                 Ok(json!({ "job_id": job_id, "pid": pid }))
@@ -831,6 +843,29 @@ mod tests {
         assert_eq!(
             extract_text(&result),
             "(True, True, True, 'refused')",
+            "{}",
+            extract_text(&result)
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bash_and_edit_follow_the_kernel_cwd_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), "old\n").unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": "import os\nfor key in [k for k in os.environ if k.startswith('DIRENV_')]:\n    del os.environ[key]\nos.chdir('sub')\nos.environ['MUSH_TEST_VAR'] = 'yes'\nos.environ['PATH'] = '/mush-test-bin:' + os.environ['PATH']\nawait edit('a.txt', 'old', 'new')\nr = await bash('basename \"$PWD\"; echo $MUSH_TEST_VAR; echo \"$PATH\" | grep -c mush-test-bin; cat a.txt')\nr.output"
+            }))
+            .await;
+
+        assert_eq!(
+            extract_text(&result),
+            "'sub\\nyes\\n1\\nnew\\n'",
             "{}",
             extract_text(&result)
         );

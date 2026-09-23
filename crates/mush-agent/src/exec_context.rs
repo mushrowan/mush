@@ -14,6 +14,13 @@ pub fn control_endpoint() -> Option<ControlEndpoint> {
 }
 
 pub fn apply_control_environment(command: &mut tokio::process::Command) {
+    apply_control_environment_with_path(command, std::env::var_os("PATH").unwrap_or_default());
+}
+
+pub fn apply_control_environment_with_path(
+    command: &mut tokio::process::Command,
+    path: std::ffi::OsString,
+) {
     for key in [
         "MUSH_CONTROL_SOCKET",
         "MUSH_CONTROL_INSTANCE",
@@ -29,15 +36,14 @@ pub fn apply_control_environment(command: &mut tokio::process::Command) {
             .env("MUSH_CONTROL_SESSION", endpoint.target.session)
             .env("MUSH_CONTROL_ACTIVATION", endpoint.target.activation);
     }
-    if let Some(path) = path_with_own_bin() {
+    if let Some(path) = path_with_own_bin(&path) {
         command.env("PATH", path);
     }
 }
 
-fn path_with_own_bin() -> Option<std::ffi::OsString> {
+fn path_with_own_bin(current: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
     let bin = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let rest: Vec<_> = std::env::split_paths(&current)
+    let rest: Vec<_> = std::env::split_paths(current)
         .filter(|dir| *dir != bin)
         .collect();
     std::env::join_paths(std::iter::once(bin).chain(rest)).ok()
