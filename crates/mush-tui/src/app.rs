@@ -156,6 +156,29 @@ pub struct PendingOAuth {
     pub pkce: mush_ai::oauth::PkceChallenge,
 }
 
+fn agent_sender(event: &mush_ai::types::EventMessage) -> Option<String> {
+    use mush_ai::types::EventOrigin;
+    let mut senders: Vec<String> = Vec::new();
+    for receipt in &event.receipts {
+        let sender = match &receipt.origin {
+            EventOrigin::Agent {
+                name, relationship, ..
+            } if relationship.is_empty() => name.clone(),
+            EventOrigin::Agent {
+                name, relationship, ..
+            } => format!("{relationship} {name}"),
+            EventOrigin::Control { .. } | EventOrigin::Inbox { .. } | EventOrigin::Legacy => {
+                return None;
+            }
+        };
+        if !senders.contains(&sender) {
+            senders.push(sender);
+        }
+    }
+    (event.kind == mush_ai::types::EventKind::Message && !senders.is_empty())
+        .then(|| senders.join(", "))
+}
+
 impl App {
     pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
@@ -511,10 +534,10 @@ impl App {
     }
 
     pub fn push_event_message(&mut self, event: &mush_ai::types::EventMessage) {
-        self.messages.push(DisplayMessage::new(
-            MessageRole::Event(event.kind),
-            event.text(),
-        ));
+        self.messages.push(DisplayMessage {
+            agent_from: agent_sender(event),
+            ..DisplayMessage::new(MessageRole::Event(event.kind), event.text())
+        });
     }
 
     pub fn push_user_message_with_images(&mut self, text: impl Into<String>, images: Vec<Vec<u8>>) {

@@ -375,6 +375,12 @@ fn build_message_lines(
 
     let mut lines = Vec::new();
 
+    if let Some(from) = &msg.agent_from
+        && !style.detail.shows_full_output()
+    {
+        push_agent_message_notice(from, style.theme, width, &mut lines);
+        return lines;
+    }
     if matches!(msg.role, MessageRole::System) {
         lines.push(system_label_line(style.theme, None));
     }
@@ -813,6 +819,19 @@ fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (
             theme.dim.fg.unwrap_or(Color::DarkGray),
         )
     }
+}
+
+fn push_agent_message_notice(
+    from: &str,
+    theme: &Theme,
+    width: u16,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let line = Line::from(vec![
+        Span::styled("agent message received", theme.tool_output),
+        Span::styled(format!("{HEADER_SEPARATOR}from {from}"), theme.dim),
+    ]);
+    lines.extend(indent_line(line, message_content_width(width as usize)));
 }
 
 fn push_status_lines(

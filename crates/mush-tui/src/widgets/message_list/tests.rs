@@ -1999,3 +1999,63 @@ fn a_status_after_a_new_message_gets_its_own_line() {
         ]
     );
 }
+
+fn agent_message_event() -> mush_ai::types::EventMessage {
+    use mush_ai::types::{EventOrigin, EventReceipt, Timestamp};
+    mush_ai::types::EventMessage {
+        content: "[agent-message from child:auth]\n\nfound the bug".into(),
+        timestamp_ms: Timestamp::zero(),
+        kind: mush_ai::types::EventKind::Message,
+        receipts: vec![EventReceipt {
+            id: String::from("agent-message-1").into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Message,
+            origin: EventOrigin::Agent {
+                session_id: "s".into(),
+                name: "auth".into(),
+                relationship: "child".into(),
+            },
+        }],
+    }
+}
+
+#[test]
+fn a_received_agent_message_is_a_notice_until_all() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_event_message(&agent_message_event());
+
+    for detail in [ChatDetail::Overview, ChatDetail::Details] {
+        app.detail = detail;
+        let text = buffer_to_string(&render_app(&app, 80, 10));
+        assert!(
+            text.contains("agent message received \u{b7} from child auth"),
+            "{text}"
+        );
+        assert!(!text.contains("found the"), "{text}");
+        assert!(!text.contains("non-human event"), "{text}");
+    }
+
+    app.detail = ChatDetail::All;
+    let text = buffer_to_string(&render_app(&app, 80, 20));
+    assert!(text.contains("non-human event"), "{text}");
+    assert!(text.contains("found the"), "{text}");
+}
+
+#[test]
+fn a_control_message_keeps_its_full_body() {
+    use mush_ai::types::{EventOrigin, EventReceipt, Timestamp};
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut event = agent_message_event();
+    event.receipts = vec![EventReceipt {
+        id: String::from("control-1").into(),
+        timestamp_ms: Timestamp::zero(),
+        kind: mush_ai::types::EventKind::Message,
+        origin: EventOrigin::Legacy,
+    }];
+    app.push_event_message(&event);
+
+    let text = buffer_to_string(&render_app(&app, 80, 20));
+
+    assert!(text.contains("non-human event"), "{text}");
+    assert!(text.contains("found the"), "{text}");
+}
