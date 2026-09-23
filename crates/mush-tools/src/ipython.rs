@@ -99,7 +99,7 @@ pub struct MushHost {
 impl MushHost {
     pub fn new(cwd: Arc<Path>) -> Self {
         Self {
-            edit: Arc::new(crate::edit::EditTool::new(cwd.clone())),
+            edit: Arc::new(crate::edit::EditTool::new(cwd.clone()).without_read_ledger()),
             jobs: crate::kernel_jobs::KernelJobs::default(),
             cwd,
             diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -892,6 +892,27 @@ mod tests {
         );
         assert!(details.error.is_none());
         assert!(details.duration_ms > 0);
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn edit_works_after_the_file_changes_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "one two three\n").unwrap();
+        let tool = tool(dir.path());
+        let path_text = path.display().to_string();
+
+        let result = tool
+            .execute(json!({
+                "code": format!(
+                    "p = {path_text:?}\nawait edit(p, 'one', '1')\nimport pathlib, os\npathlib.Path(p).write_text(pathlib.Path(p).read_text().replace('two', '2'))\nos.utime(p, (4102444800, 4102444800))\nawait edit(p, 'three', '3')"
+                )
+            }))
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1 2 3\n");
         tool.shutdown().await;
     }
 

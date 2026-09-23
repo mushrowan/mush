@@ -111,20 +111,26 @@ impl EditArgs {
 
 pub struct EditTool {
     cwd: Arc<Path>,
-    ledger: crate::read_ledger::ReadLedger,
+    ledger: Option<crate::read_ledger::ReadLedger>,
 }
 
 impl EditTool {
     pub fn new(cwd: Arc<Path>) -> Self {
         Self {
             cwd,
-            ledger: crate::read_ledger::ReadLedger::shared(),
+            ledger: Some(crate::read_ledger::ReadLedger::shared()),
         }
     }
 
     #[must_use]
     pub fn with_read_ledger(mut self, ledger: crate::read_ledger::ReadLedger) -> Self {
-        self.ledger = ledger;
+        self.ledger = Some(ledger);
+        self
+    }
+
+    #[must_use]
+    pub fn without_read_ledger(mut self) -> Self {
+        self.ledger = None;
         self
     }
 }
@@ -227,11 +233,15 @@ impl AgentTool for EditTool {
         crate::file_mutation_queue::with_file_mutation_queue(&path, async {
             let path = path.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(stale) = ledger.check(&path) {
+                if let Some(ledger) = &ledger
+                    && let Err(stale) = ledger.check(&path)
+                {
                     return ToolResult::error(stale.to_string());
                 }
                 let result = edit_file_batch(&path, &edits, &opts);
-                if result.outcome.is_success() {
+                if result.outcome.is_success()
+                    && let Some(ledger) = &ledger
+                {
                     ledger.record(&path);
                 }
                 result
