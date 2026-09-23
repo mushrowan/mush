@@ -1256,6 +1256,19 @@ struct ChildSeed {
     subagent_model: Option<String>,
     models: mush_runtime::ModelSelection,
     session_dir: std::path::PathBuf,
+    prompt_overrides: setup::PromptOverrides,
+}
+
+fn rlm_system_prompt(
+    cwd: &std::path::Path,
+    discovery: &mush_ext::DiscoveryOptions,
+    overrides: &setup::PromptOverrides,
+    kernel_packages: &[String],
+    role: &setup::RlmRole,
+) -> String {
+    let mut project = mush_ext::loader::discover_project_context_with(cwd, discovery);
+    overrides.apply(&mut project);
+    setup::build_rlm_system_prompt(&project, cwd, kernel_packages, role)
 }
 
 fn turn_config(
@@ -1350,12 +1363,15 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                         ))),
                 ));
             }
-            let project =
-                mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
             let max_depth = family.max_depth();
             let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth);
-            let system_prompt =
-                setup::build_rlm_system_prompt(&project, &seed.cwd, &seed.kernel_packages, &role);
+            let system_prompt = rlm_system_prompt(
+                &seed.cwd,
+                &seed.discovery,
+                &seed.prompt_overrides,
+                &seed.kernel_packages,
+                &role,
+            );
             let mut worker = mush_runtime::WorkerConfig::new(turn_config(
                 &seed,
                 &session.meta.id,
@@ -1412,6 +1428,13 @@ fn worker_config(
         setup.client.model.id.to_string(),
         session.meta.subagent_model.clone(),
     );
+    let prompt_overrides = setup::PromptOverrides {
+        system: cli
+            .system
+            .clone()
+            .or(setup.client.cfg.system_prompt.clone()),
+        append: cli.append_system.clone(),
+    };
     let seed = ChildSeed {
         models: models.clone(),
         model: setup.client.model.clone(),
@@ -1435,6 +1458,7 @@ fn worker_config(
         rlm_max_depth: setup::rlm_max_depth(&setup.client.cfg),
         subagent_model: setup.client.cfg.subagent_model.clone(),
         session_dir: SessionStore::default_dir(),
+        prompt_overrides: prompt_overrides.clone(),
     };
     let mut turn = turn_config(
         &seed,
@@ -1562,14 +1586,7 @@ fn worker_config(
         let cwd = setup.client.cwd.clone();
         let role = role.clone();
         let family = worker.family.clone();
-        let system = cli
-            .system
-            .clone()
-            .or(setup.client.cfg.system_prompt.clone());
-        let append = cli.append_system.clone();
         move || {
-            let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
-            setup::apply_prompt_overrides(&mut project, system.as_deref(), append.as_deref());
             if rlm {
                 let role = setup::RlmRole {
                     max_depth: family
@@ -1577,12 +1594,15 @@ fn worker_config(
                         .map_or(role.max_depth, |family| family.max_depth()),
                     ..role.clone()
                 };
-                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages, &role)
+                rlm_system_prompt(&cwd, &discovery, &prompt_overrides, &kernel_packages, &role)
             } else {
+                let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
+                prompt_overrides.apply(&mut project);
                 build_system_prompt_from_context(&project, &cwd)
             }
         }
     }));
+
     worker.autonomous = Some(std::sync::Arc::new(mush_runtime::Autonomous::new(
         setup.client.cwd.clone(),
     )));
@@ -1872,6 +1892,30 @@ mod tests {
             parent: None,
             subagent_model: None,
         }
+    }
+
+    #[test]
+    fn a_child_prompt_carries_the_system_and_append_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let overrides = setup::PromptOverrides {
+            system: Some("base from the flag".into()),
+            append: Some("tail from the flag".into()),
+        };
+        let discovery = mush_ext::DiscoveryOptions {
+            no_skills: true,
+            no_context_files: true,
+            ..Default::default()
+        };
+        let role = setup::RlmRole::child("worker", 1, 2);
+
+        let prompt = rlm_system_prompt(dir.path(), &discovery, &overrides, &[], &role);
+
+        assert!(prompt.starts_with("base from the flag"), "{prompt}");
+        assert!(prompt.contains("child agent named `worker`"), "{prompt}");
+        assert!(
+            prompt.trim_end().ends_with("tail from the flag"),
+            "{prompt}"
+        );
     }
 
     #[test]

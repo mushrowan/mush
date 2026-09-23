@@ -884,6 +884,18 @@ fn prompt_input(value: &str) -> mush_ext::PromptFile {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PromptOverrides {
+    pub system: Option<String>,
+    pub append: Option<String>,
+}
+
+impl PromptOverrides {
+    pub fn apply(&self, context: &mut loader::ProjectContext) {
+        apply_prompt_overrides(context, self.system.as_deref(), self.append.as_deref());
+    }
+}
+
 pub fn apply_prompt_overrides(
     context: &mut loader::ProjectContext,
     system: Option<&str>,
