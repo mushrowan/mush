@@ -212,9 +212,7 @@ pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner
         let mut args = worker_args.clone();
         Box::pin(async move {
             if let Some(model) = &request.model {
-                args.retain(|arg| arg != "--model");
-                args.push("--model".into());
-                args.push(model.clone());
+                args = with_model(args, model);
             }
             let descriptor = open(OpenTarget::New, args)
                 .await
@@ -247,4 +245,45 @@ pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner
             })
         })
     })
+}
+
+fn with_model(args: Vec<String>, model: &str) -> Vec<String> {
+    let mut kept = Vec::with_capacity(args.len() + 2);
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--model" {
+            args.next();
+            continue;
+        }
+        kept.push(arg);
+    }
+    kept.push("--model".into());
+    kept.push(model.into());
+    kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_new_model_replaces_the_flag_and_its_value() {
+        let args = strings(&["--thinking", "--model", "old", "--max-turns", "4"]);
+        assert_eq!(
+            with_model(args, "new"),
+            strings(&["--thinking", "--max-turns", "4", "--model", "new"])
+        );
+    }
+
+    #[test]
+    fn a_model_is_added_when_none_was_set() {
+        assert_eq!(
+            with_model(strings(&["--no-tools"]), "new"),
+            strings(&["--no-tools", "--model", "new"])
+        );
+    }
 }
