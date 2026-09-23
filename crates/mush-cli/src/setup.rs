@@ -629,7 +629,12 @@ descendants included, and `await rlm.resume_subagents(targets=None)` lets them g
 Omit `targets` for all of them. A turn already running finishes; the pause holds anything \
 queued, scheduled or delivered until you resume.\n\
 - `await agent_message.send(text, receiver_role=\"child\", receiver_name=...)` sends a child \
-more instructions. A busy child is steered mid-turn; an idle one gets it as a new prompt.\n\
+more instructions. `receiver_role` is required: `\"parent\"`, `\"sibling\"` or `\"child\"`, with \
+`receiver_name` for siblings and children. A busy agent sees the message during its turn; an \
+idle one wakes into a new turn in its own context. It returns a receipt whose \
+`deliveryStatus` is `delivered` (an idle agent got it) or `queued` (it waits on current \
+work). `await agent_message.send(\"all\", text)` broadcasts to your whole family and returns \
+`{receipts: [...]}`, with an `error` entry for any member it could not reach.\n\
 - Give a child one clear task with the context it needs; it starts from an empty conversation.\n\
 - `await rlm.create_session(prompt, name=...)` starts a separate top-level session in its own \
 worker for work that should outlive this conversation; it runs on its own and reports \

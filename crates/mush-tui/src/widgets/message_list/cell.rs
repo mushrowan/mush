@@ -254,7 +254,10 @@ fn is_edit_confirmation(result: &str, cell: &mush_tools::ipython::CellDetails) -
 }
 
 fn is_send_receipt(result: &str, cell: &mush_tools::ipython::CellDetails) -> bool {
-    !cell.sent_messages.is_empty() && result.trim_start().starts_with("{'receipts'")
+    let result = result.trim_start();
+    !cell.sent_messages.is_empty()
+        && (result.starts_with("{'receipts'")
+            || (result.starts_with('{') && result.contains("'deliveryStatus': ")))
 }
 
 fn render_sent_messages(

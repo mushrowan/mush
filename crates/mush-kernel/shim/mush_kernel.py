@@ -491,10 +491,26 @@ class _Rlm:
 
 
 class _AgentMessage:
-    async def send(self, message: str, *, receiver_role: str = "parent", receiver_name: str | None = None, mode: str = "auto") -> dict:
-        payload = {"message": message, "receiver_role": receiver_role, "mode": mode}
-        if receiver_name is not None:
-            payload["receiver_name"] = receiver_name
+    async def send(self, message: str, broadcast_message: str | None = None, *, receiver_role: str | None = None, receiver_name: str | None = None, mode: str | None = None) -> dict:
+        if broadcast_message is not None:
+            if message != "all":
+                raise TypeError("positional agent_message.send targets are not supported; use receiver_role and receiver_name")
+            if receiver_role is not None or receiver_name is not None:
+                raise TypeError("broadcast cannot be combined with receiver_role/receiver_name")
+            payload = {"target": "all", "message": broadcast_message}
+        else:
+            if receiver_role not in ("parent", "sibling", "child"):
+                raise ValueError('receiver_role must be "parent", "sibling", or "child"')
+            if not isinstance(message, str):
+                raise TypeError(f"message must be str, got {type(message).__name__}")
+            if receiver_role == "parent":
+                if receiver_name is not None:
+                    raise ValueError("receiver_name must be omitted for parent messages")
+            elif not isinstance(receiver_name, str) or not receiver_name.strip():
+                raise ValueError("receiver_name is required for sibling and child messages")
+            payload = {"message": message, "receiver_role": receiver_role}
+            if receiver_name is not None:
+                payload["receiver_name"] = receiver_name
         if _current_origin.get() is not None:
             payload["origin"] = _current_origin.get()
         return await host_request("agent_message.send", payload)

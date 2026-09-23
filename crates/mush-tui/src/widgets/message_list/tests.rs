@@ -1820,7 +1820,10 @@ fn a_sent_agent_message_shows_as_a_row_and_hides_the_receipt_dict() {
         duration_ms: 40,
         stdout: String::new(),
         stderr: String::new(),
-        result: Some("{'receipts': [{'receiver': 'auth', 'status': 'delivered'}]}".into()),
+        result: Some(
+            "{'deliveredAt': '2026-09-23T00:00:00.000Z', 'deliveryStatus': 'delivered', 'id': 'agentmsg_1'}"
+                .into(),
+        ),
         error: None,
         diffs: vec![],
         images: 0,
@@ -1841,7 +1844,7 @@ fn a_sent_agent_message_shows_as_a_row_and_hides_the_receipt_dict() {
             text.contains(" \u{25c6} agent message sent \u{b7} auth (delivered)"),
             "{text}"
         );
-        assert!(!text.contains("receipts"), "{text}");
+        assert!(!text.contains("deliveryStatus"), "{text}");
         assert!(!text.contains("regression test"), "{text}");
     }
 

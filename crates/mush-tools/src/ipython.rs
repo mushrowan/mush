@@ -125,28 +125,30 @@ impl MushHost {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let receipts = reply
-            .get("receipts")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let receipts = match reply.get("receipts").and_then(Value::as_array) {
+            Some(receipts) => receipts.clone(),
+            None => vec![reply.clone()],
+        };
         let mut sent = self
             .sent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = sent.entry(origin.to_string()).or_default();
         for receipt in receipts {
+            let status = match receipt.get("error") {
+                Some(_) => "failed",
+                None => receipt
+                    .get("deliveryStatus")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            };
             entry.push(SentMessage {
                 receiver: receipt
-                    .get("receiver")
+                    .pointer("/target/sessionName")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                status: receipt
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                status: status.to_string(),
                 text: text.clone(),
             });
         }
@@ -943,6 +945,40 @@ mod tests {
 
     fn tool(dir: &Path) -> IpythonTool {
         IpythonTool::new(dir.into())
+    }
+
+    #[test]
+    fn sent_messages_read_single_and_broadcast_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = MushHost::new(dir.path().into());
+        let payload = json!({ "message": "check the tests" });
+        host.record_sent(
+            Some("cell"),
+            &payload,
+            &json!({ "deliveryStatus": "queued", "target": { "sessionName": "auth" } }),
+        );
+        host.record_sent(
+            Some("cell"),
+            &payload,
+            &json!({ "receipts": [
+                { "deliveryStatus": "delivered", "target": { "sessionName": "root" } },
+                { "error": "gone", "target": { "sessionName": "beta" } },
+            ] }),
+        );
+        let sent = host.take_sent_messages("cell");
+        let rows: Vec<_> = sent
+            .iter()
+            .map(|sent| (sent.receiver.as_str(), sent.status.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("auth", "queued"),
+                ("root", "delivered"),
+                ("beta", "failed")
+            ]
+        );
+        assert!(sent.iter().all(|sent| sent.text == "check the tests"));
     }
 
     #[tokio::test]

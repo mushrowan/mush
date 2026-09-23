@@ -717,31 +717,22 @@ impl InProcessConnection {
         let busy = self.turn_active();
         let mut held = VecDeque::new();
         while let Some(mut delivery) = self.deferred_deliveries.pop_front() {
-            use crate::family::{DeliveryMode, Receipt};
+            use crate::family::Receipt;
             if held.len() >= crate::family::MAX_PENDING_MESSAGES {
                 delivery.ack(Receipt::Rejected);
                 continue;
             }
-            match (busy, delivery.mode) {
-                (true, DeliveryMode::Auto | DeliveryMode::Steer) => {
-                    self.steer(delivery.event.text(), Vec::new()).await;
-                    delivery.ack(Receipt::Delivered);
-                }
-                (true, DeliveryMode::FollowUp) => {
-                    delivery.ack(Receipt::Queued);
-                    held.push_back(delivery);
-                }
-                (false, _) => {
-                    if self.runtime.pending_prompt.is_some() {
-                        delivery.ack(Receipt::Queued);
-                        held.push_back(delivery);
-                        continue;
-                    }
-                    self.runtime.accept_event(delivery.event.clone());
-                    self.queued
-                        .push_back(ClientEvent::MessageInjected(delivery.event.clone()));
-                    delivery.ack(Receipt::Delivered);
-                }
+            if busy {
+                self.steer(delivery.event.text(), Vec::new()).await;
+                delivery.ack(Receipt::Queued);
+            } else if self.runtime.pending_prompt.is_some() {
+                delivery.ack(Receipt::Queued);
+                held.push_back(delivery);
+            } else {
+                self.runtime.accept_event(delivery.event.clone());
+                self.queued
+                    .push_back(ClientEvent::MessageInjected(delivery.event.clone()));
+                delivery.ack(Receipt::Delivered);
             }
         }
         self.deferred_deliveries = held;

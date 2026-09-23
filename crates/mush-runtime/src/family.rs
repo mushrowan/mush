@@ -159,17 +159,46 @@ pub enum Receipt {
     Rejected,
 }
 
+pub const MESSAGE_SOURCE: &str = "agent_message";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryMode {
-    Auto,
-    Steer,
-    FollowUp,
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeKind {
+    TopLevel,
+    Subagent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageTarget {
+    pub session_id: String,
+    pub session_name: String,
+    pub runtime_kind: RuntimeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageReceipt {
+    pub id: String,
+    pub source: &'static str,
+    pub target: MessageTarget,
+    pub message: String,
+    pub delivery_status: Receipt,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<String>,
+    pub delivery_mode: &'static str,
+}
+
+struct Target {
+    child: Option<ChildId>,
+    endpoint: MessageTarget,
+    sender: String,
 }
 
 pub struct Delivery {
     pub event: EventMessage,
-    pub mode: DeliveryMode,
     receipt: Option<oneshot::Sender<Receipt>>,
 }
 
@@ -1168,14 +1197,22 @@ impl Family {
         format!("{relationship}:{}", caller.name)
     }
 
-    pub async fn send_message(
-        &self,
-        caller: &Identity,
-        receiver_role: &str,
-        receiver_name: Option<&str>,
-        text: &str,
-        mode: DeliveryMode,
-    ) -> Result<Vec<(String, Result<Receipt, String>)>, String> {
+    fn endpoint(inner: &Inner, id: Option<&str>) -> MessageTarget {
+        match id.and_then(|id| inner.children.get(id)) {
+            Some(node) => MessageTarget {
+                session_id: node.summary.session_id.clone(),
+                session_name: node.summary.name.clone(),
+                runtime_kind: RuntimeKind::Subagent,
+            },
+            None => MessageTarget {
+                session_id: inner.root_session_id.clone(),
+                session_name: inner.root.name.clone(),
+                runtime_kind: RuntimeKind::TopLevel,
+            },
+        }
+    }
+
+    fn checked_text(text: &str) -> Result<&str, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("message is required".into());
@@ -1183,50 +1220,57 @@ impl Family {
         if text.chars().count() > MESSAGE_MAX_CHARS {
             return Err(format!("message is over {MESSAGE_MAX_CHARS} characters"));
         }
-        let targets: Vec<(Option<ChildId>, String, String)> = match receiver_role {
+        Ok(text)
+    }
+
+    fn direct_target(
+        &self,
+        caller: &Identity,
+        receiver_role: &str,
+        receiver_name: Option<&str>,
+    ) -> Result<Target, String> {
+        let receiver_name = receiver_name.map(str::trim);
+        match receiver_role {
             "parent" => {
+                if receiver_name.is_some() {
+                    return Err("receiver_name must be omitted for parent messages".into());
+                }
                 let id = caller
                     .id
                     .as_deref()
                     .ok_or_else(|| "the root agent has no parent".to_string())?;
-                if receiver_name.is_some() {
-                    return Err("receiver_name is not used for parent messages".into());
-                }
-                let inner = self.lock();
+                let mut inner = self.lock();
                 let node = inner
                     .children
-                    .get(id)
+                    .get_mut(id)
                     .ok_or_else(|| format!("{id} is not in the family"))?;
+                node.replied = true;
                 let parent = node.summary.parent.clone();
-                let parent_name = match &parent {
-                    Some(parent) => inner
-                        .children
-                        .get(parent)
-                        .map(|node| node.summary.name.clone())
-                        .unwrap_or_default(),
-                    None => inner.root.name.clone(),
-                };
-                drop(inner);
-                if let Some(node) = self.lock().children.get_mut(id) {
-                    node.replied = true;
-                }
-                vec![(parent, parent_name, self.sender_label(caller, "child"))]
+                Ok(Target {
+                    endpoint: Self::endpoint(&inner, parent.as_deref()),
+                    child: parent,
+                    sender: self.sender_label(caller, "child"),
+                })
             }
             "child" => {
                 let name = receiver_name
-                    .ok_or_else(|| "receiver_name is required for child messages".to_string())?;
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        "receiver_name is required for sibling and child messages".to_string()
+                    })?;
                 let id = self.resolve(caller, name)?;
-                let child_name = self
-                    .lock()
-                    .children
-                    .get(&id)
-                    .map(|node| node.summary.name.clone())
-                    .unwrap_or_default();
-                vec![(Some(id), child_name, self.sender_label(caller, "parent"))]
+                Ok(Target {
+                    endpoint: Self::endpoint(&self.lock(), Some(&id)),
+                    child: Some(id),
+                    sender: self.sender_label(caller, "parent"),
+                })
             }
             "sibling" => {
                 let name = receiver_name
-                    .ok_or_else(|| "receiver_name is required for sibling messages".to_string())?;
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        "receiver_name is required for sibling and child messages".to_string()
+                    })?;
                 let my_id = caller
                     .id
                     .as_deref()
@@ -1246,127 +1290,101 @@ impl Family {
                             && (node.summary.id == name || node.summary.name == name)
                             && node.summary.status != ChildStatus::Deleted
                     })
-                    .ok_or_else(|| format!("no sibling of yours is called {name}"))?;
-                vec![(
-                    Some(sibling.summary.id.clone()),
-                    sibling.summary.name.clone(),
-                    self.sender_label(caller, "sibling"),
-                )]
+                    .ok_or_else(|| format!("no sibling of yours is called {name}"))?
+                    .summary
+                    .id
+                    .clone();
+                Ok(Target {
+                    endpoint: Self::endpoint(&inner, Some(&sibling)),
+                    child: Some(sibling),
+                    sender: self.sender_label(caller, "sibling"),
+                })
             }
-            "all" => {
-                let inner = self.lock();
-                let mut targets = Vec::new();
-                if let Some(my_id) = caller.id.as_deref() {
-                    let my_parent = inner
-                        .children
-                        .get(my_id)
-                        .map(|node| node.summary.parent.clone())
-                        .ok_or_else(|| format!("{my_id} is not in the family"))?;
-                    let parent_name = match &my_parent {
-                        Some(parent) => inner
-                            .children
-                            .get(parent)
-                            .map(|node| node.summary.name.clone())
-                            .unwrap_or_default(),
-                        None => inner.root.name.clone(),
-                    };
-                    targets.push((
-                        my_parent.clone(),
-                        parent_name,
-                        self.sender_label(caller, "child"),
-                    ));
-                    for node in inner.children.values() {
-                        if node.summary.parent == my_parent
-                            && node.summary.id != my_id
-                            && node.summary.status != ChildStatus::Deleted
-                        {
-                            targets.push((
-                                Some(node.summary.id.clone()),
-                                node.summary.name.clone(),
-                                self.sender_label(caller, "sibling"),
-                            ));
-                        }
-                    }
-                }
-                for node in inner.children.values() {
-                    if node.summary.parent == caller.id
-                        && node.summary.status != ChildStatus::Deleted
-                    {
-                        targets.push((
-                            Some(node.summary.id.clone()),
-                            node.summary.name.clone(),
-                            self.sender_label(caller, "parent"),
-                        ));
-                    }
-                }
-                targets
-            }
-            other => {
-                return Err(format!(
-                    "receiver_role must be parent, child, sibling or all, not {other}"
-                ));
-            }
-        };
-        if receiver_role != "all" {
-            let mut receipts = Vec::new();
-            for (target, target_name, sender) in targets {
-                let receipt = self
-                    .deliver(caller, target.as_deref(), &sender, text, mode)
-                    .await?;
-                if receipt == Receipt::Rejected {
-                    return Err(format!(
-                        "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
-                    ));
-                }
-                receipts.push((target_name, Ok(receipt)));
-            }
-            return Ok(receipts);
+            _ => Err(r#"receiver_role must be "parent", "sibling", or "child""#.into()),
         }
-        if let Some(id) = caller.id.as_deref()
-            && let Some(node) = self.lock().children.get_mut(id)
-        {
+    }
+
+    fn broadcast_targets(&self, caller: &Identity) -> Result<Vec<Target>, String> {
+        let mut inner = self.lock();
+        let mut targets = Vec::new();
+        if let Some(my_id) = caller.id.as_deref() {
+            let node = inner
+                .children
+                .get_mut(my_id)
+                .ok_or_else(|| format!("{my_id} is not in the family"))?;
             node.replied = true;
+            let my_parent = node.summary.parent.clone();
+            targets.push(Target {
+                endpoint: Self::endpoint(&inner, my_parent.as_deref()),
+                child: my_parent.clone(),
+                sender: self.sender_label(caller, "child"),
+            });
+            for node in inner.children.values() {
+                if node.summary.parent == my_parent
+                    && node.summary.id != my_id
+                    && node.summary.status != ChildStatus::Deleted
+                {
+                    targets.push(Target {
+                        endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
+                        child: Some(node.summary.id.clone()),
+                        sender: self.sender_label(caller, "sibling"),
+                    });
+                }
+            }
         }
+        for node in inner.children.values() {
+            if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
+                targets.push(Target {
+                    endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
+                    child: Some(node.summary.id.clone()),
+                    sender: self.sender_label(caller, "parent"),
+                });
+            }
+        }
+        Ok(targets)
+    }
+
+    pub async fn send_message(
+        &self,
+        caller: &Identity,
+        receiver_role: &str,
+        receiver_name: Option<&str>,
+        text: &str,
+    ) -> Result<MessageReceipt, String> {
+        let text = Self::checked_text(text)?;
+        let target = self.direct_target(caller, receiver_role, receiver_name)?;
+        self.deliver(caller, &target, text).await
+    }
+
+    pub async fn broadcast(
+        &self,
+        caller: &Identity,
+        text: &str,
+    ) -> Result<Vec<(MessageTarget, Result<MessageReceipt, String>)>, String> {
+        let text = Self::checked_text(text)?;
+        let targets = self.broadcast_targets(caller)?;
         let sends = targets
             .iter()
-            .map(|(target, _, sender)| self.deliver(caller, target.as_deref(), sender, text, mode));
+            .map(|target| self.deliver(caller, target, text));
         let results = futures::future::join_all(sends).await;
         Ok(targets
             .into_iter()
+            .map(|target| target.endpoint)
             .zip(results)
-            .map(|((_, target_name, _), result)| {
-                let result = match result {
-                    Ok(Receipt::Rejected) => Err(format!(
-                        "{target_name} has {MAX_PENDING_MESSAGES} messages waiting already"
-                    )),
-                    other => other,
-                };
-                (target_name, result)
-            })
             .collect())
     }
 
     async fn deliver(
         &self,
         caller: &Identity,
-        target: Option<&str>,
-        sender: &str,
+        target: &Target,
         text: &str,
-        mode: DeliveryMode,
-    ) -> Result<Receipt, String> {
+    ) -> Result<MessageReceipt, String> {
         let timestamp_ms = Timestamp::now();
         let (sender_session, bucket_key) = {
             let mut inner = self.lock();
-            let session_of = |id: Option<&str>| match id {
-                Some(id) => inner
-                    .children
-                    .get(id)
-                    .map(|node| node.summary.session_id.clone())
-                    .unwrap_or_default(),
-                None => inner.root_session_id.clone(),
-            };
-            let sender_session = session_of(caller.id.as_deref());
-            let key = (sender_session.clone(), session_of(target));
+            let sender_session = Self::endpoint(&inner, caller.id.as_deref()).session_id;
+            let key = (sender_session.clone(), target.endpoint.session_id.clone());
             let now = Instant::now();
             inner
                 .message_buckets
@@ -1384,43 +1402,67 @@ impl Family {
                 })?;
             (sender_session, key)
         };
+        let id = format!("agentmsg_{}", mush_ai::types::SessionId::new());
         let event = EventMessage {
-            content: format!("[agent-message from {sender}]\n\n{text}"),
+            content: format!("[agent-message from {}]\n\n{text}", target.sender),
             timestamp_ms,
             kind: EventKind::Message,
             receipts: vec![EventReceipt {
-                id: format!("agent-message-{}", mush_ai::types::SessionId::new()).into(),
+                id: id.clone().into(),
                 timestamp_ms,
                 kind: EventKind::Message,
                 origin: EventOrigin::Agent {
                     session_id: sender_session,
                     name: caller.name.clone(),
-                    relationship: sender
+                    relationship: target
+                        .sender
                         .split_once(':')
                         .map(|(relationship, _)| relationship.to_string())
                         .unwrap_or_default(),
                 },
             }],
         };
-        let delivered = self.send_delivery(target, event, mode).await;
-        if delivered.is_err()
-            && let Some(bucket) = self.lock().message_buckets.get_mut(&bucket_key)
-        {
-            bucket.tokens = (bucket.tokens + 1).min(MESSAGE_BURST);
-        }
-        delivered
+        let delivered = match self.send_delivery(target.child.as_deref(), event).await {
+            Ok(Receipt::Rejected) => Err(format!(
+                "{} has {MAX_PENDING_MESSAGES} messages waiting already",
+                target.endpoint.session_name
+            )),
+            other => other,
+        };
+        let status = match delivered {
+            Ok(status) => status,
+            Err(error) => {
+                if let Some(bucket) = self.lock().message_buckets.get_mut(&bucket_key) {
+                    bucket.tokens = (bucket.tokens + 1).min(MESSAGE_BURST);
+                }
+                return Err(error);
+            }
+        };
+        let at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (delivered_at, queued_at) = match status {
+            Receipt::Delivered => (Some(at), None),
+            Receipt::Queued | Receipt::Rejected => (None, Some(at)),
+        };
+        Ok(MessageReceipt {
+            id,
+            source: MESSAGE_SOURCE,
+            target: target.endpoint.clone(),
+            message: text.to_string(),
+            delivery_status: status,
+            delivered_at,
+            queued_at,
+            delivery_mode: "steer",
+        })
     }
 
     async fn send_delivery(
         &self,
         target: Option<&str>,
         event: EventMessage,
-        mode: DeliveryMode,
     ) -> Result<Receipt, String> {
         let (receipt_tx, receipt_rx) = oneshot::channel();
         let delivery = Delivery {
             event,
-            mode,
             receipt: Some(receipt_tx),
         };
         match target {
@@ -1550,7 +1592,6 @@ impl Family {
                     },
                 }],
             },
-            mode: DeliveryMode::Auto,
             receipt: None,
         });
     }
@@ -2112,37 +2153,58 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             "agent_message.send" => {
                 let message = str_field("message")
                     .ok_or_else(|| mush_kernel::HostError("message is required".into()))?;
-                let role = str_field("receiver_role").unwrap_or_else(|| "parent".into());
-                let mode = match str_field("mode").as_deref() {
-                    None | Some("auto") => DeliveryMode::Auto,
-                    Some("steer") => DeliveryMode::Steer,
-                    Some("follow_up") => DeliveryMode::FollowUp,
-                    Some(other) => {
-                        return Err(mush_kernel::HostError(format!(
-                            "mode must be auto, steer or follow_up, not {other}"
-                        )));
+                let receiver_role = str_field("receiver_role");
+                let receiver_name = str_field("receiver_name");
+                match str_field("target").as_deref() {
+                    Some("all") => {
+                        if receiver_role.is_some() || receiver_name.is_some() {
+                            return Err(mush_kernel::HostError(
+                                "agent_message.send broadcast cannot be combined with \
+                                 receiver_role/receiver_name"
+                                    .into(),
+                            ));
+                        }
+                        let receipts = self
+                            .family
+                            .broadcast(&self.identity, &message)
+                            .await
+                            .map_err(mush_kernel::HostError)?;
+                        Ok(serde_json::json!({
+                            "receipts": receipts
+                                .into_iter()
+                                .map(|(target, receipt)| match receipt {
+                                    Ok(receipt) => serde_json::json!(receipt),
+                                    Err(error) => {
+                                        serde_json::json!({ "target": target, "error": error })
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        }))
                     }
-                };
-                let receipts = self
-                    .family
-                    .send_message(
-                        &self.identity,
-                        &role,
-                        str_field("receiver_name").as_deref(),
-                        &message,
-                        mode,
-                    )
-                    .await
-                    .map_err(mush_kernel::HostError)?;
-                Ok(serde_json::json!({
-                    "receipts": receipts
-                        .iter()
-                        .map(|(name, receipt)| match receipt {
-                            Ok(status) => serde_json::json!({ "receiver": name, "status": status }),
-                            Err(error) => serde_json::json!({ "receiver": name, "error": error }),
-                        })
-                        .collect::<Vec<_>>()
-                }))
+                    Some(_) => Err(mush_kernel::HostError(
+                        "positional agent_message.send targets are not supported; use \
+                         receiver_role and receiver_name"
+                            .into(),
+                    )),
+                    None => {
+                        let receiver_role = receiver_role.ok_or_else(|| {
+                            mush_kernel::HostError(
+                                r#"receiver_role must be "parent", "sibling", or "child""#.into(),
+                            )
+                        })?;
+                        let receipt = self
+                            .family
+                            .send_message(
+                                &self.identity,
+                                &receiver_role,
+                                receiver_name.as_deref(),
+                                &message,
+                            )
+                            .await
+                            .map_err(mush_kernel::HostError)?;
+                        Ok(serde_json::json!(receipt))
+                    }
+                }
             }
             "compact.status" => {
                 let commands = self.host_commands.as_ref().ok_or_else(|| {
@@ -2999,13 +3061,7 @@ mod tests {
         };
 
         let (receipts, ()) = tokio::join!(
-            family.send_message(
-                &child,
-                "parent",
-                None,
-                "found two issues",
-                DeliveryMode::Auto
-            ),
+            family.send_message(&child, "parent", None, "found two issues"),
             async {
                 for _ in 0..50 {
                     root_connection.start_pending().await;
@@ -3014,8 +3070,17 @@ mod tests {
             }
         );
 
-        let receipts = receipts.unwrap();
-        assert_eq!(receipts, vec![("root".to_string(), Ok(Receipt::Delivered))]);
+        let receipt = receipts.unwrap();
+        assert_eq!(receipt.delivery_status, Receipt::Delivered);
+        assert_eq!(receipt.target.session_name, "root");
+        assert_eq!(receipt.target.runtime_kind, RuntimeKind::TopLevel);
+        assert!(receipt.id.starts_with("agentmsg_"));
+        assert!(receipt.delivered_at.is_some() && receipt.queued_at.is_none());
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["deliveryStatus"], "delivered");
+        assert_eq!(json["target"]["sessionName"], "root");
+        assert_eq!(json["deliveryMode"], "steer");
+        assert!(json["deliveredAt"].is_string());
         let injected = std::iter::from_fn(|| root_connection.try_next_event())
             .find_map(|event| match event {
                 ClientEvent::MessageInjected(event) => Some(event),
@@ -3063,13 +3128,14 @@ mod tests {
             node.inbox = None;
         }
 
-        let mut receipts = family
-            .send_message(&root, "all", None, "status please", DeliveryMode::Auto)
-            .await
-            .unwrap();
-        receipts.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(receipts[0], ("alpha".to_string(), Ok(Receipt::Delivered)));
-        assert_eq!(receipts[1].0, "beta");
+        let mut receipts = family.broadcast(&root, "status please").await.unwrap();
+        receipts.sort_by(|a, b| a.0.session_name.cmp(&b.0.session_name));
+        assert_eq!(receipts[0].0.session_name, "alpha");
+        assert_eq!(
+            receipts[0].1.as_ref().unwrap().delivery_status,
+            Receipt::Delivered
+        );
+        assert_eq!(receipts[1].0.session_name, "beta");
         assert!(receipts[1].1.is_err());
     }
 
@@ -3281,23 +3347,14 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        let receipts = family
-            .send_message(&root, "child", Some("slow"), "hurry up", DeliveryMode::Auto)
+        let receipt = family
+            .send_message(&root, "child", Some("slow"), "hurry up")
             .await
             .unwrap();
-        assert_eq!(receipts, vec![("slow".to_string(), Ok(Receipt::Delivered))]);
-
-        let queued = family
-            .send_message(
-                &root,
-                "child",
-                Some("slow"),
-                "and then rest",
-                DeliveryMode::FollowUp,
-            )
-            .await
-            .unwrap();
-        assert_eq!(queued, vec![("slow".to_string(), Ok(Receipt::Queued))]);
+        assert_eq!(receipt.delivery_status, Receipt::Queued);
+        assert_eq!(receipt.target.session_name, "slow");
+        assert_eq!(receipt.target.runtime_kind, RuntimeKind::Subagent);
+        assert!(receipt.queued_at.is_some() && receipt.delivered_at.is_none());
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while !family.children_of(&root)[0].status.settled() {
@@ -3353,7 +3410,7 @@ mod tests {
         assert_eq!(deleted.status, ChildStatus::Deleted);
         assert!(
             family
-                .send_message(&root, "child", Some("noter"), "hi", DeliveryMode::Auto)
+                .send_message(&root, "child", Some("noter"), "hi")
                 .await
                 .is_err()
         );
@@ -3618,7 +3675,7 @@ mod tests {
 
         let (sent, ()) = tokio::join!(
             tool.execute(serde_json::json!({
-                "code": "r = await agent_message.send('done: two findings')\nprint(r['receipts'][0]['receiver'], r['receipts'][0]['status'])"
+                "code": "r = await agent_message.send('done: two findings', receiver_role='parent', mode='follow_up')\nprint(r['target']['sessionName'], r['deliveryStatus'])"
             })),
             async {
                 for _ in 0..100 {
@@ -3630,8 +3687,65 @@ mod tests {
 
         let text = mush_tools::util::extract_text(&sent);
         assert!(sent.outcome.is_success(), "{text}");
-        assert_eq!(text.trim(), "root delivered");
+        assert!(
+            ["root delivered", "root queued"].contains(&text.trim()),
+            "{text}"
+        );
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_send_host_call_wants_a_role_and_broadcasts_only_to_all() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        family
+            .spawn(
+                &Identity::root("root"),
+                "task".into(),
+                "alpha".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        settle(&family, &Identity::root("root")).await;
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root"));
+
+        let missing = handler
+            .handle("agent_message.send", serde_json::json!({ "message": "hi" }))
+            .await
+            .unwrap_err();
+        assert!(missing.0.contains("receiver_role must be"), "{}", missing.0);
+        let positional = handler
+            .handle(
+                "agent_message.send",
+                serde_json::json!({ "message": "hi", "target": "alpha" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(positional.0.contains("positional"), "{}", positional.0);
+        let mixed = handler
+            .handle(
+                "agent_message.send",
+                serde_json::json!({ "message": "hi", "target": "all", "receiver_role": "child" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(mixed.0.contains("cannot be combined"), "{}", mixed.0);
+
+        let broadcast = handler
+            .handle(
+                "agent_message.send",
+                serde_json::json!({ "message": "status?", "target": "all" }),
+            )
+            .await
+            .unwrap();
+        let receipts = broadcast["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["target"]["sessionName"], "alpha");
+        assert_eq!(receipts[0]["deliveryStatus"], "delivered");
     }
 
     #[tokio::test]

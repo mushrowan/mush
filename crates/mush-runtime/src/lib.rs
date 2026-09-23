@@ -36,8 +36,8 @@ pub use connection::{
 };
 pub use family::{
     ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
-    CreateSessionRequest, CreatedSession, DeliveryMode, Family, Identity, Receipt, RlmHandler,
-    SessionSpawner,
+    CreateSessionRequest, CreatedSession, Family, Identity, MessageReceipt, MessageTarget, Receipt,
+    RlmHandler, RuntimeKind, SessionSpawner,
 };
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use harness::HarnessStore;
