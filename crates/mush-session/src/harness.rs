@@ -321,6 +321,11 @@ impl State {
              `await harness.search(query)` ranks them. the base system prompt is immutable, \
              prompt entries are supplemental notes."
                 .to_string(),
+            "default to local refinement for current task progress, temporary blockers and \
+             session coordination. use global only for stable cross-session lessons, durable \
+             user preferences, reusable skills and subagents, or explicitly project-qualified \
+             facts."
+                .to_string(),
             String::new(),
             "call `await refine.run()` after a repeated failure, when a reusable tactic emerges, \
              when a repeated delegation role should become a subagent spec, a repeated procedure \
@@ -1226,6 +1231,7 @@ mod tests {
         let mut state = State::default();
         let empty = state.fingerprint();
         assert!(state.digest().contains("no saved harness entries yet."));
+        assert!(state.digest().contains("default to local refinement"));
         state.apply(
             &proposal(vec![create(Kind::Memory, "tests", "cargo nextest run")]),
             "ref_1",
