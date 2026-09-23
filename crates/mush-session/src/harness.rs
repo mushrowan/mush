@@ -780,10 +780,13 @@ impl Proposal {
                 format!("refiner json did not parse: {error}")
             }
         })?;
-        if !value.is_object() {
+        let Value::Object(mut record) = value else {
             return Err("refiner json must be an object".into());
+        };
+        if let Some(edits) = record.get_mut("edits").and_then(Value::as_array_mut) {
+            edits.retain_mut(normalise_edit);
         }
-        let mut proposal: Self = serde_json::from_value(value)
+        let mut proposal: Self = serde_json::from_value(Value::Object(record))
             .map_err(|error| format!("refiner json has the wrong shape: {error}"))?;
         for edit in &mut proposal.edits {
             if edit.title.as_deref().is_some_and(str::is_empty) {
@@ -849,6 +852,34 @@ impl Proposal {
     }
 }
 
+fn normalise_edit(edit: &mut Value) -> bool {
+    let Some(fields) = edit.as_object_mut() else {
+        return false;
+    };
+    for key in ["id", "title", "content", "path", "reason"] {
+        if fields.get(key).is_some_and(|value| !value.is_string()) {
+            fields.remove(key);
+        }
+    }
+    for key in ["reference", "arguments", "metadata"] {
+        if fields.get(key).is_some_and(|value| !value.is_object()) {
+            fields.remove(key);
+        }
+    }
+    let known = |key: &str, parse: fn(&str) -> bool| {
+        fields.get(key).and_then(Value::as_str).is_some_and(parse)
+    };
+    let supported = known("action", |text| {
+        serde_json::from_value::<Action>(Value::String(text.into())).is_ok()
+    }) && known("kind", |text| {
+        serde_json::from_value::<Kind>(Value::String(text.into())).is_ok()
+    });
+    if !supported {
+        tracing::warn!(edit = %edit, "dropping a refiner edit with an unsupported action or kind");
+    }
+    supported
+}
+
 fn json_object(text: &str) -> Option<&str> {
     let trimmed = text.trim();
     let trimmed = trimmed
@@ -892,6 +923,18 @@ fn validate(edit: &Edit, id: &str) -> Option<String> {
     }
     if edit.action != Action::Create && id.is_empty() {
         return Some(format!("{} requires an id", edit.action.as_str()));
+    }
+    if edit.id.as_deref() == Some("") {
+        return Some(format!(
+            "{} requires id to be a non-empty string when provided",
+            edit.action.as_str()
+        ));
+    }
+    if edit.path.as_deref() == Some("") {
+        return Some(format!(
+            "{} requires path to be a non-empty string when provided",
+            edit.action.as_str()
+        ));
     }
     if edit.action == Action::Delete {
         return None;
@@ -1471,6 +1514,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.search("修复登录", None, 10).len(), 1);
+    }
+
+    #[test]
+    fn a_mistyped_edit_field_is_dropped_without_failing_the_proposal() {
+        let parsed = Proposal::parse(
+            r#"{"edits":[
+                {"action":"create","kind":"memory","title":"t","content":"c","reference":"nope","metadata":[1],"path":7},
+                "not an edit",
+                {"action":"rename","kind":"memory","title":"t","content":"c"},
+                {"action":"create","kind":"memory","title":"u","content":"d","path":""}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.edits.len(), 2);
+        assert_eq!(parsed.edits[0].reference, None);
+        assert_eq!(parsed.edits[0].metadata, None);
+        assert_eq!(parsed.edits[0].path, None);
+
+        let mut state = State::default();
+        let result = state.apply(&parsed, "ref_1", Scope::Local, None);
+        assert!(result.applied_edits[0].applied);
+        assert_eq!(
+            result.applied_edits[1].error.as_deref(),
+            Some("create requires path to be a non-empty string when provided")
+        );
     }
 
     #[test]
