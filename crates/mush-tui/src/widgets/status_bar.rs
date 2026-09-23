@@ -758,7 +758,7 @@ mod tests {
     #[test]
     fn a_status_never_lands_in_the_bar() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.status = Some(crate::app_state::Status::error("clipboard failed: wl-copy"));
+        app.status = Some("clipboard failed: wl-copy".into());
 
         let spans = left_spans(&app, 200);
 

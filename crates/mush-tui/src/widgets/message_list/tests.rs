@@ -1942,18 +1942,42 @@ fn a_status_flushes_into_a_dim_transcript_line_and_the_next_one_replaces_it() {
     app.push_user_message("hi");
     app.status = Some("aborted".into());
     app.flush_status();
-    app.status = Some(crate::app_state::Status::error("clipboard failed: wl-copy"));
+    app.status = Some("compacted".into());
     app.flush_status();
 
     assert_eq!(app.messages.len(), 2);
-    assert_eq!(app.messages[1].role, MessageRole::Status { error: true });
     let text = buffer_to_string(&render_app(&app, 60, 6));
+    assert!(text.contains("compacted"), "{text}");
+    assert!(!text.contains("aborted"), "{text}");
+    assert!(!text.contains("system"), "{text}");
+}
+
+#[test]
+fn an_error_gets_its_own_line_and_a_later_status_keeps_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("hi");
+    app.status = Some("aborted".into());
+    app.show_error("clipboard failed: wl-copy");
+    app.status = Some("detail: overview".into());
+    app.flush_status();
+
+    let roles: Vec<_> = app.messages.iter().map(|m| m.role.clone()).collect();
+    assert_eq!(
+        roles,
+        vec![
+            MessageRole::User,
+            MessageRole::Status { error: false },
+            MessageRole::Status { error: true },
+            MessageRole::Status { error: false },
+        ]
+    );
+    let text = buffer_to_string(&render_app(&app, 60, 12));
+    assert!(text.contains("aborted"), "{text}");
     assert!(
         text.contains("\u{26a0} clipboard failed: wl-copy"),
         "{text}"
     );
-    assert!(!text.contains("aborted"), "{text}");
-    assert!(!text.contains("system"), "{text}");
+    assert!(text.contains("detail: overview"), "{text}");
 }
 
 #[test]

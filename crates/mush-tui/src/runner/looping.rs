@@ -453,9 +453,7 @@ fn note_closed_connection(runtime: &mut RunnerRuntime) -> bool {
     let app = &mut runtime.session.app;
     app.finish_streaming(None, None);
     app.active_tools.clear();
-    app.status = Some(crate::app_state::Status::error(
-        "the worker closed the connection. /quit to leave",
-    ));
+    app.show_error("the worker closed the connection. /quit to leave");
     true
 }
 
@@ -506,9 +504,9 @@ mod tests {
 
         assert!(note_closed_connection(&mut runtime));
         assert!(!runtime.session.app.stream.active);
-        let status = runtime.session.app.status.clone().unwrap();
-        assert!(status.error);
-        assert!(status.text.contains("/quit"));
+        let last = runtime.session.app.messages.last().unwrap();
+        assert_eq!(last.role, crate::app::MessageRole::Status { error: true });
+        assert!(last.content.contains("/quit"));
         assert!(!note_closed_connection(&mut runtime));
     }
 

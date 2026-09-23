@@ -694,7 +694,7 @@ fn copy_to_clipboard(
     out: &mut impl std::io::Write,
 ) {
     if let Err(error) = crate::clipboard::copy(text, env, out) {
-        app.status = Some(crate::app_state::Status::error(error.to_string()));
+        app.show_error(error.to_string());
     }
 }
 
@@ -1230,8 +1230,11 @@ mod clipboard_failure_tests {
 
         copy_to_clipboard(&mut app, "world", &env, &mut std::io::sink());
 
-        let status = app.status.expect("a status");
-        assert_eq!(status.text, format!("clipboard failed: {}", tool.display()));
-        assert!(status.error);
+        let last = app.messages.last().expect("an error line");
+        assert_eq!(
+            last.content,
+            format!("clipboard failed: {}", tool.display())
+        );
+        assert_eq!(last.role, crate::app::MessageRole::Status { error: true });
     }
 }

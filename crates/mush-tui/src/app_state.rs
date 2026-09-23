@@ -216,25 +216,11 @@ impl Default for InteractionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub text: String,
-    pub error: bool,
-}
-
-impl Status {
-    #[must_use]
-    pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            error: true,
-        }
-    }
 }
 
 impl<T: Into<String>> From<T> for Status {
     fn from(text: T) -> Self {
-        Self {
-            text: text.into(),
-            error: false,
-        }
+        Self { text: text.into() }
     }
 }
 
