@@ -51,6 +51,7 @@ windows-native-keyring-store.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 http = "1"
 bytes = "1"

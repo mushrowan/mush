@@ -1,13 +1,9 @@
 use std::fmt::Write as _;
 
-use mush_ai::registry::{ApiRegistry, LlmContext, is_retryable_stream_error_message};
+use mush_ai::registry::{ApiRegistry, LlmContext};
 use mush_ai::types::*;
 
 const DEFAULT_KEEP_RECENT: usize = 10;
-
-const COMPACTION_MAX_RETRIES: u32 = 5;
-
-const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
 
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -1295,65 +1291,16 @@ async fn call_for_text(
     context: &LlmContext,
     options: &StreamOptions,
 ) -> Result<CompactionText, CompactionError> {
-    let mut last_error = None;
-    let mut retry_after = None;
-
-    for attempt in 0..=COMPACTION_MAX_RETRIES {
-        if attempt > 0 {
-            let backoff = std::time::Duration::from_secs(
-                (1u64 << (attempt - 1)).min(COMPACTION_MAX_BACKOFF_SECS),
-            );
-            let Some(delay) = mush_ai::registry::retry_delay(backoff, retry_after.take()) else {
-                return Err(CompactionError {
-                    failure: last_error.unwrap_or(CompactionFailure::EmptyResponse),
-                    retries: attempt - 1,
-                });
-            };
-            tracing::warn!(attempt, ?delay, "retrying compaction after transient error");
-            tokio::time::sleep(delay).await;
-        }
-
-        let stream = match registry.stream(model, context, options).await {
-            Ok(stream) => stream,
-            Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
-                tracing::warn!(%error, "retryable compaction request error");
-                retry_after = error.retry_after();
-                last_error = Some(CompactionFailure::Request(error.to_string()));
-                continue;
-            }
-            Err(error) => {
-                return Err(CompactionError {
-                    failure: CompactionFailure::Request(error.to_string()),
-                    retries: attempt,
-                });
-            }
-        };
-
-        match collect_text(stream).await {
-            Ok(text) => {
-                return Ok(CompactionText {
-                    text,
-                    retries: attempt,
-                });
-            }
-            Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
-                tracing::warn!(%error, "retryable compaction stream error");
-                last_error = Some(error);
-                continue;
-            }
-            Err(error) => {
-                return Err(CompactionError {
-                    failure: error,
-                    retries: attempt,
-                });
-            }
-        }
-    }
-
-    Err(CompactionError {
-        failure: last_error.unwrap_or(CompactionFailure::EmptyResponse),
-        retries: COMPACTION_MAX_RETRIES,
-    })
+    mush_ai::oneshot::collect_text_retrying(registry, model, context, options)
+        .await
+        .map(|text| CompactionText {
+            text: text.value,
+            retries: text.retries,
+        })
+        .map_err(|error| CompactionError {
+            failure: error.value.into(),
+            retries: error.retries,
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1366,12 +1313,6 @@ struct CompactionText {
 struct CompactionError {
     failure: CompactionFailure,
     retries: u32,
-}
-
-async fn collect_text(stream: mush_ai::registry::EventStream) -> Result<String, CompactionFailure> {
-    mush_ai::oneshot::collect_stream_text(stream)
-        .await
-        .map_err(CompactionFailure::from)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1396,14 +1337,6 @@ impl From<mush_ai::oneshot::OneshotError> for CompactionFailure {
 }
 
 impl CompactionFailure {
-    fn is_retryable(&self) -> bool {
-        match self {
-            Self::Request(_) => false,
-            Self::Stream(message) => is_retryable_stream_error_message(message),
-            Self::EmptyResponse => false,
-        }
-    }
-
     fn is_context_overflow(&self) -> bool {
         let message = match self {
             Self::Request(message) | Self::Stream(message) => message,

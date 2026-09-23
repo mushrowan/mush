@@ -204,6 +204,20 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
     classify_stream_error_message(message).is_retryable()
 }
 
+pub fn retry_stream_error(error: &str, attempt: u32) -> bool {
+    match classify_stream_error_message(error) {
+        StreamErrorKind::Refusal => {
+            tracing::warn!(reason = %error, attempt, "the provider refused the request, retrying");
+            true
+        }
+        StreamErrorKind::Transient => {
+            tracing::warn!(%error, attempt, "retryable stream error, retrying");
+            true
+        }
+        StreamErrorKind::Permanent => false,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LlmContext {
     pub system_prompt: Option<String>,

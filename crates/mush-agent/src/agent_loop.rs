@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use mush_ai::registry::{
-    ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, StreamErrorKind, ToolDefinition,
-    classify_stream_error_message, retry_backoff,
+    ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, ToolDefinition, retry_backoff,
+    retry_stream_error,
 };
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
@@ -702,20 +702,6 @@ fn is_file_modifying_tool(name: &str) -> bool {
         name.to_lowercase().as_str(),
         "write" | "edit" | "apply_patch"
     )
-}
-
-fn retry_stream_error(error: &str, attempt: u32) -> bool {
-    match classify_stream_error_message(error) {
-        StreamErrorKind::Refusal => {
-            tracing::warn!(reason = %error, attempt, "the provider refused the request, retrying");
-            true
-        }
-        StreamErrorKind::Transient => {
-            tracing::warn!(%error, attempt, "retryable stream error, retrying");
-            true
-        }
-        StreamErrorKind::Permanent => false,
-    }
 }
 
 fn tool_calls_in_message(message: &AssistantMessage) -> impl Iterator<Item = &ToolCall> {
