@@ -165,6 +165,7 @@ pub struct KernelJobs {
 struct Inner {
     jobs: Mutex<HashMap<String, Arc<JobCell>>>,
     counter: std::sync::atomic::AtomicU64,
+    live: std::sync::atomic::AtomicUsize,
     notice: std::sync::Mutex<Option<NoticeSink>>,
     orphans: std::sync::Mutex<Option<crate::orphans::OrphanJournal>>,
 }
@@ -265,6 +266,9 @@ impl KernelJobs {
         cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
+        self.inner
+            .live
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let pid = child.id();
         self.journal(pid, true);
         let cell = Arc::new(JobCell {
@@ -331,6 +335,9 @@ impl KernelJobs {
                 let mut job = cell.state.lock().await;
                 job.end = Some(end.clone());
                 job.finished = Some(Instant::now());
+                jobs.inner
+                    .live
+                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                 if cell.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                     job.read = true;
                 }
@@ -351,6 +358,11 @@ impl KernelJobs {
         });
 
         Ok((id, pid))
+    }
+
+    #[must_use]
+    pub fn any_running(&self) -> bool {
+        self.inner.live.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     async fn emit_notice(&self, job_id: &str, notice: JobNotice) {
@@ -543,6 +555,19 @@ mod tests {
         assert_eq!(done.exit_code, Some(4));
         assert!(!done.running);
         assert_eq!(done.output, "one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn running_is_true_only_while_a_job_is_live() {
+        let jobs = KernelJobs::default();
+        assert!(!jobs.any_running());
+        let (id, _) = jobs
+            .start(&cwd(), "sleep 0.2", None, None, None)
+            .await
+            .unwrap();
+        assert!(jobs.any_running());
+        jobs.wait(&id).await.unwrap();
+        assert!(!jobs.any_running());
     }
 
     #[tokio::test]

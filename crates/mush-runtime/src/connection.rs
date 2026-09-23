@@ -432,6 +432,9 @@ impl InProcessConnection {
             }
             return;
         }
+        if self.background_bash_running() {
+            return;
+        }
         let commands = autonomous.gate_commands();
         if commands.is_empty() {
             self.apply_autonomous_decision(autonomous.decide(Vec::new()));
@@ -592,6 +595,13 @@ impl InProcessConnection {
         }
     }
 
+    fn background_bash_running(&self) -> bool {
+        self.runtime
+            .kernel_state
+            .as_ref()
+            .is_some_and(|kernel| kernel.background_work())
+    }
+
     async fn continue_goal(&mut self) {
         let Some(goal) = self.goal.clone() else {
             return;
@@ -600,6 +610,7 @@ impl InProcessConnection {
             || self.compaction.is_some()
             || self.runtime.pending_prompt.is_some()
             || self.children_running()
+            || self.background_bash_running()
         {
             return;
         }
@@ -2940,6 +2951,51 @@ mod tests {
             connection.try_next_event(),
             Some(ClientEvent::GoalChanged(Some(goal))) if goal.status == crate::goal::GoalStatus::Complete
         ));
+    }
+
+    struct BusyKernel(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for BusyKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(&self, _path: &std::path::Path) {}
+        async fn reset(&self) {}
+        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
+        fn background_work(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_goal_holds_while_background_bash_runs() {
+        let (mut connection, _requests) = connection();
+        let kernel = Arc::new(BusyKernel(std::sync::atomic::AtomicBool::new(true)));
+        connection.runtime.set_kernel_state(Some(
+            Arc::clone(&kernel) as Arc<dyn mush_kernel::KernelState>
+        ));
+        let goal = Arc::new(crate::goal::GoalStore::new(None));
+        connection.set_goal_store(Some(Arc::clone(&goal)));
+        connection
+            .send(ClientCommand::Goal(crate::goal::GoalCommand::Create {
+                objective: "wait for the build".into(),
+                token_budget: None,
+            }))
+            .await
+            .unwrap();
+
+        connection.start_pending().await;
+        assert!(!connection.state().turn_active);
+        assert_eq!(goal.get().unwrap().continuations, 0);
+
+        kernel.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        connection.start_pending().await;
+        assert!(connection.state().turn_active);
+        assert_eq!(goal.get().unwrap().continuations, 1);
     }
 
     #[tokio::test]

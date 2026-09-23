@@ -690,6 +690,12 @@ impl mush_kernel::KernelState for IpythonTool {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
     }
+
+    fn background_work(&self) -> bool {
+        self.mush_host
+            .as_ref()
+            .is_some_and(|host| host.jobs().any_running())
+    }
 }
 
 fn attached_images(

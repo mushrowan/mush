@@ -17,6 +17,9 @@ pub trait KernelState: Send + Sync {
     async fn restore_from(&self, path: &std::path::Path);
     async fn reset(&self);
     fn attach_session(&self, session: KernelSession);
+    fn background_work(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
