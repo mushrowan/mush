@@ -733,3 +733,65 @@ async fn attach_image_ships_the_bytes_as_an_attachment() {
     );
     kernel.shutdown().await.unwrap();
 }
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "a test helper that needs python3 on PATH"
+)]
+async fn raw_shim(owner: Option<u32>) -> (tempfile::TempDir, tokio::process::Child) {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("mush_kernel.py");
+    std::fs::write(&shim, include_str!("../shim/mush_kernel.py")).unwrap();
+    let mut command = tokio::process::Command::new("python3");
+    command
+        .arg(&shim)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Some(owner) = owner {
+        command.env("MUSH_KERNEL_OWNER_PID", owner.to_string());
+    }
+    let child = command.spawn().unwrap();
+    (dir, child)
+}
+
+#[tokio::test]
+async fn shutdown_fails_a_cell_stuck_on_a_host_request_so_the_kernel_exits_at_once() {
+    use tokio::io::AsyncWriteExt;
+    let (_dir, mut child) = raw_shim(None).await;
+    let mut stdin = child.stdin.take().unwrap();
+
+    stdin
+        .write_all(
+            b"{\"type\":\"execute\",\"id\":\"c1\",\"code\":\"await host_request('never')\"}\n",
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stdin.write_all(b"{\"type\":\"shutdown\"}\n").await.unwrap();
+    let exited = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+
+    assert!(exited.is_ok(), "the kernel waited on the stuck cell");
+}
+
+#[tokio::test]
+async fn a_kernel_whose_owner_died_exits_even_with_a_busy_cell() {
+    use tokio::io::AsyncWriteExt;
+    let mut owner = std::process::Command::new("sleep")
+        .arg("0.3")
+        .spawn()
+        .unwrap();
+    let (_dir, mut child) = raw_shim(Some(owner.id())).await;
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(b"{\"type\":\"execute\",\"id\":\"c1\",\"code\":\"while True:\\n    pass\"}\n")
+        .await
+        .unwrap();
+    owner.wait().unwrap();
+
+    let exited = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+
+    assert!(exited.is_ok(), "the kernel outlived its owner");
+    drop(stdin);
+}

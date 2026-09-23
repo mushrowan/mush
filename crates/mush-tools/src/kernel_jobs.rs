@@ -210,7 +210,7 @@ impl KernelJobs {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
     }
 
-    fn journal(&self, pid: Option<u32>, active: bool) {
+    pub fn journal(&self, pid: Option<u32>, active: bool) {
         let Some(pid) = pid else { return };
         if let Some(journal) = self
             .inner

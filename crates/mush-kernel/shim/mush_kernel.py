@@ -11,6 +11,7 @@ import pickle
 import signal
 import sys
 import threading
+import time
 import traceback
 import types
 import uuid
@@ -25,6 +26,7 @@ _current_cell: contextvars.ContextVar = contextvars.ContextVar("mush_cell", defa
 _current_origin: contextvars.ContextVar = contextvars.ContextVar("mush_origin", default=None)
 _loop: asyncio.AbstractEventLoop | None = None
 _pending_replies: dict = {}
+_host_closed = False
 _running: dict = {"id": None, "task": None}
 _parked_interrupts: set = set()
 _inflight: set = set()
@@ -224,6 +226,8 @@ def _drain_output() -> None:
 
 async def host_request(kind: str, payload=None):
     assert _loop is not None
+    if _host_closed:
+        raise HostError("kernel shutting down")
     payload = payload if payload is not None else {}
     _check_payload("host_request", payload)
     request_id = uuid.uuid4().hex
@@ -1056,10 +1060,51 @@ def _reader(queue: asyncio.Queue) -> None:
             else:
                 _loop.call_soon_threadsafe(_reject, future, HostError(str(request.get("error", "host request failed"))))
             continue
+        if kind == "shutdown":
+            _loop.call_soon_threadsafe(_fail_pending_host_requests)
         _loop.call_soon_threadsafe(queue.put_nowait, request)
         if kind == "shutdown":
             return
+    _loop.call_soon_threadsafe(_fail_pending_host_requests)
     _loop.call_soon_threadsafe(queue.put_nowait, {"type": "shutdown"})
+
+
+def _fail_pending_host_requests() -> None:
+    global _host_closed
+    _host_closed = True
+    for request_id, future in list(_pending_replies.items()):
+        _pending_replies.pop(request_id, None)
+        _reject(future, HostError("kernel shutting down"))
+
+
+def _owner_alive(owner: int, initial_ppid: int) -> bool:
+    if initial_ppid == owner and os.getppid() != initial_ppid:
+        return False
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def _owner_watchdog(owner: int, initial_ppid: int) -> None:
+    while _owner_alive(owner, initial_ppid):
+        time.sleep(1.0)
+    os._exit(1)
+
+
+def _start_owner_watchdog() -> None:
+    if os.name == "nt":
+        return
+    try:
+        owner = int(os.environ.get("MUSH_KERNEL_OWNER_PID", ""))
+    except ValueError:
+        owner = 0
+    if owner <= 0:
+        owner = os.getppid()
+    threading.Thread(target=_owner_watchdog, args=(owner, os.getppid()), daemon=True).start()
 
 
 def _resolve(future, value) -> None:
@@ -1082,8 +1127,7 @@ async def _serve() -> None:
         request = await queue.get()
         kind = request.get("type")
         if kind == "shutdown":
-            for future in _pending_replies.values():
-                _reject(future, HostError("kernel shutting down"))
+            _fail_pending_host_requests()
             return
         if kind == "execute":
             task = asyncio.ensure_future(
@@ -1129,6 +1173,7 @@ def main() -> None:
     _install_preload()
     _PRELOADED = frozenset(_namespace)
     _capture_fds()
+    _start_owner_watchdog()
     signal.signal(signal.SIGINT, _on_sigint)
     asyncio.run(_serve())
 

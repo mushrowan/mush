@@ -534,9 +534,21 @@ impl IpythonTool {
         config
     }
 
+    fn journal_kernel(&self, pid: Option<u32>, active: bool) {
+        if let Some(host) = &self.mush_host {
+            host.jobs().journal(pid, active);
+        }
+    }
+
+    async fn retire(&self, kernel: Kernel) {
+        let pid = kernel.pid();
+        let _ = kernel.shutdown().await;
+        self.journal_kernel(pid, false);
+    }
+
     pub async fn shutdown(&self) {
         if let Some(kernel) = self.kernel.lock().await.take() {
-            let _ = kernel.shutdown().await;
+            self.retire(kernel).await;
         }
     }
 
@@ -561,7 +573,9 @@ impl IpythonTool {
                 BusyKernelChoice::Wait => {}
                 BusyKernelChoice::Kill => {
                     if let Some(kernel) = self.kernel.lock().await.take() {
+                        let pid = kernel.pid();
                         kernel.kill().await;
+                        self.journal_kernel(pid, false);
                     }
                     kernel_restarted = true;
                 }
@@ -589,6 +603,7 @@ impl IpythonTool {
             {
                 self.set_restore_notice(&kernel.restore(&path).await);
             }
+            self.journal_kernel(kernel.pid(), true);
             *slot = Some(kernel);
         }
         let kernel = slot.as_ref().ok_or(KernelError::Pipes)?;
@@ -620,8 +635,11 @@ impl IpythonTool {
         if pending && let Some(sink) = &sink {
             sink(&exec_id, live.trim_end());
         }
-        if matches!(outcome, Err(KernelError::Exited(_))) {
-            *slot = None;
+        if matches!(outcome, Err(KernelError::Exited(_)))
+            && let Some(kernel) = slot.take()
+        {
+            self.journal_kernel(kernel.pid(), false);
+            kernel.kill().await;
         }
         outcome
     }
@@ -660,7 +678,7 @@ impl mush_kernel::KernelState for IpythonTool {
         *self.pending_restore.lock().await = None;
         self.take_restore_notice();
         if let Some(kernel) = self.kernel.lock().await.take() {
-            let _ = kernel.shutdown().await;
+            self.retire(kernel).await;
         }
     }
 
@@ -1293,6 +1311,35 @@ mod tests {
         let later = tool.execute(json!({ "code": "sum(carried)" })).await;
         assert_eq!(extract_text(&later), "6");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_kernel_process_is_journaled_while_it_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("orphans.jsonl");
+        let host = MushHost::new(dir.path().into());
+        host.jobs()
+            .set_orphan_journal(crate::orphans::OrphanJournal::at(&journal));
+        let tool = IpythonTool::with_mush_host(host, dir.path().into());
+
+        let pid = tool
+            .execute(json!({ "code": "import os\nos.getpid()" }))
+            .await;
+        let running = std::fs::read_to_string(&journal).unwrap();
+        tool.shutdown().await;
+        let finished = std::fs::read_to_string(&journal).unwrap();
+
+        let pid = extract_text(&pid);
+        assert!(running.contains(&format!("\"pid\":{pid},")), "{running}");
+        assert!(running.contains("\"active\":true"), "{running}");
+        assert!(
+            finished
+                .lines()
+                .last()
+                .unwrap()
+                .contains("\"active\":false"),
+            "{finished}"
+        );
     }
 
     #[tokio::test]

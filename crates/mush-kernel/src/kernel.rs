@@ -220,6 +220,7 @@ impl Kernel {
             .arg(&shim_path)
             .current_dir(&config.cwd)
             .env("PYTHONUNBUFFERED", "1")
+            .env("MUSH_KERNEL_OWNER_PID", std::process::id().to_string())
             .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -290,6 +291,15 @@ impl Kernel {
             python,
             python_version,
         })
+    }
+
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(Child::id)
     }
 
     #[must_use]
