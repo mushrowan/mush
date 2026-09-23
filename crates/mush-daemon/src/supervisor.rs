@@ -7,9 +7,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::client::{CONNECT_TIMEOUT, REQUEST_TIMEOUT};
 use crate::protocol::{decode, encode};
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+const OPEN_TIMEOUT: Duration = SPAWN_TIMEOUT.saturating_add(Duration::from_secs(5));
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ADOPTION_POLL: Duration = Duration::from_millis(500);
 const RETRY_DELAYS: [Duration; 3] = [
@@ -113,6 +115,7 @@ impl WorkerDescriptor {
     }
 }
 
+#[derive(Clone)]
 pub struct Supervisor {
     nursery: std::sync::Arc<Nursery>,
 }
@@ -189,11 +192,16 @@ impl Supervisor {
                 }
             }
             SupervisorRequest::Shutdown => {
+                let mut stopping = tokio::task::JoinSet::new();
                 for worker in self.roster() {
-                    if let Err(error) = self.nursery.stop(&worker).await {
-                        tracing::warn!(%error, session = %worker.session_id, "worker did not stop");
-                    }
+                    let nursery = std::sync::Arc::clone(&self.nursery);
+                    stopping.spawn(async move {
+                        if let Err(error) = nursery.stop(&worker).await {
+                            tracing::warn!(%error, session = %worker.session_id, "worker did not stop");
+                        }
+                    });
                 }
+                stopping.join_all().await;
                 SupervisorReply::Done
             }
         }
@@ -693,36 +701,68 @@ pub async fn run(socket: &Path, supervisor: Supervisor) -> io::Result<()> {
 }
 
 async fn serve(listener: &UnixListener, supervisor: &Supervisor) -> io::Result<()> {
+    let shutdown = tokio_util::sync::CancellationToken::new();
     loop {
-        let (stream, _) = listener.accept().await?;
-        let (reader, mut writer) = stream.into_split();
-        let mut lines = BufReader::new(reader).lines();
-        let Ok(Some(line)) = lines.next_line().await else {
-            continue;
+        let stream = tokio::select! {
+            accepted = listener.accept() => accepted?.0,
+            () = shutdown.cancelled() => return Ok(()),
         };
-        let request = match decode::<SupervisorRequest>(&line) {
-            Ok(request) => request,
-            Err(error) => {
-                let reply = SupervisorReply::Error(format!("malformed request: {error}"));
-                let _ = writer
-                    .write_all(&encode(&reply).map_err(io::Error::other)?)
-                    .await;
-                continue;
+        let supervisor = supervisor.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if serve_one(stream, &supervisor).await {
+                shutdown.cancel();
             }
-        };
-        let shutdown = matches!(request, SupervisorRequest::Shutdown);
-        let reply = supervisor.handle(request).await;
-        let _ = writer
-            .write_all(&encode(&reply).map_err(io::Error::other)?)
-            .await;
-        if shutdown {
-            return Ok(());
-        }
+        });
     }
 }
 
+async fn serve_one(stream: UnixStream, supervisor: &Supervisor) -> bool {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let Ok(Ok(Some(line))) = tokio::time::timeout(CONNECT_TIMEOUT, lines.next_line()).await else {
+        return false;
+    };
+    let (reply, shutdown) = match decode::<SupervisorRequest>(&line) {
+        Ok(request) => {
+            let shutdown = matches!(request, SupervisorRequest::Shutdown);
+            (supervisor.handle(request).await, shutdown)
+        }
+        Err(error) => (
+            SupervisorReply::Error(format!("malformed request: {error}")),
+            false,
+        ),
+    };
+    if let Ok(bytes) = encode(&reply) {
+        let _ = writer.write_all(&bytes).await;
+    }
+    shutdown
+}
+
 pub async fn request(socket: &Path, request: &SupervisorRequest) -> io::Result<SupervisorReply> {
-    let stream = UnixStream::connect(socket).await?;
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(socket))
+        .await
+        .map_err(|_| timed_out("connect", CONNECT_TIMEOUT))??;
+    let bound = match request {
+        SupervisorRequest::Open { .. } => OPEN_TIMEOUT,
+        SupervisorRequest::List
+        | SupervisorRequest::Status
+        | SupervisorRequest::Stop { .. }
+        | SupervisorRequest::Shutdown => REQUEST_TIMEOUT,
+    };
+    tokio::time::timeout(bound, exchange(stream, request))
+        .await
+        .map_err(|_| timed_out("answer", bound))?
+}
+
+fn timed_out(what: &str, after: Duration) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("the daemon did not {what} within {after:?}"),
+    )
+}
+
+async fn exchange(stream: UnixStream, request: &SupervisorRequest) -> io::Result<SupervisorReply> {
     let (reader, mut writer) = stream.into_split();
     writer
         .write_all(&encode(request).map_err(io::Error::other)?)
@@ -757,6 +797,41 @@ mod tests {
             clients: 0,
             failed: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_silent_client_does_not_hold_up_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let supervisor = Supervisor::new(
+            dir.path().join("no-such-mush"),
+            socket.clone(),
+            dir.path().join("workers"),
+            dir.path().join("logs"),
+        );
+        let running = tokio::spawn({
+            let socket = socket.clone();
+            async move { run(&socket, supervisor).await }
+        });
+        while !socket.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let _silent = UnixStream::connect(&socket).await.unwrap();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(1),
+            request(&socket, &SupervisorRequest::Status),
+        )
+        .await
+        .expect("the daemon answers while another client is silent")
+        .unwrap();
+        assert!(matches!(reply, SupervisorReply::Status { workers: 0, .. }));
+
+        let reply = request(&socket, &SupervisorRequest::Shutdown)
+            .await
+            .unwrap();
+        assert!(matches!(reply, SupervisorReply::Done));
+        running.await.unwrap().unwrap();
     }
 
     #[test]
