@@ -307,7 +307,7 @@ enum Command {
         #[arg(long, value_name = "SOCKET")]
         socket: Option<std::path::PathBuf>,
     },
-    #[command(alias = "ps", alias = "sessions")]
+    #[command(alias = "ps")]
     List {
         #[arg(short, long)]
         all: bool,
@@ -1824,6 +1824,15 @@ mod tests {
         assert_eq!(cli.goal.as_deref(), Some("ship it"));
         assert_eq!(cli.goal_budget, Some(5000));
         assert!(Cli::try_parse_from(["mush", "--goal-budget", "5000"]).is_err());
+    }
+
+    #[test]
+    fn sessions_is_not_an_alias_of_list() {
+        assert!(matches!(
+            Cli::try_parse_from(["mush", "ps"]).unwrap().command,
+            Some(Command::List { .. })
+        ));
+        assert!(Cli::try_parse_from(["mush", "sessions"]).is_err());
     }
 
     #[test]
