@@ -716,8 +716,6 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          and are accepted with it. CRUD is local by default; `global_=True` for stable \
          cross-session lessons, and python reserves `global`, so `global=True` is a syntax \
          error.\n\
-         - `await goal.fail(reason)` stops a goal you cannot finish, with the reason; the \
-         user sees it. Prefer it to looping on something that will not work.\n\
          - `await rlm.progress_note(text)` puts one line in the user's status bar; use it \
          during long work so they can see where you are.\n\
          - `await rlm.note(text)` keeps a short note that survives compaction and kernel \
@@ -1275,6 +1273,7 @@ mod tests {
         assert!(prompt.contains("<name>nix</name>"));
         assert!(!prompt.contains("Use the skill tool"));
         assert!(!prompt.contains("Batch tool"));
+        assert!(!prompt.contains("goal.fail"));
     }
 
     #[test]

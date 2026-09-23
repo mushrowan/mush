@@ -516,18 +516,6 @@ class _Goal:
             payload["summary"] = summary
         return await host_request("goal.complete", payload)
 
-    async def fail(self, error: str) -> dict:
-        return await host_request("goal.fail", {"error": error})
-
-    async def pause(self) -> dict:
-        return await host_request("goal.pause", {})
-
-    async def resume(self) -> dict:
-        return await host_request("goal.resume", {})
-
-    async def clear(self) -> dict:
-        return await host_request("goal.clear", {})
-
 
 class _Compact:
     async def status(self) -> dict:

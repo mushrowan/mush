@@ -1797,6 +1797,12 @@ impl RlmHandler {
         Ok((scheduler, jobs))
     }
 
+    fn goal_store(&self) -> Result<&Arc<crate::goal::GoalStore>, mush_kernel::HostError> {
+        self.goal
+            .as_ref()
+            .ok_or_else(|| mush_kernel::HostError("goals are not available here".into()))
+    }
+
     fn harness_store(&self) -> Result<&Arc<crate::harness::HarnessStore>, mush_kernel::HostError> {
         self.harness
             .as_ref()
@@ -2390,45 +2396,29 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 Ok(serde_json::to_value(updated).unwrap_or(serde_json::Value::Null))
             }
             "goal.get" => Ok(self.goal_reply(false)),
-            "goal.create" | "goal.complete" | "goal.fail" | "goal.pause" | "goal.resume"
-            | "goal.clear" => {
-                let store = self
-                    .goal
-                    .as_ref()
-                    .ok_or_else(|| mush_kernel::HostError("goals are not available here".into()))?;
-                let command = match kind {
-                    "goal.create" => {
-                        let objective = str_field("objective").ok_or_else(|| {
-                            mush_kernel::HostError("objective is required".into())
-                        })?;
-                        let token_budget = match payload.get("token_budget") {
-                            None | Some(serde_json::Value::Null) => None,
-                            Some(value) => Some(
-                                value.as_u64().filter(|budget| *budget > 0).ok_or_else(|| {
-                                    mush_kernel::HostError(
-                                        "token_budget must be a positive integer".into(),
-                                    )
-                                })?,
-                            ),
-                        };
-                        store
-                            .create_from_host(objective, token_budget)
-                            .map_err(mush_kernel::HostError)?;
-                        return Ok(self.goal_reply(false));
+            "goal.create" => {
+                let objective = str_field("objective")
+                    .ok_or_else(|| mush_kernel::HostError("objective is required".into()))?;
+                let token_budget = match payload.get("token_budget") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => {
+                        Some(value.as_u64().filter(|budget| *budget > 0).ok_or_else(|| {
+                            mush_kernel::HostError("token_budget must be a positive integer".into())
+                        })?)
                     }
-                    "goal.complete" => crate::goal::GoalCommand::Complete {
-                        summary: str_field("summary"),
-                    },
-                    "goal.fail" => crate::goal::GoalCommand::Fail {
-                        error: str_field("error")
-                            .ok_or_else(|| mush_kernel::HostError("error is required".into()))?,
-                    },
-                    "goal.pause" => crate::goal::GoalCommand::Pause,
-                    "goal.resume" => crate::goal::GoalCommand::Resume,
-                    _ => crate::goal::GoalCommand::Clear,
                 };
-                store.apply(command).map_err(mush_kernel::HostError)?;
-                Ok(self.goal_reply(kind == "goal.complete"))
+                self.goal_store()?
+                    .create_from_host(objective, token_budget)
+                    .map_err(mush_kernel::HostError)?;
+                Ok(self.goal_reply(false))
+            }
+            "goal.complete" => {
+                self.goal_store()?
+                    .apply(crate::goal::GoalCommand::Complete {
+                        summary: str_field("summary"),
+                    })
+                    .map_err(mush_kernel::HostError)?;
+                Ok(self.goal_reply(true))
             }
             other => Err(mush_kernel::HostError(format!(
                 "unknown host request {other}"
@@ -3222,6 +3212,27 @@ mod tests {
                 .unwrap()
                 .contains("tokens used: 0 of 100")
         );
+    }
+
+    #[tokio::test]
+    async fn the_kernel_cannot_fail_pause_resume_or_clear_a_goal() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let goal = Arc::new(crate::goal::GoalStore::new(None));
+        let handler = RlmHandler::new(family, Identity::root("root")).with_goal(Arc::clone(&goal));
+        handler
+            .handle("goal.create", serde_json::json!({ "objective": "ship" }))
+            .await
+            .unwrap();
+        for kind in ["goal.fail", "goal.pause", "goal.resume", "goal.clear"] {
+            let refused = handler
+                .handle(kind, serde_json::json!({ "error": "stuck" }))
+                .await
+                .unwrap_err();
+            assert!(refused.0.contains("unknown host request"), "{}", refused.0);
+        }
+        assert_eq!(goal.get().unwrap().status, crate::goal::GoalStatus::Active);
     }
 
     #[tokio::test]
