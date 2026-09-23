@@ -37,7 +37,7 @@ fn wait(child: &mut std::process::Child) -> std::io::Result<std::process::ExitSt
 #[cfg(unix)]
 #[test]
 fn signals_checkpoint_and_cancel_during_startup() {
-    for signal in ["-TERM", "-INT"] {
+    for (signal, code) in [("-TERM", 143), ("-INT", 130), ("-HUP", 129)] {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config/mush");
         std::fs::create_dir_all(&config).unwrap();
@@ -74,7 +74,7 @@ command = ["sh", "-c", "touch ready; exec sleep 8"]
                 .unwrap()
                 .success()
         );
-        assert!(!wait(&mut child).unwrap().success());
+        assert_eq!(wait(&mut child).unwrap().code(), Some(code));
         let status: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(status["state"], "cancelled");

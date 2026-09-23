@@ -4,18 +4,44 @@ use mush_ai::types::*;
 use mush_session::Session;
 use std::path::PathBuf;
 
-pub(crate) async fn shutdown_signal() -> std::io::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Interrupt,
+    Hangup,
+    Terminate,
+}
+
+impl Signal {
+    pub(crate) fn exit_code(self) -> u8 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Hangup => 129,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+pub(crate) async fn shutdown_signal() -> std::io::Result<Signal> {
     #[cfg(unix)]
     {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
         tokio::select! {
-            result = tokio::signal::ctrl_c() => result,
-            _ = terminate.recv() => Ok(()),
+            result = tokio::signal::ctrl_c() => result.map(|()| Signal::Interrupt),
+            _ = terminate.recv() => Ok(Signal::Terminate),
+            _ = hangup.recv() => Ok(Signal::Hangup),
         }
     }
     #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
+    tokio::signal::ctrl_c().await.map(|()| Signal::Interrupt)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct PrintExit {
+    pub(crate) code: u8,
+    pub(crate) message: String,
 }
 
 #[derive(serde::Serialize)]

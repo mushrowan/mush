@@ -5,7 +5,6 @@ use futures::StreamExt;
 
 use mush_agent::{AgentConfig, AgentEvent, agent_loop, summarise_tool_args};
 use mush_ai::models;
-use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
@@ -395,7 +394,20 @@ impl Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(report) => match report.downcast_ref::<headless::PrintExit>() {
+            Some(exit) => std::process::ExitCode::from(exit.code),
+            None => {
+                eprintln!("Error: {report:?}");
+                std::process::ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+async fn run() -> Result<()> {
     color_eyre::config::HookBuilder::default()
         .theme(if mush_cli::output::stderr_colour() {
             color_eyre::config::Theme::dark()
@@ -533,6 +545,11 @@ async fn print_mode(cli: Cli, prompt: String) -> Result<()> {
     result
 }
 
+fn print_failure(message: String) -> color_eyre::Report {
+    eprintln!("{}", Style::Red.stderr(format_args!("error: {message}")));
+    headless::PrintExit { code: 1, message }.into()
+}
+
 async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
@@ -602,9 +619,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let (mut setup, startup_report) = tokio::select! {
         biased;
         result = &mut shutdown => {
-            result?;
+            let signal = result?;
             status.state = "cancelled";
-            return Err(eyre!("cancelled"));
+            return Err(headless::PrintExit { code: signal.exit_code(), message: "cancelled".into() }.into());
         }
         result = init => result?,
     };
@@ -756,19 +773,19 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         );
     }
     let mut stream = std::pin::pin!(agent_loop(config, session.context()));
-    let mut in_text = false;
     let mut transcript = headless::Transcript::default();
-    let mut cancelled = false;
+    let mut signalled = None;
     let mut cancel_deadline = None;
     let mut ended = false;
+    let mut final_message: Option<AssistantMessage> = None;
+    let mut failure: Option<String> = None;
 
     loop {
         let event = tokio::select! {
             biased;
-            result = &mut shutdown, if !cancelled => {
-                result?;
+            result = &mut shutdown, if signalled.is_none() => {
+                signalled = Some(result?);
                 cancel.cancel();
-                cancelled = true;
                 status.state = "cancelled";
                 if !cli.no_session { store.save(&session)?; }
                 status.write()?;
@@ -794,36 +811,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         }
         match event {
             AgentEvent::AgentEnd => ended = true,
-            AgentEvent::StreamEvent { .. } if json => {}
-            AgentEvent::StreamEvent { event } => match event {
-                StreamEvent::TextDelta { delta, .. } => {
-                    if !in_text {
-                        in_text = true;
-                    }
-                    print!("{delta}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                }
-                StreamEvent::ThinkingDelta { delta, .. } => {
-                    print!("{}", Style::Dim.stdout(delta));
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                }
-                StreamEvent::TextEnd { .. } => {
-                    in_text = false;
-                }
-                StreamEvent::ThinkingEnd { .. } => {
-                    println!();
-                }
-                _ => {}
-            },
             AgentEvent::ToolExecStart {
                 tool_name, args, ..
             } => {
-                if in_text {
-                    println!();
-                    in_text = false;
-                }
                 let args_summary = summarise_tool_args(tool_name.as_str(), &args);
                 eprintln!(
                     "{} {args_summary}",
@@ -847,15 +837,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     message.usage.total_input_tokens().get(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
+                final_message = Some(message);
             }
             AgentEvent::TurnEnd { message, .. } => {
-                if in_text {
-                    println!();
-                    in_text = false;
-                }
                 let cost = models::calculate_cost(&setup.client.model, &message.usage);
                 eprintln!(
-                    "\n{}",
+                    "{}",
                     Style::Dim.stderr(format_args!(
                         "{} | in:{} out:{} cache:{} | {}",
                         message.model,
@@ -897,10 +884,6 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 );
             }
             AgentEvent::PartialDiscarded { error } => {
-                if in_text {
-                    println!();
-                    in_text = false;
-                }
                 eprintln!(
                     "{}",
                     Style::Yellow.stderr(format_args!(
@@ -928,28 +911,15 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 );
             }
             AgentEvent::MaxTurnsReached { max_turns } => {
-                if !cancelled {
+                if signalled.is_none() {
                     status.state = "turn_limit";
                 }
                 eprintln!(
-                    "\n{}",
+                    "{}",
                     Style::Yellow.stderr(format_args!("⚠ hit max turns limit ({max_turns})"))
                 );
             }
-            AgentEvent::Error { error } => {
-                eprintln!(
-                    "{}",
-                    Style::Red.stderr(format_args!("error: {}", format_error(&error)))
-                );
-                if !cli.no_session {
-                    store.save(&session)?;
-                    eprintln!(
-                        "{}",
-                        Style::Dim.stderr(format_args!("session: {}", session.meta.id))
-                    );
-                }
-                return Err(eyre!("{error}"));
-            }
+            AgentEvent::Error { error } => failure = Some(error),
             _ => {}
         }
     }
@@ -963,13 +933,36 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     }
 
     listener.shutdown().await?;
-    if cancelled {
-        return Err(eyre!("cancelled"));
+    if let Some(signal) = signalled {
+        return Err(headless::PrintExit {
+            code: signal.exit_code(),
+            message: "cancelled".into(),
+        }
+        .into());
+    }
+    if let Some(error) = failure {
+        return Err(print_failure(format_error(&error)));
     }
     if !ended || !transcript.is_complete() {
-        return Err(eyre!("agent ended with an incomplete transcript"));
+        return Err(print_failure(
+            "agent ended with an incomplete transcript".into(),
+        ));
+    }
+    if !json && let Some(message) = final_message {
+        print_final_text(&message);
     }
     Ok(())
+}
+
+fn print_final_text(message: &AssistantMessage) {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    for part in &message.content {
+        if let AssistantContentPart::Text(text) = part {
+            let _ = writeln!(stdout, "{}", text.text);
+        }
+    }
+    let _ = stdout.flush();
 }
 
 struct Prepared {

@@ -320,22 +320,13 @@ fn styled(text: &str, code: u8, colour: bool) -> String {
 }
 
 #[expect(clippy::unwrap_used)]
-fn assert_messages(
-    fixture: &Fixture,
-    stdout: &str,
-    stderr: &str,
-    out_colour: bool,
-    err_colour: bool,
-    fail: bool,
-) {
-    assert_eq!(
-        stdout,
-        format!(
-            "{}\nbefore tools\n{}",
-            styled(&fixture.thinking, 2, out_colour),
-            fixture.answer
-        )
-    );
+fn assert_messages(fixture: &Fixture, stdout: &str, stderr: &str, err_colour: bool, fail: bool) {
+    if fail {
+        assert_eq!(stdout, "");
+    } else {
+        assert_eq!(stdout, format!("{}\n", fixture.answer));
+    }
+    assert!(!stderr.contains(&fixture.thinking), "{stderr:?}");
     for (text, code) in [
         ("▶ read", 36),
         ("✓ read", 32),
@@ -376,12 +367,9 @@ fn assert_messages(
             )),
             "{stderr:?}"
         );
-        assert!(
-            stderr.find("✗ read failed").unwrap() < stderr.find("error: fixture_error").unwrap()
-        );
-        assert!(stderr.find("error: fixture_error").unwrap() < stderr.find("session:").unwrap());
-        assert!(stderr.find("session:").unwrap() < stderr.find("Error:").unwrap());
-        assert!(stderr.contains("Location:"));
+        assert!(stderr.find("✗ read failed").unwrap() < stderr.find("session:").unwrap());
+        assert!(stderr.find("session:").unwrap() < stderr.find("error: fixture_error").unwrap());
+        assert!(!stderr.contains("Location:"), "{stderr:?}");
     }
     assert_eq!(stderr.contains('\x1b'), err_colour, "{stderr:?}");
 }
@@ -393,7 +381,7 @@ fn provider_output_detects_each_stream() {
             let fixture = Fixture::new(fail, false);
             let (status, stdout, stderr) = capture(fixture.command(), out_tty, err_tty);
             assert_eq!(status.success(), !fail, "{stderr}");
-            assert_messages(&fixture, &stdout, &stderr, out_tty, err_tty, fail);
+            assert_messages(&fixture, &stdout, &stderr, err_tty, fail);
             fixture.finish(fail);
         }
     }
@@ -419,7 +407,7 @@ fn colour_environment_matches_clap_policy() {
         command.envs(env.clone());
         let (status, stdout, stderr) = capture(command, true, true);
         assert!(!status.success());
-        assert_messages(&fixture, &stdout, &stderr, enabled, enabled, true);
+        assert_messages(&fixture, &stdout, &stderr, enabled, true);
         for argument in ["--help", "--invalid-fixture-option"] {
             let mut command = self::command(fixture.dir.path());
             command.envs(env.clone()).arg(argument);
@@ -451,7 +439,7 @@ fn forced_capture_and_no_color_preserve_payload_escapes() {
         command.envs(env);
         let (status, stdout, stderr) = capture(command, false, false);
         assert!(status.success(), "{stderr}");
-        assert_messages(&fixture, &stdout, &stderr, enabled, enabled, false);
+        assert_messages(&fixture, &stdout, &stderr, enabled, false);
         fixture.finish(false);
     }
 }
@@ -474,15 +462,19 @@ fn worker_file_capture_keeps_message_order() {
     for text in [
         "fixture thinking",
         "before tools",
+        "fixture answer",
+        "Error:",
+    ] {
+        assert!(!output.contains(text), "{text:?} in {output:?}");
+    }
+    for text in [
         "▶ read",
         "✓ read",
         "gpt-output-fixture |",
         "▶ read",
         "✗ read failed",
-        "fixture answer",
-        "error: fixture_error: fixture_code: fixture detail\nsecond detail",
         "session:",
-        "Error:",
+        "error: fixture_error: fixture_code: fixture detail\nsecond detail",
     ] {
         let index = rest
             .find(text)
