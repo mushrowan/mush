@@ -4,7 +4,7 @@ use mush_ai::types::{
 };
 
 use crate::compact::{complete_text, serialize_conversation};
-use crate::harness::{self, Proposal, RefinementResult, Scope, State};
+use crate::harness::{self, Proposal, RefinementResult, RefinementSource, Scope, State};
 
 const MAX_OUTPUT_TOKENS: u64 = 32_000;
 const CONVERSATION_CHARS: usize = 80_000;
@@ -101,6 +101,8 @@ pub struct RefineRequest {
     pub instructions: Option<String>,
     pub rollback: Option<String>,
     pub global: bool,
+    #[serde(default)]
+    pub source: RefinementSource,
 }
 
 impl RefineRequest {
@@ -120,6 +122,7 @@ pub struct Plan {
     pub proposal: Proposal,
     pub rollback_of: Option<String>,
     pub scope: Scope,
+    pub source: RefinementSource,
 }
 
 #[must_use]
@@ -165,6 +168,7 @@ pub async fn plan(
             proposal: Proposal::rollback_of(target),
             rollback_of: Some(target.id.clone()),
             scope: target.scope,
+            source: request.source,
         });
     }
     let conversation = tail(&serialize_conversation(messages), CONVERSATION_CHARS);
@@ -190,6 +194,7 @@ pub async fn plan(
         proposal,
         rollback_of: None,
         scope: request.scope(),
+        source: request.source,
     })
 }
 
@@ -327,6 +332,7 @@ impl AutoRefineReview {
             )),
             rollback: None,
             global: false,
+            source: RefinementSource::Auto,
         }
     }
 }
@@ -476,6 +482,7 @@ mod tests {
                 instructions: Some("remember the port".into()),
                 rollback: None,
                 global: true,
+                ..RefineRequest::default()
             },
             &model,
         );

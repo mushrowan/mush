@@ -790,6 +790,7 @@ fn parse_refine(args: &str) -> Result<mush_session::refine::RefineRequest, Slash
             instructions: None,
             rollback: Some(id.to_string()),
             global,
+            source: mush_session::harness::RefinementSource::User,
         });
     }
     if rest.starts_with("--") {
@@ -799,6 +800,7 @@ fn parse_refine(args: &str) -> Result<mush_session::refine::RefineRequest, Slash
         instructions: (!rest.is_empty()).then(|| rest.to_string()),
         rollback: None,
         global,
+        source: mush_session::harness::RefinementSource::User,
     })
 }
 
@@ -985,6 +987,7 @@ mod tests {
                 instructions: Some("remember the port".into()),
                 rollback: None,
                 global: true,
+                ..RefineRequest::default()
             })
         );
         assert_eq!(
@@ -993,6 +996,7 @@ mod tests {
                 instructions: None,
                 rollback: Some("ref_abc".into()),
                 global: true,
+                ..RefineRequest::default()
             })
         );
         assert_eq!(

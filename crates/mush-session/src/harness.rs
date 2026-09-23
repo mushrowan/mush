@@ -1249,6 +1249,41 @@ impl AppliedEdit {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementSource {
+    Auto,
+    #[default]
+    User,
+    #[serde(rename = "self")]
+    Agent,
+}
+
+impl RefinementSource {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::User, Self::Agent];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::User => "user",
+            Self::Agent => "self",
+        }
+    }
+
+    #[must_use]
+    pub fn notice_label(self) -> String {
+        format!("[{}-refinement]", self.as_str())
+    }
+}
+
+#[must_use]
+pub fn is_refinement_notice(text: &str) -> bool {
+    RefinementSource::ALL
+        .into_iter()
+        .any(|source| text.starts_with(&format!("{}\n\n", source.notice_label())))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RefinementResult {
     pub id: String,
@@ -1262,6 +1297,16 @@ pub struct RefinementResult {
 }
 
 impl RefinementResult {
+    #[must_use]
+    pub fn applied_any(&self) -> bool {
+        self.applied_edits.iter().any(|edit| edit.applied)
+    }
+
+    #[must_use]
+    pub fn notice_message(&self, source: RefinementSource) -> String {
+        format!("{}\n\n{}", source.notice_label(), self.notice())
+    }
+
     #[must_use]
     pub fn notice(&self) -> String {
         let mut lines = vec![compact(&self.summary, OVERVIEW_CONTENT_CHARS)];
@@ -1279,14 +1324,6 @@ impl RefinementResult {
                     OVERVIEW_CONTENT_CHARS
                 )
             ));
-        }
-        let failed = self
-            .applied_edits
-            .iter()
-            .filter(|edit| !edit.applied)
-            .count();
-        if failed > 0 {
-            lines.push(format!("- {failed} edit(s) rejected"));
         }
         lines.join("\n")
     }

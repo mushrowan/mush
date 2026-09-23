@@ -51,6 +51,8 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                     || mush_runtime::notes::extract(&text).is_some()
                     || mush_runtime::kernel_notice::is_notice(&text)
                 {
+                } else if mush_session::harness::is_refinement_notice(&text) {
+                    app.push_system_message(text);
                 } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
                     app.push_bash_done(&done, None);
                 } else {
@@ -426,6 +428,19 @@ mod tests {
 
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn a_refinement_notice_shows_as_a_system_message() {
+        let mut app = app();
+        let notice =
+            "[auto-refinement]\n\nremember the port\n- create memory [local:port] port: 8080";
+
+        rebuild_display(&mut app, &[user_message("hello"), user_message(notice)]);
+
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[1].role, MessageRole::System);
+        assert_eq!(app.messages[1].content, notice);
     }
 
     #[test]

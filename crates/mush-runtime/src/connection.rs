@@ -1230,7 +1230,7 @@ impl InProcessConnection {
 
     fn try_poll_refine(&mut self) -> Option<ClientEvent> {
         use futures::FutureExt;
-        if !self.refine.as_ref().is_some_and(|task| task.is_finished()) {
+        if self.turn_active() || !self.refine.as_ref().is_some_and(|task| task.is_finished()) {
             return None;
         }
         let task = self.refine.take()?;
@@ -1238,10 +1238,18 @@ impl InProcessConnection {
             Ok(outcome) => outcome,
             Err(error) => Err(format!("refine task failed: {error}")),
         };
-        let result =
-            outcome.and_then(|plan| crate::refine::apply_plan(&self.runtime.session_id, &plan));
+        let result = outcome.and_then(|plan| {
+            crate::refine::apply_plan(&self.runtime.session_id, &plan)
+                .map(|result| (plan.source, result))
+        });
         Some(match result {
-            Ok(result) => ClientEvent::Refined(Box::new(result)),
+            Ok((source, result)) => {
+                self.runtime
+                    .conversation
+                    .append_refinement(source, result.clone());
+                self.runtime.save_now_and_settle();
+                ClientEvent::Refined(Box::new(result))
+            }
             Err(error) => ClientEvent::Session(SessionEvent::Failed(format!("refine: {error}"))),
         })
     }
@@ -2241,8 +2249,12 @@ mod tests {
             .unwrap();
         drain_turn(&mut connection).await;
         let turn = requests.lock().unwrap()[1].messages.clone();
-        assert_eq!(turn.len(), 3);
-        let Message::User(digest) = &turn[1] else {
+        assert_eq!(turn.len(), 4);
+        assert!(
+            matches!(&turn[1], Message::User(u) if u.text() == "[user-refinement]\n\nremember the runner\n- create memory [local:test_runner] test runner: cargo nextest run"),
+            "{turn:?}"
+        );
+        let Message::User(digest) = &turn[2] else {
             panic!("{turn:?}")
         };
         assert!(
@@ -2251,7 +2263,7 @@ mod tests {
                 .starts_with(mush_session::harness::DIGEST_PREFIX)
         );
         assert!(digest.text().contains("[local:test_runner] test runner"));
-        assert!(matches!(&turn[2], Message::User(u) if u.text() == "next"));
+        assert!(matches!(&turn[3], Message::User(u) if u.text() == "next"));
 
         connection
             .send(ClientCommand::Prompt {
@@ -2331,6 +2343,21 @@ mod tests {
             unreachable!()
         };
         assert!(result.applied_edits.is_empty());
+        assert!(matches!(
+            connection
+                .runtime
+                .conversation
+                .entries()
+                .last()
+                .map(|entry| &entry.kind),
+            Some(mush_session::tree::EntryKind::Refinement {
+                source: mush_session::harness::RefinementSource::Auto,
+                ..
+            })
+        ));
+        assert!(!connection.runtime.conversation.context().iter().any(|message| {
+            matches!(message, Message::User(u) if mush_session::harness::is_refinement_notice(&u.text()))
+        }));
         assert_eq!(connection.assistant_turns_since_review, 0);
         let asked = requests.lock().unwrap();
         assert_eq!(asked.len(), 3, "turn, review, plan");

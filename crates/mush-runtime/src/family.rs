@@ -2204,6 +2204,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .get("global")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
+                    source: mush_session::harness::RefinementSource::Agent,
                 };
                 commands.replace_refine(refine);
                 Ok(

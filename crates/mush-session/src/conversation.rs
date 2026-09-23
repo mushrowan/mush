@@ -39,6 +39,14 @@ impl ConversationState {
         self.tree.append_message(message)
     }
 
+    pub fn append_refinement(
+        &mut self,
+        source: crate::harness::RefinementSource,
+        result: crate::harness::RefinementResult,
+    ) -> EntryId {
+        self.tree.append_refinement(source, result)
+    }
+
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         *self = Self::from_messages(messages);
     }

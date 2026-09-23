@@ -2,6 +2,8 @@ use derive_more::Display;
 use mush_ai::types::*;
 use serde::{Deserialize, Serialize};
 
+use crate::harness::{RefinementResult, RefinementSource};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
 pub struct EntryId(String);
 
@@ -60,6 +62,10 @@ pub enum EntryKind {
         first_kept_id: EntryId,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         event_receipts: Vec<EventReceipt>,
+    },
+    Refinement {
+        source: RefinementSource,
+        result: RefinementResult,
     },
 }
 
@@ -202,7 +208,7 @@ impl SessionTree {
                     }
                     *event_receipts = receipts;
                 }
-                EntryKind::Message { .. } => unreachable!(),
+                EntryKind::Message { .. } | EntryKind::Refinement { .. } => unreachable!(),
             }
         }
         Ok(tree)
@@ -292,7 +298,17 @@ fn entry_to_message(entry: &SessionEntry) -> Message {
                 .timestamp_ms(entry.timestamp)
                 .build(),
         ),
+        EntryKind::Refinement { source, result } => Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(result.notice_message(*source)))
+                .timestamp_ms(entry.timestamp)
+                .build(),
+        ),
     }
+}
+
+fn is_applied_refinement(entry: &SessionEntry) -> bool {
+    matches!(&entry.kind, EntryKind::Refinement { result, .. } if result.applied_any())
 }
 
 impl SessionTree {
@@ -304,11 +320,23 @@ impl SessionTree {
     }
 
     pub fn append_message(&mut self, message: Message) -> EntryId {
+        self.append(EntryKind::Message { message })
+    }
+
+    pub fn append_refinement(
+        &mut self,
+        source: RefinementSource,
+        result: RefinementResult,
+    ) -> EntryId {
+        self.append(EntryKind::Refinement { source, result })
+    }
+
+    fn append(&mut self, kind: EntryKind) -> EntryId {
         let entry = SessionEntry {
             id: EntryId::new(),
             parent_id: self.leaf_id.clone(),
             timestamp: Timestamp::now(),
-            kind: EntryKind::Message { message },
+            kind,
         };
         let id = entry.id.clone();
         self.entries.push(entry);
@@ -503,7 +531,7 @@ impl SessionTree {
                     EntryKind::Compaction { summary, .. } => {
                         (SummaryKind::Compaction, summary.clone())
                     }
-                    EntryKind::Message { .. } => return None,
+                    EntryKind::Message { .. } | EntryKind::Refinement { .. } => return None,
                 };
                 Some(TreeSummaryRow {
                     id: row.entry.id.clone(),
@@ -597,7 +625,9 @@ impl SessionTree {
                 && let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id)
             {
                 for &entry in &branch[kept_pos..idx] {
-                    if matches!(entry.kind, EntryKind::Message { .. }) {
+                    if matches!(entry.kind, EntryKind::Message { .. })
+                        || is_applied_refinement(entry)
+                    {
                         entries.push(entry);
                     }
                 }
@@ -611,7 +641,8 @@ impl SessionTree {
             if matches!(
                 entry.kind,
                 EntryKind::Message { .. } | EntryKind::BranchSummary { .. }
-            ) {
+            ) || is_applied_refinement(entry)
+            {
                 entries.push(entry);
             }
         }
@@ -816,6 +847,75 @@ mod tests {
         );
         assert_eq!(tree.context_len(), 4);
         assert_eq!(tree.entries().len(), 5);
+    }
+
+    fn refinement(content: &str) -> RefinementResult {
+        crate::harness::State::default().apply(
+            &crate::harness::Proposal {
+                summary: "remember the port".into(),
+                rationale: String::new(),
+                expected_outcome: String::new(),
+                edits: vec![crate::harness::Edit {
+                    action: crate::harness::Action::Create,
+                    kind: crate::harness::Kind::Memory,
+                    id: None,
+                    title: Some("port".into()),
+                    content: Some(content.into()),
+                    path: None,
+                    reference: None,
+                    arguments: None,
+                    metadata: None,
+                    reason: None,
+                }],
+            },
+            "ref_1",
+            crate::harness::Scope::Local,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_refinement_is_saved_and_reaches_the_context_as_a_notice_when_it_applied_edits() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        tree.append_refinement(RefinementSource::Agent, refinement("8080"));
+        let mut rejected = refinement("8080");
+        rejected.applied_edits[0].applied = false;
+        tree.append_refinement(RefinementSource::Auto, rejected);
+
+        let context = tree.build_context();
+        assert_eq!(context.len(), 2);
+        let Message::User(notice) = &context[1] else {
+            panic!("{context:?}");
+        };
+        assert_eq!(
+            notice.text(),
+            "[self-refinement]\n\nremember the port\n- create memory [local:port] port: 8080"
+        );
+        assert!(crate::harness::is_refinement_notice(&notice.text()));
+
+        let saved: SessionTree =
+            serde_json::from_str(&serde_json::to_string(&tree).unwrap()).unwrap();
+        let sources: Vec<_> = saved
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                EntryKind::Refinement { source, result } => Some((*source, result.applied_any())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                (RefinementSource::Agent, true),
+                (RefinementSource::Auto, false)
+            ]
+        );
+        assert!(
+            serde_json::to_string(&tree)
+                .unwrap()
+                .contains("\"source\":\"self\"")
+        );
     }
 
     #[test]
