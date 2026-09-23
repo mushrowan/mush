@@ -67,6 +67,9 @@ pub enum EntryKind {
         source: RefinementSource,
         result: RefinementResult,
     },
+    ThinkingLevelChange {
+        thinking_level: ThinkingLevel,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +163,7 @@ impl SessionTree {
                 EntryKind::BranchSummary { from_id, .. } => tree
                     .branch_ending_at(Some(from_id))
                     .into_iter()
-                    .map(entry_to_message)
+                    .filter_map(entry_to_message)
                     .collect::<Vec<_>>(),
                 EntryKind::Compaction { first_kept_id, .. } => {
                     let branch = tree.branch_ending_at(tree.entries[index].parent_id.as_ref());
@@ -170,7 +173,7 @@ impl SessionTree {
                     };
                     branch[..kept]
                         .iter()
-                        .map(|entry| entry_to_message(entry))
+                        .filter_map(|entry| entry_to_message(entry))
                         .collect()
                 }
                 EntryKind::Message {
@@ -179,7 +182,7 @@ impl SessionTree {
                     let history: Vec<_> = tree
                         .branch_ending_at(tree.entries[index].parent_id.as_ref())
                         .into_iter()
-                        .map(entry_to_message)
+                        .filter_map(entry_to_message)
                         .collect();
                     let receipts =
                         EventMessage::summary(String::new(), Timestamp::zero(), &history).receipts;
@@ -208,7 +211,9 @@ impl SessionTree {
                     }
                     *event_receipts = receipts;
                 }
-                EntryKind::Message { .. } | EntryKind::Refinement { .. } => unreachable!(),
+                EntryKind::Message { .. }
+                | EntryKind::Refinement { .. }
+                | EntryKind::ThinkingLevelChange { .. } => unreachable!(),
             }
         }
         Ok(tree)
@@ -259,8 +264,8 @@ fn is_digest(entry: &SessionEntry) -> bool {
     )
 }
 
-fn entry_to_message(entry: &SessionEntry) -> Message {
-    match &entry.kind {
+fn entry_to_message(entry: &SessionEntry) -> Option<Message> {
+    Some(match &entry.kind {
         EntryKind::Message { message } => message.clone(),
         EntryKind::BranchSummary {
             summary,
@@ -304,7 +309,8 @@ fn entry_to_message(entry: &SessionEntry) -> Message {
                 .timestamp_ms(entry.timestamp)
                 .build(),
         ),
-    }
+        EntryKind::ThinkingLevelChange { .. } => return None,
+    })
 }
 
 fn is_applied_refinement(entry: &SessionEntry) -> bool {
@@ -342,6 +348,29 @@ impl SessionTree {
         self.entries.push(entry);
         self.leaf_id = Some(id.clone());
         id
+    }
+
+    pub fn append_thinking_level(&mut self, thinking_level: ThinkingLevel) -> EntryId {
+        let entry = SessionEntry {
+            id: EntryId::new(),
+            parent_id: self.leaf_id.clone(),
+            timestamp: Timestamp::now(),
+            kind: EntryKind::ThinkingLevelChange { thinking_level },
+        };
+        let id = entry.id.clone();
+        self.entries.push(entry);
+        self.leaf_id = Some(id.clone());
+        id
+    }
+
+    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
+        self.current_branch()
+            .into_iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                EntryKind::ThinkingLevelChange { thinking_level } => Some(thinking_level.clone()),
+                _ => None,
+            })
     }
 
     pub fn branch(&mut self, from_id: &EntryId) -> bool {
@@ -452,7 +481,7 @@ impl SessionTree {
         self.current_branch()
             .into_iter()
             .filter(|entry| !staying.contains(&*entry.id))
-            .map(entry_to_message)
+            .filter_map(entry_to_message)
             .collect()
     }
 
@@ -531,7 +560,9 @@ impl SessionTree {
                     EntryKind::Compaction { summary, .. } => {
                         (SummaryKind::Compaction, summary.clone())
                     }
-                    EntryKind::Message { .. } | EntryKind::Refinement { .. } => return None,
+                    EntryKind::Message { .. }
+                    | EntryKind::Refinement { .. }
+                    | EntryKind::ThinkingLevelChange { .. } => return None,
                 };
                 Some(TreeSummaryRow {
                     id: row.entry.id.clone(),
@@ -603,7 +634,7 @@ impl SessionTree {
     pub fn build_display_history(&self) -> Vec<Message> {
         self.current_branch()
             .into_iter()
-            .map(entry_to_message)
+            .filter_map(entry_to_message)
             .collect()
     }
 
@@ -659,8 +690,8 @@ impl SessionTree {
         let capacity = limit.map_or(entries.len(), |limit| limit.min(entries.len()));
         let mut messages = Vec::with_capacity(capacity);
 
-        for entry in entries {
-            if !push_context_message(&mut messages, limit, entry_to_message(entry)) {
+        for message in entries.into_iter().filter_map(entry_to_message) {
+            if !push_context_message(&mut messages, limit, message) {
                 return messages;
             }
         }
@@ -973,7 +1004,7 @@ mod tests {
             .map(|row| {
                 (
                     row.depth,
-                    text_of(&entry_to_message(row.entry)),
+                    text_of(&entry_to_message(row.entry).unwrap()),
                     row.on_branch,
                 )
             })

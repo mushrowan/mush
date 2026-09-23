@@ -81,6 +81,15 @@ impl WorkerConfig {
 
     #[must_use]
     pub fn connect(self, tools: &ToolRegistry, registry: &ApiRegistry) -> InProcessConnection {
+        let thinking_level =
+            self.conversation
+                .thinking_level()
+                .map_or(self.thinking_level, |level| {
+                    self.turn
+                        .default_model
+                        .clamp_thinking(&level)
+                        .normalize_visible()
+                });
         let mut runtime = SessionRuntime::new(self.conversation);
         runtime.saver = self.saver;
         runtime.lease = self.lease;
@@ -88,7 +97,7 @@ impl WorkerConfig {
         runtime.title = self.title;
         runtime.model_id = self.turn.default_model.id.to_string();
         self.models.set_current(runtime.model_id.clone());
-        self.models.set_thinking(self.thinking_level.clone());
+        self.models.set_thinking(thinking_level.clone());
         self.models.set_subagent(self.subagent_model.clone());
         runtime.subagent_model = self.subagent_model;
         runtime.paused = self.paused;
@@ -96,7 +105,7 @@ impl WorkerConfig {
         runtime.system_prompt = self.system_prompt;
         runtime.rlm_depth = self.rlm_depth;
         runtime.rlm_max_depth = self.rlm_max_depth;
-        runtime.thinking_level = self.thinking_level;
+        runtime.thinking_level = thinking_level;
         runtime.parent = self.parent;
         runtime.set_kernel_state(self.kernel_state);
         runtime.begin_kernel_restore();

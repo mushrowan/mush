@@ -1043,6 +1043,18 @@ pub fn resolve_thinking(cli_thinking: bool, model: &Model, cfg: &config::Config)
     model.clamp_thinking(&level).normalize_visible()
 }
 
+pub fn session_thinking(
+    cli_thinking: bool,
+    model: &Model,
+    cfg: &config::Config,
+    conversation: &mush_session::ConversationState,
+) -> ThinkingLevel {
+    match conversation.thinking_level() {
+        Some(level) if !cli_thinking => model.clamp_thinking(&level).normalize_visible(),
+        _ => resolve_thinking(cli_thinking, model, cfg),
+    }
+}
+
 pub fn stream_options_from_config(
     cfg: &config::Config,
     thinking: Option<ThinkingLevel>,
@@ -1742,6 +1754,26 @@ mod tests {
         let model = reasoning_model(&[], Some(ThinkingLevel::High));
         let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
         assert_eq!(resolve_thinking(false, &model, &cfg), ThinkingLevel::Low);
+    }
+
+    #[test]
+    fn a_session_keeps_its_recorded_level_unless_the_flag_asks_for_more() {
+        let model = reasoning_model(&[], None);
+        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
+        let mut conversation = mush_session::ConversationState::new();
+        assert_eq!(
+            session_thinking(false, &model, &cfg, &conversation),
+            ThinkingLevel::Low
+        );
+        conversation.record_thinking_level(&ThinkingLevel::Xhigh);
+        assert_eq!(
+            session_thinking(false, &model, &cfg, &conversation),
+            ThinkingLevel::Xhigh
+        );
+        assert_eq!(
+            session_thinking(true, &model, &cfg, &conversation),
+            ThinkingLevel::High
+        );
     }
 
     #[test]

@@ -253,6 +253,7 @@ impl SessionRuntime {
         let steering_queue = self.steering_queue.clone();
         self.deliver_pending_harness_digest();
         self.refresh_notes();
+        self.record_thinking_level();
         self.pending_prompt = Some(prompt);
         self.persist_pending_prompt();
         let conversation_snapshot = self.conversation.context();

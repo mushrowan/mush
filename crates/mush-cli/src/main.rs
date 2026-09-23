@@ -554,6 +554,7 @@ fn print_failure(message: String) -> color_eyre::Report {
 async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
+    let cfg = config::load_config_with(&cli.option)?;
     let mut session = match cli.session_target()? {
         SessionTarget::Resume(id) => {
             let meta = store.resolve(&id)?;
@@ -567,7 +568,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         SessionTarget::New => {
             let model_id = match cli.model.clone() {
                 Some(model) => model,
-                None => setup::default_model_id(&config::load_config_with(&cli.option)?, &cwd),
+                None => setup::default_model_id(&cfg, &cwd),
             };
             Session::new(&model_id, &cwd.display().to_string())
         }
@@ -581,6 +582,12 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         session.meta.model_id = model.clone().into();
     }
     status.model = Some(session.meta.model_id.to_string());
+    let thinking =
+        mush_ai::discovery::resolve_model_by_id(session.meta.model_id.as_str()).map(|model| {
+            let level = setup::session_thinking(cli.thinking, &model, &cfg, &session.conversation);
+            session.conversation.record_thinking_level(&level);
+            level
+        });
     let prompt_message = (!prompt.is_empty()).then(|| {
         Message::User(
             UserMessage::builder()
@@ -635,6 +642,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     }
 
     setup.client.options.session_id = Some(session.meta.id.clone());
+    if let Some(level) = &thinking {
+        setup.client.options.thinking =
+            Some(setup.client.model.clamp_thinking(level).normalize_visible());
+    }
     session.meta.model_id = setup.client.model.id.clone();
     status.model = Some(setup.client.model.id.to_string());
     status.state = "running";
@@ -1444,6 +1455,11 @@ fn worker_config(
         .clone()
         .unwrap_or(ThinkingLevel::Off)
         .normalize_visible();
+    if cli.thinking && worker.conversation.leaf_id().is_some() {
+        worker
+            .conversation
+            .record_thinking_level(&worker.thinking_level);
+    }
     worker.rlm_depth = setup::rlm_depth();
     worker.rlm_max_depth = seed.rlm_max_depth;
     worker.lease = opened.lease.take();

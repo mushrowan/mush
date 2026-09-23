@@ -1,4 +1,4 @@
-use mush_ai::types::Message;
+use mush_ai::types::{Message, ThinkingLevel};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::tree::{EntryId, SessionEntry, SessionTree, TreeNode};
@@ -148,6 +148,18 @@ impl ConversationState {
     pub fn is_branch_point(&self, id: &EntryId) -> bool {
         self.tree.is_branch_point(id)
     }
+
+    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
+        self.tree.thinking_level()
+    }
+
+    pub fn record_thinking_level(&mut self, thinking_level: &ThinkingLevel) -> bool {
+        if self.thinking_level().as_ref() == Some(thinking_level) {
+            return false;
+        }
+        self.tree.append_thinking_level(thinking_level.clone());
+        true
+    }
 }
 
 impl Serialize for ConversationState {
@@ -181,6 +193,29 @@ impl<'de> Deserialize<'de> for ConversationState {
 mod tests {
     use super::*;
     use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
+
+    #[test]
+    fn a_branch_keeps_the_thinking_level_recorded_on_it() {
+        let mut conversation = ConversationState::new();
+        assert_eq!(conversation.thinking_level(), None);
+        assert!(conversation.record_thinking_level(&ThinkingLevel::Medium));
+        assert!(!conversation.record_thinking_level(&ThinkingLevel::Medium));
+        let first = conversation.append_message(user_message("one"));
+        assert!(conversation.record_thinking_level(&ThinkingLevel::High));
+        conversation.append_message(user_message("two"));
+        assert_eq!(conversation.thinking_level(), Some(ThinkingLevel::High));
+        assert_eq!(conversation.context().len(), 2);
+        assert_eq!(conversation.display_history().len(), 2);
+
+        conversation.branch(&first);
+        assert_eq!(conversation.thinking_level(), Some(ThinkingLevel::Medium));
+        assert_eq!(conversation.context().len(), 1);
+
+        let saved = serde_json::to_string(&conversation).unwrap();
+        let restored: ConversationState = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.thinking_level(), Some(ThinkingLevel::Medium));
+        assert!(saved.contains("\"thinking_level_change\""), "{saved}");
+    }
 
     fn user_message(text: &str) -> Message {
         Message::User(

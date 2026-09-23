@@ -1887,6 +1887,12 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetThinking(level) => {
                 self.runtime.models.set_thinking(level.clone());
                 self.runtime.thinking_level = level;
+                if !self.turn_active()
+                    && self.runtime.conversation.leaf_id().is_some()
+                    && self.runtime.record_thinking_level()
+                {
+                    self.runtime.save_debounced();
+                }
             }
             ClientCommand::SetRlmMaxDepth(depth) => {
                 let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
@@ -3175,6 +3181,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turns_and_idle_changes_record_the_thinking_level_in_the_tree() {
+        use mush_ai::types::ThinkingLevel;
+        use mush_session::tree::EntryKind;
+        let (mut connection, _) = connection();
+        connection
+            .send(ClientCommand::SetThinking(ThinkingLevel::Medium))
+            .await
+            .unwrap();
+        assert!(connection.runtime.conversation.is_empty());
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hi".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        let entries = connection.runtime.conversation.entries();
+        assert!(matches!(
+            &entries[0].kind,
+            EntryKind::ThinkingLevelChange { thinking_level } if *thinking_level == ThinkingLevel::Medium
+        ));
+        assert!(matches!(
+            &entries[1].kind,
+            EntryKind::Message {
+                message: Message::User(_)
+            }
+        ));
+
+        connection
+            .send(ClientCommand::SetThinking(ThinkingLevel::High))
+            .await
+            .unwrap();
+        assert_eq!(
+            connection.runtime.conversation.thinking_level(),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    #[tokio::test]
     async fn abort_mid_stream_keeps_the_partial_as_an_aborted_message() {
         let (mut connection, _) = connection();
         connection.runtime.conversation = ConversationState::from_messages(vec![user("go")]);
@@ -4335,6 +4383,36 @@ mod tests {
             &mush_ai::registry::ApiRegistry::new(),
         );
         assert!(connection.state().paused.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_resumed_worker_restores_the_thinking_level_its_branch_ran_with() {
+        use mush_ai::types::ThinkingLevel;
+        let model = crate::testing::echo_model();
+        let connect = |conversation: ConversationState| {
+            let mut worker = crate::WorkerConfig::new(crate::testing::echo_config(model.clone()));
+            worker.conversation = conversation;
+            worker.thinking_level = ThinkingLevel::High;
+            worker.connect(
+                &mush_agent::ToolRegistry::new(),
+                &mush_ai::registry::ApiRegistry::new(),
+            )
+        };
+
+        let mut recorded = ConversationState::from_messages(vec![user("go")]);
+        recorded.record_thinking_level(&ThinkingLevel::Low);
+        assert_eq!(
+            connect(recorded).state().thinking_level,
+            model
+                .clamp_thinking(&ThinkingLevel::Low)
+                .normalize_visible()
+        );
+        assert_eq!(
+            connect(ConversationState::from_messages(vec![user("go")]))
+                .state()
+                .thinking_level,
+            ThinkingLevel::High
+        );
     }
 
     #[tokio::test]

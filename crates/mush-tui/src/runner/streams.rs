@@ -393,6 +393,7 @@ pub(crate) fn apply_session_events(
             }
             SessionEvent::Status(status) => session.app.status = Some(status.into()),
             SessionEvent::Failed(message) => session.app.push_system_message(message),
+            SessionEvent::ThinkingLevel(level) => session.app.thinking_level = level,
         }
     }
 }

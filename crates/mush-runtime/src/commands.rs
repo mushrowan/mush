@@ -69,18 +69,37 @@ pub enum SessionEvent {
     },
     Status(String),
     Failed(String),
+    ThinkingLevel(mush_ai::types::ThinkingLevel),
 }
 
 impl SessionRuntime {
     pub async fn handle(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
-        let events = self.dispatch(command).await;
+        let mut events = self.dispatch(command).await;
         if events
             .iter()
             .any(|event| matches!(event, SessionEvent::TranscriptReplaced { .. }))
         {
             self.refresh_context_tokens();
+            if let Some(event) = self.adopt_branch_thinking_level() {
+                events.insert(0, event);
+            }
         }
         events
+    }
+
+    pub fn adopt_branch_thinking_level(&mut self) -> Option<SessionEvent> {
+        let level = self
+            .conversation
+            .thinking_level()
+            .filter(|level| *level != self.thinking_level)?;
+        self.models.set_thinking(level.clone());
+        self.thinking_level = level.clone();
+        Some(SessionEvent::ThinkingLevel(level))
+    }
+
+    pub fn record_thinking_level(&mut self) -> bool {
+        self.conversation
+            .record_thinking_level(&self.thinking_level)
     }
 
     async fn dispatch(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
@@ -423,14 +442,17 @@ impl SessionRuntime {
                 format!("branched before: {preview}")
             }
         };
-        vec![
-            SessionEvent::TranscriptReplaced {
-                reason: Replaced::Branched,
-                messages: self.conversation.context(),
-                editor_text,
-            },
-            SessionEvent::Status(status),
-        ]
+        self.adopt_branch_thinking_level()
+            .into_iter()
+            .chain([
+                SessionEvent::TranscriptReplaced {
+                    reason: Replaced::Branched,
+                    messages: self.conversation.context(),
+                    editor_text,
+                },
+                SessionEvent::Status(status),
+            ])
+            .collect()
     }
 }
 
@@ -710,6 +732,53 @@ mod tests {
         let context = runtime.conversation.context();
         assert_eq!(context.len(), 1);
         assert!(matches!(&context[0], Message::User(user) if user.text().contains("we tried b")));
+    }
+
+    #[tokio::test]
+    async fn navigating_to_another_branch_adopts_the_thinking_level_it_ran_with() {
+        use mush_ai::types::ThinkingLevel;
+        let mut runtime = runtime(vec![]);
+        runtime
+            .conversation
+            .record_thinking_level(&ThinkingLevel::Low);
+        runtime.conversation.append_message(user("a"));
+        runtime
+            .conversation
+            .record_thinking_level(&ThinkingLevel::High);
+        runtime.conversation.append_message(user("b"));
+        runtime.thinking_level = ThinkingLevel::High;
+        let target = runtime
+            .conversation
+            .user_messages_in_branch()
+            .last()
+            .unwrap()
+            .id
+            .clone();
+
+        let events = runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: target,
+                summary: None,
+            })
+            .await;
+
+        assert_eq!(runtime.thinking_level, ThinkingLevel::High);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SessionEvent::ThinkingLevel(_)))
+        );
+
+        let first = runtime.conversation.user_messages_in_branch()[0].id.clone();
+        let events = runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: first,
+                summary: None,
+            })
+            .await;
+
+        assert_eq!(runtime.thinking_level, ThinkingLevel::Low);
+        assert_eq!(events[0], SessionEvent::ThinkingLevel(ThinkingLevel::Low));
     }
 
     #[tokio::test]

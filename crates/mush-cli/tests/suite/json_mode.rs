@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<()> {
+fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<serde_json::Value> {
     std::thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
         let deadline = Instant::now() + Duration::from_secs(25);
@@ -58,6 +58,7 @@ fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<()> {
             body.len()
         )
         .unwrap();
+        serde_json::from_slice(&bytes[start..start + length]).unwrap()
     })
 }
 
@@ -110,7 +111,7 @@ fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
         ])
         .output()
         .unwrap();
-    server.join().unwrap();
+    let _ = server.join().unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -180,4 +181,77 @@ fn json_mode_needs_a_prompt() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--prompt"), "{stderr}");
+}
+
+#[test]
+fn a_resumed_print_run_keeps_the_sessions_thinking_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "rlm = false\nthinking = \"high\"\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let model = mush_ai::types::Model::builder()
+        .id("gpt-fixture".into())
+        .name("fixture".into())
+        .provider(mush_ai::types::Provider::Custom("fixture".into()))
+        .api(mush_ai::types::Api::OpenaiResponses)
+        .base_url(format!("http://{}", listener.local_addr().unwrap()).into())
+        .context_window(mush_ai::types::TokenCount::new(1_000_000))
+        .max_output_tokens(mush_ai::types::TokenCount::new(64))
+        .reasoning(true)
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
+    let mut session = mush_session::Session::new("gpt-fixture", &dir.path().display().to_string());
+    session
+        .conversation
+        .record_thinking_level(&mush_ai::types::ThinkingLevel::Low);
+    session.push_message(mush_ai::types::Message::User(
+        mush_ai::types::UserMessage::builder()
+            .content(mush_ai::types::UserContent::Text("earlier".into()))
+            .timestamp_ms(mush_ai::types::Timestamp::zero())
+            .build(),
+    ));
+    store.save(&session).unwrap();
+    let server = serve_one_reply(listener);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mush"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", dir.path())
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("data"))
+        .env("MUSH_CONFIG_DIR", &config)
+        .current_dir(dir.path())
+        .args([
+            "--no-tools",
+            "--no-skills",
+            "--no-context-files",
+            "--resume",
+            session.meta.id.as_str(),
+            "-p",
+            "again",
+        ])
+        .output()
+        .unwrap();
+    let request = server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(request["reasoning"]["effort"], "low", "{request}");
+    let resumed = store.load(&session.meta.id).unwrap();
+    assert_eq!(
+        resumed.conversation.thinking_level(),
+        Some(mush_ai::types::ThinkingLevel::Low)
+    );
 }
