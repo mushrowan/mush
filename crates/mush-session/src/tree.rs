@@ -241,6 +241,18 @@ fn push_context_message(
     }
 }
 
+fn is_digest(entry: &SessionEntry) -> bool {
+    matches!(
+        &entry.kind,
+        EntryKind::Message {
+            message: Message::User(UserMessage {
+                content: UserContent::Text(text),
+                ..
+            }),
+        } if text.starts_with(crate::harness::DIGEST_PREFIX)
+    )
+}
+
 fn entry_to_message(entry: &SessionEntry) -> Message {
     match &entry.kind {
         EntryKind::Message { message } => message.clone(),
@@ -604,6 +616,10 @@ impl SessionTree {
             }
         }
 
+        if let Some(newest) = entries.iter().rposition(|entry| is_digest(entry)) {
+            let newest = entries[newest].id.clone();
+            entries.retain(|entry| entry.id == newest || !is_digest(entry));
+        }
         entries
     }
 
@@ -766,6 +782,40 @@ mod tests {
         tree.append_message(user_msg("q2"));
         tree.append_message(assistant_msg("a2"));
         tree
+    }
+
+    #[test]
+    fn only_the_newest_digest_reaches_the_context_and_every_copy_stays_saved() {
+        let digest =
+            |version: &str| user_msg(&format!("{}\n\n{version}", crate::harness::DIGEST_PREFIX));
+        let mut tree = SessionTree::new();
+        tree.append_message(digest("v1"));
+        tree.append_message(user_msg("q0"));
+        tree.append_message(assistant_msg("a0"));
+        tree.append_message(digest("v2"));
+        tree.append_message(user_msg("q1"));
+
+        let context: Vec<String> = tree
+            .build_context()
+            .iter()
+            .map(|message| match message {
+                Message::User(user) => user.text(),
+                Message::Assistant(assistant) => assistant.text(),
+                _ => String::new(),
+            })
+            .collect();
+
+        assert_eq!(
+            context,
+            [
+                "q0".to_string(),
+                "a0".into(),
+                format!("{}\n\nv2", crate::harness::DIGEST_PREFIX),
+                "q1".into(),
+            ]
+        );
+        assert_eq!(tree.context_len(), 4);
+        assert_eq!(tree.entries().len(), 5);
     }
 
     #[test]
