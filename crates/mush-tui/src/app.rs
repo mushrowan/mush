@@ -296,9 +296,7 @@ impl App {
                 }
                 mush_runtime::GoalStatus::Active => "goal resumed".to_string(),
                 mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
-                mush_runtime::GoalStatus::BudgetLimited => {
-                    "goal hit its token budget, /goal resume lifts it".to_string()
-                }
+                mush_runtime::GoalStatus::BudgetLimited => "goal hit its token budget".to_string(),
                 mush_runtime::GoalStatus::Complete => match &goal.summary {
                     Some(summary) => format!("goal complete: {summary}"),
                     None => "goal complete".to_string(),

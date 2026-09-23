@@ -259,11 +259,21 @@ impl GoalStore {
                 if !matches!(goal.status, GoalStatus::Paused | GoalStatus::BudgetLimited) {
                     return Err(format!("the goal is {:?}, nothing to resume", goal.status));
                 }
-                if goal.status == GoalStatus::BudgetLimited {
-                    goal.token_budget = None;
+                let exhausted = goal
+                    .token_budget
+                    .is_some_and(|budget| goal.tokens_used >= budget);
+                if exhausted {
+                    if goal.status == GoalStatus::BudgetLimited {
+                        return Err("the goal's token budget is already spent; set a new goal \
+                             with /goal <objective> or clear it with /goal clear"
+                            .into());
+                    }
+                    goal.set_status(GoalStatus::BudgetLimited, now);
+                    inner.due = None;
+                } else {
+                    goal.set_status(GoalStatus::Active, now);
+                    inner.due = Some(Continuation::Continue);
                 }
-                goal.set_status(GoalStatus::Active, now);
-                inner.due = Some(Continuation::Continue);
             }
             GoalCommand::Clear => {
                 if inner.goal.is_none() {
@@ -609,9 +619,49 @@ mod tests {
         store.turn_ended();
         assert!(store.take_due_prompt().is_none());
 
+        let refused = store.apply(GoalCommand::Resume).unwrap_err();
+        assert!(refused.contains("already spent"), "{refused}");
+        let goal = store.get().unwrap();
+        assert_eq!(goal.status, GoalStatus::BudgetLimited);
+        assert_eq!(goal.token_budget, Some(500));
+        assert!(store.take_due_prompt().is_none());
+    }
+
+    #[test]
+    fn resuming_a_paused_goal_with_a_spent_budget_stays_budget_limited() {
+        let store = GoalStore::new(None);
+        store
+            .apply(GoalCommand::Create {
+                objective: "x".into(),
+                token_budget: Some(500),
+            })
+            .unwrap();
+        store.take_due_prompt();
+        store.record_usage(400);
+        store.apply(GoalCommand::Pause).unwrap();
+        store.lock().goal.as_mut().unwrap().tokens_used = 500;
+
+        let resumed = store.apply(GoalCommand::Resume).unwrap().unwrap();
+        assert_eq!(resumed.status, GoalStatus::BudgetLimited);
+        assert!(store.take_due_prompt().is_none());
+    }
+
+    #[test]
+    fn resuming_a_paused_goal_with_budget_left_continues_it() {
+        let store = GoalStore::new(None);
+        store
+            .apply(GoalCommand::Create {
+                objective: "x".into(),
+                token_budget: Some(500),
+            })
+            .unwrap();
+        store.take_due_prompt();
+        store.record_usage(100);
+        store.apply(GoalCommand::Pause).unwrap();
+
         let resumed = store.apply(GoalCommand::Resume).unwrap().unwrap();
         assert_eq!(resumed.status, GoalStatus::Active);
-        assert_eq!(resumed.token_budget, None);
+        assert_eq!(resumed.token_budget, Some(500));
         assert!(store.take_due_prompt().is_some());
     }
 
