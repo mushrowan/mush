@@ -234,6 +234,7 @@ impl SessionRuntime {
     ) -> usize {
         self.conversation
             .apply_compaction(summary, summarised_count, messages);
+        self.harness_digest_pending = true;
         self.refresh_context_tokens();
         self.conversation.context_len()
     }

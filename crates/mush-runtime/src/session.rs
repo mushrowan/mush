@@ -233,6 +233,7 @@ pub struct SessionRuntime {
     pub paused: Option<mush_session::Pause>,
     pub notes: Option<Arc<crate::notes::Notes>>,
     pub(crate) kernel_restore: Option<KernelRestore>,
+    pub(crate) harness_digest_pending: bool,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -271,6 +272,7 @@ impl SessionRuntime {
             paused: None,
             notes: None,
             kernel_restore: None,
+            harness_digest_pending: true,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }
@@ -352,6 +354,7 @@ impl SessionRuntime {
             mush_agent::AgentEvent::ContextCompacted { compaction, .. } => {
                 let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
                 self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
+                self.harness_digest_pending = true;
             }
             _ => {}
         }

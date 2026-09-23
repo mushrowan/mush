@@ -245,7 +245,7 @@ impl SessionRuntime {
         let tools: &ToolRegistry = tools;
         let registry: &ApiRegistry = registry;
         let steering_queue = self.steering_queue.clone();
-        self.refresh_harness_digest();
+        self.deliver_pending_harness_digest();
         self.refresh_notes();
         self.pending_prompt = Some(prompt);
         self.persist_pending_prompt();

@@ -2146,6 +2146,15 @@ mod tests {
         )
     }
 
+    fn shared_data_dir() {
+        static DATA: std::sync::LazyLock<tempfile::TempDir> = std::sync::LazyLock::new(|| {
+            let dir = tempfile::tempdir().unwrap();
+            unsafe { std::env::set_var("MUSH_DATA_DIR", dir.path()) };
+            dir
+        });
+        std::sync::LazyLock::force(&DATA);
+    }
+
     fn connection_replying(reply: &str) -> (InProcessConnection, crate::testing::Requests) {
         let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ApiRegistry::new();
@@ -2205,8 +2214,7 @@ mod tests {
 
     #[tokio::test]
     async fn refine_applies_the_planned_edits_and_the_next_turn_carries_the_digest() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        shared_data_dir();
         let (mut connection, requests) = connection_replying(
             "{\"summary\":\"remember the runner\",\"rationale\":\"seen twice\",\"expectedOutcome\":\"fewer misses\",\"edits\":[{\"action\":\"create\",\"kind\":\"memory\",\"title\":\"test runner\",\"content\":\"cargo nextest run\"}]}",
         );
@@ -2283,10 +2291,107 @@ mod tests {
         );
     }
 
+    fn is_digest(message: &Message) -> bool {
+        matches!(message, Message::User(u) if u.text().starts_with(mush_session::harness::DIGEST_PREFIX))
+    }
+
+    async fn prompt(connection: &mut InProcessConnection, text: &str) {
+        connection
+            .send(ClientCommand::Prompt {
+                text: text.into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(connection).await;
+    }
+
+    #[tokio::test]
+    async fn a_mid_session_refine_reaches_the_model_as_a_notice_and_the_digest_waits_for_a_cold_boundary()
+     {
+        shared_data_dir();
+        let (mut connection, requests) = connection_replying(
+            "{\"summary\":\"remember the runner\",\"edits\":[{\"action\":\"create\",\"kind\":\"memory\",\"title\":\"test runner\",\"content\":\"cargo nextest run\"}]}",
+        );
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+
+        prompt(&mut connection, "hello").await;
+        connection
+            .send(ClientCommand::Refine(
+                mush_session::refine::RefineRequest::default(),
+            ))
+            .await
+            .unwrap();
+        wait_for(&mut connection, |event| {
+            matches!(event, ClientEvent::Refined(_))
+        })
+        .await;
+        prompt(&mut connection, "next").await;
+
+        let turn = requests.lock().unwrap()[2].messages.clone();
+        assert!(!turn.iter().any(is_digest), "{turn:?}");
+        assert!(
+            matches!(&turn[turn.len() - 2], Message::User(u) if u.text().starts_with("[user-refinement]\n\nremember the runner")),
+            "{turn:?}"
+        );
+
+        let leaf = connection.runtime.conversation.leaf_id().unwrap().clone();
+        connection.runtime.navigate_tree(&leaf, None);
+        prompt(&mut connection, "again").await;
+
+        let turn = requests.lock().unwrap()[3].messages.clone();
+        assert!(is_digest(&turn[turn.len() - 2]), "{turn:?}");
+        assert_eq!(turn.iter().filter(|message| is_digest(message)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_turn_after_a_compaction_carries_the_digest_again() {
+        shared_data_dir();
+        let (mut connection, requests) = connection();
+        connection.runtime.saver = Some(Arc::new(|_| {}));
+        let mut state = mush_session::harness::State::default();
+        state
+            .upsert(
+                &mush_session::harness::Edit {
+                    action: mush_session::harness::Action::Create,
+                    kind: mush_session::harness::Kind::Memory,
+                    id: None,
+                    title: Some("test runner".into()),
+                    content: Some("cargo nextest run".into()),
+                    path: None,
+                    reference: None,
+                    arguments: None,
+                    metadata: None,
+                    reason: None,
+                },
+                mush_session::harness::Scope::Local,
+                "test",
+            )
+            .unwrap();
+        state
+            .save(&mush_session::harness::local_dir(
+                &connection.runtime.session_id,
+            ))
+            .unwrap();
+
+        prompt(&mut connection, "one").await;
+        prompt(&mut connection, "two").await;
+        let context = connection.runtime.conversation.context();
+        connection
+            .runtime
+            .apply_compaction("earlier work".into(), 3, context[3..].to_vec());
+        prompt(&mut connection, "three").await;
+
+        let asked = requests.lock().unwrap();
+        assert!(is_digest(&asked[0].messages[0]), "{:?}", asked[0].messages);
+        assert!(!asked[1].messages.iter().skip(1).any(is_digest));
+        let after = &asked[2].messages;
+        assert!(is_digest(&after[after.len() - 2]), "{after:?}");
+    }
+
     #[tokio::test]
     async fn a_refine_that_returns_no_json_fails_without_touching_the_harness() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        shared_data_dir();
         let (mut connection, _) = connection_replying("i have nothing to add");
         connection.runtime.saver = Some(Arc::new(|_| {}));
 
@@ -2309,8 +2414,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_refine_reviews_after_the_interval_and_refines_when_approved() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        shared_data_dir();
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));
@@ -2375,8 +2479,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_subagent_never_runs_the_auto_refine_review() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        shared_data_dir();
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));
@@ -2406,8 +2509,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_refine_stays_quiet_when_disabled() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        shared_data_dir();
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));

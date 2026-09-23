@@ -374,6 +374,7 @@ impl SessionRuntime {
         self.title_generated = false;
         self.pending_prompt = None;
         self.kernel_restore = None;
+        self.harness_digest_pending = true;
         self.attach_kernel_session();
     }
 
@@ -403,6 +404,7 @@ impl SessionRuntime {
             _ => None,
         };
         let new_leaf = navigation_leaf(tree, target);
+        self.harness_digest_pending = true;
         let status = match (new_leaf, summary) {
             (Some(leaf), Some(summary)) => {
                 self.conversation.branch_with_summary(&leaf, summary);

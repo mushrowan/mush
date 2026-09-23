@@ -2208,7 +2208,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 };
                 commands.replace_refine(refine);
                 Ok(
-                    serde_json::json!({ "scheduled": true, "note": "refinement runs after this turn ends" }),
+                    serde_json::json!({ "scheduled": true, "note": "refinement runs after this turn ends; applied edits reach your context as a refinement notice" }),
                 )
             }
             "agent_observe.list_agents" => Ok(serde_json::json!({

@@ -705,7 +705,9 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          deletes prompt notes, memories, skill entries and subagent specs. Call it after a \
          repeated failure, when a reusable tactic emerges, or when the user corrects behaviour \
          that should persist. Local by default; `global_=True` for lessons every session should \
-         keep. The current harness digest appears in the conversation when it changes.\n\
+         keep. Applied edits reach you as a short refinement notice; the full harness digest \
+         is delivered when the session starts, after a compaction and after moving in the \
+         tree.\n\
          - Continual harness state is `rlm.harness` (also bare `harness`). \
          `await harness.search(query, kind=None, limit=10)`, `harness.list(kind=None)`, \
          `harness.get(kind, id)` and `harness.overview()` read the entries the digest \

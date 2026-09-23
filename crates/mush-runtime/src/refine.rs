@@ -11,7 +11,14 @@ impl SessionRuntime {
         self.saver.is_some()
     }
 
-    pub fn refresh_harness_digest(&mut self) -> Option<String> {
+    pub fn deliver_pending_harness_digest(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.harness_digest_pending) {
+            return None;
+        }
+        self.refresh_harness_digest()
+    }
+
+    fn refresh_harness_digest(&mut self) -> Option<String> {
         if !self.harness_enabled() {
             return None;
         }
