@@ -949,7 +949,10 @@ fn compaction_context(
             tools: live.tools.clone(),
         };
     }
-    let request_body = build_compaction_request(old_messages, recent_messages);
+    let request_body = build_compaction_request(
+        &summariser_input(old_messages),
+        &summariser_input(recent_messages),
+    );
     let system_prompt = compaction_system_prompt(focus);
 
     LlmContext {
@@ -962,6 +965,22 @@ fn compaction_context(
         )],
         tools: vec![],
     }
+}
+
+fn summariser_input(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter(|message| !is_regenerated(message))
+        .cloned()
+        .collect()
+}
+
+fn is_regenerated(message: &Message) -> bool {
+    let Message::User(user) = message else {
+        return false;
+    };
+    let text = user.text();
+    crate::harness::extract_digest(&text).is_some() || crate::notes::extract(&text).is_some()
 }
 
 fn fallback_summary_from_reason(
@@ -1334,6 +1353,30 @@ mod tests {
         assert!(text.contains("[Event]: [non-human event"));
         assert!(!text.contains("[compaction-summary"));
         assert!(!text.contains("compacted into the following summary"));
+    }
+
+    #[test]
+    fn the_summariser_does_not_read_harness_digests_or_notes() {
+        let digest = crate::harness::digest_message(&crate::harness::State::default());
+        let notes = crate::notes::message("- the daemon lives in mush-daemon");
+        let context = compaction_context(
+            &[
+                user_msg("fix the bug"),
+                digest,
+                notes,
+                assistant_msg("done"),
+            ],
+            &[],
+            &CompactionFocus::default(),
+            None,
+        );
+        let Message::User(request) = &context.messages[0] else {
+            panic!()
+        };
+        let text = request.text();
+        assert!(text.contains("[User]: fix the bug"));
+        assert!(!text.contains(crate::harness::DIGEST_PREFIX));
+        assert!(!text.contains("mush-daemon"));
     }
 
     #[test]
