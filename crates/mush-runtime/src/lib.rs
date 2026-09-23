@@ -30,8 +30,8 @@ pub use autonomous::{
 };
 pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
-    AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState, HostCommands,
-    InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
+    AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState, ContextUsage,
+    HostCommands, InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
 };
 pub use family::{
     ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,

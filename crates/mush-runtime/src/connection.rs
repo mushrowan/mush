@@ -226,12 +226,42 @@ pub struct InProcessConnection {
     closed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub tokens: Option<u64>,
+    pub context_window: Option<u64>,
+}
+
+impl ContextUsage {
+    #[must_use]
+    pub fn percent(&self) -> Option<f64> {
+        let (tokens, window) = (self.tokens?, self.context_window?);
+        (window > 0).then(|| tokens as f64 * 100.0 / window as f64)
+    }
+}
+
 #[derive(Default)]
 pub struct HostCommands {
     queue: std::sync::Mutex<VecDeque<ClientCommand>>,
+    context: std::sync::Mutex<ContextUsage>,
 }
 
 impl HostCommands {
+    pub fn record_context(&self, usage: ContextUsage) {
+        *self
+            .context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = usage;
+    }
+
+    #[must_use]
+    pub fn context_usage(&self) -> ContextUsage {
+        *self
+            .context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[must_use]
     pub fn compaction_queued(&self) -> bool {
         self.queue
@@ -1351,6 +1381,12 @@ impl InProcessConnection {
                     applied.summarised_count,
                     applied.messages.clone(),
                 );
+                if let Some(commands) = &self.host_commands {
+                    commands.record_context(ContextUsage {
+                        tokens: None,
+                        ..commands.context_usage()
+                    });
+                }
                 self.runtime.save_now_and_settle();
                 self.compact_refine_pending = true;
                 ClientEvent::Compacted(applied)
@@ -1569,6 +1605,17 @@ impl InProcessConnection {
                         message.usage.total_input_tokens().get(),
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                }
+                if let Some(commands) = &self.host_commands {
+                    commands.record_context(ContextUsage {
+                        tokens: Some(message.usage.total_input_tokens().get()),
+                        context_window: Some(
+                            self.runtime
+                                .model(&self.config.default_model)
+                                .context_window
+                                .get(),
+                        ),
+                    });
                 }
                 if let Some(goal) = &self.goal {
                     goal.record_usage(message.usage.total_tokens().get());

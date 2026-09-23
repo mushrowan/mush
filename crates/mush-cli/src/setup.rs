@@ -693,9 +693,10 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          - `attach_image(path, ...)` puts a png, jpeg, gif or webp in front of you as pixels. \
          Use it to look at a screenshot, chart or diagram; use a library when you need to \
          compute over the image.\n\
-         - `await compact.run(hint=None)` schedules a context compaction for after this turn, \
-         with an optional hint on what the summary must keep. Use it when the conversation has \
-         grown past what the task needs.\n\
+         - `await compact.run(instructions=None)` schedules a context compaction for after this \
+         turn, with optional instructions on what the summary must keep. Use it when the \
+         conversation has grown past what the task needs. `await compact.status()` shows \
+         `tokens`, `context_window`, `percent` and whether one is `scheduled`.\n\
          - `await refine.run(instructions=None, global_=False)` schedules a continual harness \
          refinement for after this turn: a review of the trajectory that creates, updates or \
          deletes prompt notes, memories, skill entries and subagent specs. Call it after a \

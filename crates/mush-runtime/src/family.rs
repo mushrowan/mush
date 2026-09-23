@@ -1821,6 +1821,18 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         .collect::<Vec<_>>()
                 }))
             }
+            "compact.status" => {
+                let commands = self.host_commands.as_ref().ok_or_else(|| {
+                    mush_kernel::HostError("compaction is not available here".into())
+                })?;
+                let usage = commands.context_usage();
+                Ok(serde_json::json!({
+                    "tokens": usage.tokens,
+                    "context_window": usage.context_window,
+                    "percent": usage.percent(),
+                    "scheduled": commands.compaction_queued(),
+                }))
+            }
             "compact.run" => {
                 if !self.compaction_callable {
                     return Err(mush_kernel::HostError(
@@ -1839,7 +1851,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 }
                 let focus = mush_session::compact::CompactionFocus {
                     context_budget: None,
-                    instructions: str_field("hint").filter(|hint| !hint.trim().is_empty()),
+                    instructions: str_field("instructions").filter(|text| !text.trim().is_empty()),
                 };
                 commands.push(ClientCommand::Compact { focus, auto: false });
                 Ok(
@@ -2749,6 +2761,49 @@ mod tests {
         assert!(sent.outcome.is_success(), "{text}");
         assert_eq!(text.trim(), "root delivered");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn compact_status_reports_usage_and_run_takes_instructions() {
+        use mush_kernel::HostRequestHandler;
+
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let commands = Arc::new(crate::connection::HostCommands::default());
+        commands.record_context(crate::connection::ContextUsage {
+            tokens: Some(50_000),
+            context_window: Some(200_000),
+        });
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root"))
+            .with_host_commands(Arc::clone(&commands));
+
+        let before = handler
+            .handle("compact.status", serde_json::json!({}))
+            .await
+            .unwrap();
+        handler
+            .handle(
+                "compact.run",
+                serde_json::json!({ "instructions": "keep the plan" }),
+            )
+            .await
+            .unwrap();
+        let after = handler
+            .handle("compact.status", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            before,
+            serde_json::json!({
+                "tokens": 50_000,
+                "context_window": 200_000,
+                "percent": 25.0,
+                "scheduled": false,
+            })
+        );
+        assert_eq!(after["scheduled"], true);
+        assert!(commands.compaction_queued());
     }
 
     #[tokio::test]

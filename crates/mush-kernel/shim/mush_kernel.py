@@ -523,10 +523,15 @@ class _Goal:
 
 
 class _Compact:
-    async def run(self, hint: str | None = None) -> dict:
+    async def status(self) -> dict:
+        return await host_request("compact.status", {})
+
+    async def run(self, instructions: str | None = None) -> dict:
+        if instructions is not None and not isinstance(instructions, str):
+            raise TypeError(f"instructions must be str or None, got {type(instructions).__name__}")
         payload = {}
-        if hint is not None:
-            payload["hint"] = hint
+        if instructions is not None:
+            payload["instructions"] = instructions
         return await host_request("compact.run", payload)
 
 
