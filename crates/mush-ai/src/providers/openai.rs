@@ -655,8 +655,8 @@ fn process_chunk(
                 });
             }
             _ => {
-                let idx = finish_block_events(current, output, &mut events);
-                let content_index = idx.unwrap_or(output.content.len());
+                finish_block_events(current, output, &mut events);
+                let content_index = output.content.len();
                 *current = Some(StreamBlock::Thinking {
                     text: reasoning.clone(),
                     signature: None,
@@ -692,8 +692,8 @@ fn process_chunk(
                 });
             }
             _ => {
-                let idx = finish_block_events(current, output, &mut events);
-                let content_index = idx.unwrap_or(output.content.len());
+                finish_block_events(current, output, &mut events);
+                let content_index = output.content.len();
                 *current = Some(StreamBlock::Text { text: text.clone() });
                 output.content.push(AssistantContentPart::Text(TextContent {
                     text: text.clone(),
@@ -1253,8 +1253,15 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, StreamEvent::TextStart { .. }))
+                .any(|e| matches!(e, StreamEvent::TextStart { content_index: 1 }))
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::TextDelta {
+                content_index: 1,
+                ..
+            }
+        )));
         assert_eq!(output.content.len(), 2);
     }
 
