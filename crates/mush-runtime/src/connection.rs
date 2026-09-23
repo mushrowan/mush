@@ -2409,7 +2409,7 @@ mod tests {
     async fn a_compaction_runs_in_the_background_applies_and_saves() {
         let (mut connection, _) = connection();
         let messages: Vec<Message> = (0..30)
-            .map(|i| user(&format!("turn {i}: {}", "x".repeat(400))))
+            .map(|i| user(&format!("turn {i}: {}", "x".repeat(4_000))))
             .collect();
         connection.runtime.conversation = ConversationState::from_messages(messages);
         let saved = Arc::new(Mutex::new(0usize));
@@ -2879,8 +2879,11 @@ mod tests {
         tools.register_shared(Arc::new(NoteTool));
         let registry = std::mem::replace(&mut connection.registry, ApiRegistry::new());
         connection.set_deps(tools, registry);
-        connection.runtime.conversation =
-            ConversationState::from_messages((0..30).map(|i| user(&format!("turn {i}"))).collect());
+        connection.runtime.conversation = ConversationState::from_messages(
+            (0..30)
+                .map(|i| user(&format!("turn {i}: {}", "x".repeat(4_000))))
+                .collect(),
+        );
 
         connection
             .send(ClientCommand::Prompt {

@@ -605,7 +605,10 @@ mod tests {
             model,
             StreamOptions::default(),
             true,
-            mush_session::compact::CompactionSettings::default(),
+            mush_session::compact::CompactionSettings {
+                keep_recent_tokens: 2_000,
+                ..mush_session::compact::CompactionSettings::default()
+            },
             TokenCount::new(10_000),
             ApiRegistry::new(),
             context_tokens,
@@ -670,7 +673,10 @@ mod tests {
             model,
             StreamOptions::default(),
             true,
-            mush_session::compact::CompactionSettings::default(),
+            mush_session::compact::CompactionSettings {
+                keep_recent_tokens: 2_000,
+                ..mush_session::compact::CompactionSettings::default()
+            },
             TokenCount::new(10_000),
             ApiRegistry::new(),
             Arc::new(std::sync::atomic::AtomicU64::new(6_000)),

@@ -517,7 +517,10 @@ mod tests {
                 model.clone(),
                 StreamOptions::default(),
                 true,
-                mush_session::compact::CompactionSettings::default(),
+                mush_session::compact::CompactionSettings {
+                    keep_recent_tokens: 5_000,
+                    ..mush_session::compact::CompactionSettings::default()
+                },
                 TokenCount::new(10_000),
                 registry.clone(),
                 Arc::new(std::sync::atomic::AtomicU64::new(0)),

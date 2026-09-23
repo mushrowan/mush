@@ -628,9 +628,7 @@ pub fn keep_recent_for_budget(messages: &[Message], budget_tokens: usize) -> usi
         .iter()
         .position(|message| !matches!(message, Message::ToolResult(_)))
         .map_or(messages.len(), |offset| cut + offset);
-    (messages.len() - cut)
-        .clamp(1, DEFAULT_KEEP_RECENT)
-        .min(messages.len())
+    (messages.len() - cut).max(1).min(messages.len())
 }
 
 pub fn needs_compaction_at(
@@ -1842,8 +1840,9 @@ mod tests {
 
         assert_eq!(keep_recent_for_budget(&msgs, 250), 4);
         assert_eq!(keep_recent_for_budget(&msgs, 150), 1);
-        assert_eq!(keep_recent_for_budget(&msgs, 100_000), DEFAULT_KEEP_RECENT);
+        assert_eq!(keep_recent_for_budget(&msgs, 100_000), msgs.len());
         assert_eq!(keep_recent_for_budget(&msgs, 0), 1);
+        assert_eq!(keep_recent_for_budget(&msgs, 1_100), 12);
         assert_eq!(
             CompactionSettings {
                 keep_recent_tokens: 250,

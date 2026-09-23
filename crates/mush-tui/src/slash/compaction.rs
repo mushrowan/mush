@@ -206,7 +206,7 @@ mod tests {
     async fn handle_compact_resets_live_stats() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(user_msg(&format!("question {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("answer {i}"), 1_000 + i * 100));
         }
         let mut runtime = runtime_with(msgs);
@@ -250,7 +250,7 @@ mod tests {
     async fn handle_compact_pushes_visible_summary() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(user_msg(&format!("question {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
         }
         let mut runtime = runtime_with(msgs);
@@ -292,7 +292,7 @@ mod tests {
     async fn start_and_apply_match_handle_compact_endstate() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(user_msg(&format!("question {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
         }
         let mut runtime = runtime_with(msgs.clone());
@@ -374,7 +374,7 @@ mod tests {
     async fn handle_compact_preserves_existing_display_messages() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(user_msg(&format!("question {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
         }
         let mut runtime = runtime_with(msgs.clone());
@@ -437,7 +437,7 @@ mod tests {
     async fn a_resumed_session_still_shows_the_compaction_banner() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("question {i}")));
+            msgs.push(user_msg(&format!("question {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("answer {i}"), 1_000));
         }
         let mut runtime = runtime_with(msgs);
@@ -502,7 +502,7 @@ mod tests {
     async fn handle_compact_preserves_conversation_tree() {
         let mut msgs = Vec::new();
         for i in 0..12 {
-            msgs.push(user_msg(&format!("q {i}")));
+            msgs.push(user_msg(&format!("q {i}: {}", "x".repeat(8_000))));
             msgs.push(assistant_msg(&format!("a {i}"), 1_000));
         }
         let mut runtime = runtime_with(msgs);
