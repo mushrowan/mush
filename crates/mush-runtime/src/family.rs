@@ -18,6 +18,7 @@ use crate::goal::Goal;
 use crate::worker::WorkerConfig;
 
 pub const MAX_CHILDREN: usize = 32;
+pub const CHILD_NAME_MAX_CHARS: usize = 64;
 pub const PROGRESS_NOTE_CHARS: usize = 512;
 pub const PROGRESS_NOTE_INTERVAL: Duration = Duration::from_secs(10);
 pub const MESSAGE_MAX_CHARS: usize = 16 * 1024;
@@ -308,6 +309,7 @@ struct Inner {
     root_observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
     root_note: Option<String>,
     children: BTreeMap<ChildId, Node>,
+    reserved_names: std::collections::HashSet<(Option<ChildId>, String)>,
 }
 
 pub struct Family {
@@ -372,6 +374,7 @@ impl Family {
                 root_observe: None,
                 root_note: None,
                 children,
+                reserved_names: std::collections::HashSet::new(),
             }),
             factory,
             registry_path: Mutex::new(registry_path),
@@ -631,6 +634,11 @@ impl Family {
         if name.is_empty() {
             return Err("name is required".into());
         }
+        if name.chars().count() > CHILD_NAME_MAX_CHARS {
+            return Err(format!(
+                "name must be at most {CHILD_NAME_MAX_CHARS} characters"
+            ));
+        }
         if prompt.trim().is_empty() {
             return Err("prompt is required".into());
         }
@@ -645,8 +653,9 @@ impl Family {
             .clone()
             .ok_or_else(|| "subagents are not available in this session".to_string())?;
         let id = format!("sub-{}", crate::schedule::short_id());
+        let reservation = (caller.id.clone(), name.clone());
         {
-            let inner = self.lock();
+            let mut inner = self.lock();
             let live = inner
                 .children
                 .values()
@@ -655,13 +664,16 @@ impl Family {
             if live >= MAX_CHILDREN {
                 return Err(format!("{MAX_CHILDREN} children are already running"));
             }
-            if inner.children.values().any(|node| {
-                node.summary.parent == caller.id
-                    && node.summary.name == name
-                    && node.summary.status != ChildStatus::Deleted
-            }) {
+            if inner.reserved_names.contains(&reservation)
+                || inner.children.values().any(|node| {
+                    node.summary.parent == caller.id
+                        && node.summary.name == name
+                        && node.summary.status != ChildStatus::Deleted
+                })
+            {
                 return Err(format!("you already have a child called {name}"));
             }
+            inner.reserved_names.insert(reservation.clone());
         }
         let parent_session_id = {
             let inner = self.lock();
@@ -684,7 +696,13 @@ impl Family {
             parent: caller.clone(),
             parent_session_id,
         };
-        let parts = (factory)(spec, Arc::clone(this)).await?;
+        let parts = match (factory)(spec, Arc::clone(this)).await {
+            Ok(parts) => parts,
+            Err(error) => {
+                self.lock().reserved_names.remove(&reservation);
+                return Err(error);
+            }
+        };
         let session_id = parts.config.session_id.to_string();
         let model_id = parts.config.turn.default_model.id.to_string();
         let now = Timestamp::now();
@@ -724,7 +742,9 @@ impl Family {
             control_rx,
             format!("{TASK_LABEL}\n\n{prompt}"),
         ));
-        self.lock().children.insert(
+        let mut inner = self.lock();
+        inner.reserved_names.remove(&reservation);
+        inner.children.insert(
             id.clone(),
             Node {
                 summary,
@@ -740,6 +760,7 @@ impl Family {
                 cancel_reason: None,
             },
         );
+        drop(inner);
         self.persist();
         Ok(ChildHandle {
             rlm_child_id: id,
@@ -2417,6 +2438,13 @@ mod tests {
             .unwrap_err();
         assert!(duplicate.contains("already have a child called worker"));
 
+        let long_name = "n".repeat(CHILD_NAME_MAX_CHARS + 1);
+        let too_long = family
+            .spawn(&root, "two".into(), long_name, None, None, &family)
+            .await
+            .unwrap_err();
+        assert!(too_long.contains("at most 64"), "{too_long}");
+
         let child = Identity {
             id: Some(family.children_of(&root)[0].id.clone()),
             name: "worker".into(),
@@ -2827,6 +2855,39 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].status, ChildStatus::Deleted);
         assert_eq!(entries[0].progress_note.as_deref(), Some("halfway"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn parallel_spawns_with_one_name_admit_only_one() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let inner = echo_factory(requests, "hi");
+        let factory: ChildFactory = Arc::new(move |spec: ChildSpec, family: Arc<Family>| {
+            let made = inner(spec, family);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                made.await
+            })
+        });
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(factory),
+            None,
+        );
+        let root = Identity::root("root");
+        let (first, second) = tokio::join!(
+            family.spawn(&root, "one".into(), "a".into(), None, None, &family),
+            family.spawn(&root, "two".into(), "a".into(), None, None, &family),
+        );
+        assert_eq!(
+            [first.is_ok(), second.is_ok()]
+                .iter()
+                .filter(|ok| **ok)
+                .count(),
+            1
+        );
+        assert_eq!(family.children_of(&root).len(), 1);
     }
 
     #[tokio::test]
