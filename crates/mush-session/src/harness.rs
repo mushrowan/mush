@@ -119,6 +119,68 @@ pub struct State {
     pub schema: u32,
     pub entries: BTreeMap<Kind, BTreeMap<String, Entry>>,
     pub refinements: Vec<RefinementEvent>,
+    #[serde(skip)]
+    skipped: Skipped,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Skipped {
+    entries: Vec<SkippedEntry>,
+    refinements: Vec<SkippedRefinement>,
+    unreadable: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SkippedEntry {
+    kind: String,
+    id: String,
+    raw: Value,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SkippedRefinement {
+    index: usize,
+    raw: Value,
+    reason: String,
+}
+
+impl SkippedEntry {
+    fn line(&self) -> String {
+        format!(
+            "harness: skipped malformed entry {} ({})",
+            compact(&self.id, OVERVIEW_CONTENT_CHARS),
+            self.reason
+        )
+    }
+}
+
+impl SkippedRefinement {
+    fn line(&self) -> String {
+        let label = match &self.raw {
+            Value::Object(fields) => match fields.get("id") {
+                Some(Value::String(id)) => compact(id, OVERVIEW_CONTENT_CHARS),
+                Some(other) => format!("a {} id", json_type(other)),
+                None => "an undefined id".into(),
+            },
+            other => format!("a {}", json_type(other)),
+        };
+        format!(
+            "harness: skipped malformed refinement event {label} ({})",
+            self.reason
+        )
+    }
+}
+
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 impl Default for State {
@@ -130,6 +192,7 @@ impl Default for State {
                 .map(|kind| (kind, BTreeMap::new()))
                 .collect(),
             refinements: Vec::new(),
+            skipped: Skipped::default(),
         }
     }
 }
@@ -139,23 +202,143 @@ impl State {
         let Ok(bytes) = std::fs::read(dir.join(STATE_FILE)) else {
             return Self::default();
         };
-        let Ok(mut state) = serde_json::from_slice::<Self>(&bytes) else {
-            return Self::default();
+        let mut state = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(record)) => Self::from_record(record),
+            Ok(other) => Self::unreadable(format!("a {} instead of an object", json_type(&other))),
+            Err(error) => Self::unreadable(error.to_string()),
         };
-        for kind in Kind::ALL {
-            state.entries.entry(kind).or_default();
-        }
         for entry in state.entries.values_mut().flat_map(BTreeMap::values_mut) {
             entry.scope = scope;
         }
         state
     }
 
+    fn unreadable(reason: String) -> Self {
+        let mut state = Self::default();
+        state.skipped.unreadable.push(reason);
+        state
+    }
+
+    fn from_record(mut record: Map<String, Value>) -> Self {
+        let mut state = Self::default();
+        if let Some(schema) = record
+            .get("schema")
+            .and_then(Value::as_u64)
+            .and_then(|schema| u32::try_from(schema).ok())
+        {
+            state.schema = schema;
+        }
+        match record.remove("entries") {
+            None => {}
+            Some(Value::Object(kinds)) => {
+                for (kind_key, entries) in kinds {
+                    let Value::Object(entries) = entries else {
+                        state
+                            .skipped
+                            .unreadable
+                            .push(format!("entries.{kind_key} is not an object"));
+                        continue;
+                    };
+                    let kind = serde_json::from_value::<Kind>(Value::String(kind_key.clone()));
+                    for (id, raw) in entries {
+                        let parsed = match &kind {
+                            Ok(kind) => serde_json::from_value::<Entry>(raw.clone())
+                                .map(|entry| (*kind, entry))
+                                .map_err(|error| error.to_string()),
+                            Err(_) => Err(format!("unknown kind {kind_key}")),
+                        };
+                        match parsed {
+                            Ok((kind, entry)) => {
+                                state.entries.entry(kind).or_default().insert(id, entry);
+                            }
+                            Err(reason) => state.skipped.entries.push(SkippedEntry {
+                                kind: kind_key.clone(),
+                                id,
+                                raw,
+                                reason,
+                            }),
+                        }
+                    }
+                }
+            }
+            Some(other) => state
+                .skipped
+                .unreadable
+                .push(format!("entries is a {}", json_type(&other))),
+        }
+        match record.remove("refinements") {
+            None => {}
+            Some(Value::Array(events)) => {
+                for (index, raw) in events.into_iter().enumerate() {
+                    match serde_json::from_value::<RefinementEvent>(raw.clone()) {
+                        Ok(event) => state.refinements.push(event),
+                        Err(error) => state.skipped.refinements.push(SkippedRefinement {
+                            index,
+                            raw,
+                            reason: error.to_string(),
+                        }),
+                    }
+                }
+            }
+            Some(other) => state
+                .skipped
+                .unreadable
+                .push(format!("refinements is a {}", json_type(&other))),
+        }
+        state
+    }
+
+    fn skipped_lines(&self, kind: Option<Kind>) -> Vec<String> {
+        self.skipped
+            .entries
+            .iter()
+            .filter(|skipped| match kind {
+                Some(kind) => skipped.kind == kind.as_str(),
+                None => Kind::ALL.iter().all(|known| skipped.kind != known.as_str()),
+            })
+            .map(SkippedEntry::line)
+            .collect()
+    }
+
+    fn diagnostics(&self) -> Vec<String> {
+        self.skipped
+            .unreadable
+            .iter()
+            .map(|reason| format!("harness: could not read {STATE_FILE} ({reason})"))
+            .chain(self.skipped.entries.iter().map(SkippedEntry::line))
+            .chain(self.skipped.refinements.iter().map(SkippedRefinement::line))
+            .collect()
+    }
+
     pub fn save(&self, dir: &Path) -> std::io::Result<PathBuf> {
+        if let Some(reason) = self.skipped.unreadable.first() {
+            return Err(std::io::Error::other(format!(
+                "{STATE_FILE} could not be read ({reason}), so it was left as it is"
+            )));
+        }
+        let mut value = serde_json::to_value(self).map_err(std::io::Error::other)?;
+        if let Some(entries) = value.get_mut("entries").and_then(Value::as_object_mut) {
+            for skipped in &self.skipped.entries {
+                if let Some(kind) = entries
+                    .entry(skipped.kind.clone())
+                    .or_insert_with(|| Value::Object(Map::new()))
+                    .as_object_mut()
+                {
+                    kind.entry(skipped.id.clone())
+                        .or_insert_with(|| skipped.raw.clone());
+                }
+            }
+        }
+        if let Some(refinements) = value.get_mut("refinements").and_then(Value::as_array_mut) {
+            for skipped in &self.skipped.refinements {
+                let at = skipped.index.min(refinements.len());
+                refinements.insert(at, skipped.raw.clone());
+            }
+        }
         std::fs::create_dir_all(dir)?;
         let path = dir.join(STATE_FILE);
         let tmp = dir.join(format!("{STATE_FILE}.tmp"));
-        let mut json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        let mut json = serde_json::to_vec_pretty(&value).map_err(std::io::Error::other)?;
         json.push(b'\n');
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)?;
@@ -192,12 +375,26 @@ impl State {
             .chain(&local.refinements)
             .cloned()
             .collect();
+        for source in [global, local] {
+            merged
+                .skipped
+                .entries
+                .extend(source.skipped.entries.iter().cloned());
+            merged
+                .skipped
+                .refinements
+                .extend(source.skipped.refinements.iter().cloned());
+            merged
+                .skipped
+                .unreadable
+                .extend(source.skipped.unreadable.iter().cloned());
+        }
         merged
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.values().all(BTreeMap::is_empty)
+        self.entries.values().all(BTreeMap::is_empty) && self.diagnostics().is_empty()
     }
 
     fn get(&self, kind: Kind, id: &str) -> Option<&Entry> {
@@ -338,7 +535,10 @@ impl State {
                 .to_string(),
             String::new(),
         ];
-        let mut total = 0;
+        for reason in &self.skipped.unreadable {
+            lines.push(format!("harness: could not read {STATE_FILE} ({reason})"));
+        }
+        let mut total = self.skipped.entries.len();
         for kind in Kind::ALL {
             let entries = self.entries.get(&kind).map(BTreeMap::len).unwrap_or(0);
             total += entries;
@@ -348,6 +548,7 @@ impl State {
             for entry in sorted.iter().take(OVERVIEW_ENTRIES_PER_KIND) {
                 lines.push(entry_line(entry, OVERVIEW_CONTENT_CHARS));
             }
+            lines.extend(self.skipped_lines(Some(kind)));
             if entries > OVERVIEW_ENTRIES_PER_KIND {
                 lines.push(format!(
                     "- +{} more {} entries",
@@ -355,6 +556,11 @@ impl State {
                     kind.as_str()
                 ));
             }
+            lines.push(String::new());
+        }
+        let unknown = self.skipped_lines(None);
+        if !unknown.is_empty() {
+            lines.extend(unknown);
             lines.push(String::new());
         }
         if total == 0 {
@@ -386,6 +592,7 @@ impl State {
         if skip > 0 {
             lines.push(format!("- +{skip} older refinement events"));
         }
+        lines.extend(self.skipped.refinements.iter().map(SkippedRefinement::line));
         lines.join("\n").trim().to_string()
     }
 
@@ -425,7 +632,11 @@ impl State {
                 })
             })
             .collect();
-        let material = serde_json::json!({ "entries": entries, "refinements": refinements });
+        let mut material = serde_json::json!({ "entries": entries, "refinements": refinements });
+        let diagnostics = self.diagnostics();
+        if !diagnostics.is_empty() {
+            material["skipped"] = serde_json::json!(diagnostics);
+        }
         sha256_hex(material.to_string().as_bytes())
     }
 
@@ -438,6 +649,11 @@ impl State {
             for entry in entries.values().take(PLAN_ENTRIES_PER_KIND) {
                 lines.push(entry_line(entry, PLAN_CONTENT_CHARS));
             }
+            lines.extend(
+                self.skipped_lines(Some(kind))
+                    .into_iter()
+                    .map(|line| format!("- {line}")),
+            );
             if entries.len() > PLAN_ENTRIES_PER_KIND {
                 lines.push(format!(
                     "- +{} more {} entries",
@@ -1538,6 +1754,75 @@ mod tests {
         assert_eq!(
             result.applied_edits[1].error.as_deref(),
             Some("create requires path to be a non-empty string when provided")
+        );
+    }
+
+    #[test]
+    fn a_malformed_entry_is_skipped_with_a_diagnostic_and_kept_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut good = State::default();
+        good.upsert(
+            &create(Kind::Memory, "tests", "cargo nextest run"),
+            Scope::Local,
+            "agent",
+        )
+        .unwrap();
+        let mut raw = serde_json::to_value(&good).unwrap();
+        raw["entries"]["memory"]["broken"] = serde_json::json!({"id": "broken", "title": 3});
+        raw["refinements"] = serde_json::json!([{"id": 7}]);
+        std::fs::write(dir.path().join(STATE_FILE), raw.to_string()).unwrap();
+
+        let mut state = State::load(dir.path(), Scope::Local);
+        assert!(state.entry(Kind::Memory, "tests").is_some());
+        let digest = state.digest();
+        assert!(
+            digest.contains("harness: skipped malformed entry broken (invalid type: integer `3`"),
+            "{digest}"
+        );
+        assert!(
+            digest.contains("harness: skipped malformed refinement event a number id ("),
+            "{digest}"
+        );
+        assert!(
+            state
+                .overview_for_plan()
+                .contains("- harness: skipped malformed entry broken")
+        );
+
+        state
+            .upsert(&create(Kind::Memory, "more", "text"), Scope::Local, "agent")
+            .unwrap();
+        state.save(dir.path()).unwrap();
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        assert_eq!(saved["entries"]["memory"]["broken"]["title"], 3);
+        assert!(saved["entries"]["memory"]["more"].is_object());
+        assert_eq!(saved["refinements"][0]["id"], 7);
+    }
+
+    #[test]
+    fn a_state_file_that_does_not_parse_is_never_saved_over() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STATE_FILE), "{ not json").unwrap();
+
+        let mut state = State::load(dir.path(), Scope::Global);
+        assert!(!state.is_empty());
+        assert!(
+            state
+                .digest()
+                .contains("harness: could not read harness_state.json")
+        );
+        state
+            .upsert(
+                &create(Kind::Memory, "tests", "text"),
+                Scope::Global,
+                "agent",
+            )
+            .unwrap();
+        assert!(state.save(dir.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(STATE_FILE)).unwrap(),
+            "{ not json"
         );
     }
 
