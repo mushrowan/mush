@@ -672,35 +672,6 @@ fn try_load_persisted_settings(
     }
 }
 
-fn thinking_prefs_path() -> PathBuf {
-    mush_session::data_dir().join("thinking.json")
-}
-
-pub fn load_thinking_prefs() -> mush_tui::ThinkingPrefs {
-    let path = thinking_prefs_path();
-    if !path.exists() {
-        return mush_tui::ThinkingPrefs::default();
-    }
-    let mut prefs = match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            serde_json::from_str::<mush_tui::ThinkingPrefs>(&content).unwrap_or_default()
-        }
-        Err(_) => mush_tui::ThinkingPrefs::default(),
-    };
-    prefs.prune_missing_dirs();
-    prefs
-}
-
-pub fn save_thinking_prefs(prefs: &mush_tui::ThinkingPrefs) {
-    let path = thinking_prefs_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(prefs) {
-        let _ = mush_ai::private_io::write_atomic(&path, json);
-    }
-}
-
 fn last_model_path() -> PathBuf {
     mush_session::data_dir().join("last-model.json")
 }

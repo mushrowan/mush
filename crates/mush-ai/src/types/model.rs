@@ -74,6 +74,9 @@ pub struct Model {
 impl Model {
     #[must_use]
     pub fn clamp_thinking(&self, level: &ThinkingLevel) -> ThinkingLevel {
+        if !self.reasoning {
+            return ThinkingLevel::Off;
+        }
         let available = &self.supported_thinking_levels;
         if available.is_empty() || available.contains(level) {
             return level.clone();

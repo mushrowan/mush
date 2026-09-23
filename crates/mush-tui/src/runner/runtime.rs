@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
+use super::TuiConfig;
 use mush_ai::types::{Message, ThinkingLevel};
 use notify::RecommendedWatcher;
 
@@ -100,8 +100,6 @@ pub enum DiscoveryUpdate {
 pub(super) struct RunnerRuntime {
     pub cwd: PathBuf,
     pub session: Session,
-    pub thinking_prefs: ThinkingPrefs,
-    pub thinking_saver: Option<ThinkingPrefsSaver>,
     pub pending_prompt: Option<String>,
     pub connection_closed: bool,
     pub resize: super::input::ResizeState,
@@ -113,12 +111,10 @@ pub(super) struct RunnerRuntime {
 
 impl RunnerRuntime {
     #[cfg(test)]
-    pub(super) fn from_pane(session: Session, thinking_prefs: ThinkingPrefs) -> Self {
+    pub(super) fn from_pane(session: Session) -> Self {
         Self {
             cwd: PathBuf::new(),
             session,
-            thinking_prefs,
-            thinking_saver: None,
             pending_prompt: None,
             connection_closed: false,
             resize: super::input::ResizeState::default(),
@@ -155,8 +151,6 @@ impl RunnerRuntime {
         Self {
             cwd,
             session,
-            thinking_prefs: std::mem::take(&mut tui_config.thinking_prefs),
-            thinking_saver: tui_config.save_thinking_prefs.clone(),
             pending_prompt: None,
             connection_closed: false,
             resize: super::input::ResizeState::default(),
@@ -757,7 +751,7 @@ mod tests {
                 status: crate::display_types::ToolCallStatus::Running,
                 output: None,
             });
-        let runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
+        let runtime = RunnerRuntime::from_pane(Session::new(app));
 
         assert_eq!(runtime.active_tool_labels(), vec!["bash: cargo test"]);
     }
@@ -818,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn compaction_failure_opens_recovery_prompt() {
         let app = App::new("test".into(), TokenCount::new(200_000));
-        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app));
         let original = vec![user_message("hello"), assistant_message("hi")];
         let diagnostics = mush_session::compact::CompactionDiagnostics {
             model_id: "test".into(),
@@ -905,7 +899,7 @@ mod tests {
             100,
             "test".into(),
         );
-        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(pane);
 
         let recovery = runtime
             .session
@@ -959,7 +953,7 @@ mod tests {
         let report = failure_report(pane.in_process().runtime.conversation.context());
         pane.app
             .open_compaction_recovery(report, 100, "test".into());
-        let mut runtime = RunnerRuntime::from_pane(pane, ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(pane);
 
         runtime.session.app.close_compaction_recovery();
         {
@@ -1007,7 +1001,7 @@ mod tests {
                 status: crate::display_types::ToolCallStatus::Running,
                 output: None,
             });
-        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app));
 
         assert!(runtime.tick_animation_panes());
         assert_eq!(runtime.session.app.shimmer_phase(), 1);
@@ -1016,7 +1010,7 @@ mod tests {
     #[test]
     fn poll_usage_drains_background_updates_without_awaiting_http() {
         let app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
-        let mut runtime = RunnerRuntime::from_pane(Session::new(app), ThinkingPrefs::default());
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app));
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.usage_rx = Some(rx);
 

@@ -31,6 +31,11 @@ impl LastModels {
     }
 }
 
+#[must_use]
+pub fn canonical_dir(dir: &Path) -> PathBuf {
+    std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

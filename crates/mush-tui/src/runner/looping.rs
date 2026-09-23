@@ -67,8 +67,6 @@ fn input_parts<'a>(
 ) -> (&'a mut crate::session::Session, InputDeps<'a>) {
     let RunnerRuntime {
         session,
-        thinking_prefs,
-        thinking_saver,
         cwd,
         pending_prompt,
         resize,
@@ -78,8 +76,6 @@ fn input_parts<'a>(
         session,
         InputDeps {
             tui_config,
-            thinking_prefs,
-            thinking_saver,
             cwd,
             pending_prompt,
             image_picker,
@@ -492,7 +488,7 @@ mod tests {
             config.model.context_window,
         ));
         session.app.start_streaming();
-        let mut runtime = RunnerRuntime::from_pane(session, Default::default());
+        let mut runtime = RunnerRuntime::from_pane(session);
         assert!(!note_closed_connection(&mut runtime));
 
         runtime
@@ -578,7 +574,7 @@ mod tests {
                 config.model.id.clone(),
                 config.model.context_window,
             ));
-            let mut runtime = RunnerRuntime::from_pane(session, Default::default());
+            let mut runtime = RunnerRuntime::from_pane(session);
             if matches!(case, "warm" | "stale") {
                 runtime.session.app.cache.refresh();
                 if case == "stale" {

@@ -1158,8 +1158,6 @@ mod tests {
             theme: crate::theme::Theme::default(),
             config_path: None,
             provider_api_keys: std::collections::HashMap::new(),
-            thinking_prefs: super::super::ThinkingPrefs::default(),
-            save_thinking_prefs: None,
             last_models: super::super::LastModels::default(),
             save_last_models: None,
             feature_hints: true,

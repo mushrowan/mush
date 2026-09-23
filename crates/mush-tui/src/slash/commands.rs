@@ -4,7 +4,6 @@ use mush_ai::types::*;
 
 use crate::TuiConfig;
 use crate::app::App;
-use crate::runner::ThinkingPrefs;
 use crate::text::truncate_with_ellipsis;
 
 use super::SlashAction;
@@ -13,7 +12,6 @@ pub async fn handle(
     app: &mut App,
     connection: &mut dyn mush_runtime::AgentConnection,
     tui_config: &mut TuiConfig,
-    thinking_prefs: &ThinkingPrefs,
     action: &SlashAction,
 ) -> Option<String> {
     let state = connection.state();
@@ -129,7 +127,7 @@ pub async fn handle(
             model_id: Some(model_id),
             show_all: _,
         } => {
-            if handle_model_switch(app, tui_config, thinking_prefs, model_id) {
+            if handle_model_switch(app, tui_config, model_id) {
                 let _ = connection
                     .send(mush_runtime::ClientCommand::SetModel(
                         app.model_id.to_string(),
@@ -548,12 +546,7 @@ fn help_text() -> String {
     help
 }
 
-fn handle_model_switch(
-    app: &mut App,
-    tui_config: &mut TuiConfig,
-    thinking_prefs: &ThinkingPrefs,
-    args: &str,
-) -> bool {
+fn handle_model_switch(app: &mut App, tui_config: &mut TuiConfig, args: &str) -> bool {
     let raw = args.trim();
     let id = tui_config
         .model_tiers
@@ -568,11 +561,9 @@ fn handle_model_switch(
         app.supported_thinking_levels = new_model.supported_thinking_levels.clone();
         app.cache
             .seed_for_model(new_model, &tui_config.options, tui_config.cache_timer);
-        let level = thinking_prefs
-            .get(&tui_config.cwd, id)
-            .or_else(|| thinking_prefs.last_for_model(id))
-            .or_else(|| new_model.default_thinking_level.clone())
-            .unwrap_or(ThinkingLevel::Off);
+        let level = new_model
+            .clamp_thinking(&app.thinking_level)
+            .normalize_visible();
         app.thinking_level = level.clone();
         let cwd = tui_config.cwd.clone();
         tui_config.last_models.set(cwd, id.to_string());
@@ -1328,6 +1319,24 @@ mod tests {
         assert!(app.compaction_model_id.is_none());
     }
 
+    #[test]
+    fn switching_models_keeps_the_session_thinking_level_clamped() {
+        let mut config = test_tui_config(None);
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.thinking_level = ThinkingLevel::High;
+        assert!(handle_model_switch(&mut app, &mut config, "gpt-5.2"));
+        let model = mush_ai::discovery::find_merged_model_by_id("gpt-5.2")
+            .unwrap()
+            .model;
+        assert_eq!(
+            app.thinking_level,
+            model
+                .clamp_thinking(&ThinkingLevel::High)
+                .normalize_visible()
+        );
+        assert_ne!(app.thinking_level, ThinkingLevel::Off);
+    }
+
     async fn name_session(app: &mut App, title: Option<&str>) {
         let mut config = test_tui_config(None);
         let mut connection =
@@ -1336,7 +1345,6 @@ mod tests {
             app,
             &mut connection,
             &mut config,
-            &ThinkingPrefs::default(),
             &SlashAction::Name {
                 title: title.map(str::to_string),
             },

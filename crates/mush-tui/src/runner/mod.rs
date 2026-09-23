@@ -17,7 +17,6 @@ mod size_cached_backend;
 mod streams;
 mod subagents;
 mod terminal;
-mod thinking_prefs;
 
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
@@ -30,7 +29,7 @@ pub use self::config::{
     SkillCatalogue, TuiConfig,
 };
 use self::input::LoopAction;
-pub use self::last_model::{LastModels, LastModelsSaver};
+pub use self::last_model::{LastModels, LastModelsSaver, canonical_dir};
 use self::looping::run_loop_iteration;
 use self::render::draw_panes;
 pub use self::runtime::DiscoveryUpdate;
@@ -41,7 +40,6 @@ use self::terminal::{
     TerminalStateGuard, cleanup, enter_tui_terminal, install_panic_cleanup_hook,
     probe_image_picker, restore_terminal_state,
 };
-pub use self::thinking_prefs::{ThinkingPrefs, ThinkingPrefsSaver, canonical_dir};
 
 use self::diag::verify_terminal_restored;
 

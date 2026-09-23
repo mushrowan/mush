@@ -1,15 +1,12 @@
 use std::path::Path;
 
-use mush_ai::types::ThinkingLevel;
-
 use crate::session::Session;
 use crate::slash::{self, SlashAction};
 
-use super::{ThinkingPrefs, TuiConfig};
+use super::TuiConfig;
 
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub thinking_prefs: &'a ThinkingPrefs,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
 }
@@ -202,7 +199,6 @@ pub(super) async fn handle_slash_action(
 ) -> bool {
     let SlashEnv {
         tui_config,
-        thinking_prefs,
         cwd,
         pending_prompt,
     } = env;
@@ -586,7 +582,6 @@ pub(super) async fn handle_slash_action(
                 &mut pane.app,
                 pane.connection.as_mut(),
                 tui_config,
-                thinking_prefs,
                 &other_action,
             )
             .await
@@ -680,19 +675,6 @@ async fn mcp_report(manager: Option<&mush_mcp::McpManager>, query: &slash::McpQu
             let state = manager.reconnect(server).await;
             report::format_reconnect(server, state.as_ref())
         }
-    }
-}
-
-pub(super) fn save_thinking_pref(
-    prefs: &mut ThinkingPrefs,
-    saver: &Option<super::ThinkingPrefsSaver>,
-    cwd: &Path,
-    model_id: &str,
-    level: ThinkingLevel,
-) {
-    prefs.set(cwd.to_path_buf(), model_id.to_string(), level);
-    if let Some(saver) = saver {
-        saver(prefs);
     }
 }
 
@@ -949,7 +931,6 @@ mod tests {
             action,
             SlashEnv {
                 tui_config: config,
-                thinking_prefs: &ThinkingPrefs::default(),
                 cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
             },
@@ -1119,7 +1100,6 @@ mod tests {
             },
             SlashEnv {
                 tui_config: &mut config,
-                thinking_prefs: &ThinkingPrefs::default(),
                 cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
             },

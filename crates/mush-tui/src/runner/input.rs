@@ -7,12 +7,12 @@ use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
 use crate::session::Session;
 
-use super::commands::{SlashEnv, handle_slash_action, save_thinking_pref};
+use super::TuiConfig;
+use super::commands::{SlashEnv, handle_slash_action};
 use super::streams::{
     StreamState, abort_focused_stream, answer_confirmation, edit_last_queued_steering,
     submit_streaming_input,
 };
-use super::{ThinkingPrefs, ThinkingPrefsSaver, TuiConfig};
 use crate::slash;
 
 const RESIZE_QUIET: std::time::Duration = std::time::Duration::from_millis(16);
@@ -68,8 +68,6 @@ impl std::fmt::Debug for LoopAction {
 
 pub(super) struct InputDeps<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub thinking_prefs: &'a mut ThinkingPrefs,
-    pub thinking_saver: &'a Option<ThinkingPrefsSaver>,
     pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
@@ -190,17 +188,7 @@ async fn handle_common_app_event(
 ) -> Option<LoopAction> {
     match app_event {
         AppEvent::Quit => Some(LoopAction::Quit),
-        AppEvent::CycleThinkingLevel => {
-            let app = &session.app;
-            save_thinking_pref(
-                deps.thinking_prefs,
-                deps.thinking_saver,
-                deps.cwd,
-                &app.model_id,
-                app.thinking_level.clone(),
-            );
-            Some(LoopAction::Redraw)
-        }
+        AppEvent::CycleThinkingLevel => Some(LoopAction::Redraw),
         AppEvent::PasteImage => {
             paste_clipboard_image(&mut session.app).await;
             Some(LoopAction::Redraw)
@@ -465,7 +453,6 @@ async fn handle_streaming_key_event(
                 action,
                 SlashEnv {
                     tui_config: deps.tui_config,
-                    thinking_prefs: deps.thinking_prefs,
                     cwd: deps.cwd,
                     pending_prompt: deps.pending_prompt,
                 },
@@ -591,7 +578,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 action,
                                 SlashEnv {
                                     tui_config: deps.tui_config,
-                                    thinking_prefs: deps.thinking_prefs,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
@@ -610,7 +596,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 },
                                 SlashEnv {
                                     tui_config: deps.tui_config,
-                                    thinking_prefs: deps.thinking_prefs,
                                     cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
@@ -937,8 +922,6 @@ mod tests {
             let mut resize = ResizeState::default();
             let mut deps = InputDeps {
                 tui_config: &mut tui_config,
-                thinking_prefs: &mut ThinkingPrefs::default(),
-                thinking_saver: &None,
                 cwd: std::path::Path::new(""),
                 pending_prompt: &mut pending_prompt,
                 image_picker: &image_picker,
@@ -1073,8 +1056,6 @@ mod tests {
         let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
-            thinking_prefs: &mut ThinkingPrefs::default(),
-            thinking_saver: &None,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
@@ -1109,8 +1090,6 @@ mod tests {
         let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
-            thinking_prefs: &mut ThinkingPrefs::default(),
-            thinking_saver: &None,
             cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,

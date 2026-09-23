@@ -17,7 +17,6 @@ pub struct ClientSetup {
     pub compaction_model: Option<(Model, StreamOptions)>,
     pub cwd: std::path::PathBuf,
     pub options: StreamOptions,
-    pub thinking_prefs: mush_tui::ThinkingPrefs,
     pub debug_cache: bool,
     pub http_client: mush_ai::http::HttpClient,
     pub project_context: loader::ProjectContext,
@@ -173,9 +172,8 @@ impl ClientSetup {
             t.phase("project context");
         }
 
-        let thinking_prefs = config::load_thinking_prefs();
-        let thinking_level = resolve_thinking(args.thinking, &model, &thinking_prefs, &cwd, &cfg);
-        let mut options = stream_options_from_config(&cfg, thinking_level, args.max_tokens);
+        let thinking_level = resolve_thinking(args.thinking, &model, &cfg);
+        let mut options = stream_options_from_config(&cfg, Some(thinking_level), args.max_tokens);
         resolve_api_key(&mut options, &model, &cfg).await;
         let compaction_model = init_compaction_model(&cfg, &model, &options).await;
         if let Some(t) = &mut timer {
@@ -189,7 +187,6 @@ impl ClientSetup {
             compaction_model,
             cwd,
             options,
-            thinking_prefs,
             debug_cache,
             http_client,
             project_context,
@@ -1035,22 +1032,15 @@ fn parse_language_name(name: &str) -> Option<mush_treesitter::Language> {
     }
 }
 
-pub fn resolve_thinking(
-    cli_thinking: bool,
-    model: &Model,
-    thinking_prefs: &mush_tui::ThinkingPrefs,
-    cwd: &std::path::Path,
-    cfg: &config::Config,
-) -> Option<ThinkingLevel> {
-    if cli_thinking {
-        return Some(ThinkingLevel::High);
-    }
-    thinking_prefs
-        .get(cwd, model.id.as_ref())
-        .or_else(|| thinking_prefs.last_for_model(model.id.as_ref()))
-        .or_else(|| model.default_thinking_level.clone())
-        .or_else(|| cfg.thinking.clone())
-        .map(|level| level.normalize_visible())
+pub const DEFAULT_THINKING_LEVEL: ThinkingLevel = ThinkingLevel::Medium;
+
+pub fn resolve_thinking(cli_thinking: bool, model: &Model, cfg: &config::Config) -> ThinkingLevel {
+    let level = if cli_thinking {
+        ThinkingLevel::High
+    } else {
+        cfg.thinking.clone().unwrap_or(DEFAULT_THINKING_LEVEL)
+    };
+    model.clamp_thinking(&level).normalize_visible()
 }
 
 pub fn stream_options_from_config(
@@ -1729,66 +1719,39 @@ mod tests {
         assert_eq!(default_model_id(&cfg, dir.path()), "claude-opus-5-5");
     }
 
-    fn dummy_model_with_default(level: Option<ThinkingLevel>) -> Model {
+    fn reasoning_model(levels: &[ThinkingLevel], default: Option<ThinkingLevel>) -> Model {
         let mut m = mush_ai::models::all_models_with_user()
             .into_iter()
             .next()
             .unwrap();
-        m.default_thinking_level = level;
+        m.reasoning = true;
+        m.supported_thinking_levels = levels.to_vec();
+        m.default_thinking_level = default;
         m
     }
 
     #[test]
-    fn resolve_thinking_prefers_per_dir_override_over_model_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut prefs = mush_tui::ThinkingPrefs::default();
-        let model = dummy_model_with_default(Some(ThinkingLevel::High));
-        prefs.set(
-            dir.path().to_path_buf(),
-            model.id.to_string(),
-            ThinkingLevel::Medium,
-        );
+    fn resolve_thinking_defaults_to_medium_and_ignores_the_model_default() {
+        let model = reasoning_model(&[], Some(ThinkingLevel::High));
         let cfg: config::Config = toml::from_str("").unwrap();
-        assert_eq!(
-            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
-            Some(ThinkingLevel::Medium)
-        );
+        assert_eq!(resolve_thinking(false, &model, &cfg), ThinkingLevel::Medium);
     }
 
     #[test]
-    fn resolve_thinking_falls_back_to_model_default_when_no_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefs = mush_tui::ThinkingPrefs::default();
-        let model = dummy_model_with_default(Some(ThinkingLevel::Medium));
+    fn resolve_thinking_uses_the_configured_level_over_the_model_default() {
+        let model = reasoning_model(&[], Some(ThinkingLevel::High));
+        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
+        assert_eq!(resolve_thinking(false, &model, &cfg), ThinkingLevel::Low);
+    }
+
+    #[test]
+    fn resolve_thinking_clamps_to_the_model() {
+        let model = reasoning_model(&[ThinkingLevel::Low, ThinkingLevel::High], None);
         let cfg: config::Config = toml::from_str("").unwrap();
-        assert_eq!(
-            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
-            Some(ThinkingLevel::Medium)
-        );
-    }
-
-    #[test]
-    fn resolve_thinking_model_default_outranks_config_thinking() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefs = mush_tui::ThinkingPrefs::default();
-        let model = dummy_model_with_default(Some(ThinkingLevel::High));
-        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
-        assert_eq!(
-            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
-            Some(ThinkingLevel::High)
-        );
-    }
-
-    #[test]
-    fn resolve_thinking_falls_through_to_config_when_no_model_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let prefs = mush_tui::ThinkingPrefs::default();
-        let model = dummy_model_with_default(None);
-        let cfg: config::Config = toml::from_str("thinking = \"low\"").unwrap();
-        assert_eq!(
-            resolve_thinking(false, &model, &prefs, dir.path(), &cfg),
-            Some(ThinkingLevel::Low)
-        );
+        assert_eq!(resolve_thinking(false, &model, &cfg), ThinkingLevel::High);
+        let mut plain = model;
+        plain.reasoning = false;
+        assert_eq!(resolve_thinking(true, &plain, &cfg), ThinkingLevel::Off);
     }
 
     #[test]
@@ -1804,25 +1767,6 @@ effort = "low"
 
         assert_eq!(options.effort, Some(mush_ai::types::EffortLevel::Low));
         assert_eq!(options.thinking, Some(ThinkingLevel::High));
-    }
-
-    #[test]
-    fn resolve_thinking_falls_back_to_per_model_pref_from_other_dir() {
-        let other_dir = tempfile::tempdir().unwrap();
-        let active_dir = tempfile::tempdir().unwrap();
-        let mut prefs = mush_tui::ThinkingPrefs::default();
-        let model = dummy_model_with_default(Some(ThinkingLevel::High));
-        prefs.set(
-            other_dir.path().to_path_buf(),
-            model.id.to_string(),
-            ThinkingLevel::Medium,
-        );
-        let cfg: config::Config = toml::from_str("").unwrap();
-        assert_eq!(
-            resolve_thinking(false, &model, &prefs, active_dir.path(), &cfg),
-            Some(ThinkingLevel::Medium),
-            "per-model fallback should outrank model.default_thinking_level"
-        );
     }
 
     #[tokio::test]
