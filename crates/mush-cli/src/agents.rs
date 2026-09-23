@@ -250,7 +250,15 @@ pub async fn connect(worker: &WorkerDescriptor) -> Result<mush_daemon::DaemonCon
         .map_err(|error| eyre!("{}: {error}", short_id(&worker.session_id)))
 }
 
-pub async fn rename(selector: &str, name: &str) -> Result<()> {
+fn renamed(id: &str, name: &str, json: bool) {
+    if json {
+        println!("{}", serde_json::json!({ "id": id, "name": name }));
+    } else {
+        println!("renamed {} to {name}", short_id(id));
+    }
+}
+
+pub async fn rename(selector: &str, name: &str, json: bool) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         return Err(eyre!("a name cannot be empty"));
@@ -265,7 +273,7 @@ pub async fn rename(selector: &str, name: &str) -> Result<()> {
             }),
         )
         .await?;
-        println!("renamed {} to {name}", short_id(&worker.session_id));
+        renamed(&worker.session_id, name, json);
         return Ok(());
     }
     let store = SessionStore::new(SessionStore::default_dir());
@@ -282,7 +290,7 @@ pub async fn rename(selector: &str, name: &str) -> Result<()> {
     store
         .save(&session)
         .map_err(|error| eyre!("failed to save session: {error}"))?;
-    println!("renamed {} to {name}", short_id(meta.id.as_str()));
+    renamed(meta.id.as_str(), name, json);
     Ok(())
 }
 

@@ -86,48 +86,72 @@ pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescrip
     }
 }
 
-pub async fn stop(session_id: &str) -> Result<()> {
+pub async fn stop(selector: &str, json: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
-    if !answers(&socket) {
+    let session_id = if answers(&socket) {
+        let workers = crate::agents::live().await?;
+        let Some(worker) = crate::agents::matching(&workers, selector)? else {
+            return Err(eyre!("no worker for session {selector}"));
+        };
+        let request = SupervisorRequest::Stop {
+            session_id: worker.session_id.clone(),
+        };
+        match mush_daemon::supervisor::request(&socket, &request).await? {
+            SupervisorReply::Done => worker.session_id.clone(),
+            SupervisorReply::Error(error) => return Err(eyre!("{error}")),
+            other => return Err(eyre!("unexpected daemon reply: {other:?}")),
+        }
+    } else {
         let running = mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir());
-        let Some(worker) = crate::agents::matching(&running, session_id)? else {
+        let Some(worker) = crate::agents::matching(&running, selector)? else {
+            if json {
+                return Err(eyre!("no worker for session {selector}"));
+            }
             println!("no daemon running");
             return Ok(());
         };
         mush_daemon::supervisor::stop_unsupervised(worker).await?;
-        return Ok(());
-    }
-    let request = SupervisorRequest::Stop {
-        session_id: session_id.to_string(),
+        worker.session_id.clone()
     };
-    match mush_daemon::supervisor::request(&socket, &request).await? {
-        SupervisorReply::Done => Ok(()),
-        SupervisorReply::Error(error) => Err(eyre!("{error}")),
-        other => Err(eyre!("unexpected daemon reply: {other:?}")),
+    if json {
+        println!("{}", serde_json::json!({ "stopped": session_id }));
     }
+    Ok(())
 }
 
-pub async fn shutdown(force: bool) -> Result<()> {
+pub async fn shutdown(force: bool, json: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
-    if !answers(&socket) {
-        return shutdown_unsupervised(force).await;
+    let stopped = if answers(&socket) {
+        let workers = crate::agents::live().await?;
+        if !force && !confirm_shutdown(workers.len(), json)? {
+            println!("left running");
+            return Ok(());
+        }
+        match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await? {
+            SupervisorReply::Done => workers,
+            SupervisorReply::Error(error) => return Err(eyre!("{error}")),
+            other => return Err(eyre!("unexpected daemon reply: {other:?}")),
+        }
+    } else {
+        shutdown_unsupervised(force, json).await?
+    };
+    if json {
+        let stopped: Vec<&str> = stopped
+            .iter()
+            .map(|worker| worker.session_id.as_str())
+            .collect();
+        println!("{}", serde_json::json!({ "stopped": stopped }));
     }
-    if !force && !confirm_shutdown(&socket).await? {
-        println!("left running");
-        return Ok(());
-    }
-    match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await? {
-        SupervisorReply::Done => Ok(()),
-        SupervisorReply::Error(error) => Err(eyre!("{error}")),
-        other => Err(eyre!("unexpected daemon reply: {other:?}")),
-    }
+    Ok(())
 }
 
-async fn shutdown_unsupervised(force: bool) -> Result<()> {
+async fn shutdown_unsupervised(force: bool, json: bool) -> Result<Vec<WorkerDescriptor>> {
     let running = mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir());
     if running.is_empty() {
-        println!("no daemon running");
-        return Ok(());
+        if !json {
+            println!("no daemon running");
+        }
+        return Ok(running);
     }
     if !force {
         return Err(eyre!(
@@ -138,18 +162,14 @@ async fn shutdown_unsupervised(force: bool) -> Result<()> {
     for worker in &running {
         mush_daemon::supervisor::stop_unsupervised(worker).await?;
     }
-    Ok(())
+    Ok(running)
 }
 
-async fn confirm_shutdown(socket: &Path) -> Result<bool> {
-    let workers = match mush_daemon::supervisor::request(socket, &SupervisorRequest::List).await? {
-        SupervisorReply::Workers(workers) => workers.len(),
-        _ => 0,
-    };
+fn confirm_shutdown(workers: usize, json: bool) -> Result<bool> {
     if workers == 0 {
         return Ok(true);
     }
-    if !atty::is(atty::Stream::Stdin) {
+    if json || !atty::is(atty::Stream::Stdin) {
         return Err(eyre!(
             "{workers} agent(s) are running, pass --force to stop them"
         ));

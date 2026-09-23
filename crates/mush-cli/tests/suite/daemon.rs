@@ -485,6 +485,32 @@ async fn the_cli_lists_and_renames_a_live_agent() {
     assert_eq!(rows[0]["name"], "scout one");
     assert_eq!(rows[0]["id"], descriptor.session_id[..8]);
     assert_eq!(rows[0]["status"], "idle");
+
+    let renamed = daemon
+        .cli()
+        .args([
+            "rename",
+            &descriptor.session_id[..8],
+            "scout",
+            "two",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(renamed.status.success(), "{renamed:?}");
+    let renamed: serde_json::Value = serde_json::from_slice(&renamed.stdout).unwrap();
+    assert_eq!(renamed["id"], descriptor.session_id);
+    assert_eq!(renamed["name"], "scout two");
+
+    let stopped = daemon
+        .cli()
+        .args(["stop", &descriptor.session_id[..8], "--json"])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    let stopped: serde_json::Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(stopped["stopped"], descriptor.session_id);
+    assert!(!alive(descriptor.pid));
 }
 
 #[tokio::test]
@@ -690,8 +716,18 @@ async fn shutdown_needs_a_force_flag_when_agents_are_running() {
     );
     assert!(alive(descriptor.pid));
 
-    let forced = daemon.cli().args(["shutdown", "--force"]).output().unwrap();
+    let refused = daemon.cli().args(["shutdown", "--json"]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(alive(descriptor.pid));
+
+    let forced = daemon
+        .cli()
+        .args(["shutdown", "--force", "--json"])
+        .output()
+        .unwrap();
     assert!(forced.status.success(), "{forced:?}");
+    let forced: serde_json::Value = serde_json::from_slice(&forced.stdout).unwrap();
+    assert_eq!(forced["stopped"][0], descriptor.session_id);
     assert!(!alive(descriptor.pid));
 }
 

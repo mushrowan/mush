@@ -320,8 +320,10 @@ enum Command {
     },
     Rename {
         agent: String,
-        #[arg(num_args = 1.., trailing_var_arg = true)]
+        #[arg(num_args = 1..)]
         name: Vec<String>,
+        #[arg(long)]
+        json: bool,
     },
     Schedule {
         #[command(subcommand)]
@@ -341,6 +343,8 @@ enum Command {
     },
     Stop {
         id: String,
+        #[arg(long)]
+        json: bool,
     },
     Send {
         session: String,
@@ -350,6 +354,8 @@ enum Command {
     Shutdown {
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        json: bool,
     },
     Doctor {
         #[arg(long)]
@@ -434,8 +440,8 @@ async fn main() -> Result<()> {
             | Command::Attach { .. },
         ) => unreachable!(),
         Some(Command::List { all, json }) => return agents::list(all, json).await,
-        Some(Command::Rename { agent, name }) => {
-            return agents::rename(&agent, &name.join(" ")).await;
+        Some(Command::Rename { agent, name, json }) => {
+            return agents::rename(&agent, &name.join(" "), json).await;
         }
         Some(Command::Pause { agent, all, reason }) => {
             return mush_cli::pause::pause(agent.as_deref(), all, reason.as_deref()).await;
@@ -456,11 +462,11 @@ async fn main() -> Result<()> {
                 ScheduleCommand::Cancel { job } => schedule::cancel(&job).await,
             };
         }
-        Some(Command::Stop { id }) => return daemon::stop(&id).await,
+        Some(Command::Stop { id, json }) => return daemon::stop(&id, json).await,
         Some(Command::Send { session, text }) => {
             return daemon::send(&session, &text.join(" ")).await;
         }
-        Some(Command::Shutdown { force }) => return daemon::shutdown(force).await,
+        Some(Command::Shutdown { force, json }) => return daemon::shutdown(force, json).await,
         Some(Command::Doctor { fix, json }) => return doctor::doctor(fix, json).await,
         Some(Command::Login { provider }) => return commands::login(provider).await,
         Some(Command::Logout { provider }) => return commands::logout(provider),
@@ -1739,6 +1745,26 @@ mod tests {
         assert!(matches!(
             list.command,
             Some(Command::List { all: true, .. })
+        ));
+    }
+
+    #[test]
+    fn stop_rename_and_shutdown_take_json() {
+        let stop = Cli::try_parse_from(["mush", "stop", "abc", "--json"]).unwrap();
+        assert!(matches!(
+            stop.command,
+            Some(Command::Stop { json: true, .. })
+        ));
+        let shutdown = Cli::try_parse_from(["mush", "shutdown", "--json"]).unwrap();
+        assert!(matches!(
+            shutdown.command,
+            Some(Command::Shutdown { json: true, .. })
+        ));
+        let rename =
+            Cli::try_parse_from(["mush", "rename", "--json", "abc", "new", "name"]).unwrap();
+        assert!(matches!(
+            rename.command,
+            Some(Command::Rename { json: true, ref name, .. }) if name == &["new", "name"]
         ));
     }
 
