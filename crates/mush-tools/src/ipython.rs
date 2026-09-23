@@ -215,6 +215,10 @@ fn job_id(payload: &Value) -> Result<&str, HostError> {
 
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
+    fn cancellable(&self, kind: &str) -> bool {
+        kind == "bash.wait"
+    }
+
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
         match kind {
             "bash.start" => {
@@ -269,6 +273,13 @@ impl HostRequestHandler for MushHost {
                     .await
                     .map_err(HostError)?,
             })),
+            "bash.cancel" => {
+                self.jobs
+                    .cancel(job_id(&payload)?)
+                    .await
+                    .map_err(HostError)?;
+                Ok(json!({}))
+            }
             "bash.kill" => {
                 self.jobs.kill(job_id(&payload)?).await.map_err(HostError)?;
                 Ok(json!({}))
@@ -869,6 +880,72 @@ mod tests {
             "{}",
             extract_text(&result)
         );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn interrupting_an_awaited_bash_kills_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let tool = Arc::new(tool(dir.path()));
+        let cell = {
+            let tool = tool.clone();
+            let code = format!(
+                "await bash('echo $$ > {}; exec sleep 30')",
+                pidfile.display()
+            );
+            tokio::spawn(async move { tool.execute(json!({ "code": code })).await })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pidfile.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        cell.abort();
+        let _ = cell.await;
+
+        let next = tool.execute(json!({ "code": "1 + 1" })).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(extract_text(&next), "2");
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_background_handle_outlives_a_cancelled_wait_and_still_sends_its_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = MushHost::new(dir.path().into());
+        let notices = Arc::new(std::sync::Mutex::new(
+            Vec::<crate::kernel_jobs::JobNotice>::new(),
+        ));
+        host.jobs().set_notice_sink({
+            let notices = notices.clone();
+            Arc::new(move |notice| notices.lock().unwrap().push(notice))
+        });
+        let tool = IpythonTool::with_mush_host(host, dir.path().into());
+
+        let result = tool
+            .execute(json!({
+                "code": "h = bash('sleep 0.4; exit 3')\nh.pid\ntry:\n    await asyncio.wait_for(h, 0.1)\nexcept TimeoutError:\n    pass\nawait h.running()"
+            }))
+            .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while notices.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(extract_text(&result), "True");
+        let notices = notices.lock().unwrap().clone();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].done.exit_code, 3);
         tool.shutdown().await;
     }
 

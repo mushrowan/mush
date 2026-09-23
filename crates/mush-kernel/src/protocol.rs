@@ -82,13 +82,16 @@ pub enum Event {
         #[serde(flatten)]
         extra: serde_json::Map<String, Value>,
     },
+    HostCancel {
+        id: String,
+    },
 }
 
 impl Event {
     #[must_use]
     pub fn cell_id(&self) -> Option<&str> {
         match self {
-            Self::Ready { .. } => None,
+            Self::Ready { .. } | Self::HostCancel { .. } => None,
             Self::Stdout { id, .. }
             | Self::Stderr { id, .. }
             | Self::Error { id, .. }

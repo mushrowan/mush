@@ -59,6 +59,10 @@ impl From<&str> for HostError {
 #[async_trait::async_trait]
 pub trait HostRequestHandler: Send + Sync {
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError>;
+
+    fn cancellable(&self, _kind: &str) -> bool {
+        false
+    }
 }
 
 pub struct NoHost;
@@ -115,6 +119,7 @@ struct Shared {
     idle: tokio::sync::Notify,
     stderr_tail: Mutex<VecDeque<String>>,
     handler: Arc<dyn HostRequestHandler>,
+    requests: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
 }
 
@@ -184,6 +189,7 @@ impl Kernel {
             idle: tokio::sync::Notify::new(),
             stderr_tail: Mutex::new(VecDeque::new()),
             handler,
+            requests: Mutex::new(HashMap::new()),
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
         });
 
@@ -316,7 +322,7 @@ impl Kernel {
                     finished = true;
                     break;
                 }
-                Event::Ready { .. } | Event::HostRequest { .. } => {}
+                Event::Ready { .. } | Event::HostRequest { .. } | Event::HostCancel { .. } => {}
             }
         }
         abandon.shared.take();
@@ -640,30 +646,42 @@ async fn read_events(
                 continue;
             }
         };
+        if let Event::HostCancel { id } = &event {
+            let request = shared
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(id);
+            if let Some(request) = request {
+                request.abort();
+            }
+            continue;
+        }
         if let Event::HostRequest {
             id, kind, payload, ..
         } = event
         {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                let reply = match shared.handler.handle(&kind, payload).await {
-                    Ok(value) => Request::HostReply {
-                        id,
-                        ok: true,
-                        value: Some(value),
-                        error: None,
-                    },
-                    Err(HostError(message)) => Request::HostReply {
-                        id,
-                        ok: false,
-                        value: None,
-                        error: Some(message),
-                    },
-                };
-                if let Err(error) = write_request(&shared.stdin, &reply).await {
-                    tracing::warn!(%error, "failed to answer a kernel host request");
+            let cancellable = shared.handler.cancellable(&kind);
+            let mut requests = shared
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let task = tokio::spawn({
+                let shared = shared.clone();
+                let id = id.clone();
+                async move {
+                    let reply = shared.handler.handle(&kind, payload).await;
+                    shared
+                        .requests
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
+                    reply_to_host(&shared, id, reply).await;
                 }
             });
+            if cancellable {
+                requests.insert(id, task.abort_handle());
+            }
             continue;
         }
         shared.route(event);
@@ -675,6 +693,26 @@ async fn read_events(
         .clear();
     shared.set_running(None);
     shared.idle.notify_waiters();
+}
+
+async fn reply_to_host(shared: &Shared, id: String, reply: Result<Value, HostError>) {
+    let reply = match reply {
+        Ok(value) => Request::HostReply {
+            id,
+            ok: true,
+            value: Some(value),
+            error: None,
+        },
+        Err(HostError(message)) => Request::HostReply {
+            id,
+            ok: false,
+            value: None,
+            error: Some(message),
+        },
+    };
+    if let Err(error) = write_request(&shared.stdin, &reply).await {
+        tracing::warn!(%error, "failed to answer a kernel host request");
+    }
 }
 
 async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {

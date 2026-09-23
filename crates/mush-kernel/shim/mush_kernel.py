@@ -101,7 +101,12 @@ async def host_request(kind: str, payload=None):
             "payload": payload if payload is not None else {},
         }
     )
-    return await future
+    try:
+        return await future
+    except asyncio.CancelledError:
+        if _pending_replies.pop(request_id, None) is not None:
+            emit({"type": "host_cancel", "id": request_id})
+        raise
 
 
 class HostError(RuntimeError):
@@ -143,8 +148,9 @@ class BashHandle:
 
     def __init__(self, command: str, timeout: float | None):
         self.command = command
-        self.job_id: str | None = None
-        self.pid: int | None = None
+        self._job_id: str | None = None
+        self._pid: int | None = None
+        self._released = False
         payload = {"command": command, "cwd": os.getcwd(), "env": dict(os.environ)}
         if timeout is not None:
             payload["timeout"] = timeout
@@ -154,28 +160,61 @@ class BashHandle:
 
     async def _start(self, payload: dict) -> None:
         reply = await host_request("bash.start", payload)
-        self.job_id = reply["job_id"]
-        self.pid = reply.get("pid")
+        self._job_id = reply["job_id"]
+        self._pid = reply.get("pid")
+
+    @property
+    def job_id(self) -> str | None:
+        self._released = True
+        return self._job_id
+
+    @property
+    def pid(self) -> int | None:
+        self._released = True
+        return self._pid
 
     async def _job(self) -> dict:
         await self._started
-        return {"job_id": self.job_id}
+        return {"job_id": self._job_id}
 
     def __await__(self):
-        return self.wait().__await__()
+        owned = not self._released
+        self._released = True
+        return (self._wait_owned() if owned else self.wait()).__await__()
 
     async def wait(self) -> BashResult:
         return _result_from(await host_request("bash.wait", await self._job()))
 
+    async def _wait_owned(self) -> BashResult:
+        try:
+            return await self.wait()
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            cancel = asyncio.ensure_future(self._cancel())
+            while not cancel.done():
+                try:
+                    await asyncio.shield(cancel)
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    continue
+            raise
+
+    async def _cancel(self) -> None:
+        try:
+            await host_request("bash.cancel", await self._job())
+        except Exception:  # noqa: BLE001
+            pass
+
     async def poll(self) -> BashResult | None:
+        self._released = True
         reply = await host_request("bash.poll", await self._job())
         return None if reply.get("running") else _result_from(reply)
 
     async def running(self) -> bool:
+        self._released = True
         reply = await host_request("bash.running", await self._job())
         return bool(reply.get("running"))
 
     async def output(self) -> str:
+        self._released = True
         reply = await host_request("bash.poll", await self._job())
         return str(reply.get("output", ""))
 
@@ -184,11 +223,12 @@ class BashHandle:
         return "\n".join(text.splitlines()[-lines:])
 
     async def kill(self) -> None:
+        self._released = True
         await host_request("bash.kill", await self._job())
 
     def __repr__(self) -> str:
-        state = "pending" if self.job_id is None else self.job_id
-        return f"BashHandle({self.command!r}, {state}, pid={self.pid})"
+        state = "pending" if self._job_id is None else self._job_id
+        return f"BashHandle({self.command!r}, {state}, pid={self._pid})"
 
 
 def bash(command: str, timeout: float | None = None) -> BashHandle:

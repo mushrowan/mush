@@ -57,6 +57,8 @@ pub struct JobNotice {
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const KILL_GRACE: Duration = Duration::from_secs(5);
+const CANCEL_TERM_GRACE: Duration = Duration::from_millis(500);
+const CANCEL_KILL_WAIT: Duration = Duration::from_secs(2);
 const OUTPUT_HEAD_BYTES: usize = 512 * 1024;
 const OUTPUT_TAIL_BYTES: usize = 3 * 512 * 1024;
 const QUIET_ENV: &[(&str, &str)] = &[
@@ -140,7 +142,6 @@ struct Job {
     started: Instant,
     finished: Option<Instant>,
     read: bool,
-    waiting: usize,
     pgid: Option<i32>,
 }
 
@@ -171,6 +172,25 @@ struct Inner {
 struct JobCell {
     state: Mutex<Job>,
     done: Notify,
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+struct Waiting<'a>(&'a JobCell);
+
+impl<'a> Waiting<'a> {
+    fn new(cell: &'a JobCell) -> Self {
+        cell.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(cell)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0
+            .waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl KernelJobs {
@@ -257,10 +277,10 @@ impl KernelJobs {
                 started: Instant::now(),
                 finished: None,
                 read: false,
-                waiting: 0,
                 pgid: pid.and_then(|p| i32::try_from(p).ok()),
             }),
             done: Notify::new(),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
         });
         self.inner
             .jobs
@@ -311,7 +331,7 @@ impl KernelJobs {
                 let mut job = cell.state.lock().await;
                 job.end = Some(end.clone());
                 job.finished = Some(Instant::now());
-                if job.waiting > 0 {
+                if cell.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                     job.read = true;
                 }
                 (!job.read).then(|| JobNotice {
@@ -378,6 +398,7 @@ impl KernelJobs {
 
     pub async fn wait(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let cell = self.cell(job_id).await?;
+        let _waiting = Waiting::new(&cell);
         loop {
             let notified = cell.done.notified();
             {
@@ -386,11 +407,27 @@ impl KernelJobs {
                     job.read = true;
                     return Ok(snapshot_of(job_id, &job));
                 }
-                job.waiting += 1;
             }
             notified.await;
-            cell.state.lock().await.waiting -= 1;
         }
+    }
+
+    pub async fn cancel(&self, job_id: &str) -> Result<(), String> {
+        let cell = self.cell(job_id).await?;
+        let pgid = {
+            let mut job = cell.state.lock().await;
+            job.read = true;
+            if job.end.is_none() {
+                job.end = Some(JobEnd::Killed);
+            }
+            job.pgid
+        };
+        terminate_group(pgid);
+        if !group_exits_within(pgid, CANCEL_TERM_GRACE).await {
+            kill_group(pgid);
+            group_exits_within(pgid, CANCEL_KILL_WAIT).await;
+        }
+        Ok(())
     }
 
     pub async fn kill(&self, job_id: &str) -> Result<(), String> {
@@ -455,6 +492,17 @@ fn kill_group(pgid: Option<i32>) {
             libc::kill(-pgid, libc::SIGKILL);
         }
     }
+}
+
+async fn group_exits_within(pgid: Option<i32>, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while group_alive(pgid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
 }
 
 #[cfg(unix)]
