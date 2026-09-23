@@ -234,6 +234,7 @@ pub struct SessionRuntime {
     pub notes: Option<Arc<crate::notes::Notes>>,
     pub(crate) kernel_restore: Option<KernelRestore>,
     pub(crate) harness_digest_pending: bool,
+    streaming: Option<mush_ai::stream::PartialMessage>,
     last_save: std::time::Instant,
     dirty: bool,
 }
@@ -273,6 +274,7 @@ impl SessionRuntime {
             notes: None,
             kernel_restore: None,
             harness_digest_pending: true,
+            streaming: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }
@@ -348,7 +350,19 @@ impl SessionRuntime {
     pub fn apply_event(&mut self, event: &mush_agent::AgentEvent) -> crate::Applied {
         let applied = crate::apply_agent_event(&mut self.conversation, event);
         match event {
+            mush_agent::AgentEvent::MessageStart { message } => {
+                self.streaming = Some(mush_ai::stream::PartialMessage::new(message.clone()));
+            }
+            mush_agent::AgentEvent::StreamEvent { event } => {
+                if let Some(partial) = &mut self.streaming {
+                    partial.apply(event);
+                }
+            }
+            mush_agent::AgentEvent::PartialDiscarded { .. }
+            | mush_agent::AgentEvent::Error { .. }
+            | mush_agent::AgentEvent::AgentEnd => self.streaming = None,
             mush_agent::AgentEvent::MessageEnd { message } => {
+                self.streaming = None;
                 self.context_tokens = message.usage.total_input_tokens();
             }
             mush_agent::AgentEvent::ContextCompacted { compaction, .. } => {
@@ -390,6 +404,18 @@ impl SessionRuntime {
         !self.title_generated && self.title.is_none() && self.conversation.context_len() >= 2
     }
 
+    pub fn record_aborted_partial(&mut self) -> bool {
+        let Some(partial) = self.streaming.take() else {
+            return false;
+        };
+        self.conversation
+            .append_message(Message::Assistant(partial.finish(
+                mush_ai::types::StopReason::Aborted,
+                mush_ai::stream::ABORTED_MESSAGE,
+            )));
+        true
+    }
+
     pub fn record_cancelled_tools(&mut self) -> Vec<ToolCallId> {
         use mush_ai::types::{
             AssistantContentPart, TextContent, ToolResultContentPart, ToolResultMessage,
@@ -400,6 +426,7 @@ impl SessionRuntime {
         for message in context.iter().rev() {
             match message {
                 Message::ToolResult(result) => answered.push(result.tool_call_id.clone()),
+                Message::Assistant(assistant) if !assistant.is_replayable() => break,
                 Message::Assistant(assistant) => {
                     for part in &assistant.content {
                         if let AssistantContentPart::ToolCall(call) = part

@@ -97,11 +97,13 @@ impl Transcript {
     pub(crate) fn apply(&mut self, session: &mut Session, event: &AgentEvent) -> bool {
         match event {
             AgentEvent::MessageEnd { message } => {
-                self.awaiting
-                    .extend(message.content.iter().filter_map(|part| match part {
-                        AssistantContentPart::ToolCall(call) => Some(call.id.clone()),
-                        _ => None,
-                    }));
+                if message.is_replayable() {
+                    self.awaiting
+                        .extend(message.content.iter().filter_map(|part| match part {
+                            AssistantContentPart::ToolCall(call) => Some(call.id.clone()),
+                            _ => None,
+                        }));
+                }
                 self.pending.push(Message::Assistant(message.clone()));
             }
             AgentEvent::ToolExecEnd {
@@ -567,6 +569,17 @@ mod tests {
             },
         );
         assert!(session.context().is_empty());
+    }
+
+    #[test]
+    fn an_aborted_tool_turn_is_committed_without_waiting_for_results() {
+        let mut session = Session::new("fake-model", "/tmp");
+        let mut transcript = Transcript::default();
+        let mut message = assistant();
+        message.stop_reason = StopReason::Aborted;
+        assert!(transcript.apply(&mut session, &AgentEvent::MessageEnd { message }));
+        assert!(transcript.is_complete());
+        assert_eq!(session.context().len(), 1);
     }
 
     #[test]

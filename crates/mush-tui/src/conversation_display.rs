@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use mush_agent::summarise_tool_args;
 use mush_ai::types::{
-    AssistantContentPart, AssistantMessage, Dollars, Message, Model, ModelId, Provider, ToolCallId,
-    ToolOutcome, ToolResultContentPart, ToolResultMessage, Usage,
+    AssistantContentPart, AssistantMessage, Dollars, Message, Model, ModelId, Provider, StopReason,
+    ToolCallId, ToolOutcome, ToolResultContentPart, ToolResultMessage, Usage,
 };
 
 use crate::app::{
@@ -68,6 +68,11 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 let msg_idx = app.messages.len();
                 let mut tool_calls = Vec::new();
 
+                let call_status = if assistant.is_replayable() {
+                    ToolCallStatus::Running
+                } else {
+                    ToolCallStatus::Error
+                };
                 let has_tools = assistant
                     .content
                     .iter()
@@ -96,7 +101,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     ),
                                     name,
                                     summary,
-                                    status: ToolCallStatus::Running,
+                                    status: call_status,
                                     output: None,
                                     image_data: None,
                                     batch: batch_counter,
@@ -119,7 +124,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                                     tool_call.name.as_str(),
                                     &tool_call.arguments,
                                 ),
-                                status: ToolCallStatus::Running,
+                                status: call_status,
                                 output: None,
                                 image_data: None,
                                 batch: batch_counter,
@@ -142,6 +147,9 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                         assistant.text().trim_start_matches('\n'),
                     )
                 });
+                if let Some(notice) = failed_turn_notice(assistant) {
+                    app.push_system_message(notice);
+                }
             }
             Message::ToolResult(result) => {
                 if let Some(pos) = batch_tool_ids
@@ -155,6 +163,20 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 }
             }
         }
+    }
+}
+
+fn failed_turn_notice(assistant: &AssistantMessage) -> Option<String> {
+    match assistant.stop_reason {
+        StopReason::Error => Some(format!(
+            "⚠ API error: {}",
+            assistant
+                .error_message
+                .as_deref()
+                .unwrap_or("stream ended with an error")
+        )),
+        StopReason::Aborted => Some("⚠ aborted".into()),
+        _ => None,
     }
 }
 
@@ -330,8 +352,8 @@ mod tests {
     use super::*;
     use mush_ai::models;
     use mush_ai::types::{
-        Api, AssistantMessage, Provider, StopReason, TextContent, Timestamp, TokenCount, ToolCall,
-        ToolName, Usage, UserContent, UserMessage,
+        Api, AssistantMessage, Provider, TextContent, Timestamp, TokenCount, ToolCall, ToolName,
+        Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> mush_ai::types::Model {
@@ -381,6 +403,42 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    #[test]
+    fn a_failed_turn_rebuilds_with_its_notice_and_errored_tool_calls() {
+        let mut app = app();
+        let with_reason = |stop_reason, error: &str| {
+            let Message::Assistant(mut assistant) = assistant_with_tool("tc") else {
+                unreachable!()
+            };
+            assistant.stop_reason = stop_reason;
+            assistant.error_message = Some(error.into());
+            Message::Assistant(assistant)
+        };
+        rebuild_display(
+            &mut app,
+            &[
+                user_message("go"),
+                with_reason(StopReason::Aborted, "request was aborted"),
+                user_message("again"),
+                with_reason(StopReason::Error, "overloaded"),
+            ],
+        );
+
+        let system: Vec<_> = app
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::System)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(system, ["⚠ aborted", "⚠ API error: overloaded"]);
+        assert!(
+            app.messages
+                .iter()
+                .flat_map(|m| &m.tool_calls)
+                .all(|call| call.status == ToolCallStatus::Error)
+        );
     }
 
     fn tool_result(tool_call_id: &str, outcome: ToolOutcome, text: &str) -> Message {

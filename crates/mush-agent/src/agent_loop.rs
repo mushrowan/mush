@@ -3,7 +3,7 @@ use mush_ai::registry::{
     ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, ToolDefinition, retry_backoff,
     retry_stream_error,
 };
-use mush_ai::stream::StreamEvent;
+use mush_ai::stream::{ABORTED_MESSAGE, PartialMessage, StreamEvent};
 use mush_ai::types::*;
 
 use crate::tool::{ToolRegistry, ToolResult};
@@ -280,8 +280,11 @@ pub fn agent_loop(
                 let mut final_message: Option<AssistantMessage> = None;
                 let mut last_error: Option<String> = None;
                 let mut retry_after: Option<std::time::Duration> = None;
+                let mut partial: Option<PartialMessage> = None;
+                let mut aborted = false;
 
                 'attempt: for attempt in 0..=MAX_RETRIES {
+                    partial = None;
                     if attempt > 0 {
                         let Some(delay) = mush_ai::registry::retry_delay(retry_backoff(attempt), retry_after.take()) else {
                             tracing::warn!(attempt, "the provider asked to wait past the retry cap, giving up");
@@ -290,13 +293,19 @@ pub fn agent_loop(
                         tracing::warn!(attempt, ?delay, "retrying after transient error");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {},
-                            _ = cancel.cancelled() => break 'outer,
+                            _ = cancel.cancelled() => {
+                                aborted = true;
+                                break 'attempt;
+                            }
                         }
                     }
 
                     let response = tokio::select! {
                         response = config.registry.stream(&config.model, &context, &config.options) => response,
-                        _ = cancel.cancelled() => break 'outer,
+                        _ = cancel.cancelled() => {
+                            aborted = true;
+                            break 'attempt;
+                        }
                     };
                     let mut event_stream = match response {
                         Ok(stream) => stream,
@@ -319,12 +328,15 @@ pub fn agent_loop(
                     loop {
                         let event = tokio::select! {
                             event = event_stream.next() => event,
-                            _ = cancel.cancelled() => break 'outer,
+                            _ = cancel.cancelled() => {
+                                aborted = true;
+                                break 'attempt;
+                            }
                         };
                         let Some(event) = event else { break };
                         match &event {
-                            StreamEvent::Start { partial } if !started => {
-                                yield AgentEvent::MessageStart { message: partial.clone() };
+                            StreamEvent::Start { partial: start } if !started => {
+                                yield AgentEvent::MessageStart { message: start.clone() };
                                 started = true;
                             }
                             StreamEvent::Done { message, .. } => {
@@ -348,34 +360,23 @@ pub fn agent_loop(
                                     partial_stop_reason = ?message.stop_reason,
                                     "LLM stream error"
                                 );
-                                let partial = message.clone();
-                                if !partial.content.is_empty() {
-                                    yield AgentEvent::MessageEnd { message: partial.clone() };
-                                    messages.push(Message::Assistant(partial.clone()));
-                                    for tc in tool_calls_in_message(&partial) {
-                                        let result = ToolResult::error(
-                                            "tool call cancelled because the assistant stream errored",
-                                        );
-                                        yield AgentEvent::ToolExecEnd {
-                                            tool_call_id: tc.id.clone(),
-                                            tool_name: tc.name.clone(),
-                                            result: result.clone(),
-                                        };
-                                        messages.push(Message::ToolResult(ToolResultMessage {
-                                            tool_call_id: tc.id.clone(),
-                                            tool_name: tc.name.clone(),
-                                            content: result.content,
-                                            outcome: result.outcome,
-                                            timestamp_ms: Timestamp::now(),
-                                            details: result.details,
-                                        }));
-                                    }
+                                if !message.content.is_empty() {
+                                    let failed = failed_message(message.clone(), &error_msg);
+                                    yield AgentEvent::MessageEnd { message: failed.clone() };
+                                    messages.push(Message::Assistant(failed));
                                 }
                                 yield AgentEvent::Error { error: error_msg };
                                 yield AgentEvent::AgentEnd;
                                 return;
                             }
                             _ => {}
+                        }
+                        match (&event, partial.as_mut()) {
+                            (StreamEvent::Start { partial: start }, _) => {
+                                partial = Some(PartialMessage::new(start.clone()));
+                            }
+                            (_, Some(partial)) => partial.apply(&event),
+                            (_, None) => {}
                         }
                         streamed = true;
                         yield AgentEvent::StreamEvent { event };
@@ -392,16 +393,34 @@ pub fn agent_loop(
                             yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
                         }
                         last_error = Some(match local_final {
-                            None => error_msg,
+                            None => error_msg.clone(),
                             Some(_) => format!("stream error: {error_msg}"),
                         });
                         if retrying {
                             continue 'attempt;
                         }
+                        final_message = match local_final {
+                            Some(message) => Some(failed_message(message, &error_msg)),
+                            None => partial
+                                .take()
+                                .filter(PartialMessage::has_content)
+                                .map(|p| p.finish(StopReason::Error, error_msg)),
+                        };
+                        break 'attempt;
                     }
 
                     final_message = local_final;
                     break 'attempt;
+                }
+
+                if aborted {
+                    tracing::info!("agent_loop cancelled while streaming turn {turn_index}");
+                    if let Some(partial) = partial.take() {
+                        let message = partial.finish(StopReason::Aborted, ABORTED_MESSAGE);
+                        yield AgentEvent::MessageEnd { message: message.clone() };
+                        messages.push(Message::Assistant(message));
+                    }
+                    break 'outer;
                 }
 
                 let Some(assistant_msg) = final_message else {
@@ -410,6 +429,17 @@ pub fn agent_loop(
                     yield AgentEvent::AgentEnd;
                     return;
                 };
+
+                if assistant_msg.stop_reason == StopReason::Error {
+                    let error = last_error
+                        .or_else(|| assistant_msg.error_message.clone())
+                        .unwrap_or_else(|| "assistant response failed".into());
+                    yield AgentEvent::MessageEnd { message: assistant_msg.clone() };
+                    messages.push(Message::Assistant(assistant_msg));
+                    yield AgentEvent::Error { error };
+                    yield AgentEvent::AgentEnd;
+                    return;
+                }
 
                 yield AgentEvent::MessageEnd { message: assistant_msg.clone() };
                 messages.push(Message::Assistant(assistant_msg.clone()));
@@ -704,11 +734,12 @@ fn is_file_modifying_tool(name: &str) -> bool {
     )
 }
 
-fn tool_calls_in_message(message: &AssistantMessage) -> impl Iterator<Item = &ToolCall> {
-    message.content.iter().filter_map(|part| match part {
-        AssistantContentPart::ToolCall(tool_call) => Some(tool_call),
-        _ => None,
-    })
+fn failed_message(mut message: AssistantMessage, error: &str) -> AssistantMessage {
+    message.stop_reason = StopReason::Error;
+    message
+        .error_message
+        .get_or_insert_with(|| error.to_owned());
+    message
 }
 
 #[tracing::instrument(name = "tool_exec", skip_all, fields(tool = %tool_call.name))]
@@ -1356,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_with_partial_tool_call_emits_stub_tool_result() {
+    fn stream_error_with_partial_tool_call_leaves_the_call_unanswered() {
         struct ErrorAfterToolCallProvider;
 
         #[async_trait::async_trait]
@@ -1418,13 +1449,180 @@ mod tests {
             .unwrap()
             .block_on(async { agent_loop(config, messages).collect().await });
 
-        assert!(events.iter().any(|event| {
-            matches!(
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecEnd { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::MessageEnd { message } if message.stop_reason == StopReason::Error
+        )));
+    }
+
+    fn cancellable_config<'a>(
+        registry: &'a ApiRegistry,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> AgentConfig<'a> {
+        AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::from_boxed(vec![Box::new(CounterTool)]),
+            registry,
+            options: StreamOptions::default(),
+            max_turns: DEFAULT_MAX_TURNS,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: Some(cancel),
+        }
+    }
+
+    fn user_prompt(text: &str) -> Vec<Message> {
+        vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(text.into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )]
+    }
+
+    #[tokio::test]
+    async fn cancelling_mid_stream_keeps_the_partial_as_aborted_with_its_usage() {
+        struct HangingProvider;
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for HangingProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let start = AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .usage(Usage {
+                        input_tokens: TokenCount::new(42),
+                        ..Usage::default()
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: start };
+                    yield StreamEvent::TextStart { content_index: 0 };
+                    yield StreamEvent::TextDelta { content_index: 0, delta: "half an ans".into() };
+                    std::future::pending::<()>().await;
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(HangingProvider));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stream = agent_loop(
+            cancellable_config(&registry, cancel.clone()),
+            user_prompt("hi"),
+        );
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            if matches!(
                 event,
-                AgentEvent::ToolExecEnd { tool_call_id, result, .. }
-                    if tool_call_id.as_str() == "tc_stream_error" && result.outcome.is_error()
-            )
-        }));
+                AgentEvent::StreamEvent {
+                    event: StreamEvent::TextDelta { .. }
+                }
+            ) {
+                cancel.cancel();
+            }
+            events.push(event);
+        }
+
+        let ends: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageEnd { message } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].stop_reason, StopReason::Aborted);
+        assert_eq!(ends[0].text(), "half an ans");
+        assert_eq!(ends[0].usage.input_tokens, TokenCount::new(42));
+        assert!(matches!(events.last(), Some(AgentEvent::AgentEnd)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_final_errored_message_is_kept_and_its_tool_calls_do_not_run() {
+        struct ErroredDoneProvider;
+
+        #[async_trait::async_trait]
+        impl mush_ai::registry::ApiProvider for ErroredDoneProvider {
+            fn api(&self) -> Api {
+                Api::AnthropicMessages
+            }
+
+            async fn stream(
+                &self,
+                model: &Model,
+                _context: &mush_ai::registry::LlmContext,
+                _options: &StreamOptions,
+            ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
+            {
+                let message = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                        id: "tc_errored".into(),
+                        name: "counter".into(),
+                        arguments: serde_json::json!({}),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(StopReason::Error)
+                    .error_message("invalid_request_error: nope")
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: message.clone() };
+                    yield StreamEvent::Done { reason: StopReason::Error, message };
+                };
+                Ok(Box::pin(s) as mush_ai::registry::EventStream)
+            }
+        }
+
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ErroredDoneProvider));
+        let events: Vec<AgentEvent> = agent_loop(
+            cancellable_config(&registry, Default::default()),
+            user_prompt("use a tool"),
+        )
+        .collect()
+        .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::MessageEnd { message } if message.stop_reason == StopReason::Error
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
     }
 
     #[test]

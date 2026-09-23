@@ -1383,6 +1383,7 @@ impl InProcessConnection {
         }
         let was_active = self.turn_active();
         let cancelled = self.runtime.record_cancelled_tools();
+        self.runtime.record_aborted_partial();
         self.runtime.turns.abort(PRIMARY_PANE);
         self.runtime.steering_queue.lock().await.clear();
         self.runtime.save_debounced();
@@ -3171,6 +3172,38 @@ mod tests {
                 if result.tool_call_id.as_str() == "call_1" && result.outcome.is_error()
         ));
         assert!(connection.runtime.steering_queue.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_mid_stream_keeps_the_partial_as_an_aborted_message() {
+        let (mut connection, _) = connection();
+        connection.runtime.conversation = ConversationState::from_messages(vec![user("go")]);
+        let start = AssistantMessage::builder()
+            .model("m".into())
+            .provider(mush_ai::types::Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        for event in [
+            AgentEvent::MessageStart { message: start },
+            AgentEvent::StreamEvent {
+                event: mush_ai::stream::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "partly".into(),
+                },
+            },
+        ] {
+            connection.runtime.apply_event(&event);
+        }
+
+        connection.send(ClientCommand::Abort).await.unwrap();
+
+        let transcript = connection.transcript().await;
+        assert!(matches!(
+            transcript.last(),
+            Some(Message::Assistant(message))
+                if message.stop_reason == StopReason::Aborted && message.text() == "partly"
+        ));
     }
 
     #[tokio::test]
