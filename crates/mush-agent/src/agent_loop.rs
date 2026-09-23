@@ -47,10 +47,6 @@ pub enum AgentEvent {
         point: crate::hooks::HookPoint,
         result: crate::hooks::HookResult,
     },
-    ContextTransformed {
-        before_count: usize,
-        after_count: usize,
-    },
     ContextCompacted {
         before_count: usize,
         compaction: ContextCompaction,
@@ -75,8 +71,6 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 #[derive(Debug, Clone)]
 pub enum ContextTransformResult {
     Unchanged,
-    Updated(Vec<Message>),
-    Silent(Vec<Message>),
     Compacted(ContextCompaction),
 }
 
@@ -253,17 +247,6 @@ pub fn agent_loop(
                     let before = messages.len();
                     match config.hooks.transform_context(&messages).await {
                         ContextTransformResult::Unchanged => messages.clone(),
-                        ContextTransformResult::Updated(transformed) => {
-                            let after = transformed.len();
-                            if after < before {
-                                yield AgentEvent::ContextTransformed {
-                                    before_count: before,
-                                    after_count: after,
-                                };
-                            }
-                            transformed
-                        }
-                        ContextTransformResult::Silent(transformed) => transformed,
                         ContextTransformResult::Compacted(compaction) => {
                             messages = compaction.messages.clone();
                             yield AgentEvent::ContextCompacted {
@@ -1065,10 +1048,9 @@ mod tests {
         let model = test_model();
         let tools = ToolRegistry::new();
 
-        let transform: TransformFn = Box::new(move |msgs| {
+        let transform: TransformFn = Box::new(move |_| {
             called_clone.store(true, Ordering::SeqCst);
-            let msgs = msgs.to_vec();
-            Box::pin(async move { ContextTransformResult::Silent(msgs) })
+            Box::pin(async move { ContextTransformResult::Unchanged })
         });
 
         let config = AgentConfig {

@@ -851,17 +851,6 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     );
                 }
             }
-            AgentEvent::ContextTransformed {
-                before_count,
-                after_count,
-            } => {
-                eprintln!(
-                    "{}",
-                    Style::Dim.stderr(format_args!(
-                        "(compacted: {before_count} → {after_count} messages)"
-                    ))
-                );
-            }
             AgentEvent::ContextCompacted {
                 before_count,
                 compaction,
