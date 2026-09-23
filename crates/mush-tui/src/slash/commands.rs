@@ -64,7 +64,6 @@ pub async fn handle(
                 "  /endpoints [id] - list openrouter providers + cache support for a model\n",
             );
             help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
-            help.push_str("  /injection     - toggle prompt injection preview\n");
             help.push_str(
                 "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
             );
@@ -117,7 +116,6 @@ pub async fn handle(
             keys.push_str("  ctrl+t         - cycle thinking level\n");
             keys.push_str("  ctrl+o         - focus the log / back to the composer\n");
             keys.push_str("  ctrl+r         - cycle detail: overview, details, all output\n");
-            keys.push_str("  ctrl+i         - toggle prompt injection preview\n");
             keys.push_str("\nediting:\n");
             keys.push_str("  ctrl+a / home  - start of line\n");
             keys.push_str("  ctrl+e / end   - end of line\n");
