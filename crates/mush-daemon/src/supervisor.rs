@@ -297,8 +297,11 @@ impl Nursery {
                         nursery.watch_adopted(name, descriptor).await;
                     });
                 }
-                (false, Some(recipe)) => {
+                (false, Some(mut recipe)) => {
                     tracing::warn!(name, "a worker died while no daemon was running");
+                    if !descriptor.session_id.is_empty() {
+                        recipe.session_id.clone_from(&descriptor.session_id);
+                    }
                     let _ = std::fs::remove_file(&descriptor.socket);
                     self.remember(&name, recipe.clone(), descriptor.pid);
                     let nursery = std::sync::Arc::clone(self);
@@ -408,21 +411,26 @@ impl Nursery {
         }
     }
 
-    fn name_of(&self, session_id: &str) -> Option<String> {
-        self.residents()
-            .iter()
-            .find(|(_, resident)| resident.recipe.session_id == session_id)
-            .map(|(name, _)| name.clone())
+    fn follow(&self, name: &str, mut recipe: Recipe, last: Option<&WorkerDescriptor>) -> Recipe {
+        let Some(current) = last
+            .map(|descriptor| &descriptor.session_id)
+            .filter(|id| !id.is_empty() && **id != recipe.session_id)
+        else {
+            return recipe;
+        };
+        recipe.session_id.clone_from(current);
+        self.write_recipe(name, &recipe);
+        if let Some(resident) = self.residents().get_mut(name) {
+            resident.recipe = recipe.clone();
+        }
+        recipe
     }
 
     async fn stop(&self, worker: &WorkerDescriptor) -> io::Result<()> {
-        if let Some(name) = self.name_of(&worker.session_id) {
-            let mut residents = self.residents();
-            if let Some(resident) = residents.get_mut(&name) {
+        if let Some(name) = worker.socket.file_stem().and_then(|stem| stem.to_str()) {
+            if let Some(resident) = self.residents().get_mut(name) {
                 resident.stopping = true;
             }
-        }
-        if let Some(name) = worker.socket.file_stem().and_then(|stem| stem.to_str()) {
             let _ = std::fs::remove_file(self.recipe_path(name));
         }
         if worker.failed.is_some() || worker.pid == 0 {
@@ -541,9 +549,11 @@ impl Nursery {
         };
         tracing::warn!(name, %reason, "worker died, recovering");
         reap_group(pid);
-        let interrupted = self
-            .read_descriptor(name)
+        let last = self.read_descriptor(name);
+        let interrupted = last
+            .as_ref()
             .is_some_and(|descriptor| descriptor.turn_active);
+        let recipe = self.follow(name, recipe, last.as_ref());
         self.recover(name.to_string(), recipe, reason, interrupted)
             .await;
     }

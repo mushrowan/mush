@@ -816,6 +816,48 @@ async fn a_worker_killed_mid_turn_comes_back_with_an_interrupted_marker() {
 }
 
 #[tokio::test]
+async fn a_worker_that_switched_sessions_recovers_the_session_it_had() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let other =
+        mush_session::Session::new("claude-opus-4-7", &daemon.dir.path().display().to_string());
+    store.save(&other).unwrap();
+    let switched = mush_daemon::WorkerDescriptor {
+        session_id: other.meta.id.to_string(),
+        ..*descriptor.clone()
+    };
+    std::fs::write(
+        descriptor.socket.with_extension("json"),
+        serde_json::to_vec(&switched).unwrap(),
+    )
+    .unwrap();
+
+    let pid = rustix::process::Pid::from_raw(i32::try_from(descriptor.pid).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let recovered = loop {
+        let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await
+        else {
+            panic!("expected a roster")
+        };
+        if let Some(worker) = workers
+            .iter()
+            .find(|worker| worker.pid != descriptor.pid && worker.failed.is_none())
+        {
+            break worker.clone();
+        }
+        assert!(Instant::now() < deadline, "the worker never came back");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(recovered.session_id, other.meta.id.as_str());
+}
+
+#[tokio::test]
 async fn a_worker_that_cannot_restart_is_marked_failed() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =
