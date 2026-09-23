@@ -174,7 +174,6 @@ async fn the_daemon_spawns_lists_reuses_and_stops_workers() {
         connection.state().session_id.to_string(),
         descriptor.session_id
     );
-    drop(connection);
 
     assert!(matches!(
         daemon
@@ -184,6 +183,7 @@ async fn the_daemon_spawns_lists_reuses_and_stops_workers() {
             .await,
         SupervisorReply::Done
     ));
+    drop(connection);
     assert!(!alive(descriptor.pid));
     assert!(!descriptor.socket.exists());
     let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
@@ -977,7 +977,7 @@ async fn resuming_a_failed_agent_starts_a_fresh_worker() {
     assert!(fresh);
     assert_eq!(descriptor.session_id, id);
     assert!(alive(descriptor.pid));
-    mush_daemon::DaemonConnection::connect(&descriptor.socket)
+    let _attached = mush_daemon::DaemonConnection::connect(&descriptor.socket)
         .await
         .unwrap();
     let SupervisorReply::Workers(listed) = daemon.request(SupervisorRequest::List).await else {
@@ -986,6 +986,64 @@ async fn resuming_a_failed_agent_starts_a_fresh_worker() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0].pid, descriptor.pid);
     assert!(!workers.join("gone.json").exists());
+}
+
+#[tokio::test]
+async fn an_empty_worker_stops_when_its_last_client_detaches() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let first = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+    let second = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(alive(descriptor.pid), "one client is still attached");
+
+    drop(second);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(descriptor.pid) {
+        assert!(Instant::now() < deadline, "the empty worker kept running");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
+        panic!("expected a roster")
+    };
+    assert!(
+        workers.is_empty(),
+        "the evicted worker came back: {workers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_named_worker_stays_after_its_last_client_detaches() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let mut client = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+    client
+        .send(mush_runtime::ClientCommand::Session(
+            mush_runtime::SessionCommand::Name {
+                title: Some("keeper".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(alive(descriptor.pid));
 }
 
 #[tokio::test]

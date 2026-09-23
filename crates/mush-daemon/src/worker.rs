@@ -397,7 +397,7 @@ impl Worker {
                     self.hub.accept(accepted?.0, connection.state());
                 }
                 Some(incoming) = received.recv() => match incoming {
-                    Incoming::Gone { key } => { self.hub.clients.remove(&key); }
+                    Incoming::Gone { key } => self.detach(connection, key).await,
                     Incoming::Line { key, line } => self.serve_line(connection, key, &line).await,
                 },
                 event = connection.next_event() => {
@@ -415,6 +415,18 @@ impl Worker {
                 }
                 () = tokio::time::sleep(TICK) => {}
             }
+        }
+    }
+
+    async fn detach(&mut self, connection: &mut InProcessConnection, key: ClientKey) {
+        let attached = self
+            .hub
+            .clients
+            .remove(&key)
+            .is_some_and(|client| client.identity.is_some());
+        if attached && self.hub.clients.is_empty() && !self.shutting_down && empty(connection) {
+            tracing::info!("the last client left an empty session, stopping the worker");
+            self.shut_down(connection).await;
         }
     }
 
@@ -536,6 +548,18 @@ impl Worker {
             snapshot: !caught_up,
         }
     }
+}
+
+fn empty(connection: &InProcessConnection) -> bool {
+    let state = connection.state();
+    state.context_len == 0
+        && state.tree_len == 0
+        && state.title.is_none()
+        && !state.turn_active
+        && state.active_turns == 0
+        && !state.pending_prompt
+        && !state.compacting
+        && !connection.has_scheduled_jobs()
 }
 
 async fn handle(

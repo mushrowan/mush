@@ -495,6 +495,13 @@ impl InProcessConnection {
         self.scheduler = scheduler;
     }
 
+    #[must_use]
+    pub fn has_scheduled_jobs(&self) -> bool {
+        self.scheduler
+            .as_ref()
+            .is_some_and(|scheduler| !scheduler.jobs().is_empty())
+    }
+
     fn try_poll_schedule(&mut self) -> Option<ClientEvent> {
         let jobs = self.scheduler.as_ref()?.jobs();
         if jobs == self.known_jobs {

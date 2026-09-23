@@ -775,6 +775,39 @@ async fn an_acked_command_leaves_the_journal() {
 }
 
 #[tokio::test]
+async fn an_empty_worker_ends_when_its_last_attached_client_leaves() {
+    let worker = spawn_worker();
+    let probe = tokio::net::UnixStream::connect(&worker.socket)
+        .await
+        .unwrap();
+    drop(probe);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !worker.task.is_finished(),
+        "a client that never attached is no detach"
+    );
+
+    let client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(5), worker.task)
+        .await
+        .expect("the worker ends")
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_worker_with_a_conversation_outlives_its_last_client() {
+    let worker = spawn_worker();
+    let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    client.send(prompt("hello")).await.unwrap();
+    drain_turn(&mut client).await;
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!worker.task.is_finished());
+}
+
+#[tokio::test]
 async fn a_command_from_another_envelope_version_is_refused() {
     let worker = spawn_worker();
     let (mut raw, _) = RawClient::connect(&worker.socket).await;
