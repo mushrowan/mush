@@ -359,39 +359,11 @@ pub struct IpythonTool {
     kernel: Arc<tokio::sync::Mutex<Option<Kernel>>>,
     output_sink: Option<crate::bash::OutputSink>,
     busy_prompt: Option<BusyKernelPrompt>,
-    pending_restore: tokio::sync::Mutex<Option<std::path::PathBuf>>,
-    restore_notice: std::sync::Mutex<Option<String>>,
     snapshot_generation: Arc<std::sync::atomic::AtomicU64>,
     snapshot_debounce: std::time::Duration,
 }
 
 const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
-
-fn restore_notice(outcome: &Result<mush_kernel::RestoreReport, KernelError>) -> Option<String> {
-    let mut lines = vec!["[python-state-restored]".to_string(), String::new()];
-    match outcome {
-        Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
-        Ok(report) if !report.restored.is_empty() => lines.push(format!(
-            "Your Python kernel state was revived from your previous session. These names are \
-             available again: {}.",
-            report.restored.join(", ")
-        )),
-        Ok(_) | Err(_) => lines.push(
-            "Your previous Python kernel state could not be revived; the kernel is starting \
-             fresh, so re-create any variables, imports, or loaded data you need."
-                .to_string(),
-        ),
-    }
-    if let Ok(report) = outcome
-        && !report.failed.is_empty()
-    {
-        lines.push(format!(
-            "These could not be restored and must be recreated if needed: {}.",
-            report.failed.join(", ")
-        ));
-    }
-    Some(lines.join("\n"))
-}
 
 const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const LIVE_OUTPUT_CAP_BYTES: usize = 2 * mush_kernel::DEFAULT_MAX_OUTPUT_CHARS;
@@ -420,8 +392,6 @@ impl IpythonTool {
             kernel: Arc::new(tokio::sync::Mutex::new(None)),
             output_sink: None,
             busy_prompt: None,
-            pending_restore: tokio::sync::Mutex::new(None),
-            restore_notice: std::sync::Mutex::new(None),
             snapshot_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
         }
@@ -431,28 +401,6 @@ impl IpythonTool {
     pub fn with_snapshot_debounce(mut self, debounce: std::time::Duration) -> Self {
         self.snapshot_debounce = debounce;
         self
-    }
-
-    fn set_restore_notice(&self, outcome: &Result<mush_kernel::RestoreReport, KernelError>) {
-        match outcome {
-            Ok(report) => tracing::info!(
-                restored = report.restored.len(),
-                failed = report.failed.len(),
-                "kernel state restored"
-            ),
-            Err(error) => tracing::warn!(%error, "kernel state restore failed"),
-        }
-        *self
-            .restore_notice
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = restore_notice(outcome);
-    }
-
-    fn take_restore_notice(&self) -> Option<String> {
-        self.restore_notice
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 
     fn schedule_snapshot(&self) {
@@ -584,29 +532,36 @@ impl IpythonTool {
         }
     }
 
-    async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
-        let mut slot = self.kernel.lock().await;
-        let sink = self.output_sink.clone();
-        let exec_id = mush_agent::exec_context::current_exec_id();
+    async fn started<'a>(
+        &self,
+        slot: &'a mut Option<Kernel>,
+        progress: &(dyn Fn(&str) + Sync),
+    ) -> Result<&'a Kernel, KernelError> {
         if slot.is_none() {
             let progress = |message: &str| {
                 tracing::info!("{message}");
-                if let Some(sink) = &sink {
-                    sink(&exec_id, message);
-                }
+                progress(message);
             };
             let kernel =
                 Kernel::start_with_progress(self.kernel_config(), self.host.clone(), &progress)
                     .await?;
-            if let Some(path) = self.pending_restore.lock().await.take()
-                && path.is_file()
-            {
-                self.set_restore_notice(&kernel.restore(&path).await);
-            }
             self.journal_kernel(kernel.pid(), true);
             *slot = Some(kernel);
         }
-        let kernel = slot.as_ref().ok_or(KernelError::Pipes)?;
+        slot.as_ref().ok_or(KernelError::Pipes)
+    }
+
+    async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
+        let mut slot = self.kernel.lock().await;
+        let sink = self.output_sink.clone();
+        let exec_id = mush_agent::exec_context::current_exec_id();
+        let kernel = self
+            .started(&mut slot, &|message| {
+                if let Some(sink) = &sink {
+                    sink(&exec_id, message);
+                }
+            })
+            .await?;
         let mut live = String::new();
         let mut last_emit = std::time::Instant::now() - LIVE_OUTPUT_INTERVAL;
         let mut pending = false;
@@ -662,21 +617,38 @@ impl mush_kernel::KernelState for IpythonTool {
             .map_err(|e| e.to_string())
     }
 
-    async fn restore_from(&self, path: &Path) {
-        if let Some(kernel) = self.kernel.lock().await.as_ref() {
-            if path.is_file() {
-                self.set_restore_notice(&kernel.restore(path).await);
-            }
-            return;
+    async fn restore_from(
+        &self,
+        path: &Path,
+    ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+        if !path.is_file() {
+            return None;
         }
-        *self.pending_restore.lock().await = Some(path.to_path_buf());
+        let mut slot = self.kernel.lock().await;
+        let outcome = match self.started(&mut slot, &|_| {}).await {
+            Ok(kernel) => kernel.restore(path).await,
+            Err(error) => Err(error),
+        };
+        match &outcome {
+            Ok(report) => tracing::info!(
+                restored = report.restored.len(),
+                failed = report.failed.len(),
+                "kernel state restored"
+            ),
+            Err(error) => tracing::warn!(%error, "kernel state restore failed"),
+        }
+        Some(outcome.map_err(|error| error.to_string()))
+    }
+
+    async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
+        let slot = self.kernel.lock().await;
+        let kernel = slot.as_ref()?;
+        Some(kernel.list_names().await.map_err(|error| error.to_string()))
     }
 
     async fn reset(&self) {
         self.snapshot_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.pending_restore.lock().await = None;
-        self.take_restore_notice();
         if let Some(kernel) = self.kernel.lock().await.take() {
             self.retire(kernel).await;
         }
@@ -822,9 +794,6 @@ impl AgentTool for IpythonTool {
                 let mut text = format_cell_output(&run.output);
                 if run.kernel_restarted {
                     text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
-                }
-                if let Some(notice) = self.take_restore_notice() {
-                    text = format!("{notice}\n\n{text}");
                 }
                 if run.output.ok {
                     self.schedule_snapshot();
@@ -1304,18 +1273,19 @@ mod tests {
         let report = tool.snapshot(&path).await.unwrap().unwrap();
         tool.reset().await;
         let gone = tool.execute(json!({ "code": "'carried' in dir()" })).await;
-        tool.restore_from(&path).await;
+        let restored = tool.restore_from(&path).await;
         let back = tool.execute(json!({ "code": "sum(carried)" })).await;
 
         assert_eq!(report.saved, ["carried"]);
         assert_eq!(extract_text(&gone), "False");
         assert_eq!(
-            extract_text(&back),
-            "[python-state-restored]\n\nYour Python kernel state was revived from your previous \
-             session. These names are available again: carried.\n\n6"
+            restored,
+            Some(Ok(mush_kernel::RestoreReport {
+                restored: vec!["carried".into()],
+                failed: Vec::new(),
+            }))
         );
-        let later = tool.execute(json!({ "code": "sum(carried)" })).await;
-        assert_eq!(extract_text(&later), "6");
+        assert_eq!(extract_text(&back), "6");
         tool.shutdown().await;
     }
 
@@ -1375,12 +1345,42 @@ mod tests {
 
         assert!(failed.outcome.is_error());
         assert!(!skipped);
-        assert!(
-            extract_text(&back).ends_with("\n\n42"),
-            "{}",
-            extract_text(&back)
-        );
+        assert_eq!(extract_text(&back), "42");
         tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn restoring_without_a_snapshot_leaves_the_kernel_unstarted() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+
+        let restored = tool.restore_from(&dir.path().join("missing.pickle")).await;
+
+        assert_eq!(restored, None);
+        assert_eq!(tool.live_names().await, None);
+    }
+
+    #[tokio::test]
+    async fn restoring_a_snapshot_starts_the_kernel_right_away() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel-state.pickle");
+        let first = tool(dir.path());
+        let _ = first.execute(json!({ "code": "kept = 1" })).await;
+        first.snapshot(&path).await.unwrap();
+        first.shutdown().await;
+        let second = tool(dir.path());
+
+        let restored = second.restore_from(&path).await;
+        let names = second.live_names().await;
+
+        assert!(
+            matches!(&restored, Some(Ok(report)) if report.restored == ["kept"]),
+            "{restored:?}"
+        );
+        assert_eq!(names, Some(Ok(vec!["kept".to_string()])));
+        second.shutdown().await;
     }
 
     #[tokio::test]

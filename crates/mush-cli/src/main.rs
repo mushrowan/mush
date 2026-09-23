@@ -1164,11 +1164,6 @@ async fn open_session(
     let session = match target {
         SessionTarget::Resume(id) => {
             let meta = store.resolve(id)?;
-            if let Some(kernel) = &setup.kernel_state {
-                kernel
-                    .restore_from(&SessionStore::kernel_state_path(&meta.id))
-                    .await;
-            }
             store.load(&meta.id)?
         }
         SessionTarget::Fork(id) => {

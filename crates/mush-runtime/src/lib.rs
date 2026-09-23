@@ -8,6 +8,7 @@ pub mod goal;
 pub mod harness;
 pub mod inbox;
 pub mod kernel_channels;
+pub mod kernel_notice;
 pub mod models;
 pub mod notes;
 pub mod refine;

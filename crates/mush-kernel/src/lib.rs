@@ -14,7 +14,10 @@ pub use venv::{DEFAULT_PACKAGES, ManagedVenv, Package};
 #[async_trait::async_trait]
 pub trait KernelState: Send + Sync {
     async fn snapshot(&self, path: &std::path::Path) -> Result<Option<SnapshotReport>, String>;
-    async fn restore_from(&self, path: &std::path::Path);
+    async fn restore_from(&self, path: &std::path::Path) -> Option<Result<RestoreReport, String>>;
+    async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
+        None
+    }
     async fn reset(&self);
     fn attach_session(&self, session: KernelSession);
     fn background_work(&self) -> bool {

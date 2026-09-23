@@ -99,6 +99,7 @@ impl WorkerConfig {
         runtime.thinking_level = self.thinking_level;
         runtime.parent = self.parent;
         runtime.set_kernel_state(self.kernel_state);
+        runtime.begin_kernel_restore();
         runtime.save_now();
         if let Some(notice) = self.recovery_notice {
             runtime

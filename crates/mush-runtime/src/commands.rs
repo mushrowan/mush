@@ -128,15 +128,13 @@ impl SessionRuntime {
                 self.snapshot_kernel(&previous).await;
                 if let Some(kernel) = &self.kernel_state {
                     kernel.reset().await;
-                    kernel
-                        .restore_from(&SessionStore::kernel_state_path(&id))
-                        .await;
                 }
                 if let Some(prompt) = loaded.system_prompt {
                     self.system_prompt = Some(prompt);
                 }
                 let title = loaded.meta.title.clone();
                 self.replace_session(id, loaded.conversation, title.clone(), lease);
+                self.begin_kernel_restore();
                 self.title_generated = title.is_some();
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::SystemPromptChanged(
@@ -375,6 +373,7 @@ impl SessionRuntime {
         self.title = title;
         self.title_generated = false;
         self.pending_prompt = None;
+        self.kernel_restore = None;
         self.attach_kernel_session();
     }
 
@@ -489,7 +488,12 @@ mod tests {
         ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
             Ok(None)
         }
-        async fn restore_from(&self, _path: &std::path::Path) {}
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            None
+        }
         async fn reset(&self) {}
         fn attach_session(&self, session: mush_kernel::KernelSession) {
             self.0.lock().unwrap().push(session);
@@ -734,6 +738,45 @@ mod tests {
         assert_eq!(runtime.title.as_deref(), Some("port prime"));
         assert!(runtime.title_generated);
         assert_eq!(events[0], SessionEvent::Title(Some("port prime".into())));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_session_with_a_snapshot_restores_its_kernel_in_the_background() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let saved = mush_session::Session::new("model", "/tmp");
+        SessionStore::new(SessionStore::default_dir())
+            .save(&saved)
+            .unwrap();
+        let path = SessionStore::kernel_state_path(&saved.meta.id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"snapshot").unwrap();
+        let kernel = Arc::new(RecordingKernel(std::sync::Mutex::new(Vec::new())));
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        runtime.set_kernel_state(Some(kernel.clone()));
+        let before = runtime.kernel_restore_pending();
+
+        runtime
+            .handle(SessionCommand::Resume {
+                id: saved.meta.id.clone(),
+            })
+            .await;
+        let pending = runtime.kernel_restore_pending();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(status) = runtime.settle_kernel_restore() {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(!before);
+        assert!(pending);
+        assert_eq!(settled, "python state restored");
+        assert_eq!(kernel.0.lock().unwrap().last().unwrap().state_path, path);
     }
 
     #[tokio::test]

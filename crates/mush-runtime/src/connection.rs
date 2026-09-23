@@ -975,6 +975,9 @@ impl InProcessConnection {
         if let Some(event) = self.try_poll_kernel() {
             return Some(event);
         }
+        if let Some(event) = self.try_poll_kernel_restore() {
+            return Some(event);
+        }
         if let Some(event) = self.try_poll_side_questions() {
             return Some(event);
         }
@@ -1279,6 +1282,12 @@ impl InProcessConnection {
         self.queued.pop_front()
     }
 
+    fn try_poll_kernel_restore(&mut self) -> Option<ClientEvent> {
+        let status = self.runtime.settle_kernel_restore()?;
+        self.runtime.save_now_and_settle();
+        Some(ClientEvent::Session(SessionEvent::Status(status)))
+    }
+
     async fn submit_kernel_notices(&mut self) {
         let mut notices = Vec::new();
         if let Some(kernel) = self.kernel.as_mut() {
@@ -1454,7 +1463,10 @@ impl InProcessConnection {
     }
 
     async fn start_pending_prompt(&mut self) -> bool {
-        if self.turn_active() || self.compaction.is_some() || self.runtime.pending_prompt.is_none()
+        if self.turn_active()
+            || self.compaction.is_some()
+            || self.runtime.kernel_restore_pending()
+            || self.runtime.pending_prompt.is_none()
         {
             return false;
         }
@@ -3018,12 +3030,198 @@ mod tests {
         ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
             Ok(None)
         }
-        async fn restore_from(&self, _path: &std::path::Path) {}
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            None
+        }
         async fn reset(&self) {}
         fn attach_session(&self, _session: mush_kernel::KernelSession) {}
         fn background_work(&self) -> bool {
             self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
+    }
+
+    struct RestoringKernel {
+        outcome: Option<Result<mush_kernel::RestoreReport, String>>,
+        gate: tokio::sync::Notify,
+        restores: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for RestoringKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            self.restores
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.gate.notified().await;
+            self.outcome.clone()
+        }
+        async fn reset(&self) {}
+        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
+    }
+
+    fn restoring_kernel(
+        outcome: Result<mush_kernel::RestoreReport, String>,
+    ) -> Arc<RestoringKernel> {
+        Arc::new(RestoringKernel {
+            outcome: Some(outcome),
+            gate: tokio::sync::Notify::new(),
+            restores: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn resumed_worker(
+        kernel: &Arc<RestoringKernel>,
+        snapshot: bool,
+    ) -> (InProcessConnection, crate::testing::Requests) {
+        let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(crate::testing::Echo {
+            requests: requests.clone(),
+            reply: "ok".into(),
+        }));
+        let mut worker =
+            crate::WorkerConfig::new(crate::testing::echo_config(crate::testing::echo_model()));
+        if snapshot {
+            let path = mush_session::SessionStore::kernel_state_path(&worker.session_id);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"snapshot").unwrap();
+        }
+        worker.kernel_state = Some(Arc::clone(kernel) as Arc<dyn mush_kernel::KernelState>);
+        (worker.connect(&ToolRegistry::new(), &registry), requests)
+    }
+
+    fn user_texts(context: &mush_ai::registry::LlmContext) -> Vec<String> {
+        context
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn prompt_after_restore(
+        connection: &mut InProcessConnection,
+        kernel: &RestoringKernel,
+        text: &str,
+    ) -> String {
+        connection
+            .send(ClientCommand::Prompt {
+                text: text.into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let waited = !connection.state().turn_active;
+        kernel.gate.notify_one();
+        let ClientEvent::Session(SessionEvent::Status(status)) = wait_for(connection, |event| {
+            matches!(event, ClientEvent::Session(SessionEvent::Status(_)))
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        connection.start_pending().await;
+        drain_turn(connection).await;
+        assert!(waited, "the turn waits for the restore");
+        status
+    }
+
+    #[tokio::test]
+    async fn a_resumed_kernel_names_what_came_back_once_before_the_first_request() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let kernel = restoring_kernel(Ok(mush_kernel::RestoreReport {
+            restored: vec!["df".into(), "helper".into()],
+            failed: vec!["sock".into()],
+        }));
+        let (mut connection, requests) = resumed_worker(&kernel, true);
+
+        let status = prompt_after_restore(&mut connection, &kernel, "carry on").await;
+        connection
+            .send(ClientCommand::Prompt {
+                text: "and again".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        let requests = requests.lock().unwrap().clone();
+        let first = user_texts(&requests[0]);
+        assert_eq!(
+            first,
+            [
+                "[python-state-restored]\n\nYour Python kernel state was revived from your \
+                 previous session. These names are available again: df, helper.\nThese could \
+                 not be restored and must be recreated if needed: sock.",
+                "carry on"
+            ]
+        );
+        let notices = |texts: &[String]| {
+            texts
+                .iter()
+                .filter(|text| crate::kernel_notice::is_notice(text))
+                .count()
+        };
+        assert_eq!(notices(&user_texts(&requests[1])), 1);
+        assert_eq!(status, "python state restored");
+        assert_eq!(kernel.restores.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_resume_restore_tells_the_model_the_kernel_starts_fresh() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let kernel = restoring_kernel(Err("kernel exited".into()));
+        let (mut connection, requests) = resumed_worker(&kernel, true);
+
+        let status = prompt_after_restore(&mut connection, &kernel, "carry on").await;
+
+        let first = user_texts(&requests.lock().unwrap()[0]);
+        assert_eq!(
+            first,
+            [
+                "[python-state-restored]\n\nYour previous Python kernel state could not be \
+                 revived; the kernel is starting fresh, so re-create any variables, imports, or \
+                 loaded data you need.",
+                "carry on"
+            ]
+        );
+        assert_eq!(status, "python state could not be restored");
+    }
+
+    #[tokio::test]
+    async fn a_resume_without_a_snapshot_starts_at_once_with_no_notice() {
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let kernel = restoring_kernel(Ok(mush_kernel::RestoreReport::default()));
+        let (mut connection, requests) = resumed_worker(&kernel, false);
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "fresh".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(connection.state().turn_active);
+        drain_turn(&mut connection).await;
+
+        assert_eq!(user_texts(&requests.lock().unwrap()[0]), ["fresh"]);
+        assert_eq!(kernel.restores.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

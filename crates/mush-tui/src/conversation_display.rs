@@ -49,6 +49,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                     app.push_system_message(format_compaction_banner(&body));
                 } else if mush_session::harness::extract_digest(&text).is_some()
                     || mush_runtime::notes::extract(&text).is_some()
+                    || mush_runtime::kernel_notice::is_notice(&text)
                 {
                 } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
                     app.push_bash_done(&done, None);
@@ -414,6 +415,17 @@ mod tests {
             app.messages[1].tool_calls[0].output.as_deref(),
             Some("fn main() {}")
         );
+    }
+
+    #[test]
+    fn a_kernel_restore_notice_stays_out_of_the_transcript() {
+        let notice = mush_runtime::kernel_notice::restored(&Err("kernel exited".into())).unwrap();
+        let mut app = app();
+
+        rebuild_display(&mut app, &[notice, user_message("hello")]);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].content, "hello");
     }
 
     #[test]

@@ -232,9 +232,12 @@ pub struct SessionRuntime {
     pub subagent_model: Option<String>,
     pub paused: Option<mush_session::Pause>,
     pub notes: Option<Arc<crate::notes::Notes>>,
+    pub(crate) kernel_restore: Option<KernelRestore>,
     last_save: std::time::Instant,
     dirty: bool,
 }
+
+type KernelRestore = tokio::task::JoinHandle<Option<Result<mush_kernel::RestoreReport, String>>>;
 
 pub const SESSION_SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(5);
 pub const CANCELLED_TOOL_MESSAGE: &str = "user cancelled tool";
@@ -267,9 +270,56 @@ impl SessionRuntime {
             subagent_model: None,
             paused: None,
             notes: None,
+            kernel_restore: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
         }
+    }
+
+    pub fn begin_kernel_restore(&mut self) {
+        self.kernel_restore = None;
+        let Some(kernel) = self.kernel_state.clone() else {
+            return;
+        };
+        let path = mush_session::SessionStore::kernel_state_path(&self.session_id);
+        if !path.is_file() {
+            return;
+        }
+        self.kernel_restore = Some(tokio::spawn(
+            async move { kernel.restore_from(&path).await },
+        ));
+    }
+
+    #[must_use]
+    pub fn kernel_restore_pending(&self) -> bool {
+        self.kernel_restore.is_some()
+    }
+
+    pub fn settle_kernel_restore(&mut self) -> Option<String> {
+        use futures::FutureExt;
+        if self.turn_active() {
+            return None;
+        }
+        let task = self.kernel_restore.as_mut()?;
+        if !task.is_finished() {
+            return None;
+        }
+        let outcome = match task.now_or_never()? {
+            Ok(outcome) => outcome,
+            Err(error) => Some(Err(error.to_string())),
+        };
+        self.kernel_restore = None;
+        let status = match &outcome {
+            Some(Err(_)) => "python state could not be restored",
+            Some(Ok(report)) if report.restored.is_empty() && !report.failed.is_empty() => {
+                "python state could not be restored"
+            }
+            Some(Ok(_)) | None => "python state restored",
+        };
+        if let Some(message) = outcome.as_ref().and_then(crate::kernel_notice::restored) {
+            self.conversation.append_message(message);
+        }
+        Some(status.to_string())
     }
 
     #[must_use]
