@@ -70,7 +70,11 @@ impl ProviderError {
             Self::Request(e) => {
                 e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode()
             }
-            Self::ApiError { status, .. } => status.as_u16() == 429 || status.as_u16() >= 500,
+            Self::ApiError { status, body, .. } => {
+                status.as_u16() == 429
+                    || status.as_u16() >= 500
+                    || classify_stream_error_message(body) == StreamErrorKind::Refusal
+            }
             _ => false,
         }
     }
@@ -135,10 +139,43 @@ fn jittered_retry_delay(
     Some(jittered.max(retry_after.unwrap_or_default()))
 }
 
+pub const MAX_RETRIES: u32 = 5;
+
 #[must_use]
-pub fn is_retryable_stream_error_message(message: &str) -> bool {
+pub fn retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << attempt.saturating_sub(1).min(4))
+}
+
+pub const STREAM_ENDED_EARLY: &str = "stream ended without a final message";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamErrorKind {
+    Transient,
+    Refusal,
+    Permanent,
+}
+
+impl StreamErrorKind {
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        match self {
+            Self::Transient | Self::Refusal => true,
+            Self::Permanent => false,
+        }
+    }
+}
+
+#[must_use]
+pub fn classify_stream_error_message(message: &str) -> StreamErrorKind {
     let lower = message.to_ascii_lowercase();
-    [
+    let matches = |patterns: &[&str]| patterns.iter().any(|pat| lower.contains(pat));
+    if matches(&[
+        "claude declined to respond",
+        "cyber_policy",
+        "flagged as potentially violating",
+    ]) {
+        StreamErrorKind::Refusal
+    } else if matches(&[
         "overloaded",
         "rate_limit",
         "rate limit",
@@ -151,9 +188,20 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
         "error decoding response body",
         "error reading a body from connection",
         "unexpected eof during chunk size line",
-    ]
-    .iter()
-    .any(|pat| lower.contains(pat))
+        "connection reset",
+        "broken pipe",
+        "connection closed before message completed",
+        STREAM_ENDED_EARLY,
+    ]) {
+        StreamErrorKind::Transient
+    } else {
+        StreamErrorKind::Permanent
+    }
+}
+
+#[must_use]
+pub fn is_retryable_stream_error_message(message: &str) -> bool {
+    classify_stream_error_message(message).is_retryable()
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +368,18 @@ mod tests {
             retry_after: None,
         };
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retryable_400_refusal() {
+        let err = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::BAD_REQUEST,
+            content_type: "application/json".into(),
+            body: r#"{"error":{"type":"invalid_request","code":"cyber_policy"}}"#.into(),
+            retry_after: None,
+        };
+        assert!(err.is_retryable());
     }
 
     #[test]
@@ -523,7 +583,55 @@ mod tests {
         ));
         assert!(!is_retryable_stream_error_message(""));
         assert!(!is_retryable_stream_error_message(
-            "invalid_request: cyber_policy"
+            "invalid_request_error: invalid_prompt: the prompt is too long"
         ));
+    }
+
+    #[test]
+    fn provider_refusals_are_retryable_refusals() {
+        for message in [
+            "claude declined to respond (This request triggered restrictions on violative cyber \
+             content and was blocked under Anthropic's Usage Policy.). retry on another model",
+            "claude declined to respond. retry on another model",
+            "invalid_request: cyber_policy: This content was flagged for possible cybersecurity risk.",
+            "invalid_request_error: invalid_prompt: Invalid prompt: your prompt was flagged as \
+             potentially violating our usage policy. Please try again with a different prompt",
+        ] {
+            assert_eq!(
+                classify_stream_error_message(message),
+                StreamErrorKind::Refusal,
+                "{message}"
+            );
+            assert!(is_retryable_stream_error_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn dropped_connections_are_transient() {
+        for message in [
+            "error decoding response body: error reading a body from connection: \
+             Connection reset by peer (os error 104)",
+            "error sending request: Broken pipe (os error 32)",
+            "connection closed before message completed",
+            STREAM_ENDED_EARLY,
+        ] {
+            assert_eq!(
+                classify_stream_error_message(message),
+                StreamErrorKind::Transient,
+                "{message}"
+            );
+        }
+        assert_eq!(
+            classify_stream_error_message("authentication_error: bad key"),
+            StreamErrorKind::Permanent
+        );
+    }
+
+    #[test]
+    fn retry_backoff_doubles_from_one_second_up_to_sixteen() {
+        let secs: Vec<u64> = (1..=MAX_RETRIES + 2)
+            .map(|attempt| retry_backoff(attempt).as_secs())
+            .collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 16, 16]);
     }
 }
