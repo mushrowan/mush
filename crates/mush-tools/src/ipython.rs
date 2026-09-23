@@ -222,10 +222,16 @@ impl HostRequestHandler for MushHost {
                     .get("command")
                     .and_then(Value::as_str)
                     .ok_or("bash needs a command")?;
-                let timeout = payload
-                    .get("timeout")
-                    .and_then(Value::as_u64)
-                    .map(std::time::Duration::from_secs);
+                let timeout = match payload.get("timeout") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(
+                        value
+                            .as_f64()
+                            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                            .map(std::time::Duration::from_secs_f64)
+                            .ok_or("timeout must be a positive number of seconds")?,
+                    ),
+                };
                 let origin = payload.get("origin").and_then(Value::as_str);
                 let (job_id, pid) = self
                     .jobs
@@ -244,6 +250,13 @@ impl HostRequestHandler for MushHost {
                     .await
                     .map_err(HostError)?,
             )),
+            "bash.running" => Ok(json!({
+                "running": self
+                    .jobs
+                    .running(job_id(&payload)?)
+                    .await
+                    .map_err(HostError)?,
+            })),
             "bash.kill" => {
                 self.jobs.kill(job_id(&payload)?).await.map_err(HostError)?;
                 Ok(json!({}))
@@ -801,6 +814,26 @@ mod tests {
         assert_eq!(notices[0].done.command, "exit 5");
         assert_eq!(notices[0].done.exit_code, 5);
         assert_eq!(notices[0].origin.as_deref(), Some("call_9"));
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bash_takes_a_fractional_timeout_reports_a_duration_and_refuses_an_empty_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": "r = await bash('sleep 5', timeout=0.3)\nq = await bash('sleep 0.2')\ntry:\n    bash('')\n    empty = 'ran'\nexcept TypeError:\n    empty = 'refused'\n(r.timed_out, r.duration < 3, q.duration >= 0.2, empty)"
+            }))
+            .await;
+
+        assert_eq!(
+            extract_text(&result),
+            "(True, True, True, 'refused')",
+            "{}",
+            extract_text(&result)
+        );
         tool.shutdown().await;
     }
 

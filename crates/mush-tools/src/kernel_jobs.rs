@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Notify};
 
 pub type NoticeSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
 
-const NOTICE_COMMAND_CAP: usize = 2000;
+const NOTICE_COMMAND_CAP: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BashDone {
@@ -56,8 +56,61 @@ pub struct JobNotice {
 }
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
-const KILL_GRACE: Duration = Duration::from_secs(2);
-const OUTPUT_CAP_BYTES: usize = 4 * 1024 * 1024;
+const KILL_GRACE: Duration = Duration::from_secs(5);
+const OUTPUT_HEAD_BYTES: usize = 512 * 1024;
+const OUTPUT_TAIL_BYTES: usize = 3 * 512 * 1024;
+const QUIET_ENV: &[(&str, &str)] = &[
+    ("EDITOR", "false"),
+    ("VISUAL", "false"),
+    ("GIT_EDITOR", "false"),
+    ("JJ_EDITOR", "false"),
+    ("NO_COLOR", "1"),
+    ("TERM", "dumb"),
+    ("CLICOLOR", "0"),
+    ("FORCE_COLOR", "0"),
+    ("PAGER", "cat"),
+    ("GIT_PAGER", "cat"),
+    ("GIT_ASKPASS", "true"),
+    ("SSH_ASKPASS_REQUIRE", "never"),
+    ("DEBIAN_FRONTEND", "noninteractive"),
+];
+
+#[derive(Debug, Default)]
+struct BoundedOutput {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    dropped: usize,
+}
+
+impl BoundedOutput {
+    fn push(&mut self, mut chunk: &[u8]) {
+        if self.head.len() < OUTPUT_HEAD_BYTES {
+            let take = chunk.len().min(OUTPUT_HEAD_BYTES - self.head.len());
+            self.head.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+        }
+        self.tail.extend(chunk);
+        if self.tail.len() > OUTPUT_TAIL_BYTES {
+            let excess = self.tail.len() - OUTPUT_TAIL_BYTES;
+            self.tail.drain(..excess);
+            self.dropped += excess;
+        }
+    }
+
+    fn text(&self) -> String {
+        let (front, back) = self.tail.as_slices();
+        let tail = [front, back].concat();
+        if self.dropped == 0 {
+            return String::from_utf8_lossy(&[self.head.as_slice(), &tail].concat()).into_owned();
+        }
+        format!(
+            "{}\n... [{} bytes dropped] ...\n{}",
+            String::from_utf8_lossy(&self.head),
+            self.dropped,
+            String::from_utf8_lossy(&tail)
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobEnd {
@@ -82,7 +135,7 @@ struct Job {
     command: String,
     origin: Option<String>,
     pid: Option<u32>,
-    output: String,
+    output: BoundedOutput,
     end: Option<JobEnd>,
     started: Instant,
     finished: Option<Instant>,
@@ -175,9 +228,7 @@ impl KernelJobs {
             .stdin(Stdio::null())
             .stdout(Stdio::from(writer))
             .stderr(Stdio::from(stderr));
-        for var in ["EDITOR", "VISUAL", "GIT_EDITOR", "JJ_EDITOR"] {
-            cmd.env(var, "false");
-        }
+        cmd.envs(QUIET_ENV.iter().copied());
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -189,7 +240,7 @@ impl KernelJobs {
                 command: command.to_string(),
                 origin: origin.map(str::to_owned),
                 pid,
-                output: String::new(),
+                output: BoundedOutput::default(),
                 end: None,
                 started: Instant::now(),
                 finished: None,
@@ -216,13 +267,7 @@ impl KernelJobs {
                     match reader.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let mut job = cell.state.lock().await;
-                            job.output.push_str(&String::from_utf8_lossy(&buf[..n]));
-                            if job.output.len() > OUTPUT_CAP_BYTES {
-                                let cut = job.output.len() - OUTPUT_CAP_BYTES;
-                                let cut = job.output.floor_char_boundary(cut);
-                                job.output.drain(..cut);
-                            }
+                            cell.state.lock().await.output.push(&buf[..n]);
                         }
                     }
                 }
@@ -314,6 +359,11 @@ impl KernelJobs {
         Ok(snapshot_of(job_id, &job))
     }
 
+    pub async fn running(&self, job_id: &str) -> Result<bool, String> {
+        let cell = self.cell(job_id).await?;
+        Ok(cell.state.lock().await.end.is_none())
+    }
+
     pub async fn wait(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let cell = self.cell(job_id).await?;
         loop {
@@ -335,19 +385,18 @@ impl KernelJobs {
         let cell = self.cell(job_id).await?;
         let pgid = {
             let mut job = cell.state.lock().await;
-            if job.end.is_some() {
+            if job.end.is_none() {
+                job.end = Some(JobEnd::Killed);
+            } else if !group_alive(job.pgid) {
                 return Ok(());
             }
-            job.end = Some(JobEnd::Killed);
             job.pgid
         };
         terminate_group(pgid);
-        let cell = cell.clone();
         tokio::spawn(async move {
             tokio::time::sleep(KILL_GRACE).await;
-            let job = cell.state.lock().await;
-            if job.finished.is_none() {
-                kill_group(job.pgid);
+            if group_alive(pgid) {
+                kill_group(pgid);
             }
         });
         Ok(())
@@ -371,7 +420,7 @@ fn snapshot_of(job_id: &str, job: &Job) -> JobSnapshot {
         running: job.end.is_none(),
         exit_code: job.end.as_ref().map(JobEnd::exit_code),
         end: job.end.clone(),
-        output: job.output.clone(),
+        output: job.output.text(),
         duration: job
             .finished
             .map_or_else(|| job.started.elapsed(), |f| f.duration_since(job.started)),
@@ -394,6 +443,16 @@ fn kill_group(pgid: Option<i32>) {
             libc::kill(-pgid, libc::SIGKILL);
         }
     }
+}
+
+#[cfg(unix)]
+fn group_alive(pgid: Option<i32>) -> bool {
+    pgid.is_some_and(|pgid| unsafe { libc::kill(-pgid, 0) } == 0)
+}
+
+#[cfg(not(unix))]
+fn group_alive(_pgid: Option<i32>) -> bool {
+    false
 }
 
 #[cfg(not(unix))]
@@ -564,6 +623,65 @@ mod tests {
                 .unwrap()
                 .contains("\"active\":false"),
             "{finished}"
+        );
+    }
+
+    #[test]
+    fn output_keeps_the_head_and_tail_and_marks_the_dropped_middle() {
+        let mut output = BoundedOutput::default();
+
+        output.push(&vec![b'h'; OUTPUT_HEAD_BYTES]);
+        output.push(&vec![b'm'; 1000]);
+        output.push(&vec![b't'; OUTPUT_TAIL_BYTES]);
+
+        let text = output.text();
+        let (head, rest) = text.split_once('\n').unwrap();
+        let (marker, tail) = rest.split_once('\n').unwrap();
+        assert_eq!(head, "h".repeat(OUTPUT_HEAD_BYTES));
+        assert_eq!(marker, "... [1000 bytes dropped] ...");
+        assert_eq!(tail, "t".repeat(OUTPUT_TAIL_BYTES));
+    }
+
+    #[tokio::test]
+    async fn a_job_runs_with_a_non_interactive_environment() {
+        let jobs = KernelJobs::default();
+
+        let (id, _) = jobs
+            .start(
+                &cwd(),
+                "echo $TERM $PAGER $NO_COLOR $GIT_ASKPASS",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let done = jobs.wait(&id).await.unwrap();
+
+        assert_eq!(done.output, "dumb cat 1 true\n");
+    }
+
+    #[tokio::test]
+    async fn kill_reaches_a_group_left_behind_after_the_shell_exits() {
+        let jobs = KernelJobs::default();
+
+        let (id, pid) = jobs.start(&cwd(), "sleep 30 &", None, None).await.unwrap();
+        let done = tokio::time::timeout(Duration::from_secs(5), jobs.wait(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        let pgid = pid.and_then(|pid| i32::try_from(pid).ok());
+        assert_eq!(done.exit_code, Some(0));
+        assert!(group_alive(pgid));
+        jobs.kill(&id).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while group_alive(pgid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(!group_alive(pgid));
+        assert_eq!(
+            jobs.snapshot(&id).await.unwrap().end,
+            Some(JobEnd::Exited(0))
         );
     }
 

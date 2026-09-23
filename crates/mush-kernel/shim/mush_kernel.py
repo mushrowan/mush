@@ -109,9 +109,10 @@ class HostError(RuntimeError):
 
 
 class BashResult:
-    def __init__(self, exit_code: int, output: str, timed_out: bool = False, killed: bool = False):
+    def __init__(self, exit_code: int, output: str, duration: float = 0.0, timed_out: bool = False, killed: bool = False):
         self.exit_code = exit_code
         self.output = output
+        self.duration = duration
         self.timed_out = timed_out
         self.killed = killed
 
@@ -131,6 +132,7 @@ def _result_from(reply: dict) -> BashResult:
     return BashResult(
         int(reply.get("exit_code", -1)),
         str(reply.get("output", "")),
+        duration=float(reply.get("duration_ms", 0)) / 1000,
         timed_out=end.get("kind") == "timed_out",
         killed=end.get("kind") == "killed",
     )
@@ -139,7 +141,7 @@ def _result_from(reply: dict) -> BashResult:
 class BashHandle:
     """A shell command started in the background. `await h` waits for it."""
 
-    def __init__(self, command: str, timeout: int | None):
+    def __init__(self, command: str, timeout: float | None):
         self.command = command
         self.job_id: str | None = None
         self.pid: int | None = None
@@ -170,14 +172,14 @@ class BashHandle:
         return None if reply.get("running") else _result_from(reply)
 
     async def running(self) -> bool:
-        reply = await host_request("bash.poll", await self._job())
+        reply = await host_request("bash.running", await self._job())
         return bool(reply.get("running"))
 
     async def output(self) -> str:
         reply = await host_request("bash.poll", await self._job())
         return str(reply.get("output", ""))
 
-    async def tail(self, lines: int = 20) -> str:
+    async def tail(self, lines: int = 50) -> str:
         text = await self.output()
         return "\n".join(text.splitlines()[-lines:])
 
@@ -189,7 +191,9 @@ class BashHandle:
         return f"BashHandle({self.command!r}, {state}, pid={self.pid})"
 
 
-def bash(command: str, timeout: int | None = None) -> BashHandle:
+def bash(command: str, timeout: float | None = None) -> BashHandle:
+    if not isinstance(command, str) or not command:
+        raise TypeError("command must be a non-empty str")
     return BashHandle(command, timeout)
 
 
