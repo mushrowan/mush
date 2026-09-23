@@ -13,6 +13,7 @@ derive_more.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+unicode-properties = { workspace = true, features = ["general-category"] }
 chrono.workspace = true
 futures.workspace = true
 thiserror.workspace = true

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 
 pub const STATE_FILE: &str = "harness_state.json";
 pub const HISTORY_FILE: &str = "refinements.jsonl";
@@ -546,16 +547,65 @@ impl State {
     }
 }
 
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3040}'..='\u{30ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ac00}'..='\u{d7af}'
+            | '\u{20000}'..='\u{2a6df}'
+            | '\u{2a700}'..='\u{2ee5f}'
+            | '\u{2f800}'..='\u{2fa1f}'
+            | '\u{30000}'..='\u{3347f}'
+    )
+}
+
+fn query_runs(text: &str) -> Vec<(bool, String)> {
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut run = String::new();
+    let mut run_is_cjk = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() || c.general_category_group() == GeneralCategoryGroup::Mark {
+            let cjk = is_cjk(c);
+            if !run.is_empty() && cjk != run_is_cjk {
+                runs.push((run_is_cjk, std::mem::take(&mut run)));
+            }
+            run_is_cjk = cjk;
+            run.push(c);
+        } else if !run.is_empty() {
+            runs.push((run_is_cjk, std::mem::take(&mut run)));
+        }
+    }
+    if !run.is_empty() {
+        runs.push((run_is_cjk, run));
+    }
+    runs
+}
+
 fn query_terms(query: &str) -> Vec<String> {
     let mut terms: Vec<String> = Vec::new();
-    for run in query
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|run| !run.is_empty())
-    {
-        let floor = if run.is_ascii() { 3 } else { 2 };
-        if run.chars().count() >= floor && !terms.iter().any(|seen| seen == run) {
-            terms.push(run.to_string());
+    for (cjk, run) in query_runs(&query.to_lowercase()) {
+        let chars: Vec<char> = run.chars().collect();
+        let candidates: Vec<String> = if cjk {
+            if chars.len() == 1 {
+                vec![run]
+            } else {
+                chars.windows(2).map(|pair| pair.iter().collect()).collect()
+            }
+        } else {
+            let floor = if run.is_ascii() { 3 } else { 2 };
+            if chars.len() >= floor {
+                vec![run]
+            } else {
+                Vec::new()
+            }
+        };
+        for term in candidates {
+            if !terms.contains(&term) {
+                terms.push(term);
+            }
         }
     }
     terms
@@ -1402,6 +1452,25 @@ mod tests {
         assert_eq!(state.search("cargo", Some(Kind::Skill), 10).len(), 0);
         assert_eq!(state.search("zz", None, 10).len(), 0);
         assert_eq!(state.list(Some(Kind::Memory)).len(), 3);
+    }
+
+    #[test]
+    fn query_terms_split_cjk_into_bigrams_and_off_adjacent_words() {
+        assert_eq!(query_terms("修复登录"), ["修复", "复登", "登录"]);
+        assert_eq!(query_terms("修复login bug"), ["修复", "login", "bug"]);
+        assert_eq!(query_terms("字"), ["字"]);
+        assert_eq!(query_terms("naïve мир a rlm?"), ["naïve", "мир", "rlm"]);
+        assert_eq!(query_terms("किताब"), ["किताब"]);
+
+        let mut state = State::default();
+        state
+            .upsert(
+                &create(Kind::Memory, "auth", "登录故障"),
+                Scope::Local,
+                "agent",
+            )
+            .unwrap();
+        assert_eq!(state.search("修复登录", None, 10).len(), 1);
     }
 
     #[test]
