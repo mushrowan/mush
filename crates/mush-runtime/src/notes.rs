@@ -112,10 +112,7 @@ pub const NOTES_PREFIX: &str = "Notes you kept in this session:";
 
 #[must_use]
 pub fn fingerprint(text: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    text.trim_end().hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    mush_session::harness::sha256_hex(text.trim_end().as_bytes())
 }
 
 #[must_use]

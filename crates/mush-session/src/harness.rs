@@ -390,28 +390,42 @@ impl State {
 
     #[must_use]
     pub fn fingerprint(&self) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::hash::DefaultHasher::new();
-        for kind in Kind::ALL {
-            for (id, entry) in &self.entries[&kind] {
-                (
-                    kind.as_str(),
-                    id,
-                    &entry.title,
-                    &entry.content,
-                    &entry.path,
-                    entry.scope.as_str(),
-                    entry.version,
-                    serde_json::to_string(&entry.reference).unwrap_or_default(),
-                    serde_json::to_string(&entry.arguments).unwrap_or_default(),
-                )
-                    .hash(&mut hasher);
-            }
-        }
-        for event in &self.refinements {
-            (&event.id, &event.trigger, &event.changes, &event.outcome).hash(&mut hasher);
-        }
-        format!("{:016x}", hasher.finish())
+        let mut entries: Vec<_> = Kind::ALL
+            .into_iter()
+            .flat_map(|kind| self.entries[&kind].iter())
+            .map(|(id, entry)| {
+                let skill = entry.kind == Kind::Skill;
+                let key = (entry.scope.as_str(), entry.kind.as_str(), id.as_str());
+                let material = serde_json::json!({
+                    "arguments": skill.then_some(&entry.arguments),
+                    "content": entry.content,
+                    "id": id,
+                    "kind": entry.kind.as_str(),
+                    "path": entry.path,
+                    "reference": skill.then_some(&entry.reference),
+                    "scope": entry.scope.as_str(),
+                    "title": entry.title,
+                    "version": entry.version,
+                });
+                (key, material)
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let entries: Vec<Value> = entries.into_iter().map(|(_, material)| material).collect();
+        let refinements: Vec<Value> = self
+            .refinements
+            .iter()
+            .map(|event| {
+                serde_json::json!({
+                    "changes": event.changes,
+                    "id": event.id,
+                    "outcome": event.outcome,
+                    "trigger": event.trigger,
+                })
+            })
+            .collect();
+        let material = serde_json::json!({ "entries": entries, "refinements": refinements });
+        sha256_hex(material.to_string().as_bytes())
     }
 
     #[must_use]
@@ -650,6 +664,15 @@ fn slug(raw: &str, fallback: &str) -> String {
     } else {
         out
     }
+}
+
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[must_use]
@@ -1247,6 +1270,32 @@ mod tests {
         assert!(digest.contains("recent refinements: 1"), "{digest}");
         assert_ne!(state.fingerprint(), empty);
         assert_eq!(state.fingerprint(), state.clone().fingerprint());
+    }
+
+    #[test]
+    fn the_fingerprint_is_a_stable_hash_of_what_the_digest_prints() {
+        assert_eq!(
+            State::default().fingerprint(),
+            "904c9637d991c951520d8ce4102db3989d6872e0eb4768f47c12f57ff0d24ffd"
+        );
+        let mut state = State::default();
+        state.apply(
+            &proposal(vec![create(Kind::Memory, "tests", "cargo nextest run")]),
+            "ref_1",
+            Scope::Local,
+            None,
+        );
+        let before = state.fingerprint();
+        let entry = state
+            .entries
+            .get_mut(&Kind::Memory)
+            .and_then(|entries| entries.get_mut("tests"))
+            .unwrap();
+        entry.metadata.insert("note".into(), Value::Bool(true));
+        entry.reference.insert("type".into(), "python".into());
+        entry.updated_at = "later".into();
+        entry.source = "agent".into();
+        assert_eq!(state.fingerprint(), before);
     }
 
     #[test]
