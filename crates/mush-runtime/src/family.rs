@@ -23,6 +23,8 @@ pub const PROGRESS_NOTE_CHARS: usize = 512;
 pub const PROGRESS_NOTE_INTERVAL: Duration = Duration::from_secs(10);
 pub const MESSAGE_MAX_CHARS: usize = 16 * 1024;
 pub const MAX_PENDING_MESSAGES: usize = 20;
+pub const MESSAGE_BURST: u32 = 3;
+pub const MESSAGE_REFILL: Duration = Duration::from_secs(1);
 pub const TASK_LABEL: &str = "[task from parent]";
 const DELETED_REASON: &str = "Deleted by parent orchestrator";
 const TICK: Duration = Duration::from_millis(50);
@@ -311,6 +313,31 @@ struct Inner {
     root_note_at: Option<Instant>,
     children: BTreeMap<ChildId, Node>,
     reserved_names: std::collections::HashSet<(Option<ChildId>, String)>,
+    message_buckets: std::collections::HashMap<(String, String), Bucket>,
+}
+
+#[derive(Clone, Copy)]
+struct Bucket {
+    tokens: u32,
+    updated_at: Instant,
+}
+
+impl Bucket {
+    fn take(&mut self, now: Instant) -> Result<(), Duration> {
+        let refills = (now.saturating_duration_since(self.updated_at).as_millis()
+            / MESSAGE_REFILL.as_millis()) as u32;
+        if refills > 0 {
+            self.tokens = (self.tokens + refills).min(MESSAGE_BURST);
+            self.updated_at += MESSAGE_REFILL * refills;
+        }
+        if self.tokens == 0 {
+            return Err((self.updated_at + MESSAGE_REFILL)
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1)));
+        }
+        self.tokens -= 1;
+        Ok(())
+    }
 }
 
 pub struct Family {
@@ -377,6 +404,7 @@ impl Family {
                 root_note_at: None,
                 children,
                 reserved_names: std::collections::HashSet::new(),
+                message_buckets: std::collections::HashMap::new(),
             }),
             factory,
             registry_path: Mutex::new(registry_path),
@@ -1285,8 +1313,8 @@ impl Family {
         mode: DeliveryMode,
     ) -> Result<Receipt, String> {
         let timestamp_ms = Timestamp::now();
-        let (sender_session, receiver_session) = {
-            let inner = self.lock();
+        let (sender_session, bucket_key) = {
+            let mut inner = self.lock();
             let session_of = |id: Option<&str>| match id {
                 Some(id) => inner
                     .children
@@ -1295,9 +1323,25 @@ impl Family {
                     .unwrap_or_default(),
                 None => inner.root_session_id.clone(),
             };
-            (session_of(caller.id.as_deref()), session_of(target))
+            let sender_session = session_of(caller.id.as_deref());
+            let key = (sender_session.clone(), session_of(target));
+            let now = Instant::now();
+            inner
+                .message_buckets
+                .entry(key.clone())
+                .or_insert(Bucket {
+                    tokens: MESSAGE_BURST,
+                    updated_at: now,
+                })
+                .take(now)
+                .map_err(|retry| {
+                    format!(
+                        "agent messaging rate limit exceeded, retry after {}ms",
+                        retry.as_millis()
+                    )
+                })?;
+            (sender_session, key)
         };
-        let _ = receiver_session;
         let event = EventMessage {
             content: format!("[agent-message from {sender}]\n\n{text}"),
             timestamp_ms,
@@ -1316,6 +1360,21 @@ impl Family {
                 },
             }],
         };
+        let delivered = self.send_delivery(target, event, mode).await;
+        if delivered.is_err()
+            && let Some(bucket) = self.lock().message_buckets.get_mut(&bucket_key)
+        {
+            bucket.tokens = (bucket.tokens + 1).min(MESSAGE_BURST);
+        }
+        delivered
+    }
+
+    async fn send_delivery(
+        &self,
+        target: Option<&str>,
+        event: EventMessage,
+        mode: DeliveryMode,
+    ) -> Result<Receipt, String> {
         let (receipt_tx, receipt_rx) = oneshot::channel();
         let delivery = Delivery {
             event,
@@ -2802,6 +2861,22 @@ mod tests {
         assert_eq!(receipts[0], ("alpha".to_string(), Ok(Receipt::Delivered)));
         assert_eq!(receipts[1].0, "beta");
         assert!(receipts[1].1.is_err());
+    }
+
+    #[test]
+    fn the_message_bucket_allows_a_burst_then_one_a_second() {
+        let start = Instant::now();
+        let mut bucket = Bucket {
+            tokens: MESSAGE_BURST,
+            updated_at: start,
+        };
+        for _ in 0..MESSAGE_BURST {
+            assert!(bucket.take(start).is_ok());
+        }
+        let retry = bucket.take(start).unwrap_err();
+        assert!(retry <= MESSAGE_REFILL && retry > Duration::ZERO);
+        assert!(bucket.take(start + MESSAGE_REFILL).is_ok());
+        assert!(bucket.take(start + MESSAGE_REFILL).is_err());
     }
 
     #[tokio::test]
