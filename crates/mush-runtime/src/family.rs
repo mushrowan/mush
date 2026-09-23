@@ -59,6 +59,7 @@ pub struct ChildSpec {
     pub depth: u32,
     pub parent: Identity,
     pub parent_session_id: String,
+    pub parent_thinking: Option<ThinkingLevel>,
     pub resume_session: Option<String>,
 }
 
@@ -125,6 +126,8 @@ pub struct ChildSummary {
     pub depth: u32,
     pub session_id: String,
     pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingLevel>,
     pub status: ChildStatus,
     pub spawned_at: Timestamp,
     pub updated_at: Timestamp,
@@ -791,15 +794,20 @@ impl Family {
             }
             inner.reserved_names.insert(reservation.clone());
         }
-        let parent_session_id = {
+        let (parent_session_id, parent_thinking) = {
             let inner = self.lock();
             match caller.id.as_deref() {
                 Some(id) => inner
                     .children
                     .get(id)
-                    .map(|node| node.summary.session_id.clone())
+                    .map(|node| {
+                        (
+                            node.summary.session_id.clone(),
+                            node.summary.thinking.clone(),
+                        )
+                    })
                     .unwrap_or_default(),
-                None => inner.root_session_id.clone(),
+                None => (inner.root_session_id.clone(), None),
             }
         };
         let spec = ChildSpec {
@@ -811,6 +819,7 @@ impl Family {
             depth: caller.depth + 1,
             parent: caller.clone(),
             parent_session_id,
+            parent_thinking,
             resume_session: None,
         };
         let parts = match (factory)(spec, Arc::clone(this)).await {
@@ -830,6 +839,7 @@ impl Family {
             depth: caller.depth + 1,
             session_id: session_id.clone(),
             model_id: model_id.clone(),
+            thinking: Some(parts.config.thinking_level.clone()),
             status: ChildStatus::Starting,
             spawned_at: now,
             updated_at: now,
@@ -921,30 +931,33 @@ impl Family {
                 .get(id)
                 .ok_or_else(|| format!("{id} is not in the family"))?;
             let summary = &node.summary;
-            let (parent_name, parent_depth, parent_session_id) = match &summary.parent {
-                Some(parent) => inner
-                    .children
-                    .get(parent)
-                    .map(|parent| {
-                        (
-                            parent.summary.name.clone(),
-                            parent.summary.depth,
-                            parent.summary.session_id.clone(),
-                        )
-                    })
-                    .unwrap_or_default(),
-                None => (
-                    inner.root.name.clone(),
-                    inner.root.depth,
-                    inner.root_session_id.clone(),
-                ),
-            };
+            let (parent_name, parent_depth, parent_session_id, parent_thinking) =
+                match &summary.parent {
+                    Some(parent) => inner
+                        .children
+                        .get(parent)
+                        .map(|parent| {
+                            (
+                                parent.summary.name.clone(),
+                                parent.summary.depth,
+                                parent.summary.session_id.clone(),
+                                parent.summary.thinking.clone(),
+                            )
+                        })
+                        .unwrap_or_default(),
+                    None => (
+                        inner.root.name.clone(),
+                        inner.root.depth,
+                        inner.root_session_id.clone(),
+                        None,
+                    ),
+                };
             let spec = ChildSpec {
                 id: summary.id.clone(),
                 name: summary.name.clone(),
                 prompt: String::new(),
                 model: Some(summary.model_id.clone()),
-                thinking: None,
+                thinking: summary.thinking.clone(),
                 depth: summary.depth,
                 parent: Identity {
                     id: summary.parent.clone(),
@@ -952,6 +965,7 @@ impl Family {
                     depth: parent_depth,
                 },
                 parent_session_id,
+                parent_thinking,
                 resume_session: Some(summary.session_id.clone()),
             };
             (spec, summary.status == ChildStatus::Interrupted)
@@ -3640,6 +3654,7 @@ mod tests {
                 depth: 1,
                 session_id: "s".into(),
                 model_id: "m".into(),
+                thinking: None,
                 status: ChildStatus::Running,
                 spawned_at: Timestamp::zero(),
                 updated_at: Timestamp::zero(),
@@ -3675,6 +3690,7 @@ mod tests {
     }
 
     type Resumed = Arc<StdMutex<Vec<Option<String>>>>;
+    type ParentThinking = (String, Option<ThinkingLevel>);
 
     fn resuming_factory(requests: Requests, resumed: Resumed) -> ChildFactory {
         let inner = echo_factory(requests, "back again");
@@ -3720,6 +3736,73 @@ mod tests {
             Some(path),
         );
         (dir, family)
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_is_given_its_own_parents_thinking_level() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let seen: Arc<StdMutex<Vec<ParentThinking>>> = Arc::new(StdMutex::new(Vec::new()));
+        let inner = echo_factory(requests, "hi");
+        let factory: ChildFactory = Arc::new({
+            let seen = Arc::clone(&seen);
+            move |spec: ChildSpec, family: Arc<Family>| {
+                let inner = Arc::clone(&inner);
+                let seen = Arc::clone(&seen);
+                Box::pin(async move {
+                    seen.lock()
+                        .unwrap()
+                        .push((spec.name.clone(), spec.parent_thinking.clone()));
+                    let level = if spec.depth == 1 {
+                        ThinkingLevel::High
+                    } else {
+                        ThinkingLevel::Low
+                    };
+                    let mut parts = inner(spec, family).await?;
+                    parts.config.thinking_level = level;
+                    Ok(parts)
+                })
+            }
+        });
+        let family = Family::new(
+            Identity::root("root"),
+            "root-session".into(),
+            3,
+            Some(factory),
+            None,
+        );
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "child".into(), None, None, &family)
+            .await
+            .unwrap();
+        let child = Identity {
+            id: Some(family.children_of(&root)[0].id.clone()),
+            name: "child".into(),
+            depth: 1,
+        };
+        family
+            .spawn(
+                &child,
+                "task".into(),
+                "grandchild".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("child".to_string(), None),
+                ("grandchild".to_string(), Some(ThinkingLevel::High)),
+            ]
+        );
+        assert_eq!(
+            family.children_of(&child)[0].thinking,
+            Some(ThinkingLevel::Low)
+        );
     }
 
     #[tokio::test]
@@ -3807,6 +3890,7 @@ mod tests {
             depth: 1,
             session_id: format!("session-{id}"),
             model_id: "m".into(),
+            thinking: None,
             status: ChildStatus::Idle,
             spawned_at: Timestamp::zero(),
             updated_at: Timestamp::zero(),

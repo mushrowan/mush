@@ -1299,9 +1299,10 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                     .unwrap_or_else(|| seed.model.clone()),
             };
             let mut options = seed.options.clone();
-            let parent_thinking = seed
-                .models
-                .thinking()
+            let parent_thinking = spec
+                .parent_thinking
+                .clone()
+                .or_else(|| seed.models.thinking())
                 .or_else(|| options.thinking.clone())
                 .unwrap_or(ThinkingLevel::Off);
             options.thinking = Some(mush_runtime::child_thinking(

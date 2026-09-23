@@ -1190,6 +1190,7 @@ mod tests {
             depth: 1,
             session_id: "s".into(),
             model_id: "claude-opus-4-7".into(),
+            thinking: None,
             status,
             spawned_at: mush_ai::types::Timestamp::zero(),
             updated_at: mush_ai::types::Timestamp::zero(),

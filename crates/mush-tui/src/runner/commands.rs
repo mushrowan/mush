@@ -1124,6 +1124,7 @@ mod tests {
             depth: 1,
             session_id: "s".into(),
             model_id: "m".into(),
+            thinking: None,
             status: mush_runtime::ChildStatus::Idle,
             spawned_at: Timestamp::zero(),
             updated_at: Timestamp::zero(),
