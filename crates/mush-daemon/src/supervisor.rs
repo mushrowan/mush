@@ -136,6 +136,65 @@ struct Recipe {
     session_id: String,
 }
 
+const SECRET_NAMES: [&str; 9] = [
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSW",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "COOKIE",
+    "PRIVATE",
+    "AUTHORIZATION",
+];
+
+fn secret(key: &str, value: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    SECRET_NAMES.iter().any(|name| key.contains(name))
+        || value.split("://").skip(1).any(|rest| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        })
+}
+
+fn without_secrets(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(key, value)| !secret(key, value))
+        .cloned()
+        .collect()
+}
+
+impl Recipe {
+    fn new(args: Vec<String>, cwd: PathBuf, env: &[(String, String)], session_id: String) -> Self {
+        Self {
+            args,
+            cwd,
+            env: without_secrets(env),
+            session_id,
+        }
+    }
+
+    fn scrubbed(mut self) -> (Self, bool) {
+        let kept = without_secrets(&self.env);
+        let changed = kept.len() != self.env.len();
+        self.env = kept;
+        (self, changed)
+    }
+
+    fn launch_env(
+        &self,
+        daemon: impl IntoIterator<Item = (String, String)>,
+    ) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = daemon
+            .into_iter()
+            .filter(|(key, _)| !self.env.iter().any(|(kept, _)| kept == key))
+            .collect();
+        env.extend(self.env.iter().cloned());
+        env
+    }
+}
+
 struct Resident {
     recipe: Recipe,
     pid: u32,
@@ -235,12 +294,7 @@ impl Supervisor {
         self.nursery.forget_failed(&descriptor.session_id);
         self.nursery.remember(
             &name,
-            Recipe {
-                args,
-                cwd,
-                env,
-                session_id: descriptor.session_id.clone(),
-            },
+            Recipe::new(args, cwd, &env, descriptor.session_id.clone()),
             descriptor.pid,
         );
         Ok(SupervisorReply::Worker {
@@ -280,10 +334,31 @@ impl Nursery {
 
     fn read_recipe(&self, name: &str) -> Option<Recipe> {
         let bytes = std::fs::read(self.recipe_path(name)).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let (recipe, scrubbed) = serde_json::from_slice::<Recipe>(&bytes).ok()?.scrubbed();
+        if scrubbed {
+            self.write_recipe(name, &recipe);
+        }
+        Some(recipe)
+    }
+
+    fn scrub_recipes(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.workers_dir) else {
+            return;
+        };
+        for name in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "recipe"))
+            .filter_map(|path| Some(path.file_stem()?.to_str()?.to_string()))
+        {
+            if self.read_recipe(&name).is_none() {
+                let _ = std::fs::remove_file(self.recipe_path(&name));
+            }
+        }
     }
 
     fn adopt(self: &std::sync::Arc<Self>) {
+        self.scrub_recipes();
         for (name, descriptor) in self.descriptors() {
             if self.residents().contains_key(&name) || descriptor.failed.is_some() {
                 continue;
@@ -593,7 +668,7 @@ impl Nursery {
                     &OpenTarget::Resume(recipe.session_id.clone()),
                     &recipe.args,
                     &recipe.cwd,
-                    &recipe.env,
+                    &recipe.launch_env(std::env::vars()),
                     interrupted,
                 )
                 .await;
@@ -886,6 +961,94 @@ mod tests {
             .unwrap();
         assert!(matches!(reply, SupervisorReply::Done));
         running.await.unwrap().unwrap();
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn nursery(dir: &Path) -> Nursery {
+        Nursery {
+            program: dir.join("no-such-mush"),
+            socket: dir.join("daemon.sock"),
+            workers_dir: dir.join("workers"),
+            log_dir: dir.join("logs"),
+            residents: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn a_recipe_keeps_no_keys_tokens_or_url_credentials() {
+        let recipe = Recipe::new(
+            Vec::new(),
+            PathBuf::from("/tmp"),
+            &env(&[
+                ("PATH", "/bin"),
+                ("HOME", "/home/r"),
+                ("SSH_AUTH_SOCK", "/run/ssh"),
+                ("MUSH_DATA_DIR", "/tmp/mush"),
+                ("ANTHROPIC_API_KEY", "sk-ant"),
+                ("openai_api_key", "sk"),
+                ("GITHUB_TOKEN", "ghp"),
+                ("AWS_SECRET_ACCESS_KEY", "aws"),
+                ("PGPASSWORD", "hunter2"),
+                ("DATABASE_URL", "postgres://me:hunter2@db/app"),
+                ("UPSTREAM", "https://ghp_token@github.com/r/m"),
+                ("HOMEPAGE", "https://example.com/a@b"),
+            ]),
+            "s".into(),
+        );
+        let kept: Vec<&str> = recipe.env.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            kept,
+            ["PATH", "HOME", "SSH_AUTH_SOCK", "MUSH_DATA_DIR", "HOMEPAGE"]
+        );
+    }
+
+    #[test]
+    fn a_relaunch_takes_keys_from_the_daemon_and_the_rest_from_the_recipe() {
+        let recipe = Recipe::new(
+            Vec::new(),
+            PathBuf::from("/tmp"),
+            &env(&[("PATH", "/client/bin"), ("ANTHROPIC_API_KEY", "client")]),
+            "s".into(),
+        );
+        let launched = recipe.launch_env(env(&[
+            ("PATH", "/daemon/bin"),
+            ("ANTHROPIC_API_KEY", "daemon"),
+        ]));
+        assert_eq!(
+            launched,
+            env(&[("ANTHROPIC_API_KEY", "daemon"), ("PATH", "/client/bin")])
+        );
+    }
+
+    #[test]
+    fn loading_an_old_recipe_scrubs_its_secrets_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let nursery = nursery(dir.path());
+        std::fs::create_dir_all(&nursery.workers_dir).unwrap();
+        let old = serde_json::json!({
+            "args": ["--model", "m"],
+            "cwd": "/tmp",
+            "env": [["PATH", "/bin"], ["OPENAI_API_KEY", "sk-live"]],
+            "session_id": "abc",
+        });
+        std::fs::write(nursery.recipe_path("w"), old.to_string()).unwrap();
+        std::fs::write(nursery.recipe_path("broken"), "{").unwrap();
+
+        nursery.scrub_recipes();
+
+        let on_disk = std::fs::read_to_string(nursery.recipe_path("w")).unwrap();
+        assert!(!on_disk.contains("sk-live"), "{on_disk}");
+        assert!(on_disk.contains("/bin"), "{on_disk}");
+        let recipe = nursery.read_recipe("w").unwrap();
+        assert_eq!(recipe.session_id, "abc");
+        assert_eq!(recipe.args, ["--model", "m"]);
+        assert!(!nursery.recipe_path("broken").exists());
     }
 
     #[test]
