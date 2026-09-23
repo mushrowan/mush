@@ -14,6 +14,7 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 const OPEN_TIMEOUT: Duration = SPAWN_TIMEOUT.saturating_add(Duration::from_secs(5));
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const ADOPTION_POLL: Duration = Duration::from_millis(500);
+const STALE_AFTER: Duration = crate::worker::HEARTBEAT.saturating_mul(3);
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(250),
     Duration::from_secs(1),
@@ -71,7 +72,7 @@ pub enum SupervisorReply {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerDescriptor {
     pub session_id: String,
     pub model_id: String,
@@ -96,6 +97,10 @@ pub struct WorkerDescriptor {
     pub clients: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<String>,
+    #[serde(default)]
+    pub heard_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heard_from_at: Option<u64>,
 }
 
 impl WorkerDescriptor {
@@ -469,10 +474,12 @@ impl Nursery {
     }
 
     fn roster(&self) -> Vec<WorkerDescriptor> {
+        let now = now_secs();
         self.descriptors()
             .into_iter()
             .map(|(_, descriptor)| descriptor)
             .filter(|descriptor| descriptor.alive() || descriptor.failed.is_some())
+            .map(|descriptor| sweep_staleness(descriptor, now))
             .collect()
     }
 
@@ -699,25 +706,26 @@ impl Nursery {
     fn mark_failed(&self, name: &str, recipe: &Recipe, reason: &str) {
         let descriptor = WorkerDescriptor {
             session_id: recipe.session_id.clone(),
-            model_id: String::new(),
             build: crate::build::build_id(),
-            pid: 0,
-            start_id: None,
             cwd: recipe.cwd.clone(),
             socket: self.socket_path(name),
             started_at: now_secs(),
-            title: None,
-            turn_active: false,
-            paused: false,
-            messages: 0,
             updated_at: now_secs(),
-            clients: 0,
             failed: Some(reason.lines().next().unwrap_or(reason).to_string()),
+            ..WorkerDescriptor::default()
         };
         if let Ok(bytes) = serde_json::to_vec(&descriptor) {
             let _ = mush_ai::private_io::write_private(&self.descriptor_path(name), bytes);
         }
     }
+}
+
+fn sweep_staleness(mut worker: WorkerDescriptor, now: u64) -> WorkerDescriptor {
+    let silent = worker.failed.is_none()
+        && worker.heard_at > 0
+        && now.saturating_sub(worker.heard_at) > STALE_AFTER.as_secs();
+    worker.last_heard_from_at = silent.then_some(worker.heard_at);
+    worker
 }
 
 fn select(
@@ -915,21 +923,41 @@ mod tests {
     fn worker(session_id: &str) -> WorkerDescriptor {
         WorkerDescriptor {
             session_id: session_id.into(),
-            model_id: String::new(),
-            build: String::new(),
-            pid: 0,
-            start_id: None,
-            cwd: PathBuf::new(),
-            socket: PathBuf::new(),
-            started_at: 0,
-            title: None,
-            turn_active: false,
-            paused: false,
-            messages: 0,
-            updated_at: 0,
-            clients: 0,
-            failed: None,
+            ..WorkerDescriptor::default()
         }
+    }
+
+    #[test]
+    fn a_worker_silent_past_three_heartbeats_is_marked_with_when_it_was_last_heard() {
+        let heard = WorkerDescriptor {
+            heard_at: 1_000,
+            ..worker("a")
+        };
+        assert_eq!(
+            sweep_staleness(heard.clone(), 1_045).last_heard_from_at,
+            None
+        );
+        assert_eq!(
+            sweep_staleness(heard.clone(), 1_046).last_heard_from_at,
+            Some(1_000)
+        );
+        let marked = sweep_staleness(heard, 1_046);
+        let heard_again = WorkerDescriptor {
+            heard_at: 1_050,
+            ..marked
+        };
+        assert_eq!(sweep_staleness(heard_again, 1_051).last_heard_from_at, None);
+    }
+
+    #[test]
+    fn failed_and_pre_heartbeat_workers_are_never_marked_stale() {
+        let failed = WorkerDescriptor {
+            heard_at: 1,
+            failed: Some("gone".into()),
+            ..worker("a")
+        };
+        assert_eq!(sweep_staleness(failed, 1_000).last_heard_from_at, None);
+        assert_eq!(sweep_staleness(worker("b"), 1_000).last_heard_from_at, None);
     }
 
     #[tokio::test]

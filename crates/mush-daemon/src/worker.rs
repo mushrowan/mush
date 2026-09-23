@@ -18,6 +18,7 @@ use crate::protocol::{
 use crate::supervisor::WorkerDescriptor;
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(50);
+pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(15);
 const CLIENT_FRAMES: usize = 512;
 const REPLAY_HISTORY: usize = 2048;
 const JOURNAL: usize = 256;
@@ -39,26 +40,24 @@ impl Descriptor {
         Self {
             path,
             written: WorkerDescriptor {
-                session_id: String::new(),
-                model_id: String::new(),
                 build: crate::build::build_id(),
                 pid,
                 start_id: mush_tools::orphans::process_start_id(pid),
                 cwd,
                 socket,
                 started_at,
-                title: None,
-                turn_active: false,
-                paused: false,
-                messages: 0,
                 updated_at: started_at,
-                clients: 0,
-                failed: None,
+                heard_at: started_at,
+                ..WorkerDescriptor::default()
             },
         }
     }
 
     fn refresh(&mut self, state: &ConnectionState, clients: usize) {
+        self.refresh_at(state, clients, now_secs());
+    }
+
+    fn refresh_at(&mut self, state: &ConnectionState, clients: usize, now: u64) {
         let next = WorkerDescriptor {
             session_id: state.session_id.to_string(),
             model_id: state.model_id.clone(),
@@ -69,11 +68,14 @@ impl Descriptor {
             clients,
             ..self.written.clone()
         };
-        if next == self.written && self.path.exists() {
+        let changed = next != self.written || !self.path.exists();
+        let due = now.saturating_sub(self.written.heard_at) >= HEARTBEAT.as_secs();
+        if !changed && !due {
             return;
         }
         self.written = WorkerDescriptor {
-            updated_at: now_secs(),
+            updated_at: if changed { now } else { next.updated_at },
+            heard_at: now,
             ..next
         };
         if let Ok(bytes) = serde_json::to_vec(&self.written) {
@@ -634,6 +636,33 @@ mod tests {
             },
         );
         (hub, key, outgoing, received)
+    }
+
+    #[test]
+    fn the_descriptor_is_rewritten_as_a_heartbeat_without_bumping_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.json");
+        let mut descriptor = Descriptor::new(path.clone(), dir.path().join("w.sock"), "/".into());
+        let state = state();
+        descriptor.refresh_at(&state, 0, 100);
+        let first: WorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!((first.heard_at, first.updated_at), (100, 100));
+
+        descriptor.refresh_at(&state, 0, 114);
+        let quiet: WorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(quiet.heard_at, 100);
+
+        descriptor.refresh_at(&state, 0, 115);
+        let beat: WorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!((beat.heard_at, beat.updated_at), (115, 100));
+
+        descriptor.refresh_at(&state, 1, 120);
+        let attached: WorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!((attached.heard_at, attached.updated_at), (120, 120));
     }
 
     #[tokio::test]

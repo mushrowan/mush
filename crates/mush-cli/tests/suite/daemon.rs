@@ -952,20 +952,13 @@ async fn resuming_a_failed_agent_starts_a_fresh_worker() {
     std::fs::create_dir_all(&workers).unwrap();
     let failed = mush_daemon::WorkerDescriptor {
         session_id: id.clone(),
-        model_id: String::new(),
         build: mush_daemon::build_id(),
-        pid: 0,
-        start_id: None,
         cwd: daemon.dir.path().to_path_buf(),
         socket: workers.join("gone.sock"),
         started_at: 1,
-        title: None,
-        turn_active: false,
-        paused: false,
-        messages: 0,
         updated_at: 1,
-        clients: 0,
         failed: Some("gave up".into()),
+        ..mush_daemon::WorkerDescriptor::default()
     };
     std::fs::write(
         workers.join("gone.json"),

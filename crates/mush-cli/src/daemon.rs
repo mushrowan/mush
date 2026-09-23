@@ -404,20 +404,11 @@ mod tests {
     fn descriptor(turn_active: bool, failed: bool) -> WorkerDescriptor {
         WorkerDescriptor {
             session_id: "abc".into(),
-            model_id: String::new(),
             build: "other".into(),
             pid: 1,
-            start_id: None,
-            cwd: PathBuf::new(),
-            socket: PathBuf::new(),
-            started_at: 0,
-            title: None,
             turn_active,
-            paused: false,
-            messages: 0,
-            updated_at: 0,
-            clients: 0,
             failed: failed.then(|| "gone".to_string()),
+            ..WorkerDescriptor::default()
         }
     }
 

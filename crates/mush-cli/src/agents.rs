@@ -13,6 +13,7 @@ use crate::output::Style;
 pub enum AgentStatus {
     Working,
     Failed,
+    Stale,
     Paused,
     Idle,
     Saved,
@@ -23,6 +24,7 @@ impl AgentStatus {
         match self {
             Self::Working => "working",
             Self::Failed => "failed",
+            Self::Stale => "stale",
             Self::Paused => "paused",
             Self::Idle => "idle",
             Self::Saved => "saved",
@@ -33,6 +35,7 @@ impl AgentStatus {
         match self {
             Self::Working => Style::Yellow,
             Self::Failed => Style::Red,
+            Self::Stale => Style::Magenta,
             Self::Paused => Style::Dim,
             Self::Idle => Style::Cyan,
             Self::Saved => Style::Dim,
@@ -50,9 +53,10 @@ pub struct AgentRow {
     pub updated_at: u64,
     pub pid: Option<u32>,
     pub cwd: String,
-    pub stale: bool,
+    pub other_build: bool,
     pub clients: usize,
     pub failed: Option<String>,
+    pub last_heard_from_at: Option<u64>,
 }
 
 const NAME_WIDTH: usize = 32;
@@ -100,20 +104,27 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
         .map(|worker| AgentRow {
             name: worker.title.clone().unwrap_or_default(),
             id: short_id(&worker.session_id),
-            status: match (&worker.failed, worker.turn_active, worker.paused) {
-                (Some(_), _, _) => AgentStatus::Failed,
-                (None, true, _) => AgentStatus::Working,
-                (None, false, true) => AgentStatus::Paused,
-                (None, false, false) => AgentStatus::Idle,
+            status: match (
+                &worker.failed,
+                worker.last_heard_from_at,
+                worker.turn_active,
+                worker.paused,
+            ) {
+                (Some(_), _, _, _) => AgentStatus::Failed,
+                (None, Some(_), _, _) => AgentStatus::Stale,
+                (None, None, true, _) => AgentStatus::Working,
+                (None, None, false, true) => AgentStatus::Paused,
+                (None, None, false, false) => AgentStatus::Idle,
             },
             model: worker.model_id.clone(),
             messages: worker.messages,
             updated_at: worker.updated_at.max(worker.started_at),
             pid: Some(worker.pid),
             cwd: worker.cwd.display().to_string(),
-            stale: worker.build != mush_daemon::build_id(),
+            other_build: worker.build != mush_daemon::build_id(),
             clients: worker.clients,
             failed: worker.failed.clone(),
+            last_heard_from_at: worker.last_heard_from_at,
         })
         .collect();
     for meta in saved {
@@ -132,9 +143,10 @@ pub fn rows(workers: &[WorkerDescriptor], saved: &[SessionMeta]) -> Vec<AgentRow
             updated_at: meta.updated_at.as_ms() / 1000,
             pid: None,
             cwd: meta.cwd.clone(),
-            stale: false,
+            other_build: false,
             clients: 0,
             failed: None,
+            last_heard_from_at: None,
         });
     }
     rows.sort_by(|left, right| {
@@ -152,7 +164,7 @@ pub fn table(rows: &[AgentRow]) -> String {
         .map(|row| {
             [
                 clip(&cell(&row.name), NAME_WIDTH),
-                if row.stale {
+                if row.other_build {
                     format!("{} *", cell(&row.id))
                 } else {
                     cell(&row.id)
@@ -162,7 +174,11 @@ pub fn table(rows: &[AgentRow]) -> String {
                 cell(&row.model),
                 row.messages.to_string(),
                 row.clients.to_string(),
-                cell(row.failed.as_deref().unwrap_or(&row.cwd)),
+                match (&row.failed, row.last_heard_from_at) {
+                    (Some(reason), _) => cell(reason),
+                    (None, Some(heard)) => format!("last heard {} ago", age(heard)),
+                    (None, None) => cell(&row.cwd),
+                },
             ]
         })
         .collect();
@@ -201,7 +217,7 @@ pub fn table(rows: &[AgentRow]) -> String {
         out.push('\n');
         out.push_str(line.trim_end());
     }
-    if rows.iter().any(|row| row.stale) {
+    if rows.iter().any(|row| row.other_build) {
         out.push_str("\n\n");
         out.push_str(&Style::Dim.stdout("* another build").to_string());
     }
@@ -316,21 +332,19 @@ mod tests {
 
     fn worker(id: &str, turn_active: bool, updated_at: u64) -> WorkerDescriptor {
         WorkerDescriptor {
-            paused: false,
             session_id: id.into(),
             model_id: "gpt-5.4".into(),
             build: mush_daemon::build_id(),
             pid: 42,
-            start_id: None,
             cwd: "/tmp".into(),
             socket: "/tmp/a.sock".into(),
             started_at: 1,
             clients: 1,
-            failed: None,
             title: Some(format!("agent {id}")),
             turn_active,
             messages: 7,
             updated_at,
+            ..WorkerDescriptor::default()
         }
     }
 
@@ -431,6 +445,19 @@ mod tests {
         assert_eq!(rendered.lines().count(), 2, "{rendered:?}");
         assert!(rendered.contains("red line two "), "{rendered:?}");
         assert!(!rendered.contains('\x07'));
+    }
+
+    #[test]
+    fn a_worker_that_stopped_heartbeating_shows_as_stale_with_when_it_was_heard() {
+        let mut silent = worker("aaaaaaaa1", true, 100);
+        silent.last_heard_from_at = Some(1);
+        let rows = rows(&[silent, worker("bbbbbbbb2", false, 100)], &[]);
+        assert_eq!(rows[0].status, AgentStatus::Stale);
+        assert_eq!(rows[0].last_heard_from_at, Some(1));
+        let rendered = table(&rows);
+        let line = rendered.lines().nth(1).unwrap();
+        assert!(line.contains("stale"), "{rendered}");
+        assert!(line.contains("last heard"), "{rendered}");
     }
 
     #[test]
