@@ -1,35 +1,11 @@
 use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
 
-pub const RESTORED_TAG: &str = "[python-state-restored]";
+pub const RESTORED_TAG: &str = mush_kernel::RESTORED_TAG;
 pub const PERSISTED_TAG: &str = "[python-state]";
 
 #[must_use]
 pub fn restored(outcome: &Result<mush_kernel::RestoreReport, String>) -> Option<Message> {
-    let mut lines = vec![RESTORED_TAG.to_string(), String::new()];
-    let failed = match outcome {
-        Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
-        Ok(report) => &report.failed[..],
-        Err(_) => &[],
-    };
-    match outcome {
-        Ok(report) if !report.restored.is_empty() => lines.push(format!(
-            "Your Python kernel state was revived from your previous session. These names are \
-             available again: {}.",
-            report.restored.join(", ")
-        )),
-        Ok(_) | Err(_) => lines.push(
-            "Your previous Python kernel state could not be revived; the kernel is starting \
-             fresh, so re-create any variables, imports, or loaded data you need."
-                .to_string(),
-        ),
-    }
-    if !failed.is_empty() {
-        lines.push(format!(
-            "These could not be restored and must be recreated if needed: {}.",
-            failed.join(", ")
-        ));
-    }
-    Some(notice(lines.join("\n")))
+    mush_kernel::restore_notice_text(outcome).map(notice)
 }
 
 #[must_use]

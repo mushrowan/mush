@@ -169,10 +169,11 @@ struct Shared {
     handler: Arc<dyn HostRequestHandler>,
     requests: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    child: Mutex<Option<Child>>,
+    broken: Mutex<Option<String>>,
 }
 
 pub struct Kernel {
-    child: Mutex<Option<Child>>,
     shared: Arc<Shared>,
     exec_lock: tokio::sync::Mutex<()>,
     next_id: AtomicU64,
@@ -241,6 +242,8 @@ impl Kernel {
             handler,
             requests: Mutex::new(HashMap::new()),
             stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            child: Mutex::new(None),
+            broken: Mutex::new(None),
         });
 
         tokio::spawn(tail_stderr(stderr, shared.clone()));
@@ -278,10 +281,10 @@ impl Kernel {
             Err(_) => return Err(KernelError::ReadyTimeout(config.ready_timeout)),
         };
 
+        *shared.child.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
         let reader = tokio::spawn(read_events(frames, shared.clone()));
 
         Ok(Self {
-            child: Mutex::new(Some(child)),
             shared,
             exec_lock: tokio::sync::Mutex::new(()),
             next_id: AtomicU64::new(1),
@@ -295,11 +298,17 @@ impl Kernel {
 
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
-        self.child
+        self.shared
+            .child
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(Child::id)
+    }
+
+    #[must_use]
+    pub fn protocol_failure(&self) -> Option<String> {
+        self.shared.protocol_failure()
     }
 
     #[must_use]
@@ -404,7 +413,7 @@ impl Kernel {
         if finished {
             Ok(output)
         } else {
-            Err(KernelError::Exited(self.shared.stderr_tail_text()))
+            Err(self.shared.gone())
         }
     }
 
@@ -441,6 +450,7 @@ impl Kernel {
 
     pub async fn kill(self) {
         let child = self
+            .shared
             .child
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -514,6 +524,7 @@ impl Kernel {
     pub async fn shutdown(self) -> Result<(), KernelError> {
         let _ = self.send(&Request::Shutdown).await;
         let child = self
+            .shared
             .child
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -565,7 +576,7 @@ impl Kernel {
                     }
                     Some(Event::Error { evalue, .. }) => break Err(KernelError::Request(evalue)),
                     Some(_) => continue,
-                    None => break Err(KernelError::Exited(self.shared.stderr_tail_text())),
+                    None => break Err(self.shared.gone()),
                 }
             }
         })
@@ -580,7 +591,28 @@ impl Kernel {
     }
 
     async fn send(&self, request: &Request) -> Result<(), KernelError> {
+        if let Some(reason) = self.shared.protocol_failure() {
+            return Err(KernelError::Corrupted(reason));
+        }
         write_request(&self.shared.stdin, request).await
+    }
+}
+
+impl Drop for Kernel {
+    fn drop(&mut self) {
+        self.shared
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(reader) = self
+            .reader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            reader.abort();
+        }
     }
 }
 
@@ -609,6 +641,37 @@ pub struct SnapshotReport {
 pub struct RestoreReport {
     pub restored: Vec<String>,
     pub failed: Vec<String>,
+}
+
+pub const RESTORED_TAG: &str = "[python-state-restored]";
+
+#[must_use]
+pub fn restore_notice_text(outcome: &Result<RestoreReport, String>) -> Option<String> {
+    let mut lines = vec![RESTORED_TAG.to_string(), String::new()];
+    let failed = match outcome {
+        Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
+        Ok(report) => &report.failed[..],
+        Err(_) => &[],
+    };
+    match outcome {
+        Ok(report) if !report.restored.is_empty() => lines.push(format!(
+            "Your Python kernel state was revived from your previous session. These names are \
+             available again: {}.",
+            report.restored.join(", ")
+        )),
+        Ok(_) | Err(_) => lines.push(
+            "Your previous Python kernel state could not be revived; the kernel is starting \
+             fresh, so re-create any variables, imports, or loaded data you need."
+                .to_string(),
+        ),
+    }
+    if !failed.is_empty() {
+        lines.push(format!(
+            "These could not be restored and must be recreated if needed: {}.",
+            failed.join(", ")
+        ));
+    }
+    Some(lines.join("\n"))
 }
 
 fn names(extra: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
@@ -746,34 +809,34 @@ impl Shared {
         }
     }
 
-    fn fail_running(&self, reason: String) {
-        let Some(id) = self.running() else {
-            tracing::warn!(reason, "bad kernel frame with no running cell");
-            return;
-        };
-        let sender = self
-            .cells
+    fn corrupt(&self, reason: String) {
+        tracing::warn!(reason, "bad kernel protocol frame, killing the kernel");
+        self.broken
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .cloned();
-        if let Some(sender) = sender {
-            let _ = sender.send(Event::Error {
-                id: Some(id.clone()),
-                ename: "ProtocolError".into(),
-                evalue: reason,
-                traceback: Vec::new(),
-            });
-            let _ = sender.send(Event::Done {
-                id: id.clone(),
-                ok: false,
-                extra: serde_json::Map::new(),
-            });
+            .get_or_insert(reason);
+        if let Some(child) = self
+            .child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            let _ = child.start_kill();
         }
-        let stdin = self.stdin.clone();
-        tokio::spawn(async move {
-            let _ = write_request(&stdin, &Request::Interrupt { id: Some(id) }).await;
-        });
+    }
+
+    fn protocol_failure(&self) -> Option<String> {
+        self.broken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn gone(&self) -> KernelError {
+        match self.protocol_failure() {
+            Some(reason) => KernelError::Corrupted(reason),
+            None => KernelError::Exited(self.stderr_tail_text()),
+        }
     }
 
     fn stderr_tail_text(&self) -> String {
@@ -854,10 +917,8 @@ async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Ar
         let line = match frame {
             Frame::Line(line) => line,
             Frame::Oversized => {
-                shared.fail_running(format!(
-                    "oversized protocol line: exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
-                ));
-                continue;
+                shared.corrupt(format!("line exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"));
+                break;
             }
         };
         if line.trim().is_empty() {
@@ -866,9 +927,8 @@ async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Ar
         let event = match serde_json::from_str::<Event>(&line) {
             Ok(event) => event,
             Err(error) => {
-                tracing::warn!(%error, line, "unparseable kernel event");
-                shared.fail_running(format!("unparseable protocol frame: {error}"));
-                continue;
+                shared.corrupt(format!("line is not a kernel event: {error}"));
+                break;
             }
         };
         if let Event::HostCancel { id } = &event {

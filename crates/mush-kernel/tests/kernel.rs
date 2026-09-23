@@ -330,27 +330,48 @@ async fn a_huge_result_or_error_is_capped_in_transit() {
 }
 
 #[tokio::test]
-async fn an_unparseable_frame_fails_the_running_cell_instead_of_hanging_it() {
+async fn an_unparseable_frame_fails_the_running_cell_and_kills_the_kernel() {
     let kernel = kernel().await;
 
-    let output = tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         kernel.execute(
             "import os, sys, time\nshim = next(m for m in list(sys.modules.values()) if getattr(m, '__file__', '') and m.__file__.endswith('mush_kernel.py'))\nos.write(shim._proto_fd, b'{not json\\n')\ntime.sleep(30)",
         ),
     )
     .await
-    .expect("the bad frame fails the cell")
-    .unwrap();
-    let after = tokio::time::timeout(Duration::from_secs(5), kernel.execute("1 + 1"))
-        .await
-        .expect("the stuck cell was interrupted")
-        .unwrap();
+    .expect("the bad frame fails the cell");
+    let after = kernel.execute("1 + 1").await;
 
-    assert!(!output.ok);
-    assert_eq!(output.error.unwrap().ename, "ProtocolError");
-    assert_eq!(after.result.as_deref(), Some("2"));
+    assert!(
+        matches!(&outcome, Err(KernelError::Corrupted(reason)) if reason.starts_with("line is not a kernel event")),
+        "{outcome:?}"
+    );
+    assert!(matches!(after, Err(KernelError::Corrupted(_))), "{after:?}");
+    assert!(kernel.protocol_failure().is_some());
     kernel.shutdown().await.unwrap();
+}
+
+fn process_is_gone(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+        stat.rsplit(')')
+            .next()
+            .is_some_and(|rest| rest.trim_start().starts_with('Z'))
+    })
+}
+
+#[tokio::test]
+async fn dropping_a_kernel_kills_its_process() {
+    let kernel = kernel().await;
+    let pid = kernel.pid().unwrap();
+
+    drop(kernel);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !process_is_gone(pid) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(process_is_gone(pid));
 }
 
 #[tokio::test]

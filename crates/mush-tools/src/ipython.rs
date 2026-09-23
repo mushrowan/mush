@@ -346,6 +346,10 @@ pub const KERNEL_RESTART_NOTICE: &str = "<ipython_kernel_reset>\nThe Python kern
 after an interrupted cell kept running. Variables, imports, tasks and open resources from before \
 the restart are gone; recreate them before using them.\n</ipython_kernel_reset>";
 
+pub const KERNEL_REPAIR_NOTICE: &str = "<ipython_kernel_reset>\nThe Python kernel broke its \
+protocol, so this cell was stopped and the kernel was restarted. Its state was reloaded from the \
+last snapshot where one existed; anything created since then is gone.\n</ipython_kernel_reset>";
+
 struct CellRun {
     output: CellOutput,
     kernel_restarted: bool,
@@ -359,6 +363,7 @@ pub struct IpythonTool {
     kernel: Arc<tokio::sync::Mutex<Option<Kernel>>>,
     output_sink: Option<crate::bash::OutputSink>,
     busy_prompt: Option<BusyKernelPrompt>,
+    repair_notice: std::sync::Mutex<Option<String>>,
     snapshot_generation: Arc<std::sync::atomic::AtomicU64>,
     snapshot_debounce: std::time::Duration,
 }
@@ -392,6 +397,7 @@ impl IpythonTool {
             kernel: Arc::new(tokio::sync::Mutex::new(None)),
             output_sink: None,
             busy_prompt: None,
+            repair_notice: std::sync::Mutex::new(None),
             snapshot_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
         }
@@ -555,6 +561,12 @@ impl IpythonTool {
         let mut slot = self.kernel.lock().await;
         let sink = self.output_sink.clone();
         let exec_id = mush_agent::exec_context::current_exec_id();
+        if slot
+            .as_ref()
+            .is_some_and(|kernel| kernel.protocol_failure().is_some())
+        {
+            self.repair(&mut slot).await;
+        }
         let kernel = self
             .started(&mut slot, &|message| {
                 if let Some(sink) = &sink {
@@ -590,13 +602,59 @@ impl IpythonTool {
         if pending && let Some(sink) = &sink {
             sink(&exec_id, live.trim_end());
         }
-        if matches!(outcome, Err(KernelError::Exited(_)))
-            && let Some(kernel) = slot.take()
-        {
+        match &outcome {
+            Err(KernelError::Exited(_)) => {
+                if let Some(kernel) = slot.take() {
+                    self.journal_kernel(kernel.pid(), false);
+                    kernel.kill().await;
+                }
+            }
+            Err(KernelError::Corrupted(_)) => self.repair(&mut slot).await,
+            _ => {}
+        }
+        outcome
+    }
+
+    async fn repair(&self, slot: &mut Option<Kernel>) {
+        if let Some(kernel) = slot.take() {
             self.journal_kernel(kernel.pid(), false);
             kernel.kill().await;
         }
-        outcome
+        let kernel = match Kernel::start(self.kernel_config(), self.host.clone()).await {
+            Ok(kernel) => kernel,
+            Err(error) => {
+                tracing::warn!(%error, "kernel protocol repair could not start a kernel");
+                return;
+            }
+        };
+        self.journal_kernel(kernel.pid(), true);
+        if let Some(path) = self.latest_snapshot() {
+            let outcome = kernel
+                .restore(&path)
+                .await
+                .map_err(|error| error.to_string());
+            *self
+                .repair_notice
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                mush_kernel::restore_notice_text(&outcome);
+            if kernel.protocol_failure().is_some() {
+                tracing::warn!("kernel broke its protocol again while restoring, starting fresh");
+                self.journal_kernel(kernel.pid(), false);
+                kernel.kill().await;
+                return;
+            }
+        }
+        *slot = Some(kernel);
+    }
+
+    fn latest_snapshot(&self) -> Option<std::path::PathBuf> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|session| session.state_path.clone())
+            .filter(|path| path.is_file())
     }
 }
 
@@ -795,6 +853,14 @@ impl AgentTool for IpythonTool {
                 if run.kernel_restarted {
                     text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
                 }
+                if let Some(notice) = self
+                    .repair_notice
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    text = format!("{notice}\n\n{text}");
+                }
                 if run.output.ok {
                     self.schedule_snapshot();
                 }
@@ -832,6 +898,9 @@ impl AgentTool for IpythonTool {
                 };
                 result.content.extend(images);
                 result.with_details(details.to_value())
+            }
+            Err(error @ KernelError::Corrupted(_)) => {
+                ToolResult::error(format!("kernel: {error}\n\n{KERNEL_REPAIR_NOTICE}"))
             }
             Err(error) => ToolResult::error(format!("kernel: {error}")),
         }
@@ -1286,6 +1355,116 @@ mod tests {
             }))
         );
         assert_eq!(extract_text(&back), "6");
+        tool.shutdown().await;
+    }
+
+    const BAD_FRAME: &str = "import os, sys\nshim = next(m for m in list(sys.modules.values()) if getattr(m, '__file__', '') and m.__file__.endswith('mush_kernel.py'))\nos.write(shim._proto_fd, b'{not json\\n')\nimport time\ntime.sleep(30)";
+
+    #[tokio::test]
+    async fn a_bad_protocol_frame_fails_the_cell_and_restarts_the_kernel_from_its_snapshot() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifacts/kernel-state.pickle");
+        let tool = tool(dir.path());
+        tool.attach_session(mush_kernel::KernelSession {
+            session_dir: dir.path().join("artifacts"),
+            state_path: path.clone(),
+            depth: 0,
+            max_depth: 1,
+        });
+        let _ = tool.execute(json!({ "code": "kept = 41" })).await;
+        tool.snapshot(&path).await.unwrap().unwrap();
+        let _ = tool.execute(json!({ "code": "lost = 1" })).await;
+
+        let broken = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tool.execute(json!({ "code": BAD_FRAME })),
+        )
+        .await
+        .expect("the bad frame fails the cell");
+        let after = tool
+            .execute(json!({ "code": "(kept + 1, 'lost' in dir())" }))
+            .await;
+
+        assert!(broken.outcome.is_error());
+        let text = extract_text(&broken);
+        assert!(
+            text.starts_with("kernel: bad protocol frame: line is not a kernel event"),
+            "{text}"
+        );
+        assert!(text.ends_with(KERNEL_REPAIR_NOTICE), "{text}");
+        assert_eq!(
+            extract_text(&after),
+            "[python-state-restored]\n\nYour Python kernel state was revived from your previous \
+             session. These names are available again: kept.\n\n(42, False)"
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_bad_protocol_frame_with_no_snapshot_restarts_the_kernel_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+        let _ = tool.execute(json!({ "code": "lost = 1" })).await;
+
+        let broken = tool.execute(json!({ "code": BAD_FRAME })).await;
+        let after = tool
+            .execute(json!({ "code": "('lost' in dir(), callable(bash))" }))
+            .await;
+
+        assert!(broken.outcome.is_error());
+        assert_eq!(extract_text(&after), "(False, True)");
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_that_breaks_the_protocol_again_is_dropped_for_a_fresh_kernel() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifacts/kernel-state.pickle");
+        let tool = tool(dir.path());
+        tool.attach_session(mush_kernel::KernelSession {
+            session_dir: dir.path().join("artifacts"),
+            state_path: path.clone(),
+            depth: 0,
+            max_depth: 1,
+        });
+        let _ = tool
+            .execute(json!({
+                "code": "import os, sys\nshim = next(m for m in list(sys.modules.values()) if getattr(m, '__file__', '') and m.__file__.endswith('mush_kernel.py'))\nclass Bomb:\n    def __reduce__(self):\n        return (os.write, (shim._proto_fd, b'{not json\\n'))\nbomb = Bomb()\nkept = 41"
+            }))
+            .await;
+        tool.snapshot(&path).await.unwrap().unwrap();
+
+        let broken = tool.execute(json!({ "code": BAD_FRAME })).await;
+        let after = tool.execute(json!({ "code": "'kept' in dir()" })).await;
+
+        assert!(broken.outcome.is_error());
+        assert!(after.outcome.is_success(), "{}", extract_text(&after));
+        assert_eq!(
+            extract_text(&after),
+            "[python-state-restored]\n\nYour previous Python kernel state could not be revived; \
+             the kernel is starting fresh, so re-create any variables, imports, or loaded data \
+             you need.\n\nFalse"
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_bad_frame_between_cells_is_repaired_before_the_next_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+        let _ = tool
+            .execute(json!({
+                "code": "import os, sys, threading\nshim = next(m for m in list(sys.modules.values()) if getattr(m, '__file__', '') and m.__file__.endswith('mush_kernel.py'))\nlost = 1\nthreading.Timer(0.1, os.write, (shim._proto_fd, b'{not json\\n')).start()"
+            }))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let after = tool.execute(json!({ "code": "'lost' in dir()" })).await;
+
+        assert!(after.outcome.is_success(), "{}", extract_text(&after));
+        assert_eq!(extract_text(&after), "False");
         tool.shutdown().await;
     }
 

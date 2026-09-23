@@ -5,7 +5,8 @@ pub mod venv;
 
 pub use kernel::{
     ATTACHMENT_MIME, Attachment, CellError, CellOutput, DEFAULT_MAX_OUTPUT_CHARS, HostError,
-    HostRequestHandler, Kernel, KernelConfig, NoHost, RestoreReport, SnapshotReport,
+    HostRequestHandler, Kernel, KernelConfig, NoHost, RESTORED_TAG, RestoreReport, SnapshotReport,
+    restore_notice_text,
 };
 pub use protocol::{Event, PROTOCOL_VERSION, Request};
 pub use python::PythonPlan;
@@ -59,6 +60,8 @@ pub enum KernelError {
     ReadyTimeout(std::time::Duration),
     #[error("kernel protocol error: {0}")]
     Protocol(String),
+    #[error("bad protocol frame: {0}")]
+    Corrupted(String),
     #[error("kernel request failed: {0}")]
     Request(String),
     #[error("kernel request timed out after {0:?}")]
