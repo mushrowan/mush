@@ -84,6 +84,17 @@ impl App {
         }
     }
 
+    pub fn open_model_picker_with_search(&mut self, search: &str) -> bool {
+        self.open_model_picker_overlay_inner(false);
+        let Some(picker) = self.interaction.model_picker.as_mut() else {
+            return false;
+        };
+        picker.tab = crate::model_picker::ModelPickerTab::All;
+        picker.filter = search.trim().to_string();
+        picker.selected = 0;
+        true
+    }
+
     pub fn open_model_picker_overlay_all(&mut self) {
         self.open_model_picker_overlay_inner(true);
     }

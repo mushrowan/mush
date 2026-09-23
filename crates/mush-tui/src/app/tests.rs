@@ -1931,6 +1931,38 @@ fn open_model_picker_overlay_populates_state_with_models() {
 }
 
 #[test]
+fn a_partial_model_opens_the_picker_searching_for_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion.model_completions = vec![ModelCompletion {
+        id: "claude-opus".into(),
+        name: "Claude Opus".into(),
+        provider: "anthropic".into(),
+        stale: false,
+        description: None,
+        speed_tiers: Vec::new(),
+        priority: 0,
+        visibility: None,
+    }];
+    app.completion.favourite_models = vec!["claude-opus".into()];
+
+    assert!(app.open_model_picker_with_search(" opus "));
+
+    let picker = app.interaction.model_picker.as_ref().expect("picker open");
+    assert_eq!(picker.filter, "opus");
+    assert_eq!(picker.tab, crate::model_picker::ModelPickerTab::All);
+    assert_eq!(app.interaction.mode, AppMode::ModelPicker);
+}
+
+#[test]
+fn a_partial_model_without_models_opens_nothing() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion.model_completions.clear();
+
+    assert!(!app.open_model_picker_with_search("opus"));
+    assert!(app.interaction.model_picker.is_none());
+}
+
+#[test]
 fn open_model_picker_overlay_is_noop_without_models() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.completion.model_completions.clear();

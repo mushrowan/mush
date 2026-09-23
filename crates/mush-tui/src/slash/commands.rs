@@ -1,6 +1,5 @@
 use std::fmt::Write;
 
-use mush_ai::models;
 use mush_ai::types::*;
 
 use crate::TuiConfig;
@@ -200,12 +199,15 @@ pub async fn handle(
             model_id: Some(model_id),
             show_all: _,
         } => {
-            handle_model_switch(app, tui_config, thinking_prefs, model_id);
-            let _ = connection
-                .send(mush_runtime::ClientCommand::SetModel(
-                    app.model_id.to_string(),
-                ))
-                .await;
+            if handle_model_switch(app, tui_config, thinking_prefs, model_id) {
+                let _ = connection
+                    .send(mush_runtime::ClientCommand::SetModel(
+                        app.model_id.to_string(),
+                    ))
+                    .await;
+            } else if !app.open_model_picker_with_search(model_id) {
+                app.push_system_message(format!("unknown model: {model_id}"));
+            }
             None
         }
         SlashAction::Search { query } => {
@@ -623,7 +625,7 @@ fn handle_model_switch(
     tui_config: &mut TuiConfig,
     thinking_prefs: &ThinkingPrefs,
     args: &str,
-) {
+) -> bool {
     let raw = args.trim();
     let id = tui_config
         .model_tiers
@@ -651,21 +653,8 @@ fn handle_model_switch(
         }
         let thinking_str = format!("{level:?}").to_lowercase();
         app.push_system_message(format!("switched to {id} (thinking: {thinking_str})"));
-    } else {
-        let available = models::all_models_with_user()
-            .iter()
-            .map(|m| format!("  {}", m.id))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut msg = format!("unknown model: {raw}\n\navailable:\n{available}");
-        if !tui_config.model_tiers.is_empty() {
-            msg.push_str("\n\ntiers:");
-            for (tier, model_id) in &tui_config.model_tiers {
-                msg.push_str(&format!("\n  {tier} -> {model_id}"));
-            }
-        }
-        app.push_system_message(msg);
     }
+    merged.is_some()
 }
 
 pub(crate) fn show_cost(app: &mut App) {
