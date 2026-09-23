@@ -126,11 +126,19 @@ pub async fn findings(fix: bool) -> Result<Vec<Finding>> {
                 fixed: false,
             }),
             _ => {
-                let fixed = fix && std::fs::remove_file(&socket).is_ok();
+                let live = listening(&socket);
+                let fixed = fix && !live && std::fs::remove_file(&socket).is_ok();
                 findings.push(Finding {
                     what: "daemon".into(),
                     health: Health::Unreachable,
-                    detail: format!("nothing answers on {}", socket.display()),
+                    detail: if live {
+                        format!(
+                            "a daemon listens on {} but did not answer",
+                            socket.display()
+                        )
+                    } else {
+                        format!("nothing answers on {}", socket.display())
+                    },
                     fixed,
                 });
             }

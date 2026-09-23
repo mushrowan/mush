@@ -538,6 +538,44 @@ async fn doctor_reports_a_live_worker_and_clears_a_dead_one() {
 }
 
 #[tokio::test]
+async fn doctor_leaves_the_socket_of_a_daemon_it_cannot_understand() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("mush").join("daemon.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let _ = std::io::Write::write_all(&mut stream, b"not a reply\n");
+        }
+    });
+
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env_clear();
+    for (key, value) in env(dir.path()) {
+        command.env(key, value);
+    }
+    let looked = command
+        .args(["doctor", "--fix", "--json"])
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(looked.status.success(), "{looked:?}");
+    let findings: serde_json::Value = serde_json::from_slice(&looked.stdout).unwrap();
+    let daemon = findings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["what"] == "daemon")
+        .cloned()
+        .unwrap();
+    assert_eq!(daemon["health"], "unreachable");
+    assert_eq!(daemon["fixed"], false);
+    assert!(socket.exists());
+}
+
+#[tokio::test]
 async fn shutdown_needs_a_force_flag_when_agents_are_running() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =
