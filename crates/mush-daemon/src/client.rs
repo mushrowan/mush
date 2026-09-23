@@ -278,9 +278,13 @@ async fn dial(
         .await
         .map_err(|_| ConnectError::TimedOut(timeout))??;
     let (reader, writer) = stream.into_split();
-    let (tx, mut frames) = mpsc::channel(FRAME_BUFFER);
-    let reader = tokio::spawn(read_frames(reader, tx));
-    let hello = tokio::time::timeout(timeout, frames.recv())
+    let (tx, frames) = mpsc::channel(FRAME_BUFFER);
+    let mut link = Link {
+        writer,
+        frames,
+        reader: tokio::spawn(read_frames(reader, tx)),
+    };
+    let hello = tokio::time::timeout(timeout, link.frames.recv())
         .await
         .map_err(|_| ConnectError::TimedOut(timeout))?;
     let (state, build, cursor) = match hello {
@@ -293,16 +297,7 @@ async fn dial(
         Some(Err(error)) => return Err(ConnectError::Codec(error)),
         None => return Err(ConnectError::NoHello),
     };
-    Ok((
-        Link {
-            writer,
-            frames,
-            reader,
-        },
-        state,
-        build,
-        cursor,
-    ))
+    Ok((link, state, build, cursor))
 }
 
 async fn read_frames(
@@ -455,5 +450,29 @@ impl AgentConnection for DaemonConnection {
             Ok(Reply::SystemPrompt { prompt }) => prompt,
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_connect_that_times_out_releases_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hung.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let accepted = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+
+        let error = DaemonConnection::connect_within(&path, Duration::from_millis(100))
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, ConnectError::TimedOut(_)), "{error}");
+
+        let mut server = accepted.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let wrote = server.write_all(b"{}\n").await;
+        assert!(wrote.is_err(), "the client still holds the read half");
     }
 }
