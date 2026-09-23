@@ -1946,6 +1946,27 @@ impl RlmHandler {
     }
 }
 
+fn heartbeat_interval(interval: String) -> String {
+    if interval.trim_start().starts_with("every ") {
+        interval
+    } else {
+        format!("every {interval}")
+    }
+}
+
+fn heartbeat_delivery(
+    mode: Option<String>,
+) -> Result<Option<crate::schedule::Delivery>, mush_kernel::HostError> {
+    match mode.as_deref() {
+        None => Ok(None),
+        Some("steer") => Ok(Some(crate::schedule::Delivery::Steer)),
+        Some("follow_up") => Ok(Some(crate::schedule::Delivery::FollowUp)),
+        Some(other) => Err(mush_kernel::HostError(format!(
+            "delivery_mode must be steer or follow_up, not {other}"
+        ))),
+    }
+}
+
 fn requested_thinking(
     level: Option<String>,
 ) -> Result<Option<ThinkingLevel>, mush_kernel::HostError> {
@@ -2251,18 +2272,31 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             }
             "rlm_heartbeat.list" => {
                 let (_, jobs) = self.rlm_heartbeats()?;
+                let include_inactive = payload
+                    .get("include_inactive")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let jobs: Vec<_> = jobs
+                    .into_iter()
+                    .filter(|job| {
+                        include_inactive
+                            || matches!(
+                                job.status,
+                                crate::schedule::JobStatus::Active
+                                    | crate::schedule::JobStatus::Paused
+                            )
+                    })
+                    .collect();
                 Ok(serde_json::to_value(jobs).unwrap_or(serde_json::Value::Null))
             }
             "rlm_heartbeat.create" => {
                 let (scheduler, _) = self.rlm_heartbeats()?;
-                let prompt = str_field("prompt")
-                    .ok_or_else(|| mush_kernel::HostError("prompt is required".into()))?;
-                let expression = str_field("interval").unwrap_or_else(|| "every 5m".into());
-                let expression = if expression.trim_start().starts_with("every ") {
-                    expression
-                } else {
-                    format!("every {expression}")
-                };
+                let prompt = str_field("instruction")
+                    .or_else(|| str_field("prompt"))
+                    .ok_or_else(|| mush_kernel::HostError("instruction is required".into()))?;
+                let delivery = heartbeat_delivery(str_field("delivery_mode"))?;
+                let expression =
+                    heartbeat_interval(str_field("interval").unwrap_or_else(|| "5m".into()));
                 let jobs = scheduler
                     .apply(crate::schedule::ScheduleCommand::Add {
                         expression,
@@ -2271,37 +2305,82 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         source: crate::schedule::JobSource::RlmHeartbeat,
                     })
                     .map_err(mush_kernel::HostError)?;
-                let created = jobs
+                let mut created = jobs
                     .iter()
                     .rev()
                     .find(|job| job.source == crate::schedule::JobSource::RlmHeartbeat)
                     .cloned();
+                if let (Some(job), Some(delivery)) = (&created, delivery) {
+                    let jobs = scheduler
+                        .apply(crate::schedule::ScheduleCommand::Edit {
+                            id: job.id.clone(),
+                            prompt: None,
+                            expression: None,
+                            label: None,
+                            delivery: Some(delivery),
+                        })
+                        .map_err(mush_kernel::HostError)?;
+                    let id = job.id.clone();
+                    created = jobs.into_iter().find(|job| job.id == id);
+                }
                 Ok(serde_json::to_value(created).unwrap_or(serde_json::Value::Null))
             }
-            "rlm_heartbeat.update" => {
+            "rlm_heartbeat.update" | "rlm_heartbeat.delete" => {
                 let (scheduler, jobs) = self.rlm_heartbeats()?;
                 let id = str_field("id")
                     .ok_or_else(|| mush_kernel::HostError("id is required".into()))?;
                 if !jobs.iter().any(|job| job.id == id) {
                     return Err(mush_kernel::HostError(format!("no rlm heartbeat {id}")));
                 }
-                let command = match str_field("status").as_deref() {
-                    Some("pause") | Some("paused") => {
-                        crate::schedule::ScheduleCommand::Pause(id.clone())
+                let mut commands = Vec::new();
+                if kind == "rlm_heartbeat.delete" {
+                    commands.push(crate::schedule::ScheduleCommand::Cancel(id.clone()));
+                } else {
+                    let prompt = str_field("instruction").or_else(|| str_field("prompt"));
+                    let expression = str_field("interval").map(heartbeat_interval);
+                    let label = str_field("label");
+                    let delivery = heartbeat_delivery(str_field("delivery_mode"))?;
+                    if prompt.is_some()
+                        || expression.is_some()
+                        || label.is_some()
+                        || delivery.is_some()
+                    {
+                        commands.push(crate::schedule::ScheduleCommand::Edit {
+                            id: id.clone(),
+                            prompt,
+                            expression,
+                            label,
+                            delivery,
+                        });
                     }
-                    Some("resume") | Some("active") => {
-                        crate::schedule::ScheduleCommand::Resume(id.clone())
+                    match str_field("status").as_deref() {
+                        None => {}
+                        Some("pause" | "paused") => {
+                            commands.push(crate::schedule::ScheduleCommand::Pause(id.clone()));
+                        }
+                        Some("resume" | "active") => {
+                            commands.push(crate::schedule::ScheduleCommand::Resume(id.clone()));
+                        }
+                        Some("cancel" | "cancelled" | "clear") => {
+                            commands.push(crate::schedule::ScheduleCommand::Cancel(id.clone()));
+                        }
+                        Some(other) => {
+                            return Err(mush_kernel::HostError(format!(
+                                "status must be pause or resume, not {other}"
+                            )));
+                        }
                     }
-                    Some("cancel") | Some("cancelled") | Some("clear") => {
-                        crate::schedule::ScheduleCommand::Cancel(id.clone())
+                    if commands.is_empty() {
+                        return Err(mush_kernel::HostError(
+                            "update needs instruction, interval, label, status or delivery_mode"
+                                .into(),
+                        ));
                     }
-                    other => {
-                        return Err(mush_kernel::HostError(format!(
-                            "status must be pause, resume or cancel, not {other:?}"
-                        )));
-                    }
-                };
-                let jobs = scheduler.apply(command).map_err(mush_kernel::HostError)?;
+                }
+                let mut jobs = Vec::new();
+                for command in commands {
+                    jobs = scheduler.apply(command).map_err(mush_kernel::HostError)?;
+                }
                 let updated = jobs.into_iter().find(|job| job.id == id);
                 Ok(serde_json::to_value(updated).unwrap_or(serde_json::Value::Null))
             }
@@ -3012,6 +3091,68 @@ mod tests {
         assert!(retry <= MESSAGE_REFILL && retry > Duration::ZERO);
         assert!(bucket.take(start + MESSAGE_REFILL).is_ok());
         assert!(bucket.take(start + MESSAGE_REFILL).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_rlm_heartbeat_api_edits_deletes_and_lists_inactive_ones() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let scheduler = Arc::new(crate::schedule::Scheduler::new(None));
+        let handler =
+            RlmHandler::new(family, Identity::root("root")).with_scheduler(Arc::clone(&scheduler));
+        let created = handler
+            .handle(
+                "rlm_heartbeat.create",
+                serde_json::json!({
+                    "instruction": "check ci",
+                    "interval": "10m",
+                    "delivery_mode": "follow_up",
+                }),
+            )
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["delivery"], "follow_up");
+        assert_eq!(created["expression"], "every 10m");
+
+        let updated = handler
+            .handle(
+                "rlm_heartbeat.update",
+                serde_json::json!({
+                    "id": id,
+                    "instruction": "check ci and docs",
+                    "interval": "20m",
+                    "label": "ci",
+                    "status": "pause",
+                    "delivery_mode": "steer",
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["prompt"], "check ci and docs");
+        assert_eq!(updated["expression"], "every 20m");
+        assert_eq!(updated["label"], "ci");
+        assert_eq!(updated["status"], "paused");
+        assert_eq!(updated["delivery"], "steer");
+
+        handler
+            .handle("rlm_heartbeat.delete", serde_json::json!({ "id": id }))
+            .await
+            .unwrap();
+        let active = handler
+            .handle("rlm_heartbeat.list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(active.as_array().unwrap().len(), 0);
+        let all = handler
+            .handle(
+                "rlm_heartbeat.list",
+                serde_json::json!({ "include_inactive": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(all.as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

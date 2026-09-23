@@ -100,6 +100,13 @@ pub enum ScheduleCommand {
     Pause(String),
     Resume(String),
     Cancel(String),
+    Edit {
+        id: String,
+        prompt: Option<String>,
+        expression: Option<String>,
+        label: Option<String>,
+        delivery: Option<Delivery>,
+    },
     HeartbeatPause,
     HeartbeatResume,
     HeartbeatClear,
@@ -345,6 +352,37 @@ impl Scheduler {
             ScheduleCommand::Cancel(id) => {
                 let job = find_mut(&mut jobs, &id)?;
                 job.status = JobStatus::Cancelled;
+            }
+            ScheduleCommand::Edit {
+                id,
+                prompt,
+                expression,
+                label,
+                delivery,
+            } => {
+                let job = find_mut(&mut jobs, &id)?;
+                if let Some(prompt) = prompt {
+                    if prompt.trim().is_empty() {
+                        return Err("a scheduled prompt needs text".into());
+                    }
+                    job.prompt = prompt.trim().to_string();
+                }
+                if let Some(expression) = expression {
+                    let schedule = parse_expression(&expression, now_ms)?;
+                    if job.source != JobSource::Schedule
+                        && !matches!(schedule, ScheduleKind::Every { .. })
+                    {
+                        return Err("a heartbeat repeats: use `every 10m`".into());
+                    }
+                    job.schedule = schedule;
+                    job.expression = expression.trim().to_string();
+                }
+                if let Some(label) = label {
+                    job.label = Some(label.trim().to_string()).filter(|label| !label.is_empty());
+                }
+                if let Some(delivery) = delivery {
+                    job.delivery = delivery;
+                }
             }
             ScheduleCommand::HeartbeatPause
             | ScheduleCommand::HeartbeatResume

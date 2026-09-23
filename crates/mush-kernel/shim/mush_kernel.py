@@ -702,17 +702,45 @@ class _Harness:
 
 
 class _RlmHeartbeat:
-    async def create(self, prompt: str, *, interval: str = "5m", label: str | None = None) -> dict:
-        payload = {"prompt": prompt, "interval": interval}
-        if label is not None:
-            payload["label"] = label
+    async def create(
+        self,
+        instruction: str,
+        interval: str | None = None,
+        label: str | None = None,
+        delivery_mode: str | None = None,
+    ) -> dict:
+        payload = {"instruction": instruction}
+        for key, value in (("interval", interval), ("label", label), ("delivery_mode", delivery_mode)):
+            if value is not None:
+                payload[key] = value
         return await host_request("rlm_heartbeat.create", payload)
 
-    async def list(self) -> list:
-        return await host_request("rlm_heartbeat.list", {})
+    async def list(self, include_inactive: bool = False) -> list:
+        return await host_request("rlm_heartbeat.list", {"include_inactive": bool(include_inactive)})
 
-    async def update(self, id: str, *, status: str) -> dict:
-        return await host_request("rlm_heartbeat.update", {"id": id, "status": status})
+    async def update(
+        self,
+        id: str,
+        instruction: str | None = None,
+        interval: str | None = None,
+        label: str | None = None,
+        status: str | None = None,
+        delivery_mode: str | None = None,
+    ) -> dict:
+        payload = {"id": id}
+        for key, value in (
+            ("instruction", instruction),
+            ("interval", interval),
+            ("label", label),
+            ("status", status),
+            ("delivery_mode", delivery_mode),
+        ):
+            if value is not None:
+                payload[key] = value
+        return await host_request("rlm_heartbeat.update", payload)
+
+    async def delete(self, id: str) -> dict:
+        return await host_request("rlm_heartbeat.delete", {"id": id})
 
 
 harness = _Harness()
