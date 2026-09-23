@@ -547,6 +547,10 @@ class _AgentObserve:
         reply = await host_request("agent_observe.list_agents", {})
         return reply.get("agents", [])
 
+    async def get_agent(self, target) -> dict:
+        reply = await host_request("agent_observe.get_agent", {"target": _child_target(target)})
+        return reply.get("agent", {})
+
     async def recent_messages(self, target, *, limit: int = 8, max_chars: int = 800) -> list:
         reply = await host_request(
             "agent_observe.recent_messages",

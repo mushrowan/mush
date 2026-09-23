@@ -607,6 +607,23 @@ impl Family {
         views
     }
 
+    pub fn get_agent(&self, caller: &Identity, target: &str) -> Result<AgentView, String> {
+        let mut matches = self.roster(caller).into_iter().filter(|view| {
+            view.name == target
+                || view.session_id == target
+                || view.rlm_child_id.as_deref() == Some(target)
+        });
+        let found = matches
+            .next()
+            .ok_or_else(|| format!("{target} is not you, your parent, a sibling or a child"))?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "{target} names more than one agent, use its session id"
+            ));
+        }
+        Ok(found)
+    }
+
     pub async fn recent_messages(
         &self,
         caller: &Identity,
@@ -2164,6 +2181,15 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             "agent_observe.list_agents" => Ok(serde_json::json!({
                 "agents": self.family.roster(&self.identity),
             })),
+            "agent_observe.get_agent" => {
+                let target = str_field("target")
+                    .ok_or_else(|| mush_kernel::HostError("target is required".into()))?;
+                let agent = self
+                    .family
+                    .get_agent(&self.identity, &target)
+                    .map_err(mush_kernel::HostError)?;
+                Ok(serde_json::json!({ "agent": agent }))
+            }
             "agent_observe.recent_messages" => {
                 let target = str_field("target")
                     .ok_or_else(|| mush_kernel::HostError("target is required".into()))?;
@@ -2522,6 +2548,14 @@ mod tests {
                 ("child".into(), "beta".into()),
             ]
         );
+
+        let gamma = family.get_agent(&alpha, "gamma").unwrap();
+        assert_eq!(gamma.relationship, "child");
+        assert_eq!(
+            family.get_agent(&alpha, "root").unwrap().relationship,
+            "parent"
+        );
+        assert!(family.get_agent(&root, "gamma").is_err());
 
         let mut alpha_view: Vec<(String, String)> = family
             .roster(&alpha)
