@@ -447,7 +447,9 @@ impl Family {
         self.lock()
             .children
             .values()
-            .filter(|node| node.summary.parent == caller.id)
+            .filter(|node| {
+                node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted
+            })
             .map(|node| node.summary.clone())
             .collect()
     }
@@ -518,7 +520,10 @@ impl Family {
                     }
                 }
                 for node in inner.children.values() {
-                    if &node.summary.id != id && node.summary.parent == parent {
+                    if &node.summary.id != id
+                        && node.summary.parent == parent
+                        && node.summary.status != ChildStatus::Deleted
+                    {
                         views.push(view_of(
                             &node.summary,
                             "sibling",
@@ -530,7 +535,7 @@ impl Family {
             }
         }
         for node in inner.children.values() {
-            if node.summary.parent == caller.id {
+            if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
                 views.push(view_of(
                     &node.summary,
                     "child",
@@ -594,6 +599,7 @@ impl Family {
         let inner = self.lock();
         let mut matches = inner.children.values().filter(|node| {
             node.summary.parent == caller.id
+                && node.summary.status != ChildStatus::Deleted
                 && (node.summary.id == target || node.summary.name == target)
         });
         let found = matches
@@ -2568,6 +2574,43 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].status, ChildStatus::Deleted);
         assert_eq!(entries[0].progress_note.as_deref(), Some("halfway"));
+    }
+
+    #[tokio::test]
+    async fn a_name_reused_after_delete_resolves_to_the_live_child() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "one".into(), "w".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+        family.delete(&root, "w").await.unwrap();
+        let second = family
+            .spawn(&root, "two".into(), "w".into(), None, None, &family)
+            .await
+            .unwrap();
+
+        let listed = family.children_of(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, second.rlm_child_id);
+        let collected = family
+            .collect(&root, vec!["w".into()], Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(collected[0].id, second.rlm_child_id);
+        assert_eq!(
+            family
+                .roster(&root)
+                .iter()
+                .filter(|view| view.relationship == "child")
+                .count(),
+            1
+        );
+        assert_eq!(family.all().len(), 2);
+        let deleted = family.delete(&root, "w").await.unwrap();
+        assert_eq!(deleted.id, second.rlm_child_id);
     }
 
     #[tokio::test]
