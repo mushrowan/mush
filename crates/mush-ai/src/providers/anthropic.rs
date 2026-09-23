@@ -441,8 +441,7 @@ enum RequestTool {
         name: String,
         description: String,
         input_schema: serde_json::Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        eager_input_streaming: Option<bool>,
+        eager_input_streaming: bool,
     },
     Advisor {
         #[serde(rename = "type")]
@@ -700,12 +699,12 @@ fn build_request_headers(
         headers.insert("authorization", auth);
     } else {
         let key = api_key.expose();
-        headers.insert(
-            "anthropic-beta",
-            HeaderValue::from_static(
-                "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14",
-            ),
-        );
+        if !model.supports_adaptive_thinking {
+            headers.insert(
+                "anthropic-beta",
+                HeaderValue::from_static("interleaved-thinking-2025-05-14"),
+            );
+        }
         let mut api_key_hv = HeaderValue::from_str(key)?;
         api_key_hv.set_sensitive(true);
         headers.insert("x-api-key", api_key_hv);
@@ -779,7 +778,7 @@ fn convert_tools(
                     name,
                     description: tool.description.clone(),
                     input_schema: tool.parameters.clone(),
-                    eager_input_streaming: is_oauth.then_some(true),
+                    eager_input_streaming: true,
                 },
             )
         })
@@ -3579,6 +3578,43 @@ mod tests {
             body.system.unwrap()[0].text,
             "x-anthropic-billing-header: cc_version=2.1.280.335; cc_entrypoint=cli; cch=00000;"
         );
+    }
+
+    #[test]
+    fn api_key_requests_send_interleaved_thinking_only_for_budget_models_and_stream_tools_eagerly()
+    {
+        let key = ApiKey::new("sk-ant-api03-test").unwrap();
+        let budget = Model {
+            supports_adaptive_thinking: false,
+            ..test_model()
+        };
+        let headers =
+            build_request_headers(&budget, &StreamOptions::default(), &key, false).unwrap();
+        assert_eq!(headers["anthropic-beta"], "interleaved-thinking-2025-05-14");
+
+        let adaptive = Model {
+            supports_adaptive_thinking: true,
+            ..test_model()
+        };
+        let headers =
+            build_request_headers(&adaptive, &StreamOptions::default(), &key, false).unwrap();
+        assert!(headers.get("anthropic-beta").is_none());
+
+        let tools = [ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let body = build_request_body(
+            &budget,
+            &None,
+            &[],
+            &tools,
+            &StreamOptions::default(),
+            false,
+        );
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["tools"][0]["eager_input_streaming"], true);
     }
 
     #[test]
