@@ -12,6 +12,7 @@ pub enum SkillSource {
     Project,
     User,
     AgentsMd,
+    Bundled,
 }
 
 impl SkillSource {
@@ -22,6 +23,7 @@ impl SkillSource {
             Self::Project => "project",
             Self::User => "user",
             Self::AgentsMd => "agents.md",
+            Self::Bundled => "bundled",
         }
     }
 }
@@ -133,17 +135,18 @@ fn validate_description(description: Option<&str>) -> Vec<String> {
 }
 
 pub fn load_skill_file(path: &Path, source: SkillSource) -> ScanResult {
+    match std::fs::read_to_string(path) {
+        Ok(content) => parse_skill(&content, path, source),
+        Err(error) => ScanResult {
+            skills: Vec::new(),
+            diagnostics: vec![SkillDiagnostic::warning(path, error.to_string())],
+        },
+    }
+}
+
+pub fn parse_skill(content: &str, path: &Path, source: SkillSource) -> ScanResult {
     let mut result = ScanResult::default();
-    let content = match std::fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) => {
-            result
-                .diagnostics
-                .push(SkillDiagnostic::warning(path, error.to_string()));
-            return result;
-        }
-    };
-    let Some(frontmatter) = parse_frontmatter(&content) else {
+    let Some(frontmatter) = parse_frontmatter(content) else {
         result
             .diagnostics
             .push(SkillDiagnostic::warning(path, "missing frontmatter"));

@@ -230,6 +230,9 @@ impl AppSetup {
         providers::register_builtins(&mut registry, http_client.clone());
 
         let rlm = cfg.rlm;
+        if rlm && let Err(error) = crate::bundled_skills::install(&crate::bundled_skills::root()) {
+            tracing::warn!("bundled skills: {error}");
+        }
         let classic_tools = !args.no_tools && !rlm;
         let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
         let orphans = mush_tools::orphans::OrphanJournal::at(
@@ -791,18 +794,16 @@ pub fn build_rlm_system_prompt(
         prompt.push_str(&role_sections);
     }
     push_project_context(&mut prompt, &context.agents_md);
-    if context
-        .skills
-        .iter()
-        .any(|skill| !skill.disable_model_invocation)
-    {
+    let skills =
+        crate::bundled_skills::with_discovered(&context.skills, &crate::bundled_skills::root());
+    if skills.iter().any(|skill| !skill.disable_model_invocation) {
         prompt.push_str(
             "\n\nSkills provide specialised instructions for specific tasks. When a task matches a \
              skill's description, read its SKILL.md with `Path(location).read_text()` before \
              acting, and resolve relative paths in it against the skill's directory. If the user \
              names a skill with `$skill-name`, read it first.\n\n",
         );
-        prompt.push_str(&format_available_skills(&context.skills));
+        prompt.push_str(&format_available_skills(&skills));
     }
     if custom.is_some() {
         push_date_and_cwd(&mut prompt, &cwd_str);
@@ -1274,6 +1275,51 @@ mod tests {
         assert!(!prompt.contains("Use the skill tool"));
         assert!(!prompt.contains("Batch tool"));
         assert!(!prompt.contains("goal.fail"));
+    }
+
+    #[test]
+    fn the_rlm_prompt_lists_bundled_skills_unless_a_discovered_one_takes_the_name() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard::set(&[("MUSH_DATA_DIR", Some("/data/mush"))]);
+        let bundled = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(2),
+        );
+        assert!(bundled.contains("<name>goal</name>"));
+        assert!(bundled.contains("<location>/data/mush/bundled-skills/goal/SKILL.md</location>"));
+        assert!(
+            bundled
+                .contains("<location>/data/mush/bundled-skills/rlm-heartbeat/SKILL.md</location>")
+        );
+
+        let context = ProjectContext {
+            skills: vec![Skill {
+                name: "goal".into(),
+                description: "the project goal skill".into(),
+                path: "/repo/.mush/skills/goal/SKILL.md".into(),
+                source: mush_ext::SkillSource::Project,
+                disable_model_invocation: false,
+            }],
+            ..ProjectContext::default()
+        };
+        let overridden = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(2),
+        );
+        assert_eq!(overridden.matches("<name>goal</name>").count(), 1);
+        assert!(overridden.contains("<location>/repo/.mush/skills/goal/SKILL.md</location>"));
+        assert!(!overridden.contains("/data/mush/bundled-skills/goal/"));
+        assert!(overridden.contains("<name>rlm-heartbeat</name>"));
+
+        let classic = build_system_prompt_from_context(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+        );
+        assert!(!classic.contains("bundled-skills"));
     }
 
     #[test]

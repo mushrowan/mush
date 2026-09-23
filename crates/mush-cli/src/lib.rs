@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod bundled_skills;
 pub mod commands;
 pub mod config;
 pub mod control;
