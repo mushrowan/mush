@@ -1709,11 +1709,16 @@ fn an_ipython_cell_collapses_to_a_preview_and_expands_with_detail() {
     assert!(!overview.contains("import re"), "{overview}");
     assert_eq!(overview.lines().filter(|l| l.contains("python")).count(), 1);
 
-    app.cycle_detail();
+    app.detail = ChatDetail::Details;
     let details = rendered_text(&all_lines(&app, 80));
-    assert!(details.contains(" \u{2570}\u{2500} import re"), "{details}");
-    assert!(details.contains("    len(matches)"), "{details}");
-    assert!(details.contains("  \u{203a} 3"), "{details}");
+    assert!(!details.contains("import re"), "{details}");
+    assert!(!details.contains("\u{203a} 3"), "{details}");
+
+    app.detail = ChatDetail::All;
+    let all = rendered_text(&all_lines(&app, 80));
+    assert!(all.contains(" \u{2570}\u{2500} import re"), "{all}");
+    assert!(all.contains("    len(matches)"), "{all}");
+    assert!(all.contains("  \u{203a} 3"), "{all}");
 }
 
 fn cell_details() -> mush_tools::ipython::CellDetails {
@@ -1757,25 +1762,55 @@ fn a_structured_cell_shows_duration_output_and_the_edit_summary_by_detail_level(
     app.messages
         .push(cell_message(cell_details(), ToolCallStatus::Done));
 
+    app.detail = ChatDetail::Overview;
     let overview = rendered_text(&all_lines(&app, 90));
     assert!(
         overview.contains("\u{2191} 2 \u{2193} 2 lines \u{b7} 1.2s"),
         "{overview}"
     );
+    assert!(
+        overview.contains("    \u{2570}\u{2500} /repo/a.txt +1 -1"),
+        "{overview}"
+    );
     assert!(!overview.contains("hello there"), "{overview}");
+    assert!(!overview.contains("\u{203a} one"), "{overview}");
 
     app.detail = ChatDetail::Details;
     let details = rendered_text(&all_lines(&app, 90));
-    assert!(details.contains("  \u{203a} one"), "{details}");
-    assert!(details.contains("    two"), "{details}");
-    assert!(!details.contains("edited /repo/a.txt"), "{details}");
     assert!(details.contains("/repo/a.txt +1 -1"), "{details}");
-    assert!(!details.contains("+ hello there"), "{details}");
-    assert!(details.contains("2 images sent to the model"), "{details}");
+    assert!(details.contains("hello there"), "{details}");
+    assert!(!details.contains("await edit("), "{details}");
+    assert!(!details.contains("\u{203a} one"), "{details}");
+    assert!(!details.contains("images sent"), "{details}");
 
     app.detail = ChatDetail::All;
     let all = rendered_text(&all_lines(&app, 90));
+    assert!(all.contains("    await edit("), "{all}");
+    assert!(all.contains("/repo/a.txt +1 -1"), "{all}");
     assert!(all.contains("hello there"), "{all}");
+    assert!(all.contains("  \u{203a} one"), "{all}");
+    assert!(all.contains("    two"), "{all}");
+    assert!(!all.contains("edited /repo/a.txt"), "{all}");
+    assert!(all.contains("2 images sent to the model"), "{all}");
+}
+
+#[test]
+fn a_full_cell_keeps_every_output_line() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let stdout: String = (1..=40).map(|n| format!("row {n}\n")).collect();
+    app.messages.push(cell_message(
+        mush_tools::ipython::CellDetails {
+            stdout,
+            ..cell_details()
+        },
+        ToolCallStatus::Done,
+    ));
+
+    app.detail = ChatDetail::All;
+    let all = rendered_text(&all_lines(&app, 90));
+    assert!(all.contains("  \u{203a} row 1\n"), "{all}");
+    assert!(all.contains("row 20"), "{all}");
+    assert!(all.contains("row 40"), "{all}");
 }
 
 #[test]
@@ -1799,16 +1834,25 @@ fn a_sent_agent_message_shows_as_a_row_and_hides_the_receipt_dict() {
     };
     app.messages.push(cell_message(cell, ToolCallStatus::Done));
 
-    app.detail = ChatDetail::Details;
-    let details = rendered_text(&all_lines(&app, 90));
-    assert!(details.contains("agent message sent"), "{details}");
-    assert!(details.contains("auth (delivered)"), "{details}");
-    assert!(!details.contains("receipts"), "{details}");
-    assert!(!details.contains("regression test"), "{details}");
+    for detail in [ChatDetail::Overview, ChatDetail::Details] {
+        app.detail = detail;
+        let text = rendered_text(&all_lines(&app, 90));
+        assert!(
+            text.contains(" \u{25c6} agent message sent \u{b7} auth (delivered)"),
+            "{text}"
+        );
+        assert!(!text.contains("receipts"), "{text}");
+        assert!(!text.contains("regression test"), "{text}");
+    }
 
     app.detail = ChatDetail::All;
     let all = rendered_text(&all_lines(&app, 90));
-    assert!(all.contains("check the regression test too"), "{all}");
+    assert!(all.contains("agent message sent"), "{all}");
+    assert!(
+        all.contains(" \u{2570}\u{2500} check the regression test too"),
+        "{all}"
+    );
+    assert!(!all.contains("receipts"), "{all}");
 }
 
 #[test]
@@ -1846,9 +1890,13 @@ fn a_failed_cell_names_the_error_on_top_and_keeps_the_traceback_for_details() {
 
     app.detail = ChatDetail::Details;
     let details = rendered_text(&all_lines(&app, 90));
+    assert!(!details.contains("Traceback"), "{details}");
+
+    app.detail = ChatDetail::All;
+    let all = rendered_text(&all_lines(&app, 90));
     assert!(
-        details.contains("  \u{203a} Traceback (most recent call last):"),
-        "{details}"
+        all.contains("  \u{203a} Traceback (most recent call last):"),
+        "{all}"
     );
 }
 
@@ -1859,7 +1907,7 @@ fn a_running_cell_pulses_and_waits_for_output() {
     cell.tool_calls[0].cell = None;
     cell.tool_calls[0].output = None;
     app.messages.push(cell);
-    app.detail = ChatDetail::Details;
+    app.detail = ChatDetail::All;
 
     let first = rendered_text(&all_lines(&app, 90));
     assert!(first.contains("waiting for output..."), "{first}");
@@ -1905,14 +1953,17 @@ fn an_attached_bash_done_shows_only_when_the_cell_is_expanded() {
         ..DisplayMessage::new(MessageRole::Assistant, "")
     });
 
-    let overview = buffer_to_string(&render_app(&app, 70, 8));
-    assert!(!overview.contains("background shell command"), "{overview}");
+    for detail in [ChatDetail::Overview, ChatDetail::Details] {
+        app.detail = detail;
+        let text = buffer_to_string(&render_app(&app, 70, 8));
+        assert!(!text.contains("background shell command"), "{text}");
+    }
 
-    app.detail = ChatDetail::Details;
-    let details = buffer_to_string(&render_app(&app, 70, 8));
+    app.detail = ChatDetail::All;
+    let all = buffer_to_string(&render_app(&app, 70, 8));
     assert!(
-        details.contains("background shell command finished · pid 4242"),
-        "{details}"
+        all.contains("background shell command finished · pid 4242"),
+        "{all}"
     );
 }
 

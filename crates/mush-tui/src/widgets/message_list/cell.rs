@@ -5,13 +5,15 @@ use super::{
     HEADER_SEPARATOR, MessageStyle, char_cell_width, code_preview, spans_cell_width,
     tool_status_label, wrap_styled_spans,
 };
-use crate::app::{ChatDetail, DisplayToolCall, ToolCallStatus};
+use crate::app::{DisplayToolCall, ToolCallStatus};
 use crate::theme::Theme;
 use crate::widgets::working_icon::WORKING_ICON_FRAMES;
 
 const CODE_GUTTER: &str = "\u{2570}\u{2500} ";
 const OUTPUT_GUTTER: &str = " \u{203a} ";
 const INDENT: &str = "   ";
+const FILE_GUTTER: &str = "   \u{2570}\u{2500} ";
+const SENT_GUTTER: &str = "\u{25c6} ";
 
 pub(super) fn render_cell(
     tc: &DisplayToolCall,
@@ -22,14 +24,12 @@ pub(super) fn render_cell(
     let theme = style.theme;
     let cell = tc.cell.as_ref();
     let code = tc.summary.trim_end();
-    let output = CellOutputView::new(tc, style.detail, theme);
+    let output = CellOutputView::new(tc, theme);
+    let expanded = style.detail.shows_full_output();
 
     lines.push(top_line(tc, code, &output, width, style));
-    if !style.detail.shows_thinking() {
-        return;
-    }
 
-    let has_code = !code.is_empty();
+    let has_code = expanded && !code.is_empty();
     if has_code {
         for (index, raw) in code.lines().enumerate() {
             let gutter = if index == 0 { CODE_GUTTER } else { INDENT };
@@ -37,6 +37,18 @@ pub(super) fn render_cell(
                 .unwrap_or_else(|| vec![Span::styled(raw.to_string(), theme.code_block)]);
             push_gutter(lines, gutter, theme.dim, spans, width);
         }
+    }
+
+    if let Some(cell) = cell {
+        if has_code && !cell.diffs.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        render_diffs(cell, width, lines, style);
+        render_sent_messages(cell, width, lines, style);
+    }
+
+    if !expanded {
+        return;
     }
 
     let mut gutter = OutputGutter::new(has_code);
@@ -56,7 +68,10 @@ pub(super) fn render_cell(
     if output.blocks.is_empty() {
         let placeholder = match tc.status {
             ToolCallStatus::Running => Some("waiting for output..."),
-            _ if cell.is_none_or(|cell| cell.diffs.is_empty() && cell.images == 0) => {
+            _ if cell.is_none_or(|cell| {
+                cell.diffs.is_empty() && cell.sent_messages.is_empty() && cell.images == 0
+            }) =>
+            {
                 Some("no output")
             }
             _ => None,
@@ -73,23 +88,21 @@ pub(super) fn render_cell(
         }
     }
 
-    if let Some(cell) = cell {
-        render_diffs(cell, width, lines, style, &mut gutter);
-        render_sent_messages(cell, width, lines, style, &mut gutter);
-        if cell.images > 0 {
-            let plural = if cell.images == 1 { "" } else { "s" };
-            let gutter_text = gutter.next(lines);
-            push_gutter(
-                lines,
-                gutter_text,
+    if let Some(cell) = cell
+        && cell.images > 0
+    {
+        let plural = if cell.images == 1 { "" } else { "s" };
+        let gutter_text = gutter.next(lines);
+        push_gutter(
+            lines,
+            gutter_text,
+            theme.dim,
+            vec![Span::styled(
+                format!("{} image{plural} sent to the model", cell.images),
                 theme.dim,
-                vec![Span::styled(
-                    format!("{} image{plural} sent to the model", cell.images),
-                    theme.dim,
-                )],
-                width,
-            );
-        }
+            )],
+            width,
+        );
     }
 
     if let Some(done) = &tc.bash_done {
@@ -181,7 +194,7 @@ struct CellOutputView {
 }
 
 impl CellOutputView {
-    fn new(tc: &DisplayToolCall, detail: ChatDetail, theme: &Theme) -> Self {
+    fn new(tc: &DisplayToolCall, theme: &Theme) -> Self {
         let mut blocks = Vec::new();
         let mut raw_lines = 0;
         let mut push = |text: &str, style: Style, blocks: &mut Vec<OutputBlock>| {
@@ -190,12 +203,10 @@ impl CellOutputView {
                 return;
             }
             raw_lines += text.lines().count();
-            let shown = if detail.shows_full_output() {
-                text.to_string()
-            } else {
-                crate::batch_output::truncate_output(text)
-            };
-            blocks.push(OutputBlock { text: shown, style });
+            blocks.push(OutputBlock {
+                text: text.to_string(),
+                style,
+            });
         };
         match &tc.cell {
             Some(cell) => {
@@ -251,28 +262,30 @@ fn render_sent_messages(
     width: usize,
     lines: &mut Vec<Line<'static>>,
     style: &MessageStyle<'_>,
-    gutter: &mut OutputGutter,
 ) {
     let theme = style.theme;
+    let expanded = style.detail.shows_full_output();
     for sent in &cell.sent_messages {
-        let gutter_text = gutter.next(lines);
+        if expanded {
+            lines.push(Line::raw(""));
+        }
         push_gutter(
             lines,
-            gutter_text,
+            SENT_GUTTER,
             theme.dim,
             vec![
                 Span::styled("agent message sent", theme.tool_output),
-                Span::styled(format!(" {HEADER_SEPARATOR} {}", sent.receiver), theme.dim),
+                Span::styled(format!("{HEADER_SEPARATOR}{}", sent.receiver), theme.dim),
                 Span::styled(format!(" ({})", sent.status), theme.dim),
             ],
             width,
         );
-        if style.detail.shows_full_output() {
-            for text_line in sent.text.lines() {
-                let gutter_text = gutter.next(lines);
+        if expanded {
+            for (index, text_line) in sent.text.lines().enumerate() {
+                let gutter = if index == 0 { CODE_GUTTER } else { INDENT };
                 push_gutter(
                     lines,
-                    gutter_text,
+                    gutter,
                     theme.dim,
                     vec![Span::styled(text_line.to_string(), theme.dim)],
                     width,
@@ -287,7 +300,6 @@ fn render_diffs(
     width: usize,
     lines: &mut Vec<Line<'static>>,
     style: &MessageStyle<'_>,
-    gutter: &mut OutputGutter,
 ) {
     let theme = style.theme;
     let mut by_path: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -302,10 +314,9 @@ fn render_diffs(
             let (da, dr) = count_changed_lines(diff);
             (a + da, r + dr)
         });
-        let gutter_text = gutter.next(lines);
         push_gutter(
             lines,
-            gutter_text,
+            FILE_GUTTER,
             theme.dim,
             vec![
                 Span::styled(path.to_string(), theme.tool_output),
@@ -316,7 +327,7 @@ fn render_diffs(
             ],
             width,
         );
-        if !style.detail.shows_full_output() {
+        if !style.detail.shows_diffs() {
             continue;
         }
         let lang = crate::syntax::lang_from_path(path);

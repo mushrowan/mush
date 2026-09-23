@@ -135,6 +135,11 @@ impl ChatDetail {
     }
 
     #[must_use]
+    pub const fn shows_diffs(self) -> bool {
+        !matches!(self, Self::Overview)
+    }
+
+    #[must_use]
     pub const fn shows_full_output(self) -> bool {
         matches!(self, Self::All)
     }
