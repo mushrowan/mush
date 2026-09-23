@@ -4,6 +4,7 @@ use mush_daemon::{SupervisorReply, SupervisorRequest, WorkerDescriptor};
 use mush_session::SessionMeta;
 use mush_session::SessionStore;
 use serde::Serialize;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::output::Style;
 
@@ -60,12 +61,29 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+fn cell(text: &str) -> String {
+    mush_tui::widgets::top_bar::sanitise_title(&mush_tui::widgets::ansi::strip_ansi(text))
+}
+
 fn clip(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_string();
     }
-    let kept: String = text.chars().take(width.saturating_sub(1)).collect();
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let next = used + c.width().unwrap_or(0);
+        if next > width.saturating_sub(1) {
+            break;
+        }
+        used = next;
+        kept.push(c);
+    }
     format!("{}…", kept.trim_end())
+}
+
+fn pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
 }
 
 fn age(updated_at: u64) -> String {
@@ -133,18 +151,18 @@ pub fn table(rows: &[AgentRow]) -> String {
         .iter()
         .map(|row| {
             [
-                clip(&row.name, NAME_WIDTH),
+                clip(&cell(&row.name), NAME_WIDTH),
                 if row.stale {
-                    format!("{} *", row.id)
+                    format!("{} *", cell(&row.id))
                 } else {
-                    row.id.clone()
+                    cell(&row.id)
                 },
                 row.status.label().to_string(),
                 age(row.updated_at),
-                row.model.clone(),
+                cell(&row.model),
                 row.messages.to_string(),
                 row.clients.to_string(),
-                row.failed.clone().unwrap_or_else(|| row.cwd.clone()),
+                cell(row.failed.as_deref().unwrap_or(&row.cwd)),
             ]
         })
         .collect();
@@ -154,7 +172,7 @@ pub fn table(rows: &[AgentRow]) -> String {
     let mut widths = headers.map(str::len);
     for row in &cells {
         for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.chars().count());
+            *width = (*width).max(cell.width());
         }
     }
     let mut out = String::new();
@@ -171,7 +189,7 @@ pub fn table(rows: &[AgentRow]) -> String {
             .zip(widths)
             .enumerate()
             .map(|(column, (value, width))| {
-                let padded = format!("{value:<width$}");
+                let padded = pad(value, width);
                 match column {
                     2 => row.status.style().stdout(padded).to_string(),
                     7 => Style::Dim.stdout(padded).to_string(),
@@ -366,6 +384,44 @@ mod tests {
         assert!(lines[1].contains("aaaaaaaa"));
         assert!(lines[1].contains("idle"));
         assert!(lines[1].ends_with("/tmp"));
+    }
+
+    #[test]
+    fn wide_names_line_up_by_display_width() {
+        let mut wide = worker("aaaaaaaa1", false, 100);
+        wide.title = Some("日本語".into());
+        let mut narrow = worker("bbbbbbbb2", false, 90);
+        narrow.title = Some("narrow".into());
+        let rendered = table(&rows(&[wide, narrow], &[]));
+        let columns: Vec<usize> = rendered
+            .lines()
+            .skip(1)
+            .map(|line| {
+                line[..line
+                    .find("bbbbbbbb")
+                    .or_else(|| line.find("aaaaaaaa"))
+                    .unwrap()]
+                    .width()
+            })
+            .collect();
+        assert_eq!(columns[0], columns[1], "{rendered}");
+    }
+
+    #[test]
+    fn a_long_wide_name_is_clipped_to_the_column_width() {
+        let clipped = clip(&"字".repeat(40), NAME_WIDTH);
+        assert!(clipped.width() <= NAME_WIDTH, "{clipped}");
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn a_name_loses_its_escapes_controls_and_newlines() {
+        let mut noisy = worker("aaaaaaaa1", false, 100);
+        noisy.title = Some("\x1b[31mred\x1b[0m\nline\ttwo\x07".into());
+        let rendered = table(&rows(&[noisy], &[]));
+        assert_eq!(rendered.lines().count(), 2, "{rendered:?}");
+        assert!(rendered.contains("red line two "), "{rendered:?}");
+        assert!(!rendered.contains('\x07'));
     }
 
     #[test]
