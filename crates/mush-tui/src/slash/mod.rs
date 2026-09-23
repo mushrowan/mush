@@ -68,6 +68,8 @@ pub enum SlashParseError {
         "usage: /compact [--context-budget <count>] [instructions] (budget e.g. 10k, 1024, 1.5k, 1m)"
     )]
     CompactUsage,
+    #[error("{0}. usage: /new [--name <name> --] [prompt]")]
+    NewUsage(String),
     #[error("invalid context budget: {0}")]
     InvalidContextBudget(#[from] TokenCountParseError),
 }
@@ -82,7 +84,10 @@ pub enum SlashAction {
     Help,
     Keys,
     Clear,
-    New,
+    New {
+        name: Option<String>,
+        prompt: Option<String>,
+    },
     Model {
         model_id: Option<String>,
         show_all: bool,
@@ -184,7 +189,7 @@ impl SlashAction {
         !matches!(
             self,
             Self::Clear
-                | Self::New
+                | Self::New { .. }
                 | Self::Resume { .. }
                 | Self::Branch { .. }
                 | Self::NavigateTree { .. }
@@ -478,6 +483,86 @@ fn parse_schedule(args: &str) -> Result<ScheduleAction, SlashParseError> {
     }
 }
 
+fn strip_flag<'a>(args: &'a str, flag: &str) -> Option<&'a str> {
+    args.strip_prefix(flag)
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn new_usage(reason: impl Into<String>) -> SlashParseError {
+    SlashParseError::NewUsage(reason.into())
+}
+
+fn new_prompt(rest: &str) -> Result<Option<String>, SlashParseError> {
+    let prompt = rest.trim();
+    if prompt.is_empty() {
+        return Err(new_usage("missing prompt after --"));
+    }
+    Ok(Some(prompt.to_string()))
+}
+
+fn parse_new(args: &str) -> Result<SlashAction, SlashParseError> {
+    if args.is_empty() {
+        return Ok(SlashAction::New {
+            name: None,
+            prompt: None,
+        });
+    }
+    if !args.starts_with('-') {
+        return Ok(SlashAction::New {
+            name: None,
+            prompt: Some(args.to_string()),
+        });
+    }
+    if let Some(rest) = strip_flag(args, "--") {
+        return Ok(SlashAction::New {
+            name: None,
+            prompt: new_prompt(rest)?,
+        });
+    }
+    let first_word = |text: &str| text.split_whitespace().next().unwrap_or(text).to_string();
+    let Some(rest) = strip_flag(args, "--name") else {
+        return Err(new_usage(format!("unknown option {}", first_word(args))));
+    };
+    let rest = rest.trim_start();
+    if strip_flag(rest, "--name").is_some() {
+        return Err(new_usage("--name given twice"));
+    }
+    if rest.is_empty() || rest.starts_with('-') {
+        return Err(new_usage("missing value for --name"));
+    }
+    let (name, rest) = match rest.chars().next() {
+        Some(quote @ ('"' | '\'')) => rest[1..]
+            .split_once(quote)
+            .ok_or_else(|| new_usage("unterminated quote in --name"))?,
+        _ => rest.split_once(char::is_whitespace).unwrap_or((rest, "")),
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(new_usage("--name cannot be empty"));
+    }
+    let name = Some(name.to_string());
+    if rest.is_empty() {
+        return Ok(SlashAction::New { name, prompt: None });
+    }
+    if !rest.starts_with(char::is_whitespace) {
+        return Err(new_usage("expected -- before the prompt"));
+    }
+    let rest = rest.trim_start();
+    if strip_flag(rest, "--name").is_some() {
+        return Err(new_usage("--name given twice"));
+    }
+    if let Some(prompt) = strip_flag(rest, "--") {
+        return Ok(SlashAction::New {
+            name,
+            prompt: new_prompt(prompt)?,
+        });
+    }
+    if rest.starts_with('-') {
+        return Err(new_usage(format!("unknown option {}", first_word(rest))));
+    }
+    Err(new_usage("expected -- before the prompt"))
+}
+
 fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
     let args = args.trim();
     match args {
@@ -533,7 +618,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "system-prompt" | "system" => Ok(SlashAction::SystemPrompt),
         "help" => Ok(SlashAction::Help),
         "keys" => Ok(SlashAction::Keys),
-        "new" => Ok(SlashAction::New),
+        "new" => parse_new(args),
         "model" => {
             if args == "--all" {
                 Ok(SlashAction::Model {
@@ -1037,7 +1122,64 @@ mod tests {
 
     #[test]
     fn parse_new_command() {
-        assert_eq!(parse("/new").unwrap(), SlashAction::New);
+        assert_eq!(
+            parse("/new").unwrap(),
+            SlashAction::New {
+                name: None,
+                prompt: None,
+            }
+        );
+    }
+
+    fn new_action(name: Option<&str>, prompt: Option<&str>) -> SlashAction {
+        SlashAction::New {
+            name: name.map(Into::into),
+            prompt: prompt.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn parse_new_takes_a_name_and_a_prompt() {
+        assert_eq!(
+            parse("/new fix the bug").unwrap(),
+            new_action(None, Some("fix the bug"))
+        );
+        assert_eq!(
+            parse("/new -- --flag looking text").unwrap(),
+            new_action(None, Some("--flag looking text"))
+        );
+        assert_eq!(
+            parse("/new --name ui").unwrap(),
+            new_action(Some("ui"), None)
+        );
+        assert_eq!(
+            parse("/new --name \"port prime\" -- fix it").unwrap(),
+            new_action(Some("port prime"), Some("fix it"))
+        );
+        assert_eq!(
+            parse("/new --name 'a b'").unwrap(),
+            new_action(Some("a b"), None)
+        );
+    }
+
+    #[test]
+    fn parse_new_refuses_bad_flags() {
+        for input in [
+            "/new --bogus",
+            "/new --name",
+            "/new --name --name x",
+            "/new --name ui fix it",
+            "/new --name ui -- ",
+            "/new --name \"unterminated",
+            "/new --name ui --other",
+            "/new --",
+            "/new --name \"\"",
+        ] {
+            assert!(
+                matches!(parse(input), Err(SlashParseError::NewUsage(_))),
+                "{input}"
+            );
+        }
     }
 
     #[test]

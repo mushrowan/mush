@@ -209,7 +209,7 @@ pub(super) async fn handle_slash_action(
     let mut state_changed = false;
     let changes_conversation = matches!(
         action,
-        SlashAction::New
+        SlashAction::New { .. }
             | SlashAction::Resume { .. }
             | SlashAction::Undo
             | SlashAction::Branch { .. }
@@ -430,9 +430,33 @@ pub(super) async fn handle_slash_action(
             let report = mcp_report(tui_config.mcp.as_deref(), &query).await;
             session.app.push_system_message(report);
         }
-        SlashAction::New => {
-            run_session_command(session, tui_config, mush_runtime::SessionCommand::New).await;
+        SlashAction::New { name, prompt } => {
+            let created =
+                run_session_command(session, tui_config, mush_runtime::SessionCommand::New).await;
             state_changed = true;
+            if !created {
+                if let Some(prompt) = prompt {
+                    session.app.input.text = prompt;
+                    session.app.input.cursor = session.app.input.text.len();
+                }
+                return state_changed;
+            }
+            if let Some(title) = name
+                .map(|name| crate::widgets::top_bar::sanitise_title(&name))
+                .filter(|title| !title.is_empty())
+            {
+                run_session_command(
+                    session,
+                    tui_config,
+                    mush_runtime::SessionCommand::Name { title: Some(title) },
+                )
+                .await;
+            }
+            if let Some(prompt) = prompt {
+                session.app.push_user_message(prompt.clone());
+                session.app.start_streaming();
+                *pending_prompt = Some(prompt);
+            }
         }
         SlashAction::Fork { index: Some(index) } => {
             state_changed = run_session_command(
@@ -1078,6 +1102,35 @@ mod tests {
 
         assert_eq!(config.session_id, old_id);
         assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+    }
+
+    #[test]
+    fn new_with_a_name_and_prompt_names_the_fresh_session_and_sends_the_prompt() {
+        let mut session = conversation_session(vec![user("old")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+        let mut pending_prompt = None;
+
+        futures::executor::block_on(handle_slash_action(
+            &mut session,
+            SlashAction::New {
+                name: Some("port prime".into()),
+                prompt: Some("fix it".into()),
+            },
+            SlashEnv {
+                tui_config: &mut config,
+                thinking_prefs: &ThinkingPrefs::default(),
+                cwd: std::path::Path::new("/tmp"),
+                pending_prompt: &mut pending_prompt,
+            },
+        ));
+
+        assert_ne!(config.session_id, old_id);
+        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+        assert_eq!(pending_prompt.as_deref(), Some("fix it"));
+        let last = session.app.messages.last().expect("the prompt shows");
+        assert_eq!(last.role, crate::app::MessageRole::User);
+        assert_eq!(last.content, "fix it");
     }
 
     #[test]

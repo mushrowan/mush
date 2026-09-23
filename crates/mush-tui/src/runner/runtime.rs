@@ -22,7 +22,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "autonomous",
         "keep working without a human until gates pass or a limit",
     ),
-    ("new", "save session, start fresh"),
+    (
+        "new",
+        "save session, start fresh ([--name <name> --] [prompt])",
+    ),
     ("model", "show or switch model"),
     ("sessions", "browse and resume sessions"),
     ("resume", "browse sessions, or resume one by id"),

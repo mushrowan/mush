@@ -269,7 +269,10 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     let old_session = control.target().session;
     super::commands::handle_slash_action(
         &mut runtime.session,
-        crate::slash::SlashAction::New,
+        crate::slash::SlashAction::New {
+            name: None,
+            prompt: None,
+        },
         super::commands::SlashEnv {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
@@ -298,7 +301,10 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
     assert_eq!(outcome(&control, "previous-session"), Outcome::Completed);
     super::commands::handle_slash_action(
         &mut runtime.session,
-        crate::slash::SlashAction::New,
+        crate::slash::SlashAction::New {
+            name: None,
+            prompt: None,
+        },
         super::commands::SlashEnv {
             tui_config: &mut config,
             thinking_prefs: &runtime.thinking_prefs,
@@ -1091,7 +1097,10 @@ async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
         runtime.session.app.stream.active = active;
         let changed = super::commands::handle_slash_action(
             &mut runtime.session,
-            crate::slash::SlashAction::New,
+            crate::slash::SlashAction::New {
+                name: None,
+                prompt: None,
+            },
             super::commands::SlashEnv {
                 tui_config: &mut config,
                 thinking_prefs: &runtime.thinking_prefs,

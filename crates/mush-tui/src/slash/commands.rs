@@ -141,7 +141,7 @@ pub async fn handle(
             app.push_system_message(keys);
             None
         }
-        SlashAction::New
+        SlashAction::New { .. }
         | SlashAction::Fork { index: Some(_) }
         | SlashAction::Clone
         | SlashAction::Clear
