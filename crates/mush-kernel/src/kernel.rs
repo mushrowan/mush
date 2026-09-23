@@ -357,7 +357,9 @@ impl Kernel {
             if started.elapsed() >= self.busy_wait {
                 return Err(KernelError::Busy);
             }
-            let _ = self.interrupt().await;
+            if let Some(id) = self.shared.running() {
+                let _ = self.interrupt_cell(&id).await;
+            }
             let _ =
                 tokio::time::timeout(BUSY_INTERRUPT_INTERVAL, self.shared.idle.notified()).await;
         }

@@ -210,31 +210,31 @@ async fn a_rejected_host_request_raises_in_the_cell() {
 }
 
 #[tokio::test]
-async fn an_interrupt_that_beats_its_cell_is_parked_and_delivered_on_start() {
-    let kernel = Arc::new(kernel().await);
+async fn a_bare_interrupt_with_nothing_running_is_dropped() {
+    let kernel = kernel().await;
 
     kernel.interrupt().await.unwrap();
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        kernel.execute("n = 0\nwhile True:\n    n += 1"),
-    )
-    .await
-    .expect("the parked interrupt lands on the next cell")
-    .unwrap();
-    assert!(output.interrupted(), "{output:?}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let output = kernel.execute("1 + 1").await.unwrap();
 
-    let after = kernel.execute("1 + 1").await.unwrap();
-    assert_eq!(
-        after.result.as_deref(),
-        Some("2"),
-        "a parked interrupt fires once"
-    );
-    Arc::try_unwrap(kernel)
-        .ok()
-        .unwrap()
-        .shutdown()
-        .await
-        .unwrap();
+    assert!(!output.interrupted(), "{output:?}");
+    assert_eq!(output.result.as_deref(), Some("2"));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_interrupt_for_a_finished_cell_does_not_touch_the_next_one() {
+    let kernel = kernel().await;
+
+    let first = kernel.execute("1").await.unwrap();
+    kernel.interrupt_cell("cell-1").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let second = kernel.execute("2").await.unwrap();
+
+    assert_eq!(first.result.as_deref(), Some("1"));
+    assert!(!second.interrupted(), "{second:?}");
+    assert_eq!(second.result.as_deref(), Some("2"));
+    kernel.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -26,6 +26,7 @@ _loop: asyncio.AbstractEventLoop | None = None
 _pending_replies: dict = {}
 _running: dict = {"id": None, "task": None}
 _parked_interrupts: set = set()
+_inflight: set = set()
 _interrupt_next = False
 _interrupt_lock = threading.Lock()
 _main_thread = threading.main_thread().ident
@@ -724,8 +725,16 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
         with _interrupt_lock:
             _running["id"] = None
             _running["task"] = None
-            _parked_interrupts.discard(cell_id)
+            _finish_locked(cell_id)
         emit({"type": "done", "id": cell_id, "ok": ok})
+
+
+def _finish_locked(cell_id: str) -> None:
+    global _interrupt_next
+    _inflight.discard(cell_id)
+    _parked_interrupts.discard(cell_id)
+    if not _inflight:
+        _interrupt_next = False
 
 
 def _snapshot(request: dict) -> None:
@@ -792,22 +801,18 @@ def _on_sigint(signum, frame) -> None:
 
 
 def _interrupt(cell_id) -> None:
-    """Interrupt a cell, parking the request when that cell has not started.
-
-    A bare interrupt hits the running cell, or the next one to start. An
-    interrupt naming a cell only ever hits that cell. Runs on the reader
-    thread: the signal has to reach a loop stuck in synchronous code.
-    """
     global _interrupt_next
     with _interrupt_lock:
         running = _running["id"]
-        if cell_id is None:
-            if running is None:
-                _interrupt_next = True
-                return
+        if running is not None and cell_id in (None, running):
             cell_id = running
-        elif cell_id != running:
-            _parked_interrupts.add(cell_id)
+        elif cell_id is not None:
+            if cell_id in _inflight:
+                _parked_interrupts.add(cell_id)
+            return
+        else:
+            if _inflight:
+                _interrupt_next = True
             return
     _deliver_interrupt(cell_id)
 
@@ -848,6 +853,9 @@ def _reader(queue: asyncio.Queue) -> None:
             emit({"type": "error", "id": None, "ename": "ProtocolError", "evalue": str(exc), "traceback": []})
             continue
         kind = request.get("type")
+        if kind == "execute" and request.get("id") is not None:
+            with _interrupt_lock:
+                _inflight.add(request["id"])
         if kind == "interrupt":
             _interrupt(request.get("id"))
             continue
