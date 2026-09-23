@@ -311,6 +311,7 @@ struct Inner {
     root_observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
     root_note: Option<String>,
     root_note_at: Option<Instant>,
+    root_running: bool,
     children: BTreeMap<ChildId, Node>,
     reserved_names: std::collections::HashSet<(Option<ChildId>, String)>,
     message_buckets: std::collections::HashMap<(String, String), Bucket>,
@@ -402,6 +403,7 @@ impl Family {
                 root_observe: None,
                 root_note: None,
                 root_note_at: None,
+                root_running: false,
                 children,
                 reserved_names: std::collections::HashSet::new(),
                 message_buckets: std::collections::HashMap::new(),
@@ -494,6 +496,10 @@ impl Family {
             .collect()
     }
 
+    pub fn set_root_running(&self, running: bool) {
+        self.lock().root_running = running;
+    }
+
     #[must_use]
     pub fn descendants_running(&self, id: Option<&str>) -> bool {
         let inner = self.lock();
@@ -525,7 +531,7 @@ impl Family {
                 relationship: "self".into(),
                 session_id: inner.root_session_id.clone(),
                 rlm_child_id: None,
-                status: "active".into(),
+                status: root_status(&inner).into(),
                 observable: false,
                 model_id: None,
                 progress_note: inner.root_note.clone(),
@@ -538,7 +544,7 @@ impl Family {
                 let me = inner.children.get(id);
                 if let Some(node) = me {
                     views.push(view_of(
-                        &node.summary,
+                        node,
                         "self",
                         false,
                         running_children(&inner, &Some(node.summary.id.clone())),
@@ -551,7 +557,7 @@ impl Family {
                         relationship: "parent".into(),
                         session_id: inner.root_session_id.clone(),
                         rlm_child_id: None,
-                        status: "active".into(),
+                        status: root_status(&inner).into(),
                         observable: inner.root_observe.is_some(),
                         model_id: None,
                         progress_note: inner.root_note.clone(),
@@ -563,7 +569,7 @@ impl Family {
                     Some(parent_id) => {
                         if let Some(node) = inner.children.get(parent_id) {
                             views.push(view_of(
-                                &node.summary,
+                                node,
                                 "parent",
                                 node.observe.is_some(),
                                 running_children(&inner, &Some(node.summary.id.clone())),
@@ -577,7 +583,7 @@ impl Family {
                         && node.summary.status != ChildStatus::Deleted
                     {
                         views.push(view_of(
-                            &node.summary,
+                            node,
                             "sibling",
                             node.observe.is_some(),
                             running_children(&inner, &Some(node.summary.id.clone())),
@@ -589,7 +595,7 @@ impl Family {
         for node in inner.children.values() {
             if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
                 views.push(view_of(
-                    &node.summary,
+                    node,
                     "child",
                     node.observe.is_some(),
                     running_children(&inner, &Some(node.summary.id.clone())),
@@ -1536,17 +1542,18 @@ fn compact_preview(text: &str, max: usize) -> String {
 }
 
 fn view_of(
-    summary: &ChildSummary,
+    node: &Node,
     relationship: &str,
     observable: bool,
     children_running: usize,
 ) -> AgentView {
+    let summary = &node.summary;
     AgentView {
         name: summary.name.clone(),
         relationship: relationship.to_string(),
         session_id: summary.session_id.clone(),
         rlm_child_id: Some(summary.id.clone()),
-        status: format!("{:?}", summary.status).to_lowercase(),
+        status: family_status(summary.status, node.inbox.is_some()).into(),
         observable,
         model_id: Some(summary.model_id.clone()),
         progress_note: summary.progress_note.clone(),
@@ -1554,6 +1561,26 @@ fn view_of(
         tool_running: summary.tool_running.clone(),
         awaiting_confirmation: summary.awaiting_confirmation.clone(),
         children_running,
+    }
+}
+
+fn root_status(inner: &Inner) -> &'static str {
+    if inner.root_running {
+        "running"
+    } else {
+        "idle"
+    }
+}
+
+fn family_status(status: ChildStatus, live: bool) -> &'static str {
+    match status {
+        ChildStatus::Starting | ChildStatus::Running => "running",
+        ChildStatus::Idle | ChildStatus::Failed | ChildStatus::Cancelled if live => "idle",
+        ChildStatus::Idle
+        | ChildStatus::Failed
+        | ChildStatus::Cancelled
+        | ChildStatus::Interrupted
+        | ChildStatus::Deleted => "inactive",
     }
 }
 
@@ -2466,6 +2493,15 @@ mod tests {
             .await
             .unwrap();
         settle(&family, &alpha).await;
+
+        let statuses: Vec<String> = family
+            .roster(&root)
+            .into_iter()
+            .map(|view| view.status)
+            .collect();
+        assert_eq!(statuses, vec!["idle", "idle", "idle"]);
+        family.set_root_running(true);
+        assert_eq!(family.roster(&root)[0].status, "running");
 
         let mut root_view: Vec<(String, String)> = family
             .roster(&root)

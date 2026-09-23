@@ -648,6 +648,14 @@ impl InProcessConnection {
         self.family = family;
     }
 
+    fn mark_root_running(&self, running: bool) {
+        if self.family_member.is_none()
+            && let Some(family) = &self.family
+        {
+            family.set_root_running(running);
+        }
+    }
+
     pub fn set_family_member(
         &mut self,
         member: Option<(
@@ -1469,6 +1477,7 @@ impl InProcessConnection {
         self.runtime.start_prepared_turn(request, prep, &deps);
         self.runtime.save_now_and_settle();
         self.queued.push_back(ClientEvent::TurnStarted);
+        self.mark_root_running(true);
         true
     }
 
@@ -1688,6 +1697,7 @@ impl InProcessConnection {
                 self.runtime.save_now_and_settle();
                 self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
+                self.mark_root_running(false);
                 self.fork_compaction_due = !cancelled && self.fork_compaction_due();
                 let failed = self.turn_error.take();
                 if !cancelled && let Some(goal) = &self.goal {
