@@ -247,7 +247,112 @@ fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-pub fn build_compaction_prompt(messages: &[Message]) -> String {
+const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 2000;
+
+const SUMMARY_TOOL_RESULT_TAIL_CHARS: usize = 500;
+
+fn truncate_for_summary(text: &str, max_chars: usize) -> String {
+    let total = text.chars().count();
+    if total <= max_chars {
+        return text.to_string();
+    }
+    let marker_max = format!(
+        "[... {total} characters truncated; first {max_chars} and last {SUMMARY_TOOL_RESULT_TAIL_CHARS} kept ...]"
+    )
+    .chars()
+    .count();
+    let head_chars = max_chars.saturating_sub(SUMMARY_TOOL_RESULT_TAIL_CHARS + marker_max + 4);
+    let elided = total - head_chars - SUMMARY_TOOL_RESULT_TAIL_CHARS;
+    let head: String = text.chars().take(head_chars).collect();
+    let tail: String = text
+        .chars()
+        .skip(total - SUMMARY_TOOL_RESULT_TAIL_CHARS)
+        .collect();
+    format!(
+        "{head}\n\n[... {elided} characters truncated; first {head_chars} and last {SUMMARY_TOOL_RESULT_TAIL_CHARS} kept ...]\n\n{tail}"
+    )
+}
+
+pub fn serialize_conversation(messages: &[Message]) -> String {
+    let mut parts = Vec::new();
+    let mut call_indices: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+
+    for msg in messages {
+        match msg {
+            Message::Event(event) => parts.push(format!("[Event]: {}", event.text())),
+            Message::User(u) => {
+                let text = u.text();
+                if !text.is_empty() {
+                    parts.push(format!("[User]: {text}"));
+                }
+            }
+            Message::Assistant(a) => {
+                let mut texts = Vec::new();
+                let mut thinking = Vec::new();
+                let mut calls = Vec::new();
+                for part in &a.content {
+                    match part {
+                        AssistantContentPart::Text(t) => texts.push(t.text.as_str()),
+                        AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                            thinking: text,
+                            ..
+                        }) if !text.is_empty() => thinking.push(text.as_str()),
+                        AssistantContentPart::ToolCall(tc) => {
+                            let args = match &tc.arguments {
+                                serde_json::Value::Object(map) => map
+                                    .iter()
+                                    .map(|(k, v)| format!("{k}={v}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                other => other.to_string(),
+                            };
+                            let index = call_indices.len() + 1;
+                            call_indices.insert(tc.id.as_str(), index);
+                            calls.push(format!("#{index} {}({args})", tc.name));
+                        }
+                        _ => {}
+                    }
+                }
+                if !thinking.is_empty() {
+                    parts.push(format!("[Assistant thinking]: {}", thinking.join("\n")));
+                }
+                if !texts.is_empty() {
+                    parts.push(format!("[Assistant]: {}", texts.join("\n")));
+                }
+                if !calls.is_empty() {
+                    parts.push(format!("[Assistant tool calls]: {}", calls.join("; ")));
+                }
+            }
+            Message::ToolResult(tr) => {
+                let text: String = tr
+                    .content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+                        ToolResultContentPart::Image(_) => None,
+                    })
+                    .collect();
+                if text.is_empty() {
+                    continue;
+                }
+                let index = call_indices
+                    .get(tr.tool_call_id.as_str())
+                    .map(|i| format!(" #{i}"))
+                    .unwrap_or_default();
+                let status = if tr.outcome.is_error() { ", error" } else { "" };
+                parts.push(format!(
+                    "[Tool result ({}{status}){index}]: {}",
+                    tr.tool_name,
+                    truncate_for_summary(&text, SUMMARY_TOOL_RESULT_MAX_CHARS)
+                ));
+            }
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+fn brief_transcript(messages: &[Message]) -> String {
     let mut parts = Vec::new();
 
     for (i, msg) in messages.iter().enumerate() {
@@ -311,14 +416,14 @@ pub fn build_compaction_prompt(messages: &[Message]) -> String {
 }
 
 pub fn build_compaction_request(old: &[Message], recent: &[Message]) -> String {
-    let conversation_dump = build_compaction_prompt(old);
+    let conversation_dump = serialize_conversation(old);
     if recent.is_empty() {
         return format!(
             "<conversation>\n{conversation_dump}\n</conversation>\n\n\
              {SUMMARISATION_INSTRUCTIONS}"
         );
     }
-    let recent_dump = build_compaction_prompt(recent);
+    let recent_dump = serialize_conversation(recent);
     format!(
         "<conversation>\n{conversation_dump}\n</conversation>\n\n\
          <recent_state>\n{recent_dump}\n</recent_state>\n\n\
@@ -933,7 +1038,7 @@ fn fallback_summary_from_reason(
 
     out.push_str("\n## Raw compacted-message appendix\n\n");
     out.push_str("This appendix is kept as a safety net because LLM summarisation failed.\n\n");
-    out.push_str(&build_compaction_prompt(old_messages));
+    out.push_str(&brief_transcript(old_messages));
     out
 }
 
@@ -1244,9 +1349,9 @@ mod tests {
         assert!(
             input
                 .content
-                .contains("[0] user: only rowan can authorise deletion")
+                .contains("[User]: only rowan can authorise deletion")
         );
-        assert!(input.content.contains("[1] event: [non-human event"));
+        assert!(input.content.contains("[Event]: [non-human event"));
         assert_eq!(input.receipts.len(), 1);
     }
 
@@ -1262,7 +1367,7 @@ mod tests {
             panic!()
         };
         assert_eq!(event.receipts[0].timestamp_ms.as_ms(), 12);
-        assert!(event.content.contains("[0] event:"));
+        assert!(event.content.contains("[Event]:"));
         assert!(!context.system_prompt.unwrap().contains("i am rowan"));
     }
     use mush_ai::stream::StreamEvent;
@@ -1354,26 +1459,105 @@ mod tests {
         assert_eq!(estimate_message_tokens(&msg), 40 / CHARS_PER_TOKEN);
     }
 
-    #[test]
-    fn build_prompt_includes_all_messages() {
-        let msgs = vec![
-            user_msg("explain traits"),
-            assistant_msg("traits are interfaces"),
-            user_msg("show an example"),
-        ];
-        let prompt = build_compaction_prompt(&msgs);
-        assert!(prompt.contains("explain traits"));
-        assert!(prompt.contains("traits are interfaces"));
-        assert!(prompt.contains("show an example"));
+    fn assistant_parts(content: Vec<AssistantContentPart>) -> Message {
+        Message::Assistant(
+            AssistantMessage::builder()
+                .content(content)
+                .model("test".into())
+                .provider(Provider::Custom("test".into()))
+                .api(Api::AnthropicMessages)
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContentPart {
+        AssistantContentPart::ToolCall(ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        })
+    }
+
+    fn tool_result(id: &str, name: &str, text: &str, outcome: ToolOutcome) -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: id.into(),
+            tool_name: name.into(),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: text.into(),
+            })],
+            outcome,
+            timestamp_ms: Timestamp::zero(),
+            details: None,
+        })
     }
 
     #[test]
-    fn build_prompt_handles_multibyte_truncation() {
-        let long_text = "—".repeat(300);
-        let msgs = vec![assistant_msg(&long_text)];
-        let prompt = build_compaction_prompt(&msgs);
-        assert!(prompt.contains("..."));
-        assert!(!prompt.is_empty());
+    fn serialized_conversation_keeps_every_message_in_full() {
+        let long = "traits are interfaces ".repeat(100);
+        let msgs = vec![
+            user_msg("explain traits"),
+            assistant_msg(&long),
+            user_msg("show an example"),
+        ];
+        let prompt = serialize_conversation(&msgs);
+        assert!(prompt.contains("[User]: explain traits"));
+        assert!(prompt.contains(&format!("[Assistant]: {long}")));
+        assert!(prompt.contains("[User]: show an example"));
+    }
+
+    #[test]
+    fn serialized_conversation_keeps_thinking_and_skips_empty_reasoning() {
+        let msgs = vec![assistant_parts(vec![
+            AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: "the bug is in the lease".into(),
+                signature: None,
+            }),
+            AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: String::new(),
+                signature: Some("sig".into()),
+            }),
+            AssistantContentPart::Text(TextContent {
+                text: "found it".into(),
+            }),
+        ])];
+        let prompt = serialize_conversation(&msgs);
+        assert_eq!(
+            prompt,
+            "[Assistant thinking]: the bug is in the lease\n\n[Assistant]: found it"
+        );
+    }
+
+    #[test]
+    fn serialized_tool_calls_pair_with_their_results_by_index() {
+        let msgs = vec![
+            assistant_parts(vec![
+                tool_call("a", "ipython", serde_json::json!({"code": "print(1)"})),
+                tool_call("b", "ipython", serde_json::json!({"code": "print(2)"})),
+            ]),
+            tool_result("b", "ipython", "2", ToolOutcome::Success),
+            tool_result("a", "ipython", "boom", ToolOutcome::Error),
+        ];
+        let prompt = serialize_conversation(&msgs);
+        assert!(prompt.contains(
+            "[Assistant tool calls]: #1 ipython(code=\"print(1)\"); #2 ipython(code=\"print(2)\")"
+        ));
+        assert!(prompt.contains("[Tool result (ipython) #2]: 2"));
+        assert!(prompt.contains("[Tool result (ipython, error) #1]: boom"));
+    }
+
+    #[test]
+    fn serialized_tool_results_keep_the_head_and_the_tail() {
+        let output = format!("{}{}", "—".repeat(3000), "exit 101");
+        let msgs = vec![tool_result("x", "bash", &output, ToolOutcome::Success)];
+        let prompt = serialize_conversation(&msgs);
+        let body = prompt
+            .strip_prefix("[Tool result (bash)]: ")
+            .expect("unpaired results keep the name-only label");
+        assert!(body.chars().count() <= SUMMARY_TOOL_RESULT_MAX_CHARS);
+        assert!(body.starts_with('—'));
+        assert!(body.ends_with("exit 101"));
+        assert!(body.contains("characters truncated"));
     }
 
     #[test]

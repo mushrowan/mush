@@ -3,7 +3,7 @@ use mush_ai::types::{
     Message, Model, StreamOptions, ThinkingLevel, Timestamp, TokenCount, UserContent, UserMessage,
 };
 
-use crate::compact::{build_compaction_prompt, complete_text};
+use crate::compact::{complete_text, serialize_conversation};
 use crate::harness::{self, Proposal, RefinementResult, Scope, State};
 
 const MAX_OUTPUT_TOKENS: u64 = 32_000;
@@ -167,7 +167,7 @@ pub async fn plan(
             scope: target.scope,
         });
     }
-    let conversation = tail(&build_compaction_prompt(messages), CONVERSATION_CHARS);
+    let conversation = tail(&serialize_conversation(messages), CONVERSATION_CHARS);
     let prompt = user_prompt(&conversation, merged, history, request, model);
     let context = LlmContext {
         system_prompt: Some(SYSTEM_PROMPT.to_string()),
@@ -343,10 +343,7 @@ pub async fn review(
     turns_since_review: u32,
     session_thinking: &ThinkingLevel,
 ) -> Result<AutoRefineReview, String> {
-    let conversation = tail(
-        &build_compaction_prompt(messages),
-        REVIEW_CONVERSATION_CHARS,
-    );
+    let conversation = tail(&serialize_conversation(messages), REVIEW_CONVERSATION_CHARS);
     let prompt = [
         format!(
             "<trigger>\n{}; {turns_since_review} assistant turns since the last auto-refine review\n</trigger>",

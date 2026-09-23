@@ -117,9 +117,9 @@ fn compaction_replay_and_repeated_compaction_preserve_exact_event_receipts() {
         saved.conversation.display_history(),
         session.conversation.display_history()
     );
-    let prompt = mush_session::compact::build_compaction_prompt(&[original]);
-    assert!(prompt.starts_with("[0] event: [non-human event"));
-    assert!(!prompt.contains("[0] user:"));
+    let prompt = mush_session::compact::serialize_conversation(&[original]);
+    assert!(prompt.starts_with("[Event]: [non-human event"));
+    assert!(!prompt.contains("[User]:"));
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn compaction_cycles_keep_full_audit_and_bounded_model_receipt_references() {
         };
         assert_eq!(summary.receipts.len(), audit.len());
         assert!(summary.text().len() < 1024);
-        let prompt = mush_session::compact::build_compaction_prompt(&state.context());
+        let prompt = mush_session::compact::serialize_conversation(&state.context());
         assert!(prompt.len() < 2048);
         assert!(prompt.contains("receipt_reference"));
         session.conversation = state;
