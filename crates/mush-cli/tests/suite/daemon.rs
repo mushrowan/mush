@@ -989,6 +989,32 @@ async fn resuming_a_failed_agent_starts_a_fresh_worker() {
 }
 
 #[tokio::test]
+async fn resuming_without_a_model_flag_runs_the_sessions_model() {
+    let daemon = Daemon::start();
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let session = mush_session::Session::new(
+        "claude-sonnet-4-6",
+        &daemon.dir.path().display().to_string(),
+    );
+    store.save(&session).unwrap();
+    let id = session.meta.id.to_string();
+
+    let reply = daemon
+        .request(SupervisorRequest::Open {
+            target: OpenTarget::Resume(id.clone()),
+            args: vec!["--no-tools".into()],
+            cwd: daemon.dir.path().to_path_buf(),
+            env: env(daemon.dir.path()),
+        })
+        .await;
+    let SupervisorReply::Worker { descriptor, .. } = reply else {
+        panic!("expected a worker, got {reply:?}")
+    };
+    assert_eq!(descriptor.session_id, id);
+    assert_eq!(descriptor.model_id, "claude-sonnet-4-6");
+}
+
+#[tokio::test]
 async fn an_empty_worker_stops_when_its_last_client_detaches() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =

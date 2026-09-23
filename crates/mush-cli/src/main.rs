@@ -1144,6 +1144,17 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     Ok(())
 }
 
+fn resumed_model(cli: &Cli) -> Option<String> {
+    let (SessionTarget::Resume(id) | SessionTarget::Fork(id)) = cli.session_target().ok()? else {
+        return None;
+    };
+    let meta = SessionStore::new(SessionStore::default_dir())
+        .resolve(&id)
+        .ok()?;
+    mush_ai::discovery::resolve_model_by_id(meta.model_id.as_str())
+        .map(|model| model.id.to_string())
+}
+
 async fn prepare(cli: &Cli) -> Result<Prepared> {
     let (sinks, kernel_signals) = mush_runtime::kernel_channels();
     let timer = if cli.profile_startup {
@@ -1152,7 +1163,10 @@ async fn prepare(cli: &Cli) -> Result<Prepared> {
         None
     };
     let (setup, startup_report) = AppSetup::init(SetupArgs {
-        client: cli.client_args(),
+        client: setup::ClientArgs {
+            model: cli.model.clone().or_else(|| resumed_model(cli)),
+            ..cli.client_args()
+        },
         max_turns: cli.max_turns,
         system: cli.system.clone(),
         no_tools: cli.no_tools,
