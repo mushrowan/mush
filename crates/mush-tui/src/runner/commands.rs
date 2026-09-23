@@ -1134,6 +1134,54 @@ mod tests {
     }
 
     #[test]
+    fn a_new_session_drops_the_old_sessions_children() {
+        let mut session = conversation_session(vec![user("old")]);
+        let mut config = TuiConfig::for_test();
+        session.app.note_child(mush_runtime::ChildSummary {
+            id: "sub-a".into(),
+            name: "a".into(),
+            parent: None,
+            depth: 1,
+            session_id: "s".into(),
+            model_id: "m".into(),
+            status: mush_runtime::ChildStatus::Idle,
+            spawned_at: Timestamp::zero(),
+            updated_at: Timestamp::zero(),
+            answer: None,
+            error: None,
+            progress_note: None,
+            usage: mush_ai::types::Usage {
+                input_tokens: TokenCount::new(100),
+                ..Default::default()
+            },
+            cost: mush_ai::types::Cost {
+                input: mush_ai::types::Dollars::new(0.5),
+                ..Default::default()
+            },
+            turns: 1,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
+            paused: None,
+        });
+
+        run(
+            &mut session,
+            &mut config,
+            SlashAction::New {
+                name: None,
+                prompt: None,
+            },
+        );
+
+        assert!(session.app.children.is_empty());
+        assert_eq!(
+            session.app.session_spend(),
+            (TokenCount::ZERO, mush_ai::types::Dollars::ZERO)
+        );
+    }
+
+    #[test]
     fn name_sets_the_session_title_and_a_blank_one_is_refused() {
         let mut session = conversation_session(vec![]);
         let mut config = TuiConfig::for_test();

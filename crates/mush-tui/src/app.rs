@@ -347,6 +347,11 @@ impl App {
         )
     }
 
+    pub fn clear_children(&mut self) {
+        self.children.clear();
+        self.children_spend = (TokenCount::ZERO, Dollars::ZERO);
+    }
+
     #[must_use]
     pub fn running_children(&self) -> usize {
         self.children

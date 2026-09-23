@@ -318,6 +318,35 @@ struct Registry {
     children: Vec<ChildSummary>,
 }
 
+fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
+    let Some(registry) = path
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Registry>(&bytes).ok())
+    else {
+        return BTreeMap::new();
+    };
+    registry
+        .children
+        .into_iter()
+        .map(|mut summary| {
+            if !summary.status.settled() {
+                summary.status = ChildStatus::Interrupted;
+            }
+            let node = Node {
+                summary,
+                inbox: None,
+                observe: None,
+                control: None,
+                shutdown: None,
+                task: None,
+                last_note_at: None,
+                replied: false,
+            };
+            (node.summary.id.clone(), node)
+        })
+        .collect()
+}
+
 impl Family {
     #[must_use]
     pub fn new(
@@ -327,30 +356,7 @@ impl Family {
         factory: Option<ChildFactory>,
         registry_path: Option<PathBuf>,
     ) -> Arc<Self> {
-        let mut children = BTreeMap::new();
-        if let Some(path) = &registry_path
-            && let Ok(bytes) = std::fs::read(path)
-            && let Ok(registry) = serde_json::from_slice::<Registry>(&bytes)
-        {
-            for mut summary in registry.children {
-                if !summary.status.settled() {
-                    summary.status = ChildStatus::Interrupted;
-                }
-                children.insert(
-                    summary.id.clone(),
-                    Node {
-                        summary,
-                        inbox: None,
-                        observe: None,
-                        control: None,
-                        shutdown: None,
-                        task: None,
-                        last_note_at: None,
-                        replied: false,
-                    },
-                );
-            }
-        }
+        let children = load_registry(registry_path.as_deref());
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 root,
@@ -384,15 +390,25 @@ impl Family {
     }
 
     pub fn rebind(&self, session_id: String, registry_path: Option<PathBuf>) {
+        for node in self.lock().children.values_mut() {
+            if let Some(shutdown) = node.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if !node.summary.status.settled() {
+                node.summary.status = ChildStatus::Cancelled;
+            }
+        }
+        self.persist();
+        let children = load_registry(registry_path.as_deref());
         {
             let mut inner = self.lock();
             inner.root_session_id = session_id;
+            inner.children = children;
         }
         *self
             .registry_path
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = registry_path;
-        self.persist();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -2586,6 +2602,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(spawn.contains("not available"));
+    }
+
+    fn saved_child(id: &str, name: &str) -> ChildSummary {
+        ChildSummary {
+            id: id.into(),
+            name: name.into(),
+            parent: None,
+            depth: 1,
+            session_id: format!("session-{id}"),
+            model_id: "m".into(),
+            status: ChildStatus::Idle,
+            spawned_at: Timestamp::zero(),
+            updated_at: Timestamp::zero(),
+            answer: None,
+            error: None,
+            progress_note: None,
+            usage: Usage::default(),
+            cost: Cost::default(),
+            turns: 1,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
+            paused: None,
+        }
+    }
+
+    #[test]
+    fn rebinding_swaps_in_the_new_sessions_children_and_leaves_the_old_registry_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old/subagents.json");
+        let new_path = dir.path().join("new/subagents.json");
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        let write = |path: &std::path::Path, children: Vec<ChildSummary>| {
+            std::fs::write(path, serde_json::to_vec(&Registry { children }).unwrap()).unwrap();
+        };
+        write(&old_path, vec![saved_child("sub-old", "old")]);
+        write(&new_path, vec![saved_child("sub-new", "new")]);
+        let family = Family::new(
+            Identity::root("root"),
+            "old".into(),
+            2,
+            None,
+            Some(old_path.clone()),
+        );
+
+        family.rebind("new".into(), Some(new_path.clone()));
+
+        let names: Vec<_> = family.all().into_iter().map(|child| child.name).collect();
+        assert_eq!(names, vec!["new".to_string()]);
+        let names_in = |path: &std::path::Path| -> Vec<String> {
+            serde_json::from_slice::<Registry>(&std::fs::read(path).unwrap())
+                .unwrap()
+                .children
+                .into_iter()
+                .map(|child| child.name)
+                .collect()
+        };
+        assert_eq!(names_in(&old_path), vec!["old".to_string()]);
+        assert_eq!(names_in(&new_path), vec!["new".to_string()]);
+
+        family.rebind(
+            "fresh".into(),
+            Some(dir.path().join("fresh/subagents.json")),
+        );
+
+        assert!(family.all().is_empty());
     }
 
     #[tokio::test]

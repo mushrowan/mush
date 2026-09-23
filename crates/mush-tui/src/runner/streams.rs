@@ -357,6 +357,7 @@ pub(crate) fn apply_session_events(
     for event in events {
         match event {
             SessionEvent::SessionIdChanged(id) => {
+                session.app.clear_children();
                 tui_config.session_id = id.clone();
                 tui_config.options.session_id = Some(id);
             }
