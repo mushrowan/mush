@@ -12,7 +12,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{ClientId, CommandId, Cursor, Envelope, Frame, Reply, Request, encode};
+use crate::protocol::{
+    ClientId, CommandId, Cursor, ENVELOPE_VERSION, Envelope, Frame, Reply, Request, encode,
+};
 use crate::supervisor::WorkerDescriptor;
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(50);
@@ -475,6 +477,12 @@ impl Worker {
         command: ClientCommand,
         envelope: Envelope,
     ) -> Result<Reply, ConnectionError> {
+        if envelope.version != ENVELOPE_VERSION {
+            return Err(ConnectionError::Refused(format!(
+                "command envelope version {} is not supported, this worker speaks {ENVELOPE_VERSION}",
+                envelope.version
+            )));
+        }
         if let Some(ack) = envelope.ack {
             self.journal.ack(&(envelope.client.clone(), ack));
         }

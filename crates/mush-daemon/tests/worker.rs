@@ -525,13 +525,17 @@ impl RawClient {
     }
 
     async fn command(&mut self, id: u64, text: &str, command_id: &str) {
+        self.versioned(id, text, command_id, 1).await;
+    }
+
+    async fn versioned(&mut self, id: u64, text: &str, command_id: &str, version: u32) {
         use tokio::io::AsyncWriteExt;
         let request = serde_json::json!({
             "type": "command",
             "id": id,
             "command": {"type": "prompt", "data": {"text": text, "images": []}},
             "envelope": {
-                "version": 1,
+                "version": version,
                 "client": "raw",
                 "command": command_id,
             },
@@ -768,6 +772,29 @@ async fn an_acked_command_leaves_the_journal() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn a_command_from_another_envelope_version_is_refused() {
+    let worker = spawn_worker();
+    let (mut raw, _) = RawClient::connect(&worker.socket).await;
+    raw.attach(None).await;
+    let _ = raw.read().await;
+
+    raw.versioned(1, "hello", "cmd-1", 2).await;
+    let result = loop {
+        if let mush_daemon::Frame::Response { result, .. } = raw.read().await {
+            break result;
+        }
+    };
+    let Err(ConnectionError::Refused(error)) = result else {
+        panic!("expected a refusal, got {result:?}")
+    };
+    assert!(error.contains("version 2"), "{error}");
+
+    let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(client.transcript().await.is_empty());
 }
 
 async fn wait_for_response(raw: &mut RawClient) {
