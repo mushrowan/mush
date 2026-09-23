@@ -310,10 +310,6 @@ pub async fn handle(
             }
             None
         }
-        SlashAction::TaskClaim { .. } | SlashAction::TaskRelease { .. } | SlashAction::TaskList => {
-            handle_task(app, &tui_config.cwd, action);
-            None
-        }
         SlashAction::Debug => {
             app.push_system_message(build_debug_dump(app, tui_config.session_id.as_str()));
             None
@@ -504,50 +500,6 @@ fn build_debug_dump(app: &App, session_id: &str) -> String {
 
     out.push_str("```");
     out
-}
-
-fn handle_task(app: &mut App, cwd: &std::path::Path, action: &SlashAction) {
-    let store = mush_agent::TaskStore::new(cwd);
-    let agent_id = std::process::id().to_string();
-
-    match action {
-        SlashAction::TaskClaim { id, description } => {
-            let lock = mush_agent::TaskLock {
-                id: id.clone(),
-                description: description.clone(),
-                agent: agent_id,
-                claimed_at: unix_timestamp(),
-                files: vec![],
-            };
-            match store.claim(&lock) {
-                Ok(()) => app.push_system_message(format!("claimed task: {id}")),
-                Err(e) => app.push_system_message(format!("failed: {e}")),
-            }
-        }
-        SlashAction::TaskRelease { id } => match store.release(id, &agent_id) {
-            Ok(()) => app.push_system_message(format!("released task: {id}")),
-            Err(e) => app.push_system_message(format!("failed: {e}")),
-        },
-        SlashAction::TaskList => match store.list() {
-            Ok(tasks) if tasks.is_empty() => app.push_system_message("no active tasks"),
-            Ok(tasks) => {
-                let mut msg = String::from("active tasks:\n");
-                for t in &tasks {
-                    writeln!(msg, "  {} (agent {}) - {}", t.id, t.agent, t.description).ok();
-                }
-                app.push_system_message(msg.trim_end().to_string());
-            }
-            Err(e) => app.push_system_message(format!("failed: {e}")),
-        },
-        _ => {}
-    }
-}
-
-fn unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn help_text() -> String {

@@ -164,14 +164,6 @@ pub enum SlashAction {
     },
     Card,
     Mcp(McpQuery),
-    TaskClaim {
-        id: String,
-        description: String,
-    },
-    TaskRelease {
-        id: String,
-    },
-    TaskList,
     Debug,
     Reload,
     RefreshModels,
