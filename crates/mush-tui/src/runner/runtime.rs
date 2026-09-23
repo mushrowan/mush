@@ -438,6 +438,7 @@ fn replay_history(app: &mut App, history: &[Message], context: &[Message]) {
     }
     crate::conversation_display::rebuild_display(app, history);
     crate::conversation_display::accumulate_session_stats(app, context);
+    app.stats.total_cost = crate::conversation_display::session_cost(history);
     app.status = Some(format!("resumed session ({} messages)", history.len()).into());
 }
 
@@ -578,6 +579,48 @@ mod tests {
             app.status.as_ref().map(|s| s.text.as_str()),
             Some("resumed session (2 messages)")
         );
+    }
+
+    #[test]
+    fn replay_counts_the_spend_from_before_a_compaction() {
+        use mush_session::ConversationState;
+
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .find(|model| model.cost.input > 0.0)
+            .expect("expected a priced model");
+        let priced = |text: &str| {
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: text.into(),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .usage(Usage {
+                        input_tokens: TokenCount::new(1_000_000),
+                        ..Usage::default()
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let mut source = ConversationState::new();
+        for i in 0..6u64 {
+            source.append_message(user_message(&format!("question {i}")));
+            source.append_message(priced(&format!("answer {i}")));
+        }
+        source
+            .compact_at_leaf("EARLIER SUMMARY".into(), 8)
+            .expect("compaction applies");
+
+        let config = test_config();
+        let mut app = build_initial_app(&config, Path::new("."));
+        replay_history(&mut app, &source.display_history(), &source.context());
+
+        let expected = model.cost.input * 6.0;
+        assert!((app.stats.total_cost.get() - expected).abs() < 1e-9);
     }
 
     #[test]

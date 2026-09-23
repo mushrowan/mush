@@ -50,7 +50,7 @@ pub fn top_bar_line(app: &App, width: u16) -> Line<'static> {
         Span::raw(" ".repeat(start)),
         Span::styled(title, app.theme.status_model),
     ];
-    if let Some(cost) = cost_label(app.stats.total_cost) {
+    if let Some(cost) = cost_label(app.session_spend()) {
         spans.push(Span::styled(format!("  {cost}"), app.theme.dim));
     }
     Line::from(spans)
@@ -74,6 +74,33 @@ mod tests {
 
     fn app() -> App {
         App::new("test".into(), TokenCount::new(200_000))
+    }
+
+    fn child_with_cost(dollars: f64) -> mush_runtime::ChildSummary {
+        mush_runtime::ChildSummary {
+            paused: None,
+            id: "sub-a".into(),
+            name: "a".into(),
+            parent: None,
+            depth: 1,
+            session_id: "s".into(),
+            model_id: "m".into(),
+            status: mush_runtime::ChildStatus::Idle,
+            spawned_at: mush_ai::types::Timestamp::zero(),
+            updated_at: mush_ai::types::Timestamp::zero(),
+            answer: None,
+            error: None,
+            progress_note: None,
+            usage: mush_ai::types::Usage::default(),
+            cost: mush_ai::types::Cost {
+                input: Dollars::new(dollars),
+                ..Default::default()
+            },
+            turns: 1,
+            streaming: false,
+            tool_running: None,
+            awaiting_confirmation: None,
+        }
     }
 
     fn render(app: &App, width: u16) -> String {
@@ -101,6 +128,18 @@ mod tests {
         let row = render(&app, 40);
 
         assert!(row.contains("hello  $1.23"), "{row:?}");
+    }
+
+    #[test]
+    fn the_cost_counts_subagent_spend() {
+        let mut app = app();
+        app.session_title = Some("hello".into());
+        app.stats.total_cost = Dollars::new(1.0);
+        app.children.push(child_with_cost(0.5));
+
+        let row = render(&app, 40);
+
+        assert!(row.contains("hello  $1.50"), "{row:?}");
     }
 
     #[test]

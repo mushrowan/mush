@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use mush_agent::summarise_tool_args;
 use mush_ai::types::{
-    AssistantContentPart, Message, ToolCallId, ToolOutcome, ToolResultContentPart,
-    ToolResultMessage,
+    AssistantContentPart, AssistantMessage, Dollars, Message, Model, ModelId, Provider, ToolCallId,
+    ToolOutcome, ToolResultContentPart, ToolResultMessage,
 };
 
 use crate::app::{
@@ -155,10 +155,36 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     }
 }
 
+type ModelCache = HashMap<(Provider, ModelId), Option<Model>>;
+
+fn assistant_cost(models: &mut ModelCache, assistant: &AssistantMessage) -> Option<Dollars> {
+    models
+        .entry((assistant.provider.clone(), assistant.model.clone()))
+        .or_insert_with(|| {
+            mush_ai::models::find_model(&assistant.provider, assistant.model.as_str())
+        })
+        .as_ref()
+        .map(|model| mush_ai::models::calculate_cost(model, &assistant.usage).total())
+}
+
+#[must_use]
+pub fn session_cost(conversation: &[Message]) -> Dollars {
+    let mut models = ModelCache::new();
+    conversation
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(assistant) => assistant_cost(&mut models, assistant),
+            _ => None,
+        })
+        .fold(Dollars::ZERO, |total, cost| total + cost)
+}
+
 pub fn accumulate_session_stats(app: &mut App, conversation: &[Message]) {
+    let mut models = ModelCache::new();
     for message in conversation {
         if let Message::Assistant(assistant) = message {
-            app.stats.update(&assistant.usage, None);
+            let cost = assistant_cost(&mut models, assistant);
+            app.stats.update(&assistant.usage, cost);
         }
     }
 
@@ -581,6 +607,64 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    fn priced_model() -> mush_ai::types::Model {
+        models::all_models_with_user()
+            .into_iter()
+            .find(|model| model.cost.input > 0.0)
+            .expect("expected a priced model")
+    }
+
+    fn priced_assistant(model: &mush_ai::types::Model) -> Message {
+        Message::Assistant(
+            AssistantMessage::builder()
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(1_000_000),
+                    ..Usage::default()
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )
+    }
+
+    #[test]
+    fn resume_replays_the_spend_of_each_assistant_turn() {
+        let model = priced_model();
+        let mut app = app();
+        let conversation = vec![
+            user_message("hello"),
+            priced_assistant(&model),
+            user_message("again"),
+            priced_assistant(&model),
+        ];
+
+        accumulate_session_stats(&mut app, &conversation);
+
+        let expected = Dollars::new(model.cost.input * 2.0);
+        assert!((app.stats.total_cost.get() - expected.get()).abs() < 1e-9);
+        assert!((session_cost(&conversation).get() - expected.get()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_unknown_model_adds_no_spend() {
+        let conversation = vec![Message::Assistant(
+            AssistantMessage::builder()
+                .model(ModelId::from("no-such-model"))
+                .provider(Provider::Anthropic)
+                .api(Api::AnthropicMessages)
+                .usage(Usage {
+                    input_tokens: TokenCount::new(1_000_000),
+                    ..Usage::default()
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        assert_eq!(session_cost(&conversation), Dollars::ZERO);
     }
 
     fn compaction_summary_message(body: &str) -> Message {

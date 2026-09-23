@@ -293,6 +293,15 @@ impl App {
     }
 
     #[must_use]
+    pub fn session_spend(&self) -> mush_ai::types::Dollars {
+        self.children
+            .iter()
+            .fold(self.stats.total_cost, |total, child| {
+                total + child.cost.total()
+            })
+    }
+
+    #[must_use]
     pub fn running_children(&self) -> usize {
         self.children
             .iter()
