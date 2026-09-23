@@ -234,6 +234,12 @@ impl SessionRuntime {
             api_key,
             account_id,
         } = prep;
+        if let Some(kernel) = &self.kernel_state {
+            kernel.set_model(
+                &model.id,
+                model.input.contains(&mush_ai::types::InputModality::Image),
+            );
+        }
         let thinking_level = self.thinking_level.clone();
         let context_tokens = self.context_tokens;
         let TurnDeps {

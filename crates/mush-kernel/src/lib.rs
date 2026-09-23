@@ -24,6 +24,7 @@ pub trait KernelState: Send + Sync {
     fn background_work(&self) -> bool {
         false
     }
+    fn set_model(&self, _id: &str, _accepts_images: bool) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

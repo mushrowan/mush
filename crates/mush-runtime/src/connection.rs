@@ -3737,6 +3737,59 @@ mod tests {
         )));
     }
 
+    struct ModelKernel(std::sync::Mutex<Vec<(String, bool)>>);
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for ModelKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            None
+        }
+        async fn reset(&self) {}
+        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
+        fn set_model(&self, id: &str, accepts_images: bool) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((id.to_string(), accepts_images));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_tells_the_kernel_which_model_it_runs_on() {
+        let (mut connection, _requests) = connection();
+        let kernel = Arc::new(ModelKernel(std::sync::Mutex::new(Vec::new())));
+        connection.runtime.set_kernel_state(Some(
+            Arc::clone(&kernel) as Arc<dyn mush_kernel::KernelState>
+        ));
+        let model = connection.runtime.model(&connection.config.default_model);
+
+        connection
+            .send(ClientCommand::Prompt {
+                text: "hello".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        drain_turn(&mut connection).await;
+
+        assert_eq!(
+            *kernel.0.lock().unwrap(),
+            [(
+                model.id.to_string(),
+                model.input.contains(&mush_ai::types::InputModality::Image)
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn a_goal_holds_while_background_bash_runs() {
         let (mut connection, _requests) = connection();

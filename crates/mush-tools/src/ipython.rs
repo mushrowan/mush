@@ -366,6 +366,7 @@ pub struct IpythonTool {
     repair_notice: std::sync::Mutex<Option<String>>,
     snapshot_generation: Arc<std::sync::atomic::AtomicU64>,
     snapshot_debounce: std::time::Duration,
+    model: std::sync::Mutex<Option<(String, bool)>>,
 }
 
 const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -400,6 +401,7 @@ impl IpythonTool {
             repair_notice: std::sync::Mutex::new(None),
             snapshot_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
+            model: std::sync::Mutex::new(None),
         }
     }
 
@@ -648,6 +650,20 @@ impl IpythonTool {
         *slot = Some(kernel);
     }
 
+    fn vision_refusal(&self) -> Option<String> {
+        match &*self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            Some((id, false)) => Some(format!(
+                "\n[image not attached: {id} does not support vision. Tell the user to switch to a \
+                 vision-capable model to load images into context.]"
+            )),
+            Some((_, true)) | None => None,
+        }
+    }
+
     fn latest_snapshot(&self) -> Option<std::path::PathBuf> {
         self.session
             .lock()
@@ -719,6 +735,14 @@ impl mush_kernel::KernelState for IpythonTool {
             .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+    }
+
+    fn set_model(&self, id: &str, accepts_images: bool) {
+        *self
+            .model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((id.to_string(), accepts_images));
     }
 
     fn background_work(&self) -> bool {
@@ -883,10 +907,19 @@ impl AgentTool for IpythonTool {
                         .unwrap_or_default(),
                     background: run.output.background.clone(),
                 };
-                let images = attached_images(&run.output.attachments, &mut text);
+                let refusal = (!run.output.attachments.is_empty())
+                    .then(|| self.vision_refusal())
+                    .flatten();
+                let images = match &refusal {
+                    Some(refusal) => {
+                        text.push_str(refusal);
+                        Vec::new()
+                    }
+                    None => attached_images(&run.output.attachments, &mut text),
+                };
                 let mut details = details;
                 details.images = images.len();
-                let mut result = if run.output.ok {
+                let mut result = if run.output.ok && refusal.is_none() {
                     ToolResult::text(text)
                 } else {
                     ToolResult::error(text)
@@ -1316,6 +1349,44 @@ mod tests {
             .collect();
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].mime_type, mush_ai::types::ImageMimeType::Jpeg);
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn attaching_an_image_on_a_model_without_vision_is_an_error() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dot.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4))
+            .save(&path)
+            .unwrap();
+        let tool = tool(dir.path());
+        tool.set_model("text-only", false);
+
+        let result = tool
+            .execute(json!({
+                "code": format!("attach_image({:?})", path.display().to_string())
+            }))
+            .await;
+
+        assert!(result.outcome.is_error());
+        assert!(
+            extract_text(&result).ends_with(
+                "[image not attached: text-only does not support vision. Tell the user to switch \
+                 to a vision-capable model to load images into context.]"
+            ),
+            "{}",
+            extract_text(&result)
+        );
+        assert_eq!(result.content.len(), 1);
+        tool.set_model("seeing", true);
+        let seen = tool
+            .execute(json!({
+                "code": format!("attach_image({:?})", path.display().to_string())
+            }))
+            .await;
+        assert!(seen.outcome.is_success(), "{}", extract_text(&seen));
+        assert_eq!(seen.content.len(), 2);
         tool.shutdown().await;
     }
 
