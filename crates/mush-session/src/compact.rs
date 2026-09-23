@@ -838,8 +838,9 @@ pub async fn try_llm_compact(
     Ok(result)
 }
 
-fn with_file_operations(mut summary: String, summarised: &[Message]) -> String {
+fn with_file_operations(summary: String, summarised: &[Message]) -> String {
     let ops = crate::file_ops::FileOperations::from_messages(summarised);
+    let mut summary = crate::file_ops::strip_file_lists(&summary);
     summary.push_str(&ops.render());
     summary
 }
@@ -1039,7 +1040,24 @@ fn summariser_input(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
         .filter(|message| !is_regenerated(message))
-        .cloned()
+        .map(|message| match message {
+            Message::User(user) => {
+                let text = user.text();
+                if crate::file_ops::is_summary_text(&text) {
+                    let mut user = user.clone();
+                    user.content = UserContent::Text(crate::file_ops::strip_file_lists(&text));
+                    Message::User(user)
+                } else {
+                    message.clone()
+                }
+            }
+            Message::Event(event) if event.kind.is_summary() => {
+                let mut event = event.clone();
+                event.content = crate::file_ops::strip_file_lists(&event.content);
+                Message::Event(event)
+            }
+            other => other.clone(),
+        })
         .collect()
 }
 
@@ -1421,6 +1439,26 @@ mod tests {
         assert!(text.contains("[Event]: [non-human event"));
         assert!(!text.contains("[compaction-summary"));
         assert!(!text.contains("compacted into the following summary"));
+    }
+
+    #[test]
+    fn the_summariser_reads_earlier_summaries_without_their_file_lists() {
+        let earlier = user_msg(&mush_ai::types::compaction_summary_text(
+            "## Goal\nold work\n\n<modified-files>\nold.rs\n</modified-files>",
+        ));
+        let context = compaction_context(
+            &[earlier, user_msg("more <read-files>kept</read-files>")],
+            &[],
+            &CompactionFocus::default(),
+            None,
+        );
+        let Message::User(request) = &context.messages[0] else {
+            panic!()
+        };
+        let text = request.text();
+        assert!(text.contains("old work"));
+        assert!(!text.contains("old.rs"));
+        assert!(text.contains("more <read-files>kept</read-files>"));
     }
 
     #[test]
@@ -2340,7 +2378,7 @@ mod tests {
                 Ok(Box::pin(futures::stream::iter(vec![
                     StreamEvent::TextDelta {
                         content_index: 0,
-                        delta: "## Goal\nship it".into(),
+                        delta: "## Goal\nship it\n\n<read-files>\nstale.rs\n</read-files>".into(),
                     },
                     StreamEvent::Done {
                         reason: StopReason::Stop,

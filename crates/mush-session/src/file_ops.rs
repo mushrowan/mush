@@ -12,6 +12,31 @@ const READ_OPEN: &str = "<read-files>";
 const READ_CLOSE: &str = "</read-files>";
 const MODIFIED_OPEN: &str = "<modified-files>";
 const MODIFIED_CLOSE: &str = "</modified-files>";
+const MAX_ENTRIES: usize = 200;
+const MAX_COMBINED_CHARS: usize = 6000;
+
+#[must_use]
+pub fn strip_file_lists(summary: &str) -> String {
+    let mut out = summary.to_string();
+    for (open, close) in [(READ_OPEN, READ_CLOSE), (MODIFIED_OPEN, MODIFIED_CLOSE)] {
+        while let Some(start) = out.find(open) {
+            let Some(end) = out[start..]
+                .find(close)
+                .map(|end| start + end + close.len())
+            else {
+                break;
+            };
+            let start = out[..start].trim_end_matches('\n').len();
+            out.replace_range(start..end, "");
+        }
+    }
+    out.trim_end().to_string()
+}
+
+pub(crate) fn is_summary_text(text: &str) -> bool {
+    mush_ai::types::strip_compaction_summary_prefix(text).is_some()
+        || text.starts_with(mush_ai::types::BRANCH_SUMMARY_PREFIX)
+}
 
 impl FileOperations {
     #[must_use]
@@ -62,8 +87,14 @@ impl FileOperations {
                     }
                 }
             }
-            Message::User(user) => self.absorb_text(&user.text()),
-            Message::Event(event) => self.absorb_text(&event.content),
+            Message::User(user) => {
+                let text = user.text();
+                if is_summary_text(&text) {
+                    self.absorb_text(&text);
+                }
+            }
+            Message::Event(event) if event.kind.is_summary() => self.absorb_text(&event.content),
+            Message::Event(_) => {}
         }
     }
 
@@ -78,24 +109,49 @@ impl FileOperations {
         self.read.is_empty() && self.modified.is_empty()
     }
 
+    fn capped_lists(&self) -> (Vec<&str>, Vec<&str>) {
+        let mut read: Vec<&str> = self
+            .read
+            .iter()
+            .filter(|path| !self.modified.contains(*path))
+            .map(String::as_str)
+            .take(MAX_ENTRIES)
+            .collect();
+        let mut modified: Vec<&str> = self
+            .modified
+            .iter()
+            .map(String::as_str)
+            .take(MAX_ENTRIES)
+            .collect();
+        let chars = |read: &[&str], modified: &[&str]| -> usize {
+            read.iter().chain(modified).map(|path| path.len() + 1).sum()
+        };
+        while !read.is_empty() && chars(&read, &modified) > MAX_COMBINED_CHARS {
+            read.pop();
+        }
+        while !modified.is_empty() && chars(&read, &modified) > MAX_COMBINED_CHARS {
+            modified.pop();
+        }
+        (read, modified)
+    }
+
     #[must_use]
     pub fn render(&self) -> String {
+        let (read, modified) = self.capped_lists();
         let mut out = String::new();
-        if !self.read.is_empty() {
+        for (open, close, paths) in [
+            (READ_OPEN, READ_CLOSE, read),
+            (MODIFIED_OPEN, MODIFIED_CLOSE, modified),
+        ] {
+            if paths.is_empty() {
+                continue;
+            }
             out.push_str("\n\n");
-            out.push_str(READ_OPEN);
+            out.push_str(open);
             out.push('\n');
-            out.push_str(&self.read.iter().cloned().collect::<Vec<_>>().join("\n"));
+            out.push_str(&paths.join("\n"));
             out.push('\n');
-            out.push_str(READ_CLOSE);
-        }
-        if !self.modified.is_empty() {
-            out.push_str("\n\n");
-            out.push_str(MODIFIED_OPEN);
-            out.push('\n');
-            out.push_str(&self.modified.iter().cloned().collect::<Vec<_>>().join("\n"));
-            out.push('\n');
-            out.push_str(MODIFIED_CLOSE);
+            out.push_str(close);
         }
         out
     }
@@ -186,9 +242,9 @@ mod tests {
 
     #[test]
     fn an_earlier_summary_carries_its_lists_forward() {
-        let earlier = user(
-            "<summary>\nwork so far\n\n<read-files>\nold/read.rs\n</read-files>\n\n<modified-files>\nold/changed.rs\n</modified-files>\n</summary>",
-        );
+        let earlier = user(&compaction_summary_text(
+            "work so far\n\n<read-files>\nold/read.rs\n</read-files>\n\n<modified-files>\nold/changed.rs\n</modified-files>",
+        ));
         let ops = FileOperations::from_messages(&[earlier, cell_result(&["new.rs"])]);
         assert_eq!(ops.read.iter().collect::<Vec<_>>(), vec!["old/read.rs"]);
         assert_eq!(
@@ -205,7 +261,50 @@ mod tests {
             rendered,
             "\n\n<read-files>\na\n</read-files>\n\n<modified-files>\nb\n</modified-files>"
         );
-        assert_eq!(FileOperations::from_messages(&[user(&rendered)]), ops);
+        assert_eq!(
+            FileOperations::from_messages(&[user(&compaction_summary_text(&rendered))]),
+            ops
+        );
         assert_eq!(FileOperations::default().render(), "");
+    }
+
+    #[test]
+    fn pasted_file_list_tags_outside_a_summary_are_ignored() {
+        let pasted = user("look at this <read-files>\nsecret.rs\n</read-files>");
+        assert!(FileOperations::from_messages(&[pasted]).is_empty());
+    }
+
+    #[test]
+    fn stripping_removes_both_blocks_and_their_leading_newlines() {
+        let summary = "## Goal\nship it\n\n<read-files>\na\n</read-files>\n\n<modified-files>\nb\n</modified-files>\n";
+        assert_eq!(strip_file_lists(summary), "## Goal\nship it");
+        assert_eq!(strip_file_lists("no lists"), "no lists");
+    }
+
+    #[test]
+    fn the_lists_are_capped_and_reads_drop_first() {
+        let mut ops = FileOperations::default();
+        for i in 0..300 {
+            ops.modified.insert(format!("m{i:03}"));
+        }
+        let (read, modified) = ops.capped_lists();
+        assert!(read.is_empty());
+        assert_eq!(modified.len(), MAX_ENTRIES);
+
+        let mut ops = FileOperations::default();
+        let long = "x".repeat(99);
+        for i in 0..50 {
+            ops.read.insert(format!("r{i:02}{long}"));
+            ops.modified.insert(format!("m{i:02}{long}"));
+        }
+        let (read, modified) = ops.capped_lists();
+        assert_eq!(modified.len(), 50);
+        assert_eq!(read.len(), 8);
+        assert_eq!(read.last().copied(), Some(format!("r07{long}").as_str()));
+        let ops = FileOperations {
+            read: BTreeSet::new(),
+            modified: (0..100).map(|i| format!("m{i:02}{long}")).collect(),
+        };
+        assert_eq!(ops.capped_lists().1.len(), 58);
     }
 }
