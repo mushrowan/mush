@@ -379,12 +379,10 @@ impl Autonomous {
         }
         inner.due = false;
         inner.last_decision_at = Some(Instant::now());
-        if let Some(reason) = Self::limit_reached(&inner) {
-            inner.enabled = false;
-            inner.stopped = Some(reason.clone());
-            return Decision::Stop(reason);
-        }
         if !inner.gates.commands.is_empty() {
+            for run in gate_results.iter().filter(|run| run.passed) {
+                inner.gate_attempts.remove(&run.command);
+            }
             let failed = gate_results.into_iter().find(|run| !run.passed);
             let Some(run) = failed else {
                 inner.enabled = false;
@@ -411,8 +409,18 @@ impl Autonomous {
                 inner.stopped = Some(reason.clone());
                 return Decision::Stop(reason);
             }
+            if let Some(reason) = Self::limit_reached(&inner) {
+                inner.enabled = false;
+                inner.stopped = Some(reason.clone());
+                return Decision::Stop(reason);
+            }
             inner.continuations += 1;
             return Decision::Continue(gate_failure_prompt(&failure, inner.gates.max_retries));
+        }
+        if let Some(reason) = Self::limit_reached(&inner) {
+            inner.enabled = false;
+            inner.stopped = Some(reason.clone());
+            return Decision::Stop(reason);
         }
         inner.continuations += 1;
         Decision::Continue(format!(
@@ -452,46 +460,55 @@ fn gate_failure_prompt(failure: &GateFailure, max_retries: u32) -> String {
     text
 }
 
+const SNAPSHOT_PATHSPEC: [&str; 8] = [
+    "--",
+    ".",
+    ":(exclude)verification",
+    ":(exclude)target",
+    ":(exclude).vf-prime-agent",
+    ":(exclude)Cargo.lock",
+    ":(exclude)submission.tar.gz",
+    ":(exclude)runner_args.log",
+];
+
 pub fn workspace_snapshot(cwd: &Path) -> Option<String> {
-    let status = std::process::Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "-uall",
-            "--no-renames",
-            "--",
-            ".",
-            ":(exclude)target",
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    if !status.status.success() {
-        return None;
-    }
-    let diff = std::process::Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "diff",
-            "--no-color",
-            "--",
-            ".",
-            ":(exclude)target",
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("--no-optional-locks")
+            .args(args)
+            .args(SNAPSHOT_PATHSPEC)
+            .current_dir(cwd)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let status = git(&["status", "--porcelain=v1", "-z", "-uall", "--no-renames"])?;
+    let diff = git(&["diff", "--no-ext-diff", "--binary", "HEAD"])?;
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    status.stdout.hash(&mut hasher);
-    diff.stdout.hash(&mut hasher);
+    status.hash(&mut hasher);
+    diff.hash(&mut hasher);
+    let mut untracked: Vec<&[u8]> = status
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| entry.strip_prefix(b"?? "))
+        .collect();
+    untracked.sort_unstable();
+    for path in untracked {
+        path.hash(&mut hasher);
+        let full = cwd.join(String::from_utf8_lossy(path).as_ref());
+        match std::fs::symlink_metadata(&full) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::read_link(&full).ok().hash(&mut hasher);
+            }
+            Ok(meta) if meta.is_file() => std::fs::read(&full).ok().hash(&mut hasher),
+            Ok(_) | Err(_) => {}
+        }
+    }
     Some(format!("{:016x}", hasher.finish()))
 }
 
 pub async fn run_gate(command: &str, cwd: &Path, timeout: Duration) -> GateRun {
-    let snapshot = workspace_snapshot(cwd);
     let child = tokio::process::Command::new("bash")
         .arg("-c")
         .arg(command)
@@ -531,7 +548,7 @@ pub async fn run_gate(command: &str, cwd: &Path, timeout: Duration) -> GateRun {
         skipped: false,
         exit_text,
         output,
-        snapshot,
+        snapshot: workspace_snapshot(cwd),
     }
 }
 
@@ -762,6 +779,64 @@ mod tests {
             "the real decision is still owed once the children settle"
         );
         assert_eq!(autonomous.status().continuations, 1);
+    }
+
+    #[test]
+    fn passing_gates_stop_as_passed_even_at_the_limit() {
+        let autonomous = on(
+            Limits {
+                max_continuations: Some(0),
+                ..Limits::unlimited()
+            },
+            Gates {
+                commands: vec!["true".into()],
+                ..Gates::default()
+            },
+        );
+        autonomous.turn_ended();
+        assert_eq!(
+            autonomous.decide(vec![GateRun {
+                command: "true".into(),
+                passed: true,
+                skipped: false,
+                exit_text: "exited with 0".into(),
+                output: String::new(),
+                snapshot: None,
+            }]),
+            Decision::Stop("all gates passed".into())
+        );
+    }
+
+    #[test]
+    fn editing_an_untracked_file_changes_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "one").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        std::fs::write(dir.path().join("new.txt"), "draft").unwrap();
+        let before = workspace_snapshot(dir.path()).unwrap();
+        std::fs::write(dir.path().join("new.txt"), "draft two").unwrap();
+        let after = workspace_snapshot(dir.path()).unwrap();
+        assert_ne!(before, after);
+        std::fs::write(dir.path().join("Cargo.lock"), "ignored").unwrap();
+        assert_eq!(workspace_snapshot(dir.path()).unwrap(), after);
     }
 
     #[test]
