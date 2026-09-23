@@ -1077,15 +1077,6 @@ pub async fn auto_compact(
     )
     .await;
 
-    if result.masked_count > 0 {
-        eprintln!(
-            "{}",
-            Style::Dim.stderr(format_args!(
-                "(masked {} old tool outputs, ~{} tokens saved)",
-                result.masked_count, result.mask_tokens_saved
-            ))
-        );
-    }
     if result.summarised_count > 0 {
         eprintln!(
             "{}",

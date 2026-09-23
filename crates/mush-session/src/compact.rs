@@ -5,8 +5,6 @@ use mush_ai::types::*;
 
 const DEFAULT_KEEP_RECENT: usize = 10;
 
-const DEFAULT_KEEP_OBSERVATIONS: usize = 5;
-
 const COMPACTION_MAX_RETRIES: u32 = 5;
 
 const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
@@ -227,60 +225,6 @@ fn message_char_count(msg: &Message) -> usize {
 
 fn estimate_message_tokens(msg: &Message) -> usize {
     message_char_count(msg) / CHARS_PER_TOKEN
-}
-
-pub fn mask_observations(
-    messages: &mut [Message],
-    keep_recent_turns: Option<usize>,
-) -> ObservationMaskResult {
-    let keep = keep_recent_turns.unwrap_or(DEFAULT_KEEP_OBSERVATIONS);
-
-    let Some(cutoff_index) = find_recent_boundary(messages, TurnPivot::Assistant, keep) else {
-        return ObservationMaskResult {
-            masked_count: 0,
-            tokens_saved: 0,
-        };
-    };
-
-    let mut masked_count = 0;
-    let mut tokens_saved = 0;
-
-    for msg in &mut messages[..cutoff_index] {
-        if let Message::ToolResult(tr) = msg {
-            let old_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
-
-            let line_count: usize = tr
-                .content
-                .iter()
-                .map(|p| match p {
-                    ToolResultContentPart::Text(t) => t.text.lines().count(),
-                    ToolResultContentPart::Image(_) => 1,
-                })
-                .sum();
-
-            let summary = format!(
-                "[tool output hidden: {} lines, tool: {}]",
-                line_count, tr.tool_name
-            );
-
-            tr.content = vec![ToolResultContentPart::Text(TextContent { text: summary })];
-
-            let new_tokens = estimate_message_tokens(&Message::ToolResult(tr.clone()));
-            tokens_saved += old_tokens.saturating_sub(new_tokens);
-            masked_count += 1;
-        }
-    }
-
-    ObservationMaskResult {
-        masked_count,
-        tokens_saved,
-    }
-}
-
-#[derive(Debug)]
-pub struct ObservationMaskResult {
-    pub masked_count: usize,
-    pub tokens_saved: usize,
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -643,8 +587,6 @@ pub fn compaction_tokens_for_estimated_payload(
 #[derive(Debug)]
 pub struct AutoCompactResult {
     pub messages: Vec<Message>,
-    pub masked_count: usize,
-    pub mask_tokens_saved: usize,
     pub summarised_count: usize,
     pub summary: String,
 }
@@ -663,23 +605,6 @@ pub async fn auto_compact(
     if !needs_compaction_for_messages(context_tokens, context_window, &messages, settings) {
         return AutoCompactResult {
             messages,
-            masked_count: 0,
-            mask_tokens_saved: 0,
-            summarised_count: 0,
-            summary: String::new(),
-        };
-    }
-
-    let mut messages = messages;
-    let mask_result = mask_observations(&mut messages, None);
-
-    if mask_result.masked_count > 0
-        && estimate_tokens(&messages) < settings.threshold(context_window).get() as usize
-    {
-        return AutoCompactResult {
-            messages,
-            masked_count: mask_result.masked_count,
-            mask_tokens_saved: mask_result.tokens_saved,
             summarised_count: 0,
             summary: String::new(),
         };
@@ -700,8 +625,6 @@ pub async fn auto_compact(
 
     AutoCompactResult {
         messages: result.messages,
-        masked_count: mask_result.masked_count,
-        mask_tokens_saved: mask_result.tokens_saved,
         summarised_count: result.summarised_count,
         summary: result.summary,
     }
@@ -2334,129 +2257,5 @@ mod tests {
             !first_text.is_some_and(|t| t.contains("first summary")),
             "should not contain first summary anymore"
         );
-    }
-
-    fn tool_result_msg(tool_name: &str, output: &str) -> Message {
-        Message::ToolResult(ToolResultMessage {
-            tool_call_id: "tc_1".into(),
-            tool_name: tool_name.into(),
-            content: vec![ToolResultContentPart::Text(TextContent {
-                text: output.into(),
-            })],
-            outcome: ToolOutcome::Success,
-            timestamp_ms: Timestamp::zero(),
-            details: None,
-        })
-    }
-
-    #[test]
-    fn mask_observations_basic() {
-        let big_output = (0..50)
-            .map(|i| format!("line {i}: some output text here"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut msgs = vec![
-            user_msg("q1"),
-            assistant_msg("calling tool"),
-            tool_result_msg("bash", &big_output),
-            user_msg("q2"),
-            assistant_msg("calling another tool"),
-            tool_result_msg("read", "file contents\nline2"),
-            user_msg("q3"),
-            assistant_msg("final answer"),
-        ];
-
-        let result = mask_observations(&mut msgs, Some(2));
-
-        assert_eq!(result.masked_count, 1);
-        assert!(result.tokens_saved > 0);
-
-        if let Message::ToolResult(tr) = &msgs[2] {
-            let text = &tr.content[0];
-            if let ToolResultContentPart::Text(t) = text {
-                assert!(
-                    t.text.contains("[tool output hidden:"),
-                    "should be masked: {}",
-                    t.text
-                );
-                assert!(t.text.contains("bash"), "should mention tool name");
-            }
-        } else {
-            panic!("expected tool result at index 2");
-        }
-
-        if let Message::ToolResult(tr) = &msgs[5] {
-            let text = &tr.content[0];
-            if let ToolResultContentPart::Text(t) = text {
-                assert!(
-                    t.text.contains("file contents"),
-                    "recent tool result should be preserved: {}",
-                    t.text
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn mask_observations_nothing_to_mask() {
-        let mut msgs = vec![user_msg("hi"), assistant_msg("hello")];
-
-        let result = mask_observations(&mut msgs, Some(5));
-        assert_eq!(result.masked_count, 0);
-        assert_eq!(result.tokens_saved, 0);
-    }
-
-    #[test]
-    fn mask_observations_preserves_structure() {
-        let mut msgs = vec![
-            user_msg("q1"),
-            assistant_msg("a1"),
-            tool_result_msg("bash", "output 1"),
-            user_msg("q2"),
-            assistant_msg("a2"),
-            tool_result_msg("read", "output 2"),
-            user_msg("q3"),
-            assistant_msg("a3"),
-            tool_result_msg("edit", "output 3"),
-        ];
-
-        mask_observations(&mut msgs, Some(1));
-
-        assert_eq!(msgs.len(), 9);
-        assert!(matches!(msgs[0], Message::User(_)));
-        assert!(matches!(msgs[1], Message::Assistant(_)));
-        assert!(matches!(msgs[2], Message::ToolResult(_)));
-    }
-
-    #[test]
-    fn mask_observations_counts_lines() {
-        let mut msgs = vec![
-            user_msg("q"),
-            assistant_msg("a"),
-            tool_result_msg("bash", "line1\nline2\nline3"),
-            user_msg("q2"),
-            assistant_msg("a2"),
-        ];
-
-        mask_observations(&mut msgs, Some(1));
-
-        if let Message::ToolResult(tr) = &msgs[2]
-            && let ToolResultContentPart::Text(t) = &tr.content[0]
-        {
-            assert!(t.text.contains("3 lines"), "should count lines: {}", t.text);
-        }
-    }
-
-    #[test]
-    fn mask_observations_default_threshold() {
-        let mut msgs: Vec<Message> = Vec::new();
-        for i in 0..7 {
-            msgs.push(user_msg(&format!("q{i}")));
-            msgs.push(assistant_msg(&format!("a{i}")));
-            msgs.push(tool_result_msg("bash", &format!("output {i}")));
-        }
-
-        let result = mask_observations(&mut msgs, None);
-        assert_eq!(result.masked_count, 2);
     }
 }

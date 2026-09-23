@@ -685,8 +685,6 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                         summary: result.summary,
                         summarised_count: result.summarised_count,
                     })
-                } else if result.masked_count > 0 {
-                    mush_agent::ContextTransformResult::Silent(result.messages)
                 } else {
                     mush_agent::ContextTransformResult::Unchanged
                 }

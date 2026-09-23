@@ -347,8 +347,6 @@ pub fn build_context_transform(
                     summary: result.summary,
                     summarised_count: result.summarised_count,
                 })
-            } else if result.masked_count > 0 {
-                mush_agent::ContextTransformResult::Silent(result.messages)
             } else {
                 mush_agent::ContextTransformResult::Unchanged
             }
@@ -459,13 +457,6 @@ pub async fn auto_compact(
     )
     .await;
 
-    if result.masked_count > 0 {
-        tracing::info!(
-            masked = result.masked_count,
-            tokens_saved = result.mask_tokens_saved,
-            "observation masking applied"
-        );
-    }
     if result.summarised_count > 0 {
         tracing::info!(
             summarised = result.summarised_count,
