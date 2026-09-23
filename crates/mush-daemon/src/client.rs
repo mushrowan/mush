@@ -20,7 +20,8 @@ const FRAME_BUFFER: usize = 256;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 fn timeout_for(command: &ClientCommand) -> Duration {
     match command {
@@ -145,8 +146,8 @@ impl DaemonConnection {
                 self.closed = true;
                 return false;
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_millis(500));
+            tokio::time::sleep_until((tokio::time::Instant::now() + backoff).min(deadline)).await;
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_CAP);
         }
     }
 
