@@ -31,18 +31,21 @@ pub fn sanitise_title(raw: &str) -> String {
 
 fn cost_label(cost: Dollars) -> Option<String> {
     let amount = cost.get();
-    (amount.is_finite() && amount > 0.0).then(|| format!("${amount:.2}"))
+    (amount.is_finite() && amount >= 0.0).then(|| format!("${amount:.2}"))
+}
+
+fn cwd_name(cwd: &str) -> &str {
+    std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(cwd)
 }
 
 pub fn top_bar_line(app: &App, width: u16) -> Line<'static> {
-    let Some(title) = app
-        .session_title
-        .as_deref()
-        .map(sanitise_title)
-        .filter(|t| !t.is_empty())
-    else {
+    let title = sanitise_title(app.session_title.as_deref().unwrap_or(cwd_name(&app.cwd)));
+    if title.is_empty() {
         return Line::default();
-    };
+    }
     let width = usize::from(width);
     let title_width = title.width();
     let start = width.saturating_sub(title_width) / 2;
@@ -116,7 +119,7 @@ mod tests {
 
         let row = render(&app, 21);
 
-        assert_eq!(row.trim_end(), format!("{}hello", " ".repeat(8)));
+        assert_eq!(row.trim_end(), format!("{}hello  $0.00", " ".repeat(8)));
     }
 
     #[test]
@@ -143,22 +146,23 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_cost_is_not_shown() {
+    fn a_zero_cost_shows_as_zero() {
         let mut app = app();
         app.session_title = Some("hello".into());
 
         let row = render(&app, 40);
 
-        assert!(!row.contains('$'), "{row:?}");
+        assert!(row.contains("hello  $0.00"), "{row:?}");
     }
 
     #[test]
-    fn no_title_renders_a_blank_row() {
-        let app = app();
+    fn no_title_falls_back_to_the_cwd_name() {
+        let mut app = app();
+        app.cwd = "~/dev/mush".into();
 
         let row = render(&app, 40);
 
-        assert_eq!(row.trim(), "");
+        assert_eq!(row.trim(), "mush  $0.00");
     }
 
     #[test]
