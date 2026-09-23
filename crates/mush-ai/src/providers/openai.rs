@@ -132,10 +132,13 @@ fn build_request_body(
             ToolResultTrimming::Preserve
         };
     let mut visitor = OpenaiVisitor {
+        model,
         trimming,
         out: &mut all_messages,
+        pending_images: Vec::new(),
     };
     super::walk_messages(messages, &mut visitor);
+    visitor.flush_images();
 
     let mut converted_tools = if tools.is_empty() {
         None
@@ -275,12 +278,54 @@ fn mark_last_text(message: &mut serde_json::Value, cache_control: &serde_json::V
 }
 
 struct OpenaiVisitor<'a> {
+    model: &'a Model,
     trimming: ToolResultTrimming,
     out: &'a mut Vec<serde_json::Value>,
+    pending_images: Vec<serde_json::Value>,
 }
+
+impl OpenaiVisitor<'_> {
+    fn flush_images(&mut self) {
+        if self.pending_images.is_empty() {
+            return;
+        }
+        let mut content = vec![serde_json::json!({
+            "type": "text",
+            "text": "Attached image(s) from tool result:",
+        })];
+        content.append(&mut self.pending_images);
+        self.out.push(serde_json::json!({
+            "role": "user",
+            "content": content,
+        }));
+    }
+
+    fn tool_call_id(&self, id: &str) -> String {
+        if let Some((call_id, _)) = id.split_once('|') {
+            return call_id
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .take(MAX_TOOL_CALL_ID_CHARS)
+                .collect();
+        }
+        if matches!(&self.model.provider, Provider::Custom(name) if name == "openai") {
+            return id.chars().take(MAX_TOOL_CALL_ID_CHARS).collect();
+        }
+        id.to_string()
+    }
+}
+
+const MAX_TOOL_CALL_ID_CHARS: usize = 40;
 
 impl super::MessageVisitor for OpenaiVisitor<'_> {
     fn on_user(&mut self, user: &UserMessage) {
+        self.flush_images();
         let content = match &user.content {
             UserContent::Text(text) => serde_json::json!(text),
             UserContent::Parts(parts) => {
@@ -310,6 +355,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
     }
 
     fn on_assistant(&mut self, asst: &AssistantMessage) {
+        self.flush_images();
         let mut msg_obj = serde_json::json!({ "role": "assistant" });
 
         let text_parts: Vec<&str> = asst
@@ -332,7 +378,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
             .iter()
             .filter_map(|p| match p {
                 AssistantContentPart::ToolCall(tc) => Some(serde_json::json!({
-                    "id": tc.id.as_str(),
+                    "id": self.tool_call_id(tc.id.as_str()),
                     "type": "function",
                     "function": {
                         "name": tc.name.as_str(),
@@ -361,13 +407,34 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let text = super::maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming);
+        let has_images = tr
+            .content
+            .iter()
+            .any(|part| matches!(part, ToolResultContentPart::Image(_)));
+        let text = if raw_text.is_empty() && has_images {
+            "(see attached image)".to_string()
+        } else {
+            super::maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming)
+        };
 
         self.out.push(serde_json::json!({
             "role": "tool",
-            "tool_call_id": tr.tool_call_id.as_str(),
+            "tool_call_id": self.tool_call_id(tr.tool_call_id.as_str()),
             "content": text,
         }));
+
+        if has_images && self.model.input.contains(&InputModality::Image) {
+            self.pending_images
+                .extend(tr.content.iter().filter_map(|part| match part {
+                    ToolResultContentPart::Image(img) => Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.mime_type, img.data),
+                        }
+                    })),
+                    ToolResultContentPart::Text(_) => None,
+                }));
+        }
     }
 }
 
@@ -1035,6 +1102,55 @@ mod tests {
         };
         let body = build_request_body(&other, &None, &messages, &[], &StreamOptions::default());
         assert_eq!(body.messages[1]["content"], "second");
+    }
+
+    #[test]
+    fn tool_result_images_follow_as_a_user_message_and_ids_are_normalised() {
+        let long_id = format!("call_abc|{}", "x+/=".repeat(100));
+        let mut messages = old_tool_turn("");
+        messages.truncate(3);
+        let Message::Assistant(assistant) = &mut messages[1] else {
+            panic!()
+        };
+        let AssistantContentPart::ToolCall(call) = &mut assistant.content[0] else {
+            panic!()
+        };
+        call.id = long_id.as_str().into();
+        let Message::ToolResult(result) = &mut messages[2] else {
+            panic!()
+        };
+        result.tool_call_id = long_id.as_str().into();
+        result.content = vec![ToolResultContentPart::Image(ImageContent {
+            mime_type: ImageMimeType::Png,
+            data: "aW1n".into(),
+        })];
+        messages.push(user_turn("what is it"));
+
+        let options = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..StreamOptions::default()
+        };
+        let body = build_request_body(&test_model(), &None, &messages, &[], &options);
+        assert_eq!(body.messages[1]["tool_calls"][0]["id"], "call_abc");
+        assert_eq!(body.messages[2]["tool_call_id"], "call_abc");
+        assert_eq!(body.messages[2]["content"], "(see attached image)");
+        assert_eq!(body.messages[3]["role"], "user");
+        assert_eq!(
+            body.messages[3]["content"][0]["text"],
+            "Attached image(s) from tool result:"
+        );
+        assert_eq!(
+            body.messages[3]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aW1n"
+        );
+        assert_eq!(body.messages[4]["content"], "what is it");
+
+        let text_only = Model {
+            input: vec![InputModality::Text],
+            ..test_model()
+        };
+        let body = build_request_body(&text_only, &None, &messages, &[], &options);
+        assert_eq!(body.messages[3]["content"], "what is it");
     }
 
     #[test]
