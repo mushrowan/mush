@@ -114,16 +114,52 @@ impl CellOutput {
     }
 }
 
-#[derive(Default)]
-struct Background {
+pub const DEFAULT_MAX_OUTPUT_CHARS: usize = 64 * 1024;
+
+#[derive(Debug, Default)]
+struct Capped {
     text: String,
     chars: usize,
     truncated: bool,
 }
 
+impl Capped {
+    fn push(&mut self, text: &str, cap: usize) {
+        if self.truncated {
+            return;
+        }
+        let room = cap.saturating_sub(self.chars);
+        match text.char_indices().nth(room) {
+            Some((cut, _)) => {
+                self.text.push_str(&text[..cut]);
+                self.chars = cap;
+                self.truncated = true;
+            }
+            None => {
+                self.text.push_str(text);
+                self.chars += text.chars().count();
+            }
+        }
+    }
+
+    fn finish(self, what: &str, cap: usize) -> String {
+        let mut text = self.text;
+        if self.truncated {
+            text.push_str(&format!("\n[... {what} truncated at {cap} chars ...]"));
+        }
+        text
+    }
+}
+
+fn capped(text: String, cap: usize) -> String {
+    let mut out = Capped::default();
+    out.push(&text, cap);
+    out.finish("output", cap)
+}
+
 struct Shared {
     cells: Mutex<HashMap<String, mpsc::UnboundedSender<Event>>>,
-    background: Mutex<Background>,
+    background: Mutex<Capped>,
     current: Mutex<Option<String>>,
     running: Mutex<Option<String>>,
     idle: tokio::sync::Notify,
@@ -194,7 +230,7 @@ impl Kernel {
 
         let shared = Arc::new(Shared {
             cells: Mutex::new(HashMap::new()),
-            background: Mutex::new(Background::default()),
+            background: Mutex::new(Capped::default()),
             current: Mutex::new(None),
             running: Mutex::new(None),
             idle: tokio::sync::Notify::new(),
@@ -298,6 +334,8 @@ impl Kernel {
         }
 
         let mut output = CellOutput::default();
+        let mut stdout = Capped::default();
+        let mut stderr = Capped::default();
         let mut finished = false;
         let mut abandon = InterruptOnDrop {
             shared: Some((self.shared.clone(), id.clone())),
@@ -306,16 +344,19 @@ impl Kernel {
             on_event(&event);
             match event {
                 Event::Stdout { id: None, .. } | Event::Stderr { id: None, .. } => {}
-                Event::Stdout { text, .. } => output.stdout.push_str(&text),
-                Event::Stderr { text, .. } => output.stderr.push_str(&text),
-                Event::Result { text, .. } => output.result = Some(text),
+                Event::Stdout { text, .. } => stdout.push(&text, DEFAULT_MAX_OUTPUT_CHARS),
+                Event::Stderr { text, .. } => stderr.push(&text, DEFAULT_MAX_OUTPUT_CHARS),
+                Event::Result { text, .. } => {
+                    output.result = Some(capped(text, DEFAULT_MAX_OUTPUT_CHARS));
+                }
                 Event::Display { data, .. } => {
                     if let Some(payload) = data.get(ATTACHMENT_MIME) {
                         match serde_json::from_value::<Attachment>(payload.clone()) {
                             Ok(attachment) if attachment.data.len() > MAX_ATTACHMENT_CHARS => {
-                                output
-                                    .stderr
-                                    .push_str("attachment dropped: larger than the host accepts\n");
+                                stderr.push(
+                                    "attachment dropped: larger than the host accepts\n",
+                                    DEFAULT_MAX_OUTPUT_CHARS,
+                                );
                             }
                             Ok(attachment) => output.attachments.push(attachment),
                             Err(error) => tracing::debug!(%error, "malformed attachment display"),
@@ -345,6 +386,8 @@ impl Kernel {
         }
         abandon.shared.take();
         self.shared.unregister(&id);
+        output.stdout = stdout.finish("output", DEFAULT_MAX_OUTPUT_CHARS);
+        output.stderr = stderr.finish("output", DEFAULT_MAX_OUTPUT_CHARS);
         output.duration = started.elapsed();
         if finished {
             Ok(output)
@@ -625,42 +668,20 @@ impl Shared {
     }
 
     fn push_background(&self, text: &str) {
-        let mut background = self
-            .background
+        self.background
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if background.truncated {
-            return;
-        }
-        let room = MAX_BACKGROUND_OUTPUT_CHARS - background.chars;
-        let mut chars = text.char_indices();
-        match chars.nth(room) {
-            Some((cut, _)) => {
-                background.text.push_str(&text[..cut]);
-                background.chars = MAX_BACKGROUND_OUTPUT_CHARS;
-                background.truncated = true;
-            }
-            None => {
-                background.text.push_str(text);
-                background.chars += text.chars().count();
-            }
-        }
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(text, MAX_BACKGROUND_OUTPUT_CHARS);
     }
 
     fn take_background(&self) -> String {
-        let background = std::mem::take(
+        std::mem::take(
             &mut *self
                 .background
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner),
-        );
-        let mut text = background.text;
-        if background.truncated {
-            text.push_str(&format!(
-                "\n[... background output truncated at {MAX_BACKGROUND_OUTPUT_CHARS} chars ...]"
-            ));
-        }
-        text
+        )
+        .finish("background output", MAX_BACKGROUND_OUTPUT_CHARS)
     }
 
     fn route(&self, event: Event) {

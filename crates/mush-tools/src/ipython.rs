@@ -363,6 +363,7 @@ pub struct IpythonTool {
 }
 
 const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const LIVE_OUTPUT_CAP_BYTES: usize = 2 * mush_kernel::DEFAULT_MAX_OUTPUT_CHARS;
 
 impl IpythonTool {
     pub fn new(cwd: Arc<Path>) -> Self {
@@ -498,11 +499,16 @@ impl IpythonTool {
         let outcome = kernel
             .execute_from(code, origin, |event| {
                 let Some(sink) = &sink else { return };
-                match event {
+                let text = match event {
                     mush_kernel::Event::Stdout { text, .. }
-                    | mush_kernel::Event::Stderr { text, .. } => live.push_str(text),
+                    | mush_kernel::Event::Stderr { text, .. } => text,
                     _ => return,
+                };
+                if live.len() >= LIVE_OUTPUT_CAP_BYTES {
+                    return;
                 }
+                live.push_str(text);
+                live.truncate(live.floor_char_boundary(LIVE_OUTPUT_CAP_BYTES));
                 pending = true;
                 if last_emit.elapsed() >= LIVE_OUTPUT_INTERVAL {
                     sink(&exec_id, live.trim_end());

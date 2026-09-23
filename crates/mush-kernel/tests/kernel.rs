@@ -289,6 +289,26 @@ async fn a_nan_or_oversized_payload_raises_in_the_cell_instead_of_leaving_the_wi
 }
 
 #[tokio::test]
+async fn output_streams_and_the_result_are_capped_per_cell() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute("for _ in range(200):\n    print('o' * 1000)\nimport sys\nsys.stderr.write('e' * 100_000)\n'r' * 100_000")
+        .await
+        .unwrap();
+
+    let marker = "\n[... output truncated at 65536 chars ...]";
+    assert_eq!(output.stdout.len(), 65536 + marker.len());
+    assert!(output.stdout.ends_with(marker));
+    assert!(output.stderr.starts_with("eee"));
+    assert!(output.stderr.ends_with(marker));
+    let result = output.result.unwrap();
+    assert!(result.starts_with("'rrr"));
+    assert!(result.ends_with(marker));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_huge_result_or_error_is_capped_in_transit() {
     let kernel = kernel().await;
 
@@ -298,9 +318,12 @@ async fn a_huge_result_or_error_is_capped_in_transit() {
         .await
         .unwrap();
 
-    let result = result.result.unwrap();
-    assert!(result.len() < 1_100_000, "{}", result.len());
-    assert!(result.ends_with("[... result truncated at 1048576 characters ...]"));
+    assert!(
+        result
+            .result
+            .unwrap()
+            .ends_with("[... output truncated at 65536 chars ...]")
+    );
     let error = error.error.unwrap();
     assert!(error.evalue.len() < 1_100_000, "{}", error.evalue.len());
     kernel.shutdown().await.unwrap();
