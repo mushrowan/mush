@@ -1437,10 +1437,14 @@ fn worker_config(
         let kernel_packages = setup.kernel_packages.clone();
         let cwd = setup.client.cwd.clone();
         let role = role.clone();
+        let system = cli
+            .system
+            .clone()
+            .or(setup.client.cfg.system_prompt.clone());
         let append = cli.append_system.clone();
         move || {
             let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
-            setup::apply_prompt_overrides(&mut project, append.as_deref());
+            setup::apply_prompt_overrides(&mut project, system.as_deref(), append.as_deref());
             if rlm {
                 setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages, &role)
             } else {

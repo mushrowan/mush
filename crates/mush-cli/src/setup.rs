@@ -210,7 +210,13 @@ impl AppSetup {
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
         let mut client = ClientSetup::init(args.client, timer.as_mut()).await?;
-        apply_prompt_overrides(&mut client.project_context, args.append_system.as_deref());
+        apply_prompt_overrides(
+            &mut client.project_context,
+            args.system
+                .as_deref()
+                .or(client.cfg.system_prompt.as_deref()),
+            args.append_system.as_deref(),
+        );
         let ClientSetup {
             cfg,
             model,
@@ -279,21 +285,16 @@ impl AppSetup {
 
         init_skill_tools(project_context, !classic_tools, &mut tools);
 
-        let system_prompt = args
-            .system
-            .or(cfg.system_prompt.clone())
-            .unwrap_or_else(|| {
-                if rlm {
-                    build_rlm_system_prompt(
-                        project_context,
-                        cwd,
-                        &kernel_packages,
-                        &RlmRole::root(rlm_max_depth(cfg)),
-                    )
-                } else {
-                    build_system_prompt_from_context(project_context, cwd)
-                }
-            });
+        let system_prompt = if rlm {
+            build_rlm_system_prompt(
+                project_context,
+                cwd,
+                &kernel_packages,
+                &RlmRole::root(rlm_max_depth(cfg)),
+            )
+        } else {
+            build_system_prompt_from_context(project_context, cwd)
+        };
         if let Some(t) = &mut timer {
             t.phase("system prompt");
         }
@@ -879,7 +880,14 @@ fn prompt_input(value: &str) -> mush_ext::PromptFile {
     }
 }
 
-pub fn apply_prompt_overrides(context: &mut loader::ProjectContext, append: Option<&str>) {
+pub fn apply_prompt_overrides(
+    context: &mut loader::ProjectContext,
+    system: Option<&str>,
+    append: Option<&str>,
+) {
+    if let Some(system) = system.filter(|text| !text.trim().is_empty()) {
+        context.system_prompt = Some(prompt_input(system));
+    }
     if let Some(append) = append.filter(|text| !text.trim().is_empty()) {
         context.append_system_prompt = Some(prompt_input(append));
     }
@@ -1367,6 +1375,34 @@ mod tests {
     }
 
     #[test]
+    fn a_system_flag_is_the_custom_prompt_and_keeps_the_context() {
+        let mut context = ProjectContext {
+            agents_md: vec![mush_ext::AgentsMd {
+                path: "/repo/AGENTS.md".into(),
+                content: "repo rules".into(),
+            }],
+            system_prompt: Some(mush_ext::PromptFile {
+                path: "/repo/.mush/SYSTEM.md".into(),
+                content: "from SYSTEM.md".into(),
+            }),
+            ..ProjectContext::default()
+        };
+        apply_prompt_overrides(&mut context, Some("from the flag"), None);
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        assert!(prompt.starts_with("from the flag\n\n# Project Context"));
+        assert!(prompt.contains("## /repo/AGENTS.md\n\nrepo rules"));
+        assert!(prompt.ends_with("Current working directory: /repo"));
+        assert!(!prompt.contains("from SYSTEM.md"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prompt.md");
+        std::fs::write(&file, "prompt from a file\n").unwrap();
+        apply_prompt_overrides(&mut context, file.to_str(), None);
+        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        assert!(prompt.starts_with("prompt from a file\n\n"));
+    }
+
+    #[test]
     fn the_append_prompt_comes_last_and_the_cli_value_replaces_the_file() {
         let mut context = ProjectContext {
             agents_md: vec![mush_ext::AgentsMd {
@@ -1390,7 +1426,7 @@ mod tests {
         let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"), &[], &root);
         assert!(prompt.ends_with("</available_skills>\n\nfrom the file"));
 
-        apply_prompt_overrides(&mut context, Some("from the cli"));
+        apply_prompt_overrides(&mut context, None, Some("from the cli"));
         let prompt = build_rlm_system_prompt(&context, std::path::Path::new("/repo"), &[], &root);
         assert!(prompt.ends_with("</available_skills>\n\nfrom the cli"));
         assert!(!prompt.contains("from the file"));
@@ -1398,7 +1434,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("extra.md");
         std::fs::write(&file, "read from disk\n").unwrap();
-        apply_prompt_overrides(&mut context, file.to_str());
+        apply_prompt_overrides(&mut context, None, file.to_str());
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(prompt.ends_with("\n\nread from disk"));
     }
