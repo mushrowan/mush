@@ -2269,10 +2269,8 @@ fn a_running_tool_keeps_its_whole_output() {
 #[test]
 fn the_detail_level_cycles_and_wraps() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    assert_eq!(app.detail, ChatDetail::Overview);
-
-    app.cycle_detail();
     assert_eq!(app.detail, ChatDetail::Details);
+
     app.cycle_detail();
     assert_eq!(app.detail, ChatDetail::All);
     app.cycle_detail();

@@ -104,8 +104,8 @@ impl Drop for MessageMut<'_> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChatDetail {
-    #[default]
     Overview,
+    #[default]
     Details,
     All,
 }

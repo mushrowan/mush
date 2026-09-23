@@ -1511,8 +1511,7 @@ fn all_output_shows_every_line_of_a_finished_tool() {
         None,
     );
 
-    app.cycle_detail();
-    app.cycle_detail();
+    app.detail = mush_tui::app::ChatDetail::All;
     let transcript = window_rows(&app);
 
     assert!(
@@ -1529,13 +1528,14 @@ fn details_reveals_collapsed_thinking() {
     let mut reply = DisplayMessage::new(MessageRole::Assistant, "done");
     reply.thinking = Some("first weigh the options\nthen pick one".into());
     app.messages.push(reply);
+    app.detail = mush_tui::app::ChatDetail::Overview;
     let before = window_rows(&app);
     assert!(
         !before.iter().any(|r| r.contains("then pick one")),
         "{before:#?}"
     );
 
-    app.cycle_detail();
+    app.detail = mush_tui::app::ChatDetail::Details;
     let after = window_rows(&app);
 
     assert!(
@@ -1549,12 +1549,12 @@ fn the_detail_key_cycles_from_the_composer_and_the_log() {
     let mut app = conversation(1);
 
     press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
-    assert_eq!(app.detail, mush_tui::app::ChatDetail::Details);
+    assert_eq!(app.detail, mush_tui::app::ChatDetail::All);
 
     start_reading(&mut app);
     press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
 
-    assert_eq!(app.detail, mush_tui::app::ChatDetail::All);
+    assert_eq!(app.detail, mush_tui::app::ChatDetail::Overview);
 }
 
 #[test]
