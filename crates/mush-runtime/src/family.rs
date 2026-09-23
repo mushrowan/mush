@@ -1872,11 +1872,25 @@ impl RlmHandler {
         }
     }
 
-    fn goal_reply(&self) -> serde_json::Value {
+    fn goal_reply(&self, completing: bool) -> serde_json::Value {
         let goal = self.goal.as_ref().and_then(|goal| goal.get());
+        let report = goal
+            .as_ref()
+            .filter(|_| completing)
+            .and_then(Goal::completion_budget_report);
+        let remaining = goal.as_ref().and_then(Goal::remaining_tokens);
+        let goal = goal.map(|goal| {
+            let seconds = goal.elapsed_secs();
+            let mut value = serde_json::to_value(goal).unwrap_or(serde_json::Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("time_used_seconds".into(), seconds.into());
+            }
+            value
+        });
         serde_json::json!({
             "goal": goal,
-            "remaining_tokens": goal.as_ref().and_then(Goal::remaining_tokens),
+            "remaining_tokens": remaining,
+            "completion_budget_report": report,
         })
     }
 
@@ -2224,7 +2238,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                 let updated = jobs.into_iter().find(|job| job.id == id);
                 Ok(serde_json::to_value(updated).unwrap_or(serde_json::Value::Null))
             }
-            "goal.get" => Ok(self.goal_reply()),
+            "goal.get" => Ok(self.goal_reply(false)),
             "goal.create" | "goal.complete" | "goal.fail" | "goal.pause" | "goal.resume"
             | "goal.clear" => {
                 let store = self
@@ -2249,7 +2263,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         store
                             .create_from_host(objective, token_budget)
                             .map_err(mush_kernel::HostError)?;
-                        return Ok(self.goal_reply());
+                        return Ok(self.goal_reply(false));
                     }
                     "goal.complete" => crate::goal::GoalCommand::Complete {
                         summary: str_field("summary"),
@@ -2263,7 +2277,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     _ => crate::goal::GoalCommand::Clear,
                 };
                 store.apply(command).map_err(mush_kernel::HostError)?;
-                Ok(self.goal_reply())
+                Ok(self.goal_reply(kind == "goal.complete"))
             }
             other => Err(mush_kernel::HostError(format!(
                 "unknown host request {other}"
@@ -2914,6 +2928,53 @@ mod tests {
         assert!(retry <= MESSAGE_REFILL && retry > Duration::ZERO);
         assert!(bucket.take(start + MESSAGE_REFILL).is_ok());
         assert!(bucket.take(start + MESSAGE_REFILL).is_err());
+    }
+
+    #[tokio::test]
+    async fn goal_replies_carry_time_used_and_the_completion_report() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let goal = Arc::new(crate::goal::GoalStore::new(None));
+        let handler = RlmHandler::new(family, Identity::root("root")).with_goal(Arc::clone(&goal));
+        handler
+            .handle(
+                "goal.create",
+                serde_json::json!({ "objective": "ship", "token_budget": 100 }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            handler
+                .handle("goal.create", serde_json::json!({ "objective": "again" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            handler
+                .handle(
+                    "goal.create",
+                    serde_json::json!({ "objective": "x", "token_budget": -5 })
+                )
+                .await
+                .is_err()
+        );
+        let got = handler
+            .handle("goal.get", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(got["goal"]["time_used_seconds"].is_u64());
+        assert!(got["completion_budget_report"].is_null());
+        let done = handler
+            .handle("goal.complete", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            done["completion_budget_report"]
+                .as_str()
+                .unwrap()
+                .contains("tokens used: 0 of 100")
+        );
     }
 
     #[tokio::test]

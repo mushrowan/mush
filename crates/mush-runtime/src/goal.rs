@@ -27,6 +27,10 @@ pub struct Goal {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default)]
+    pub time_used_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_since: Option<Timestamp>,
 }
 
 #[must_use]
@@ -42,11 +46,48 @@ impl Goal {
     }
 
     #[must_use]
+    pub fn completion_budget_report(&self) -> Option<String> {
+        if self.status != GoalStatus::Complete {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if let Some(budget) = self.token_budget {
+            parts.push(format!("tokens used: {} of {budget}", self.tokens_used));
+        }
+        let seconds = self.elapsed_secs();
+        if seconds > 0 {
+            parts.push(format!("time used: {seconds} seconds"));
+        }
+        (!parts.is_empty()).then(|| {
+            format!(
+                "Goal achieved. Report final budget usage to the user: {}.",
+                parts.join("; ")
+            )
+        })
+    }
+
+    #[must_use]
     pub fn elapsed_secs(&self) -> u64 {
-        self.updated_at
-            .as_ms()
-            .saturating_sub(self.created_at.as_ms())
-            / 1_000
+        self.time_used_ms_at(Timestamp::now()) / 1_000
+    }
+
+    fn time_used_ms_at(&self, now: Timestamp) -> u64 {
+        self.time_used_ms
+            + self
+                .active_since
+                .map_or(0, |since| now.as_ms().saturating_sub(since.as_ms()))
+    }
+
+    fn set_status(&mut self, status: GoalStatus, now: Timestamp) {
+        if self.status == GoalStatus::Active && status != GoalStatus::Active {
+            self.time_used_ms = self.time_used_ms_at(now);
+            self.active_since = None;
+        }
+        if status == GoalStatus::Active && self.active_since.is_none() {
+            self.active_since = Some(now);
+        }
+        self.status = status;
+        self.updated_at = now;
     }
 }
 
@@ -183,6 +224,8 @@ impl GoalStore {
                     updated_at: now,
                     summary: None,
                     error: None,
+                    time_used_ms: 0,
+                    active_since: Some(now),
                 });
                 inner.due = Some(if replaced_active {
                     Continuation::ObjectiveUpdated
@@ -193,16 +236,14 @@ impl GoalStore {
             }
             GoalCommand::Fail { error } => {
                 let goal = inner.goal.as_mut().ok_or("no goal is set")?;
-                goal.status = GoalStatus::Failed;
+                goal.set_status(GoalStatus::Failed, now);
                 goal.error = Some(error);
-                goal.updated_at = now;
                 inner.due = None;
             }
             GoalCommand::Complete { summary } => {
                 let goal = inner.goal.as_mut().ok_or("no goal is set")?;
-                goal.status = GoalStatus::Complete;
+                goal.set_status(GoalStatus::Complete, now);
                 goal.summary = summary;
-                goal.updated_at = now;
                 inner.due = None;
             }
             GoalCommand::Pause => {
@@ -210,8 +251,7 @@ impl GoalStore {
                 if goal.status != GoalStatus::Active {
                     return Err(format!("the goal is {:?}, not active", goal.status));
                 }
-                goal.status = GoalStatus::Paused;
-                goal.updated_at = now;
+                goal.set_status(GoalStatus::Paused, now);
                 inner.due = None;
             }
             GoalCommand::Resume => {
@@ -222,8 +262,7 @@ impl GoalStore {
                 if goal.status == GoalStatus::BudgetLimited {
                     goal.token_budget = None;
                 }
-                goal.status = GoalStatus::Active;
-                goal.updated_at = now;
+                goal.set_status(GoalStatus::Active, now);
                 inner.due = Some(Continuation::Continue);
             }
             GoalCommand::Clear => {
@@ -254,7 +293,7 @@ impl GoalStore {
             .token_budget
             .is_some_and(|budget| goal.tokens_used >= budget)
         {
-            goal.status = GoalStatus::BudgetLimited;
+            goal.set_status(GoalStatus::BudgetLimited, Timestamp::now());
         }
         let goal = goal.clone();
         if goal.status == GoalStatus::BudgetLimited {
@@ -318,8 +357,7 @@ impl GoalStore {
                     .token_budget
                     .is_some_and(|budget| goal.tokens_used >= budget)
                 {
-                    goal.status = GoalStatus::BudgetLimited;
-                    goal.updated_at = Timestamp::now();
+                    goal.set_status(GoalStatus::BudgetLimited, Timestamp::now());
                     inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
                 } else {
                     inner.due = Some(Continuation::Continue);
@@ -344,9 +382,8 @@ impl GoalStore {
         if goal.status != GoalStatus::Active {
             return;
         }
-        goal.status = GoalStatus::Failed;
+        goal.set_status(GoalStatus::Failed, Timestamp::now());
         goal.error = Some(error.to_string());
-        goal.updated_at = Timestamp::now();
         let goal = goal.clone();
         drop(inner);
         self.persist(Some(&goal));
@@ -531,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn elapsed_counts_from_creation_to_the_last_change() {
+    fn elapsed_counts_only_active_time() {
         let mut goal = Goal {
             id: "g".into(),
             objective: "o".into(),
@@ -543,10 +580,13 @@ mod tests {
             updated_at: Timestamp::from_ms(1_000),
             summary: None,
             error: None,
+            time_used_ms: 0,
+            active_since: Some(Timestamp::from_ms(1_000)),
         };
-        assert_eq!(goal.elapsed_secs(), 0);
-        goal.updated_at = Timestamp::from_ms(91_000);
-        assert_eq!(goal.elapsed_secs(), 90);
+        goal.set_status(GoalStatus::Paused, Timestamp::from_ms(31_000));
+        assert_eq!(goal.time_used_ms_at(Timestamp::from_ms(500_000)), 30_000);
+        goal.set_status(GoalStatus::Active, Timestamp::from_ms(600_000));
+        assert_eq!(goal.time_used_ms_at(Timestamp::from_ms(660_000)), 90_000);
     }
 
     #[test]
@@ -667,6 +707,28 @@ mod tests {
         assert!(notice.starts_with("[goal: objective updated]"));
         assert!(notice.contains("<objective>\nnew\n</objective>"));
         assert!(store.take_due_prompt().is_none());
+    }
+
+    #[test]
+    fn a_completed_goal_reports_its_budget_usage() {
+        let store = GoalStore::new(None);
+        store
+            .apply(GoalCommand::Create {
+                objective: "x".into(),
+                token_budget: Some(1_000),
+            })
+            .unwrap();
+        store.record_usage(250);
+        assert!(store.get().unwrap().completion_budget_report().is_none());
+        let done = store
+            .apply(GoalCommand::Complete { summary: None })
+            .unwrap()
+            .unwrap();
+        assert!(
+            done.completion_budget_report()
+                .unwrap()
+                .contains("tokens used: 250 of 1000")
+        );
     }
 
     #[test]
