@@ -185,26 +185,20 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
         let text = app.input.take_text();
-        if text.starts_with('/') {
-            match crate::slash::parse(&text) {
-                Ok(action) if action.is_safe_during_stream() => {
-                    return Some(AppEvent::SlashCommand { action });
-                }
-                Ok(_) => {
-                    app.input.text = text;
-                    app.input.cursor = app.input.text.len();
-                    app.input.ensure_cursor_visible();
-                    app.status = Some(
-                        "this slash command is blocked while streaming; press esc to abort first"
-                            .into(),
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    app.push_system_message(error.to_string());
-                    return None;
-                }
+        match classify_submission(app, &text) {
+            Submission::Prompt => {}
+            Submission::Command(action) if action.is_safe_during_stream() => {
+                return Some(AppEvent::SlashCommand { action });
             }
+            Submission::Command(_) => {
+                restore_input(app, text);
+                app.status = Some(
+                    "this slash command is blocked while streaming; press esc to abort first"
+                        .into(),
+                );
+                return None;
+            }
+            Submission::Refused => return None,
         }
         return Some(AppEvent::UserSubmit {
             text,
@@ -213,6 +207,40 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
 
     handle_editing(app, key)
+}
+
+enum Submission {
+    Prompt,
+    Command(crate::slash::SlashAction),
+    Refused,
+}
+
+fn classify_submission(app: &mut App, text: &str) -> Submission {
+    if !text.starts_with('/') {
+        return Submission::Prompt;
+    }
+    match crate::slash::parse(text) {
+        Ok(crate::slash::SlashAction::Other { name, .. }) if !app.knows_slash_command(&name) => {
+            let Some(suggestion) = app.suggest_slash_command(&name) else {
+                return Submission::Prompt;
+            };
+            restore_input(app, text.to_string());
+            app.status =
+                Some(format!("Unknown command: /{name}. Did you mean /{suggestion}?").into());
+            Submission::Refused
+        }
+        Ok(action) => Submission::Command(action),
+        Err(error) => {
+            app.push_system_message(error.to_string());
+            Submission::Refused
+        }
+    }
+}
+
+fn restore_input(app: &mut App, text: String) {
+    app.input.text = text;
+    app.input.cursor = app.input.text.len();
+    app.input.ensure_cursor_visible();
 }
 
 fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -269,14 +297,10 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             app.viewport.to_bottom();
             let text = app.input.take_text();
-            if text.starts_with('/') {
-                match crate::slash::parse(&text) {
-                    Ok(action) => return Some(AppEvent::SlashCommand { action }),
-                    Err(error) => {
-                        app.push_system_message(error.to_string());
-                        return None;
-                    }
-                }
+            match classify_submission(app, &text) {
+                Submission::Prompt => {}
+                Submission::Command(action) => return Some(AppEvent::SlashCommand { action }),
+                Submission::Refused => return None,
             }
             Some(AppEvent::UserSubmit {
                 text,

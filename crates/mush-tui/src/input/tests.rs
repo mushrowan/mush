@@ -374,6 +374,12 @@ fn slash_command_parsed() {
 #[test]
 fn slash_command_with_args() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion
+        .slash_commands
+        .push(crate::app::SlashCommand {
+            name: "review".into(),
+            description: "review a file".into(),
+        });
     app.input.text = "/review src/main.rs".into();
     app.input.cursor = 19;
     let event = handle_key(&mut app, key(KeyCode::Enter));
@@ -383,6 +389,91 @@ fn slash_command_with_args() {
         }) => {
             assert_eq!(name, "review");
             assert_eq!(args, "src/main.rs");
+        }
+        other => panic!("expected SlashCommand, got {other:?}"),
+    }
+}
+
+fn app_with_commands(names: &[&str]) -> App {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion.slash_commands = names
+        .iter()
+        .map(|name| crate::app::SlashCommand {
+            name: (*name).into(),
+            description: String::new(),
+        })
+        .collect();
+    app
+}
+
+#[test]
+fn a_slash_typo_is_refused_with_a_suggestion() {
+    let mut app = app_with_commands(&["help", "resume", "skill:python"]);
+    for (typed, message) in [
+        ("/resuem", "Unknown command: /resuem. Did you mean /resume?"),
+        (
+            "/skill:pythno fix the bug",
+            "Unknown command: /skill:pythno. Did you mean /skill:python?",
+        ),
+    ] {
+        app.input.text = typed.into();
+        app.input.cursor = typed.len();
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        assert!(event.is_none(), "{event:?}");
+        assert_eq!(app.input.text, typed);
+        assert_eq!(app.status.as_ref().map(|s| s.text.as_str()), Some(message));
+    }
+}
+
+#[test]
+fn a_slash_prompt_with_no_near_command_is_sent_as_is() {
+    let mut app = app_with_commands(&["help", "mcp", "resume"]);
+    for typed in ["/usr/bin/foo is broken", "/tmp notes for the cleanup"] {
+        app.input.text = typed.into();
+        app.input.cursor = typed.len();
+
+        let event = handle_key(&mut app, key(KeyCode::Enter));
+
+        match event {
+            Some(AppEvent::UserSubmit { text, .. }) => assert_eq!(text, typed),
+            other => panic!("expected UserSubmit, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_slash_prompt_while_streaming_is_steered_as_is() {
+    let mut app = app_with_commands(&["help", "resume"]);
+    app.start_streaming();
+    app.input.text = "/etc/hosts is where lookups start".into();
+    app.input.cursor = app.input.text.len();
+
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+
+    match event {
+        Some(AppEvent::UserSubmit { text, .. }) => {
+            assert_eq!(text, "/etc/hosts is where lookups start");
+        }
+        other => panic!("expected UserSubmit, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_known_skill_command_still_runs() {
+    let mut app = app_with_commands(&["help", "skill:python"]);
+    app.input.text = "/skill:python fix it".into();
+    app.input.cursor = app.input.text.len();
+
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+
+    match event {
+        Some(AppEvent::SlashCommand {
+            action: crate::slash::SlashAction::Other { name, args },
+        }) => {
+            assert_eq!(name, "skill:python");
+            assert_eq!(args, "fix it");
         }
         other => panic!("expected SlashCommand, got {other:?}"),
     }

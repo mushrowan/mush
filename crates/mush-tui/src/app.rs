@@ -612,6 +612,26 @@ impl App {
     }
 
     #[must_use]
+    pub fn knows_slash_command(&self, name: &str) -> bool {
+        self.completion
+            .slash_commands
+            .iter()
+            .any(|command| command.name == name)
+    }
+
+    #[must_use]
+    pub fn suggest_slash_command(&self, name: &str) -> Option<String> {
+        crate::slash::suggest_command(
+            name,
+            self.completion
+                .slash_commands
+                .iter()
+                .map(|command| command.name.as_str()),
+        )
+        .map(str::to_string)
+    }
+
+    #[must_use]
     pub fn has_queued_messages(&self) -> bool {
         self.messages.iter().any(|m| m.queued)
     }

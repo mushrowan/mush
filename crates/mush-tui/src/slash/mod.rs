@@ -720,6 +720,44 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
     }
 }
 
+const MAX_SUGGESTED_NAME_LEN: usize = 64;
+
+pub(crate) fn suggest_command<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let len = name.chars().count();
+    if len > MAX_SUGGESTED_NAME_LEN {
+        return None;
+    }
+    let threshold = if len <= 3 { 1 } else { (len / 3).max(2) };
+    let mut closest: Option<(&str, usize)> = None;
+    for candidate in candidates {
+        let distance = edit_distance(name, candidate);
+        if closest.is_none_or(|(_, best)| distance < best) {
+            closest = Some((candidate, distance));
+        }
+    }
+    closest
+        .filter(|&(_, distance)| distance <= threshold)
+        .map(|(candidate, _)| candidate)
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (i, l) in left.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, r) in right.iter().enumerate() {
+            let substitution = previous[j] + usize::from(l != *r);
+            current[j + 1] = (previous[j + 1] + 1).min(current[j] + 1).min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
     let trimmed = command.trim();
     match trimmed.split_once(char::is_whitespace) {
@@ -815,6 +853,34 @@ fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_near_typo_suggests_the_closest_command() {
+        let commands = ["resume", "logs", "mcp", "skill:python"];
+        assert_eq!(suggest_command("resuem", commands), Some("resume"));
+        assert_eq!(suggest_command("log", commands), Some("logs"));
+        assert_eq!(
+            suggest_command("skill:pythno", commands),
+            Some("skill:python")
+        );
+    }
+
+    #[test]
+    fn paths_and_far_words_get_no_suggestion() {
+        let commands = ["resume", "logs", "mcp", "help"];
+        assert_eq!(suggest_command("tmp", commands), None);
+        assert_eq!(suggest_command("usr/bin/foo", commands), None);
+        assert_eq!(suggest_command("etc/hosts", commands), None);
+        assert_eq!(suggest_command(&"h".repeat(65), commands), None);
+    }
+
+    #[test]
+    fn the_first_of_equally_close_commands_wins() {
+        assert_eq!(suggest_command("mdoel", ["model", "models"]), Some("model"));
+        assert_eq!(suggest_command("goa", ["go", "goal"]), Some("go"));
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
 
     #[test]
     fn parse_rlm_max_depth_shows_or_sets() {
