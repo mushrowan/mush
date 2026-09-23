@@ -275,12 +275,17 @@ pub fn agent_loop(
                 const MAX_BACKOFF_SECS: u64 = 16;
                 let mut final_message: Option<AssistantMessage> = None;
                 let mut last_error: Option<String> = None;
+                let mut retry_after: Option<std::time::Duration> = None;
 
                 'attempt: for attempt in 0..=MAX_RETRIES {
                     if attempt > 0 {
-                        let delay = std::time::Duration::from_secs(
+                        let backoff = std::time::Duration::from_secs(
                             (1u64 << (attempt - 1)).min(MAX_BACKOFF_SECS),
                         );
+                        let Some(delay) = mush_ai::registry::retry_delay(backoff, retry_after.take()) else {
+                            tracing::warn!(attempt, "the provider asked to wait past the retry cap, giving up");
+                            break 'attempt;
+                        };
                         tracing::warn!(attempt, ?delay, "retrying after transient error");
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {},
@@ -296,6 +301,7 @@ pub fn agent_loop(
                         Ok(stream) => stream,
                         Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
                             tracing::warn!(error = %e, "retryable request error");
+                            retry_after = e.retry_after();
                             last_error = Some(format!("request failed: {e}"));
                             continue 'attempt;
                         }

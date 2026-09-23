@@ -173,13 +173,15 @@ pub(crate) async fn check_response(
     }
 
     if !status.is_success() {
+        let retry_after = crate::registry::parse_retry_after(response.headers());
         let text = response.text().await.unwrap_or_default();
-        tracing::error!(%status, %content_type, body = %text, "{api_label} API error");
+        tracing::error!(%status, %content_type, body = %text, ?retry_after, "{api_label} API error");
         return Err(crate::registry::ProviderError::ApiError {
             api: api_label,
             status,
             content_type,
             body: crate::registry::truncate_error_body(&text),
+            retry_after,
         });
     }
 

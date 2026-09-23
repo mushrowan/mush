@@ -34,6 +34,7 @@ pub enum ProviderError {
         status: reqwest::StatusCode,
         content_type: String,
         body: String,
+        retry_after: Option<std::time::Duration>,
     },
 
     #[error("{0}")]
@@ -73,6 +74,65 @@ impl ProviderError {
             _ => false,
         }
     }
+
+    #[must_use]
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::ApiError { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+pub const RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[must_use]
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::time::Duration> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    if let Some(ms) = header("retry-after-ms").and_then(|raw| raw.trim().parse::<f64>().ok())
+        && ms.is_finite()
+        && ms >= 0.0
+    {
+        return Some(std::time::Duration::from_secs_f64(ms / 1000.0));
+    }
+    let raw = header("retry-after")?.trim();
+    if let Ok(seconds) = raw.parse::<f64>() {
+        return (seconds.is_finite() && seconds >= 0.0)
+            .then(|| std::time::Duration::from_secs_f64(seconds));
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+    Some(
+        (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default(),
+    )
+}
+
+#[must_use]
+pub fn retry_delay(
+    backoff: std::time::Duration,
+    retry_after: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    let unit =
+        (u64::from_le_bytes(crate::ids::random_bytes::<8>()) >> 11) as f64 / (1u64 << 53) as f64;
+    jittered_retry_delay(backoff, retry_after, unit)
+}
+
+fn jittered_retry_delay(
+    backoff: std::time::Duration,
+    retry_after: Option<std::time::Duration>,
+    unit: f64,
+) -> Option<std::time::Duration> {
+    if retry_after.is_some_and(|wait| wait > RETRY_MAX_DELAY) {
+        return None;
+    }
+    if let Some(wait) = retry_after
+        && wait >= backoff
+    {
+        return Some(wait);
+    }
+    let jittered = backoff.mul_f64(0.75 + 0.5 * unit.clamp(0.0, 1.0));
+    Some(jittered.max(retry_after.unwrap_or_default()))
 }
 
 #[must_use]
@@ -209,6 +269,7 @@ mod tests {
             status: reqwest::StatusCode::TOO_MANY_REQUESTS,
             content_type: "application/json".into(),
             body: "rate limited".into(),
+            retry_after: None,
         };
         assert!(err.is_retryable());
     }
@@ -220,6 +281,7 @@ mod tests {
             status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             content_type: "application/json".into(),
             body: "internal error".into(),
+            retry_after: None,
         };
         assert!(err.is_retryable());
     }
@@ -231,6 +293,7 @@ mod tests {
             status: reqwest::StatusCode::BAD_GATEWAY,
             content_type: "text/html".into(),
             body: "bad gateway".into(),
+            retry_after: None,
         };
         assert!(err.is_retryable());
     }
@@ -242,6 +305,7 @@ mod tests {
             status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
             content_type: "text/plain".into(),
             body: "unavailable".into(),
+            retry_after: None,
         };
         assert!(err.is_retryable());
     }
@@ -253,6 +317,7 @@ mod tests {
             status: reqwest::StatusCode::BAD_REQUEST,
             content_type: "application/json".into(),
             body: "bad request".into(),
+            retry_after: None,
         };
         assert!(!err.is_retryable());
     }
@@ -264,6 +329,7 @@ mod tests {
             status: reqwest::StatusCode::UNAUTHORIZED,
             content_type: "application/json".into(),
             body: "unauthorized".into(),
+            retry_after: None,
         };
         assert!(!err.is_retryable());
     }
@@ -275,8 +341,69 @@ mod tests {
             status: reqwest::StatusCode::FORBIDDEN,
             content_type: "application/json".into(),
             body: "forbidden".into(),
+            retry_after: None,
         };
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn retry_after_reads_milliseconds_seconds_and_dates() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        use std::time::Duration;
+        let headers = |pairs: &[(&'static str, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(*name, HeaderValue::from_str(value).unwrap());
+            }
+            map
+        };
+        assert_eq!(
+            parse_retry_after(&headers(&[
+                ("retry-after-ms", "1500"),
+                ("retry-after", "9")
+            ])),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            parse_retry_after(&headers(&[("retry-after", "7")])),
+            Some(Duration::from_secs(7))
+        );
+        let later = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc2822();
+        let from_date = parse_retry_after(&headers(&[("retry-after", &later)])).unwrap();
+        assert!(from_date > Duration::from_secs(25) && from_date <= Duration::from_secs(30));
+        assert_eq!(
+            parse_retry_after(&headers(&[("retry-after", "soon")])),
+            None
+        );
+        assert_eq!(parse_retry_after(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn retry_delays_jitter_the_backoff_and_respect_the_server_wait() {
+        use std::time::Duration;
+        let backoff = Duration::from_secs(4);
+        assert_eq!(
+            jittered_retry_delay(backoff, None, 0.0),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            jittered_retry_delay(backoff, None, 1.0),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            jittered_retry_delay(backoff, Some(Duration::from_secs(10)), 0.5),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            jittered_retry_delay(backoff, Some(Duration::from_millis(3500)), 0.0),
+            Some(Duration::from_millis(3500))
+        );
+        assert_eq!(
+            jittered_retry_delay(backoff, Some(Duration::from_secs(61)), 0.5),
+            None
+        );
+        let delay = retry_delay(backoff, None).unwrap();
+        assert!(delay >= Duration::from_secs(3) && delay <= Duration::from_secs(5));
     }
 
     #[test]

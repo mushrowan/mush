@@ -1296,12 +1296,19 @@ async fn call_for_text(
     options: &StreamOptions,
 ) -> Result<CompactionText, CompactionError> {
     let mut last_error = None;
+    let mut retry_after = None;
 
     for attempt in 0..=COMPACTION_MAX_RETRIES {
         if attempt > 0 {
-            let delay = std::time::Duration::from_secs(
+            let backoff = std::time::Duration::from_secs(
                 (1u64 << (attempt - 1)).min(COMPACTION_MAX_BACKOFF_SECS),
             );
+            let Some(delay) = mush_ai::registry::retry_delay(backoff, retry_after.take()) else {
+                return Err(CompactionError {
+                    failure: last_error.unwrap_or(CompactionFailure::EmptyResponse),
+                    retries: attempt - 1,
+                });
+            };
             tracing::warn!(attempt, ?delay, "retrying compaction after transient error");
             tokio::time::sleep(delay).await;
         }
@@ -1310,6 +1317,7 @@ async fn call_for_text(
             Ok(stream) => stream,
             Err(error) if error.is_retryable() && attempt < COMPACTION_MAX_RETRIES => {
                 tracing::warn!(%error, "retryable compaction request error");
+                retry_after = error.retry_after();
                 last_error = Some(CompactionFailure::Request(error.to_string()));
                 continue;
             }
