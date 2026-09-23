@@ -88,6 +88,7 @@ impl WorkerConfig {
         runtime.title = self.title;
         runtime.model_id = self.turn.default_model.id.to_string();
         self.models.set_current(runtime.model_id.clone());
+        self.models.set_thinking(self.thinking_level.clone());
         self.models.set_subagent(self.subagent_model.clone());
         runtime.subagent_model = self.subagent_model;
         runtime.paused = self.paused;

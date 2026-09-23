@@ -7,12 +7,17 @@ pub struct ModelSelection(Arc<Mutex<Selection>>);
 struct Selection {
     current: String,
     subagent: Option<String>,
+    thinking: Option<mush_ai::types::ThinkingLevel>,
 }
 
 impl ModelSelection {
     #[must_use]
     pub fn new(current: String, subagent: Option<String>) -> Self {
-        Self(Arc::new(Mutex::new(Selection { current, subagent })))
+        Self(Arc::new(Mutex::new(Selection {
+            current,
+            subagent,
+            thinking: None,
+        })))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Selection> {
@@ -26,6 +31,15 @@ impl ModelSelection {
     #[must_use]
     pub fn current(&self) -> String {
         self.lock().current.clone()
+    }
+
+    pub fn set_thinking(&self, level: mush_ai::types::ThinkingLevel) {
+        self.lock().thinking = Some(level);
+    }
+
+    #[must_use]
+    pub fn thinking(&self) -> Option<mush_ai::types::ThinkingLevel> {
+        self.lock().thinking.clone()
     }
 
     pub fn set_subagent(&self, id: Option<String>) {
@@ -46,9 +60,58 @@ impl ModelSelection {
     }
 }
 
+pub fn child_thinking(
+    model: &mush_ai::types::Model,
+    requested: Option<&mush_ai::types::ThinkingLevel>,
+    parent: &mush_ai::types::ThinkingLevel,
+) -> Result<mush_ai::types::ThinkingLevel, String> {
+    use mush_ai::types::ThinkingLevel;
+    let supported = &model.supported_thinking_levels;
+    match requested {
+        Some(level) => {
+            if *level == ThinkingLevel::Off || supported.is_empty() || supported.contains(level) {
+                return Ok(level.clone());
+            }
+            let names: Vec<&str> = std::iter::once("off")
+                .chain(supported.iter().filter_map(ThinkingLevel::effort_name))
+                .collect();
+            Err(format!(
+                "thinking level {} is not supported by {}, supported levels: {}",
+                level.effort_name().unwrap_or("off"),
+                model.id,
+                names.join(", ")
+            ))
+        }
+        None if *parent == ThinkingLevel::Off => Ok(ThinkingLevel::Off),
+        None => Ok(model.clamp_thinking(parent)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_follows_the_parent_thinking_clamped_to_its_model() {
+        use mush_ai::types::ThinkingLevel;
+        let mut model = crate::testing::echo_model();
+        model.supported_thinking_levels = vec![ThinkingLevel::Low, ThinkingLevel::Medium];
+        assert_eq!(
+            child_thinking(&model, None, &ThinkingLevel::Xhigh),
+            Ok(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            child_thinking(&model, None, &ThinkingLevel::Off),
+            Ok(ThinkingLevel::Off)
+        );
+        assert_eq!(
+            child_thinking(&model, Some(&ThinkingLevel::Low), &ThinkingLevel::High),
+            Ok(ThinkingLevel::Low)
+        );
+        let refused =
+            child_thinking(&model, Some(&ThinkingLevel::High), &ThinkingLevel::Off).unwrap_err();
+        assert!(refused.contains("off, low, medium"), "{refused}");
+    }
 
     #[test]
     fn a_child_takes_what_it_asked_for_then_the_session_override() {
@@ -70,5 +133,8 @@ mod tests {
         assert_eq!(models.current(), "one");
         models.set_current("two".into());
         assert_eq!(models.current(), "two");
+        assert!(models.thinking().is_none());
+        models.set_thinking(mush_ai::types::ThinkingLevel::High);
+        assert_eq!(models.thinking(), Some(mush_ai::types::ThinkingLevel::High));
     }
 }

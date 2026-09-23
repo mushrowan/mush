@@ -41,7 +41,7 @@ pub use family::{
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use harness::HarnessStore;
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
-pub use models::ModelSelection;
+pub use models::{ModelSelection, child_thinking};
 pub use notes::Notes;
 pub use schedule::{Delivery, Job, JobSource, JobStatus, ScheduleCommand, ScheduleKind, Scheduler};
 pub use session::{

@@ -1923,8 +1923,17 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     .ok_or_else(|| mush_kernel::HostError("prompt is required".into()))?;
                 let name = str_field("name")
                     .ok_or_else(|| mush_kernel::HostError("name is required".into()))?;
-                let thinking =
-                    str_field("thinking").map(|level| ThinkingLevel::from_effort_str(&level));
+                let thinking = match str_field("thinking") {
+                    None => None,
+                    Some(level) => match ThinkingLevel::from_effort_str(&level) {
+                        ThinkingLevel::Other(other) => {
+                            return Err(mush_kernel::HostError(format!(
+                                "thinking must be off, minimal, low, medium, high or xhigh, not {other}"
+                            )));
+                        }
+                        known => Some(known),
+                    },
+                };
                 let handle = self
                     .family
                     .spawn(
@@ -2928,6 +2937,23 @@ mod tests {
         assert!(retry <= MESSAGE_REFILL && retry > Duration::ZERO);
         assert!(bucket.take(start + MESSAGE_REFILL).is_ok());
         assert!(bucket.take(start + MESSAGE_REFILL).is_err());
+    }
+
+    #[tokio::test]
+    async fn spawn_refuses_an_unknown_thinking_level() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root"));
+        let refused = handler
+            .handle(
+                "rlm.spawn",
+                serde_json::json!({ "prompt": "p", "name": "n", "thinking": "hgih" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.0.contains("not hgih"), "{}", refused.0);
+        assert!(family.all().is_empty());
     }
 
     #[tokio::test]

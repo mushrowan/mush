@@ -1792,7 +1792,10 @@ impl AgentConnection for InProcessConnection {
                     self.queued.push_back(ClientEvent::PausedChanged(pause));
                 }
             }
-            ClientCommand::SetThinking(level) => self.runtime.thinking_level = level,
+            ClientCommand::SetThinking(level) => {
+                self.runtime.models.set_thinking(level.clone());
+                self.runtime.thinking_level = level;
+            }
             ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::ReloadSystemPrompt => {

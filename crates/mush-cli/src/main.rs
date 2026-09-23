@@ -1255,9 +1255,16 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                     .unwrap_or_else(|| seed.model.clone()),
             };
             let mut options = seed.options.clone();
-            if let Some(thinking) = &spec.thinking {
-                options.thinking = Some(thinking.clone());
-            }
+            let parent_thinking = seed
+                .models
+                .thinking()
+                .or_else(|| options.thinking.clone())
+                .unwrap_or(ThinkingLevel::Off);
+            options.thinking = Some(mush_runtime::child_thinking(
+                &model,
+                spec.thinking.as_ref(),
+                &parent_thinking,
+            )?);
             let session = Session::new(model.id.as_str(), &seed.cwd.display().to_string());
             let (sinks, signals) = mush_runtime::kernel_channels();
             let cfg = config::Config {
