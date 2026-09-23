@@ -93,6 +93,8 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<RequestText>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_retention: Option<String>,
@@ -108,6 +110,11 @@ struct RequestTool {
     description: String,
     parameters: serde_json::Value,
     strict: bool,
+}
+
+#[derive(Serialize)]
+struct RequestText {
+    verbosity: String,
 }
 
 #[derive(Serialize)]
@@ -169,7 +176,7 @@ fn build_request_body(
         summary: Some("auto".into()),
     });
 
-    let include = if reasoning.is_some() {
+    let include = if reasoning.is_some() || is_codex {
         Some(vec!["reasoning.encrypted_content".into()])
     } else {
         None
@@ -195,11 +202,8 @@ fn build_request_body(
         _ => None,
     };
 
-    let tool_fields = if converted_tools.is_some() {
-        (
-            Some("auto".into()),
-            if is_codex { None } else { Some(true) },
-        )
+    let tool_fields = if is_codex || converted_tools.is_some() {
+        (Some("auto".into()), Some(true))
     } else {
         (None, None)
     };
@@ -225,6 +229,9 @@ fn build_request_body(
         parallel_tool_calls: tool_fields.1,
         reasoning,
         include,
+        text: is_codex.then(|| RequestText {
+            verbosity: "low".into(),
+        }),
         prompt_cache_key,
         prompt_cache_retention,
         truncation: if is_codex { None } else { Some("auto".into()) },
@@ -1838,6 +1845,42 @@ mod tests {
 
         let body = build_request_body(&model, &None, &[], &[], &options, true);
         assert_eq!(body.instructions.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn codex_body_always_sends_verbosity_include_and_parallel_tools() {
+        let model = codex_model();
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Off),
+            ..Default::default()
+        };
+
+        let body =
+            serde_json::to_value(build_request_body(&model, &None, &[], &[], &options, true))
+                .unwrap();
+        assert_eq!(body["text"], serde_json::json!({"verbosity": "low"}));
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn non_codex_omits_text_verbosity() {
+        let mut model = codex_model();
+        model.provider = Provider::Custom("openai".into());
+        let body = serde_json::to_value(build_request_body(
+            &model,
+            &None,
+            &[],
+            &[],
+            &StreamOptions::default(),
+            false,
+        ))
+        .unwrap();
+        assert!(body.get("text").is_none());
     }
 
     #[test]
