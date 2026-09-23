@@ -68,12 +68,17 @@ impl Job {
 
     #[must_use]
     pub fn prompt_text(&self) -> String {
-        let label = self.label.as_deref().unwrap_or(&self.expression);
-        let kind = match self.source {
-            JobSource::Heartbeat | JobSource::RlmHeartbeat => "heartbeat",
-            JobSource::Schedule => "scheduled",
-        };
-        format!("[{kind}: {label}]\n\n{}", self.prompt)
+        match self.source {
+            JobSource::Heartbeat | JobSource::RlmHeartbeat => format!(
+                "[heartbeat: {} run#{}]\n\n{}",
+                self.expression, self.runs, self.prompt
+            ),
+            JobSource::Schedule => format!(
+                "[scheduled: {}]\n\n{}",
+                self.label.as_deref().unwrap_or(&self.expression),
+                self.prompt
+            ),
+        }
     }
 }
 
@@ -528,7 +533,7 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(
             due[0].prompt_text(),
-            "[heartbeat: heartbeat]\n\ncheck the tests"
+            "[heartbeat: every 20s run#1]\n\ncheck the tests"
         );
         assert!(scheduler.take_due(now + 22_000).is_empty());
         assert!(!scheduler.take_due(now + 42_000).is_empty());

@@ -3102,7 +3102,7 @@ mod tests {
         drain_turn(&mut connection).await;
         assert!(matches!(
             &requests.lock().unwrap()[0].messages[0],
-            Message::User(user) if user.text() == "[heartbeat: heartbeat]\n\ncheck the build"
+            Message::User(user) if user.text() == "[heartbeat: every 10s run#1]\n\ncheck the build"
         ));
 
         connection
