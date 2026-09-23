@@ -624,6 +624,29 @@ fn select(
     Ok(first)
 }
 
+#[must_use]
+pub fn running_workers(dir: &Path) -> Vec<WorkerDescriptor> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut running: Vec<WorkerDescriptor> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|path| serde_json::from_slice(&std::fs::read(path).ok()?).ok())
+        .filter(WorkerDescriptor::alive)
+        .collect();
+    running.sort_by_key(|worker| worker.started_at);
+    running
+}
+
+pub async fn stop_unsupervised(worker: &WorkerDescriptor) -> io::Result<()> {
+    let _ = std::fs::remove_file(worker.socket.with_extension("recipe"));
+    stop(worker).await?;
+    let _ = std::fs::remove_file(descriptor_of(worker));
+    Ok(())
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

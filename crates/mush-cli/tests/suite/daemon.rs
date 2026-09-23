@@ -1,5 +1,6 @@
 #![expect(clippy::expect_used, clippy::unwrap_used)]
 
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -573,6 +574,103 @@ async fn doctor_leaves_the_socket_of_a_daemon_it_cannot_understand() {
     assert_eq!(daemon["health"], "unreachable");
     assert_eq!(daemon["fixed"], false);
     assert!(socket.exists());
+}
+
+fn start_unsupervised_worker(
+    dir: &Path,
+) -> (
+    std::sync::mpsc::Receiver<std::process::ExitStatus>,
+    mush_daemon::WorkerDescriptor,
+) {
+    let workers = dir.join("mush").join("workers");
+    std::fs::create_dir_all(&workers).unwrap();
+    let descriptor = workers.join("lone.json");
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env_clear();
+    for (key, value) in env(dir) {
+        command.env(key, value);
+    }
+    let mut child = command
+        .args(["--no-tools", "--no-session", "--model", "claude-opus-4-7"])
+        .args(["worker", "--socket"])
+        .arg(workers.join("lone.sock"))
+        .arg("--descriptor")
+        .arg(&descriptor)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let (exited, exit) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok(status) = child.wait() {
+            let _ = exited.send(status);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(worker) = std::fs::read(&descriptor)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<mush_daemon::WorkerDescriptor>(&bytes).ok())
+            .filter(|worker| !worker.session_id.is_empty())
+        {
+            return (exit, worker);
+        }
+        let late = Instant::now() >= deadline;
+        if late {
+            let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+        assert!(!late, "the worker never announced itself");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn cli_in(dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env_clear();
+    for (key, value) in env(dir) {
+        command.env(key, value);
+    }
+    command.current_dir(dir).stdin(Stdio::null());
+    command
+}
+
+#[tokio::test]
+async fn shutdown_without_a_daemon_reports_and_kills_running_workers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, worker) = start_unsupervised_worker(dir.path());
+
+    let refused = cli_in(dir.path()).arg("shutdown").output().unwrap();
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("1 agent(s) are still running"), "{stderr}");
+    assert!(alive(worker.pid));
+
+    let forced = cli_in(dir.path())
+        .args(["shutdown", "--force"])
+        .output()
+        .unwrap();
+    assert!(forced.status.success(), "{forced:?}");
+    exit.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(!worker.socket.with_extension("json").exists());
+}
+
+#[tokio::test]
+async fn stop_without_a_daemon_stops_the_matching_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let (exit, worker) = start_unsupervised_worker(dir.path());
+
+    let stopped = cli_in(dir.path())
+        .args(["stop", &worker.session_id[..8]])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    exit.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(!worker.socket.with_extension("json").exists());
 }
 
 #[tokio::test]

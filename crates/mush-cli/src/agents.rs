@@ -230,7 +230,7 @@ fn saved_sessions() -> Vec<SessionMeta> {
         .collect()
 }
 
-fn matching<'a>(
+pub fn matching<'a>(
     workers: &'a [WorkerDescriptor],
     selector: &str,
 ) -> Result<Option<&'a WorkerDescriptor>> {

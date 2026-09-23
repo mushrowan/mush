@@ -89,7 +89,12 @@ pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescrip
 pub async fn stop(session_id: &str) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
     if !answers(&socket) {
-        println!("no daemon running");
+        let running = mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir());
+        let Some(worker) = crate::agents::matching(&running, session_id)? else {
+            println!("no daemon running");
+            return Ok(());
+        };
+        mush_daemon::supervisor::stop_unsupervised(worker).await?;
         return Ok(());
     }
     let request = SupervisorRequest::Stop {
@@ -105,8 +110,7 @@ pub async fn stop(session_id: &str) -> Result<()> {
 pub async fn shutdown(force: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
     if !answers(&socket) {
-        println!("no daemon running");
-        return Ok(());
+        return shutdown_unsupervised(force).await;
     }
     if !force && !confirm_shutdown(&socket).await? {
         println!("left running");
@@ -117,6 +121,24 @@ pub async fn shutdown(force: bool) -> Result<()> {
         SupervisorReply::Error(error) => Err(eyre!("{error}")),
         other => Err(eyre!("unexpected daemon reply: {other:?}")),
     }
+}
+
+async fn shutdown_unsupervised(force: bool) -> Result<()> {
+    let running = mush_daemon::supervisor::running_workers(&mush_daemon::workers_dir());
+    if running.is_empty() {
+        println!("no daemon running");
+        return Ok(());
+    }
+    if !force {
+        return Err(eyre!(
+            "no daemon answers but {} agent(s) are still running, pass --force to kill them",
+            running.len()
+        ));
+    }
+    for worker in &running {
+        mush_daemon::supervisor::stop_unsupervised(worker).await?;
+    }
+    Ok(())
 }
 
 async fn confirm_shutdown(socket: &Path) -> Result<bool> {
