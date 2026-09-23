@@ -465,12 +465,19 @@ class _Rlm:
     async def progress_note(self, text: str) -> dict:
         return await host_request("rlm.progress_note", {"text": text})
 
-    async def create_session(self, prompt: str, *, name: str | None = None, model: str | None = None) -> dict:
+    async def create_session(
+        self,
+        prompt: str,
+        *,
+        name: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+        cwd: str | None = None,
+    ) -> dict:
         payload = {"prompt": prompt}
-        if name is not None:
-            payload["name"] = name
-        if model is not None:
-            payload["model"] = model
+        for key, value in (("name", name), ("model", model), ("thinking", thinking), ("cwd", cwd)):
+            if value is not None:
+                payload[key] = value
         return await host_request("rlm.create_session", payload)
 
     async def note(self, text: str) -> str:

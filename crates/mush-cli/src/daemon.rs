@@ -72,11 +72,19 @@ async fn wait_until_gone(socket: &Path) {
 }
 
 pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescriptor> {
+    open_in(target, args, std::env::current_dir()?).await
+}
+
+async fn open_in(
+    target: OpenTarget,
+    args: Vec<String>,
+    cwd: std::path::PathBuf,
+) -> Result<WorkerDescriptor> {
     let socket = ensure_running().await?;
     let request = SupervisorRequest::Open {
         target,
         args,
-        cwd: std::env::current_dir()?,
+        cwd,
         env: std::env::vars().collect(),
     };
     match mush_daemon::supervisor::request(&socket, &request).await? {
@@ -256,7 +264,19 @@ pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner
             if let Some(model) = &request.model {
                 args = with_model(args, model);
             }
-            let descriptor = open(OpenTarget::New, args)
+            let cwd = match request.cwd {
+                Some(cwd) => {
+                    let cwd = std::env::current_dir()
+                        .map_err(|error| error.to_string())?
+                        .join(cwd);
+                    if !cwd.is_dir() {
+                        return Err(format!("cwd {} is not a directory", cwd.display()));
+                    }
+                    cwd
+                }
+                None => std::env::current_dir().map_err(|error| error.to_string())?,
+            };
+            let descriptor = open_in(OpenTarget::New, args, cwd)
                 .await
                 .map_err(|error| error.to_string())?;
             let mut connection = mush_daemon::DaemonConnection::connect(&descriptor.socket)
@@ -270,6 +290,12 @@ pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner
                             title: Some(name.clone()),
                         },
                     ))
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            if let Some(level) = request.thinking {
+                connection
+                    .send(mush_runtime::ClientCommand::SetThinking(level))
                     .await
                     .map_err(|error| error.to_string())?;
             }

@@ -75,6 +75,8 @@ pub struct CreateSessionRequest {
     pub prompt: String,
     pub name: Option<String>,
     pub model: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1927,6 +1929,17 @@ impl RlmHandler {
     }
 }
 
+fn requested_thinking(
+    level: Option<String>,
+) -> Result<Option<ThinkingLevel>, mush_kernel::HostError> {
+    match level.as_deref().map(ThinkingLevel::from_effort_str) {
+        Some(ThinkingLevel::Other(other)) => Err(mush_kernel::HostError(format!(
+            "thinking must be off, minimal, low, medium, high or xhigh, not {other}"
+        ))),
+        known => Ok(known),
+    }
+}
+
 fn summary_json(child: &ChildSummary) -> serde_json::Value {
     serde_json::to_value(child).unwrap_or(serde_json::Value::Null)
 }
@@ -1950,17 +1963,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     .ok_or_else(|| mush_kernel::HostError("prompt is required".into()))?;
                 let name = str_field("name")
                     .ok_or_else(|| mush_kernel::HostError("name is required".into()))?;
-                let thinking = match str_field("thinking") {
-                    None => None,
-                    Some(level) => match ThinkingLevel::from_effort_str(&level) {
-                        ThinkingLevel::Other(other) => {
-                            return Err(mush_kernel::HostError(format!(
-                                "thinking must be off, minimal, low, medium, high or xhigh, not {other}"
-                            )));
-                        }
-                        known => Some(known),
-                    },
-                };
+                let thinking = requested_thinking(str_field("thinking"))?;
                 let handle = self
                     .family
                     .spawn(
@@ -2194,6 +2197,8 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     prompt,
                     name: str_field("name"),
                     model: str_field("model"),
+                    thinking: requested_thinking(str_field("thinking"))?,
+                    cwd: str_field("cwd").map(PathBuf::from),
                 })
                 .await
                 .map_err(mush_kernel::HostError)?;
@@ -3591,6 +3596,8 @@ mod tests {
         let family = family(requests, 2, None);
         let spawner: SessionSpawner = Arc::new(|request: CreateSessionRequest| {
             Box::pin(async move {
+                assert_eq!(request.thinking, Some(ThinkingLevel::High));
+                assert_eq!(request.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
                 Ok(CreatedSession {
                     session_id: "deadbeef".into(),
                     name: request.name,
@@ -3614,7 +3621,12 @@ mod tests {
         let created = root
             .handle(
                 "rlm.create_session",
-                serde_json::json!({ "prompt": "audit the deps", "name": "deps" }),
+                serde_json::json!({
+                    "prompt": "audit the deps",
+                    "name": "deps",
+                    "thinking": "high",
+                    "cwd": "/tmp",
+                }),
             )
             .await
             .unwrap();
