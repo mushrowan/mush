@@ -1255,6 +1255,7 @@ struct ChildSeed {
     rlm_max_depth: u32,
     subagent_model: Option<String>,
     models: mush_runtime::ModelSelection,
+    session_dir: std::path::PathBuf,
 }
 
 fn turn_config(
@@ -1308,7 +1309,12 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 spec.thinking.as_ref(),
                 &parent_thinking,
             )?);
-            let session = Session::new(model.id.as_str(), &seed.cwd.display().to_string());
+            let session = match &spec.resume_session {
+                Some(id) => SessionStore::new(seed.session_dir.clone())
+                    .load(&SessionId::from(id.as_str()))
+                    .map_err(|error| format!("cannot reopen {}: {error}", spec.name))?,
+                None => Session::new(model.id.as_str(), &seed.cwd.display().to_string()),
+            };
             let (sinks, signals) = mush_runtime::kernel_channels();
             let cfg = config::Config {
                 kernel: seed.kernel.clone(),
@@ -1355,10 +1361,11 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 model,
                 options.clone(),
             ));
+            worker.conversation = session.conversation.clone();
             worker.session_id = session.meta.id.clone();
             worker.title = Some(spec.name.clone());
             worker.parent = Some(spec.parent_session_id.clone().into());
-            worker.system_prompt = Some(system_prompt);
+            worker.system_prompt = Some(session.system_prompt.clone().unwrap_or(system_prompt));
             worker.thinking_level = options
                 .thinking
                 .clone()
@@ -1426,6 +1433,7 @@ fn worker_config(
         saver: opened.saver.as_ref().map(|saver| saver.handle()),
         rlm_max_depth: setup::rlm_max_depth(&setup.client.cfg),
         subagent_model: setup.client.cfg.subagent_model.clone(),
+        session_dir: SessionStore::default_dir(),
     };
     let mut turn = turn_config(
         &seed,

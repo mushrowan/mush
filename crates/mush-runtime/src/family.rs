@@ -59,6 +59,7 @@ pub struct ChildSpec {
     pub depth: u32,
     pub parent: Identity,
     pub parent_session_id: String,
+    pub resume_session: Option<String>,
 }
 
 pub struct ChildParts {
@@ -190,6 +191,18 @@ pub struct MessageReceipt {
     pub queued_at: Option<String>,
     pub delivery_mode: &'static str,
 }
+
+struct Live {
+    inbox: mpsc::UnboundedSender<Delivery>,
+    observe: mpsc::UnboundedSender<ObserveRequest>,
+    control: mpsc::UnboundedSender<ClientCommand>,
+    shutdown: oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+pub const CHILD_INTERRUPTED: &str = "The parent session restarted while this agent was working. \
+The saved transcript was recovered, but unfinished model, tool, bash or child-agent work was not \
+replayed. Inspect external side effects before continuing.";
 
 struct Target {
     child: Option<ChildId>,
@@ -377,6 +390,7 @@ pub struct Family {
     factory: Option<ChildFactory>,
     registry_path: Mutex<Option<PathBuf>>,
     max_depth: std::sync::atomic::AtomicU32,
+    waking: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -442,6 +456,7 @@ impl Family {
             factory,
             registry_path: Mutex::new(registry_path),
             max_depth: std::sync::atomic::AtomicU32::new(max_depth),
+            waking: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -796,6 +811,7 @@ impl Family {
             depth: caller.depth + 1,
             parent: caller.clone(),
             parent_session_id,
+            resume_session: None,
         };
         let parts = match (factory)(spec, Arc::clone(this)).await {
             Ok(parts) => parts,
@@ -828,32 +844,18 @@ impl Family {
             awaiting_confirmation: None,
             paused: None,
         };
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let mut connection = parts.config.connect(&parts.tools, &parts.registry);
-        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
-        connection.attach_agent_inbox(inbox_rx);
-        let (observe_tx, observe_rx) = mpsc::unbounded_channel();
-        connection.attach_observe_inbox(observe_rx);
-        let (control_tx, control_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(drive_child(
-            Arc::clone(this),
-            id.clone(),
-            connection,
-            shutdown_rx,
-            control_rx,
-            format!("{TASK_LABEL}\n\n{prompt}"),
-        ));
+        let live = Self::launch(this, &id, parts, Some(format!("{TASK_LABEL}\n\n{prompt}")));
         let mut inner = self.lock();
         inner.reserved_names.remove(&reservation);
         inner.children.insert(
             id.clone(),
             Node {
                 summary,
-                inbox: Some(inbox_tx),
-                observe: Some(observe_tx),
-                control: Some(control_tx),
-                shutdown: Some(shutdown_tx),
-                task: Some(task),
+                inbox: Some(live.inbox),
+                observe: Some(live.observe),
+                control: Some(live.control),
+                shutdown: Some(live.shutdown),
+                task: Some(live.task),
                 last_note_at: None,
                 replied: false,
                 notified: false,
@@ -869,6 +871,117 @@ impl Family {
             session_id,
             model: model_id,
         })
+    }
+
+    fn launch(this: &Arc<Self>, id: &str, parts: ChildParts, first_prompt: Option<String>) -> Live {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut connection = parts.config.connect(&parts.tools, &parts.registry);
+        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        connection.attach_agent_inbox(inbox_rx);
+        let (observe_tx, observe_rx) = mpsc::unbounded_channel();
+        connection.attach_observe_inbox(observe_rx);
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(drive_child(
+            Arc::clone(this),
+            id.to_string(),
+            connection,
+            shutdown_rx,
+            control_rx,
+            first_prompt,
+        ));
+        Live {
+            inbox: inbox_tx,
+            observe: observe_tx,
+            control: control_tx,
+            shutdown: shutdown_tx,
+            task,
+        }
+    }
+
+    fn asleep(&self, id: &str) -> bool {
+        self.lock()
+            .children
+            .get(id)
+            .is_some_and(|node| node.inbox.is_none() && node.summary.status != ChildStatus::Deleted)
+    }
+
+    async fn wake(&self, id: &str, this: &Arc<Self>) -> Result<(), String> {
+        let _waking = self.waking.lock().await;
+        if !self.asleep(id) {
+            return Ok(());
+        }
+        let factory = self
+            .factory
+            .clone()
+            .ok_or_else(|| format!("{id} is no longer running"))?;
+        let (spec, interrupted) = {
+            let inner = self.lock();
+            let node = inner
+                .children
+                .get(id)
+                .ok_or_else(|| format!("{id} is not in the family"))?;
+            let summary = &node.summary;
+            let (parent_name, parent_depth, parent_session_id) = match &summary.parent {
+                Some(parent) => inner
+                    .children
+                    .get(parent)
+                    .map(|parent| {
+                        (
+                            parent.summary.name.clone(),
+                            parent.summary.depth,
+                            parent.summary.session_id.clone(),
+                        )
+                    })
+                    .unwrap_or_default(),
+                None => (
+                    inner.root.name.clone(),
+                    inner.root.depth,
+                    inner.root_session_id.clone(),
+                ),
+            };
+            let spec = ChildSpec {
+                id: summary.id.clone(),
+                name: summary.name.clone(),
+                prompt: String::new(),
+                model: Some(summary.model_id.clone()),
+                thinking: None,
+                depth: summary.depth,
+                parent: Identity {
+                    id: summary.parent.clone(),
+                    name: parent_name,
+                    depth: parent_depth,
+                },
+                parent_session_id,
+                resume_session: Some(summary.session_id.clone()),
+            };
+            (spec, summary.status == ChildStatus::Interrupted)
+        };
+        let mut parts = (factory)(spec, Arc::clone(this)).await?;
+        if interrupted {
+            parts.config.recovery_notice = Some(CHILD_INTERRUPTED.into());
+        }
+        let live = Self::launch(this, id, parts, None);
+        {
+            let mut inner = self.lock();
+            let Some(node) = inner.children.get_mut(id) else {
+                let _ = live.shutdown.send(());
+                return Err(format!("{id} is not in the family"));
+            };
+            node.inbox = Some(live.inbox);
+            node.observe = Some(live.observe);
+            node.control = Some(live.control);
+            node.shutdown = Some(live.shutdown);
+            node.task = Some(live.task);
+            node.replied = false;
+            node.notified = false;
+            node.awaiting_quiet = false;
+            node.cancel_reason = None;
+            node.summary.status = ChildStatus::Idle;
+            node.summary.error = None;
+            node.summary.updated_at = Timestamp::now();
+        }
+        self.persist();
+        Ok(())
     }
 
     fn update(&self, id: &str, apply: impl FnOnce(&mut ChildSummary)) {
@@ -1350,22 +1463,24 @@ impl Family {
         receiver_role: &str,
         receiver_name: Option<&str>,
         text: &str,
+        this: &Arc<Self>,
     ) -> Result<MessageReceipt, String> {
         let text = Self::checked_text(text)?;
         let target = self.direct_target(caller, receiver_role, receiver_name)?;
-        self.deliver(caller, &target, text).await
+        self.deliver(caller, &target, text, this).await
     }
 
     pub async fn broadcast(
         &self,
         caller: &Identity,
         text: &str,
+        this: &Arc<Self>,
     ) -> Result<Vec<(MessageTarget, Result<MessageReceipt, String>)>, String> {
         let text = Self::checked_text(text)?;
         let targets = self.broadcast_targets(caller)?;
         let sends = targets
             .iter()
-            .map(|target| self.deliver(caller, target, text));
+            .map(|target| self.deliver(caller, target, text, this));
         let results = futures::future::join_all(sends).await;
         Ok(targets
             .into_iter()
@@ -1379,6 +1494,7 @@ impl Family {
         caller: &Identity,
         target: &Target,
         text: &str,
+        this: &Arc<Self>,
     ) -> Result<MessageReceipt, String> {
         let timestamp_ms = Timestamp::now();
         let (sender_session, bucket_key) = {
@@ -1422,12 +1538,19 @@ impl Family {
                 },
             }],
         };
-        let delivered = match self.send_delivery(target.child.as_deref(), event).await {
-            Ok(Receipt::Rejected) => Err(format!(
-                "{} has {MAX_PENDING_MESSAGES} messages waiting already",
-                target.endpoint.session_name
-            )),
-            other => other,
+        let woken = match target.child.as_deref() {
+            Some(child) if self.asleep(child) => self.wake(child, this).await,
+            _ => Ok(()),
+        };
+        let delivered = match woken {
+            Ok(()) => match self.send_delivery(target.child.as_deref(), event).await {
+                Ok(Receipt::Rejected) => Err(format!(
+                    "{} has {MAX_PENDING_MESSAGES} messages waiting already",
+                    target.endpoint.session_name
+                )),
+                other => other,
+            },
+            Err(error) => Err(error),
         };
         let status = match delivered {
             Ok(status) => status,
@@ -1691,28 +1814,30 @@ async fn drive_child(
     mut connection: InProcessConnection,
     shutdown: oneshot::Receiver<()>,
     mut control: mpsc::UnboundedReceiver<ClientCommand>,
-    first_prompt: String,
+    first_prompt: Option<String>,
 ) {
     let model = connection.default_model();
-    match connection
-        .send(ClientCommand::Prompt {
-            text: first_prompt,
-            images: Vec::new(),
-        })
-        .await
-    {
-        Ok(events) => {
-            for event in &events {
-                family.record(&id, event, Some(&model));
+    if let Some(text) = first_prompt {
+        match connection
+            .send(ClientCommand::Prompt {
+                text,
+                images: Vec::new(),
+            })
+            .await
+        {
+            Ok(events) => {
+                for event in &events {
+                    family.record(&id, event, Some(&model));
+                }
             }
-        }
-        Err(error) => {
-            family.update(&id, |child| {
-                child.status = ChildStatus::Failed;
-                child.error = Some(error.to_string());
-            });
-            family.post_exit_notice(&id, ExitNotice::Failed);
-            return;
+            Err(error) => {
+                family.update(&id, |child| {
+                    child.status = ChildStatus::Failed;
+                    child.error = Some(error.to_string());
+                });
+                family.post_exit_notice(&id, ExitNotice::Failed);
+                return;
+            }
         }
     }
     let mut shutdown = shutdown;
@@ -2166,7 +2291,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                         }
                         let receipts = self
                             .family
-                            .broadcast(&self.identity, &message)
+                            .broadcast(&self.identity, &message, &self.family)
                             .await
                             .map_err(mush_kernel::HostError)?;
                         Ok(serde_json::json!({
@@ -2199,6 +2324,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                                 &receiver_role,
                                 receiver_name.as_deref(),
                                 &message,
+                                &self.family,
                             )
                             .await
                             .map_err(mush_kernel::HostError)?;
@@ -3061,7 +3187,7 @@ mod tests {
         };
 
         let (receipts, ()) = tokio::join!(
-            family.send_message(&child, "parent", None, "found two issues"),
+            family.send_message(&child, "parent", None, "found two issues", &family),
             async {
                 for _ in 0..50 {
                     root_connection.start_pending().await;
@@ -3125,10 +3251,14 @@ mod tests {
             .find(|child| child.name == "beta")
             .unwrap();
         if let Some(node) = family.lock().children.get_mut(&beta.id) {
-            node.inbox = None;
+            let (closed, _) = mpsc::unbounded_channel();
+            node.inbox = Some(closed);
         }
 
-        let mut receipts = family.broadcast(&root, "status please").await.unwrap();
+        let mut receipts = family
+            .broadcast(&root, "status please", &family)
+            .await
+            .unwrap();
         receipts.sort_by(|a, b| a.0.session_name.cmp(&b.0.session_name));
         assert_eq!(receipts[0].0.session_name, "alpha");
         assert_eq!(
@@ -3348,7 +3478,7 @@ mod tests {
         }
 
         let receipt = family
-            .send_message(&root, "child", Some("slow"), "hurry up")
+            .send_message(&root, "child", Some("slow"), "hurry up", &family)
             .await
             .unwrap();
         assert_eq!(receipt.delivery_status, Receipt::Queued);
@@ -3410,7 +3540,7 @@ mod tests {
         assert_eq!(deleted.status, ChildStatus::Deleted);
         assert!(
             family
-                .send_message(&root, "child", Some("noter"), "hi")
+                .send_message(&root, "child", Some("noter"), "hi", &family)
                 .await
                 .is_err()
         );
@@ -3542,6 +3672,131 @@ mod tests {
             .await
             .unwrap_err();
         assert!(spawn.contains("not available"));
+    }
+
+    type Resumed = Arc<StdMutex<Vec<Option<String>>>>;
+
+    fn resuming_factory(requests: Requests, resumed: Resumed) -> ChildFactory {
+        let inner = echo_factory(requests, "back again");
+        Arc::new(move |spec: ChildSpec, family: Arc<Family>| {
+            let inner = Arc::clone(&inner);
+            let resumed = Arc::clone(&resumed);
+            Box::pin(async move {
+                resumed.lock().unwrap().push(spec.resume_session.clone());
+                let resume = spec.resume_session.clone();
+                let mut parts = inner(spec, family).await?;
+                if let Some(session) = resume {
+                    parts.config.session_id = session.into();
+                }
+                Ok(parts)
+            })
+        })
+    }
+
+    fn restored_family(
+        status: ChildStatus,
+        requests: Requests,
+        resumed: Resumed,
+    ) -> (tempfile::TempDir, Arc<Family>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let child = ChildSummary {
+            status,
+            ..saved_child("sub-1", "left")
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&Registry {
+                children: vec![child],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let family = Family::new(
+            Identity::root("root"),
+            "root-session".into(),
+            2,
+            Some(resuming_factory(requests, resumed)),
+            Some(path),
+        );
+        (dir, family)
+    }
+
+    #[tokio::test]
+    async fn a_message_wakes_an_interrupted_child_in_its_own_session() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let resumed: Resumed = Arc::new(StdMutex::new(Vec::new()));
+        let (_dir, family) = restored_family(
+            ChildStatus::Running,
+            Arc::clone(&requests),
+            Arc::clone(&resumed),
+        );
+        let root = Identity::root("root");
+        assert_eq!(family.all()[0].status, ChildStatus::Interrupted);
+
+        let receipt = family
+            .send_message(&root, "child", Some("left"), "are you there?", &family)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.delivery_status, Receipt::Delivered);
+        assert_eq!(receipt.target.session_id, "session-sub-1");
+        assert_eq!(*resumed.lock().unwrap(), vec![Some("session-sub-1".into())]);
+        let children = settle(&family, &root).await;
+        assert_eq!(children[0].status, ChildStatus::Idle);
+        assert_eq!(children[0].session_id, "session-sub-1");
+        assert_eq!(children[0].answer.as_deref(), Some("back again"));
+        let asked = requests.lock().unwrap();
+        let texts: Vec<String> = asked[0]
+            .messages
+            .iter()
+            .map(|message| match message {
+                Message::User(user) => user.text(),
+                Message::Event(event) => event.content.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == CHILD_INTERRUPTED),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.ends_with("[agent-message from parent:root]\n\nare you there?")),
+            "{texts:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_woken_child_stays_live_for_the_next_message() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let resumed: Resumed = Arc::new(StdMutex::new(Vec::new()));
+        let (_dir, family) = restored_family(
+            ChildStatus::Idle,
+            Arc::clone(&requests),
+            Arc::clone(&resumed),
+        );
+        let root = Identity::root("root");
+
+        family
+            .send_message(&root, "child", Some("left"), "first", &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+        family
+            .send_message(&root, "child", Some("left"), "second", &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        assert_eq!(resumed.lock().unwrap().len(), 1);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        let asked = requests.lock().unwrap();
+        assert!(!asked[0].messages.iter().any(|message| matches!(
+            message,
+            Message::Event(event) if event.content == CHILD_INTERRUPTED
+        )));
     }
 
     fn saved_child(id: &str, name: &str) -> ChildSummary {
