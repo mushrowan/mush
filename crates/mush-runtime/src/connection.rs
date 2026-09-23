@@ -1040,9 +1040,15 @@ impl InProcessConnection {
                 .extend(events.into_iter().map(ClientEvent::Session));
             return;
         }
-        let target = self.runtime.compaction_target(&self.config).await;
-        let registry = self.registry.clone();
         let settings = self.config.branch_summary;
+        let target = self.runtime.compaction_target(&self.config).await;
+        let required = mush_session::compact::branch_summary_request_tokens(
+            &abandoned,
+            target.window,
+            &settings,
+        );
+        let target = target.fitting(required);
+        let registry = self.registry.clone();
         let task = tokio::spawn(async move {
             mush_session::compact::summarise_branch(
                 &abandoned,
@@ -1636,9 +1642,16 @@ impl InProcessConnection {
             return Err(ConnectionError::Compacting);
         }
         self.compaction_auto = false;
-        let target = self.runtime.compaction_target(&self.config).await;
+        let target = self.runtime.compaction_target(&self.config).await.fitting(
+            mush_session::compact::summary_request_tokens(
+                &messages,
+                self.config.compaction.keep_recent(&messages),
+                &focus,
+                &self.config.compaction,
+            ),
+        );
         let pane_model = self.runtime.model(&self.config.default_model);
-        let live = (target.model.id == pane_model.id).then(|| {
+        let live = target.uses_session_model().then(|| {
             let tools = crate::turn::aligned_tools(
                 &self.tools,
                 &pane_model,
@@ -2925,6 +2938,66 @@ mod tests {
             &compaction.messages[..turn.messages.len()],
             &turn.messages[..]
         );
+        assert!(matches!(
+            compaction.messages.last(),
+            Some(Message::User(user)) if user.text().starts_with("[context checkpoint]")
+        ));
+    }
+
+    async fn compaction_request_with_a_summariser_window(
+        window: u64,
+    ) -> mush_ai::registry::LlmContext {
+        let (mut connection, requests) = connection();
+        connection.runtime.system_prompt = Some("you are terse".into());
+        let mut summariser = crate::testing::echo_model();
+        summariser.id = "summariser".into();
+        summariser.context_window = TokenCount::new(window);
+        summariser.effective_context_window = None;
+        connection.config.compaction_model =
+            Some((summariser, mush_ai::types::StreamOptions::default()));
+        connection.runtime.conversation = ConversationState::from_messages(
+            (0..30)
+                .map(|i| user(&format!("turn {i}: {}", "x".repeat(4_000))))
+                .collect(),
+        );
+
+        connection
+            .send(ClientCommand::Compact {
+                focus: CompactionFocus::default(),
+                auto: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(ClientEvent::Compacted(_)) = connection.next_event().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let asked = requests.lock().unwrap();
+        let [compaction] = &asked[..] else {
+            panic!("{}", asked.len());
+        };
+        compaction.clone()
+    }
+
+    #[tokio::test]
+    async fn a_summariser_with_room_for_the_summary_request_gets_it() {
+        let compaction = compaction_request_with_a_summariser_window(1_000_000).await;
+
+        assert_ne!(compaction.system_prompt.as_deref(), Some("you are terse"));
+        assert_eq!(compaction.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_summariser_too_small_for_the_summary_request_hands_it_to_the_session_model() {
+        let compaction = compaction_request_with_a_summariser_window(10_000).await;
+
+        assert_eq!(compaction.system_prompt.as_deref(), Some("you are terse"));
         assert!(matches!(
             compaction.messages.last(),
             Some(Message::User(user)) if user.text().starts_with("[context checkpoint]")

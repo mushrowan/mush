@@ -514,8 +514,10 @@ mod tests {
         for turn in 0..2 {
             let messages = conversation.context();
             let transform = build_context_transform(
-                model.clone(),
-                StreamOptions::default(),
+                mush_runtime::CompactionTarget::session_model(
+                    model.clone(),
+                    StreamOptions::default(),
+                ),
                 true,
                 mush_session::compact::CompactionSettings {
                     keep_recent_tokens: 5_000,

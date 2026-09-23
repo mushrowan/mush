@@ -52,10 +52,51 @@ pub struct TurnPrep {
     pub account_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct CompactionTarget {
     pub model: Model,
     pub options: StreamOptions,
     pub window: TokenCount,
+    pub session: Option<(Model, StreamOptions)>,
+}
+
+impl CompactionTarget {
+    #[must_use]
+    pub fn fitting(self, required_tokens: usize) -> Self {
+        match self.session {
+            Some((model, options))
+                if !mush_session::compact::window_fits(&self.model, required_tokens) =>
+            {
+                tracing::warn!(
+                    compaction_model = %self.model.id,
+                    required_tokens,
+                    "compaction model window is too small for the summary request, using the session model"
+                );
+                Self {
+                    model,
+                    options,
+                    session: None,
+                    ..self
+                }
+            }
+            session => Self { session, ..self },
+        }
+    }
+
+    #[must_use]
+    pub fn session_model(model: Model, options: StreamOptions) -> Self {
+        Self {
+            window: model.compaction_window(),
+            model,
+            options,
+            session: None,
+        }
+    }
+
+    #[must_use]
+    pub fn uses_session_model(&self) -> bool {
+        self.session.is_none()
+    }
 }
 
 #[must_use]
@@ -131,17 +172,36 @@ impl SessionRuntime {
 
     pub async fn compaction_target(&self, config: &TurnConfig) -> CompactionTarget {
         let pane_model = self.model(&config.default_model);
-        let (model, mut options) = config
+        let window = pane_model.compaction_window();
+        let (model, options) = config
             .compaction_model
             .clone()
             .unwrap_or_else(|| (pane_model.clone(), config.options.clone()));
-        options.session_id = Some(self.session_id.clone());
-        let options = resolve_auth_into_options(&model, options, &config.provider_api_keys).await;
+        let options = self.resolved_options(&model, options, config).await;
+        let session = if model.id == pane_model.id {
+            None
+        } else {
+            let options = self
+                .resolved_options(&pane_model, config.options.clone(), config)
+                .await;
+            Some((pane_model, options))
+        };
         CompactionTarget {
             model,
             options,
-            window: pane_model.compaction_window(),
+            window,
+            session,
         }
+    }
+
+    async fn resolved_options(
+        &self,
+        model: &Model,
+        mut options: StreamOptions,
+        config: &TurnConfig,
+    ) -> StreamOptions {
+        options.session_id = Some(self.session_id.clone());
+        resolve_auth_into_options(model, options, &config.provider_api_keys).await
     }
 
     pub async fn prepare_turn(&self, config: &TurnConfig) -> TurnPrep {
@@ -197,13 +257,12 @@ impl SessionRuntime {
             Arc::new(std::sync::atomic::AtomicU64::new(context_tokens.get()));
         let cwd = injections.cwd.clone().unwrap_or_default();
         let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
-        let live = (target.model.id == model.id).then(|| LiveContext {
+        let live = Some(LiveContext {
             system_prompt: self.system_prompt.clone(),
             tools: mush_agent::tool_definitions(&tool_registry, model.api),
         });
         let transform = build_context_transform(
-            target.model,
-            target.options,
+            target,
             config.auto_compact,
             config.compaction,
             model.compaction_window(),
@@ -269,8 +328,7 @@ impl SessionRuntime {
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_context_transform(
-    compact_model: Model,
-    compact_options: StreamOptions,
+    target: CompactionTarget,
     do_auto_compact: bool,
     settings: mush_session::compact::CompactionSettings,
     compaction_window: TokenCount,
@@ -294,8 +352,7 @@ pub fn build_context_transform(
 
     Some(Box::new(move |messages| {
         let owned_messages = messages.to_vec();
-        let model = compact_model.clone();
-        let options = compact_options.clone();
+        let target = target.clone();
         let ctx_tokens = context_tokens_shared.clone();
         let baseline_estimated_tokens = baseline_estimated_tokens.clone();
         let hooks = hooks.clone();
@@ -328,16 +385,24 @@ pub fn build_context_transform(
                 );
                 return mush_agent::ContextTransformResult::Unchanged;
             }
+            let target = target.fitting(mush_session::compact::summary_request_tokens(
+                &owned_messages,
+                settings.keep_recent(&owned_messages),
+                &mush_session::compact::CompactionFocus::default(),
+                &settings,
+            ));
             let mut result = auto_compact(
                 owned_messages,
                 effective_compaction_tokens,
                 compaction_window,
                 &registry,
-                &model,
-                &options,
+                &target.model,
+                &target.options,
                 Some(&hooks),
                 Some(cwd.as_path()),
-                live.as_ref().as_ref(),
+                live.as_ref()
+                    .as_ref()
+                    .filter(|_| target.uses_session_model()),
                 &settings,
             )
             .await;
@@ -533,6 +598,46 @@ mod tests {
 
         assert_eq!(target.model.id, summariser.id);
         assert_eq!(target.window, pane_model.compaction_window());
+        assert_eq!(
+            target.session.as_ref().map(|(model, _)| &model.id),
+            Some(&pane_model.id)
+        );
+        assert!(!target.uses_session_model());
+    }
+
+    #[test]
+    fn a_summary_request_too_big_for_the_compaction_model_falls_back_to_the_session_model() {
+        let session = custom_model("session");
+        let mut summariser = custom_model("summariser");
+        summariser.context_window = TokenCount::new(8_000);
+        let target = |summariser: &Model| CompactionTarget {
+            model: summariser.clone(),
+            options: StreamOptions::default(),
+            window: session.compaction_window(),
+            session: Some((session.clone(), StreamOptions::default())),
+        };
+
+        let fits = target(&summariser).fitting(8_000);
+        assert_eq!(fits.model.id, summariser.id);
+        assert!(!fits.uses_session_model());
+
+        let falls_back = target(&summariser).fitting(8_001);
+        assert_eq!(falls_back.model.id, session.id);
+        assert!(falls_back.uses_session_model());
+        assert_eq!(falls_back.window, session.compaction_window());
+
+        summariser.context_window = TokenCount::ZERO;
+        assert_eq!(
+            target(&summariser).fitting(1_000_000).model.id,
+            summariser.id
+        );
+        assert_eq!(
+            CompactionTarget::session_model(session.clone(), StreamOptions::default())
+                .fitting(1_000_000)
+                .model
+                .id,
+            session.id
+        );
     }
 
     fn custom_model(provider: &str) -> Model {
@@ -602,8 +707,7 @@ mod tests {
             .unwrap();
         let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(6_000));
         let transform = build_context_transform(
-            model,
-            StreamOptions::default(),
+            CompactionTarget::session_model(model, StreamOptions::default()),
             true,
             mush_session::compact::CompactionSettings {
                 keep_recent_tokens: 2_000,
@@ -670,8 +774,7 @@ mod tests {
             .next()
             .unwrap();
         let transform = build_context_transform(
-            model,
-            StreamOptions::default(),
+            CompactionTarget::session_model(model, StreamOptions::default()),
             true,
             mush_session::compact::CompactionSettings {
                 keep_recent_tokens: 2_000,
@@ -717,8 +820,7 @@ mod tests {
             .map(|i| user_msg(format!("small {i}: {}", "x".repeat(120))))
             .collect();
         let transform = build_context_transform(
-            model,
-            StreamOptions::default(),
+            CompactionTarget::session_model(model, StreamOptions::default()),
             true,
             mush_session::compact::CompactionSettings::default(),
             TokenCount::new(10_000),

@@ -903,6 +903,50 @@ fn branch_summary_context(abandoned: &[Message], budget_tokens: usize) -> Option
     })
 }
 
+#[must_use]
+pub fn summary_request_tokens(
+    messages: &[Message],
+    keep_recent: usize,
+    focus: &CompactionFocus,
+    settings: &CompactionSettings,
+) -> usize {
+    let split_at = messages.len().saturating_sub(keep_recent);
+    if split_at == 0 {
+        return 0;
+    }
+    let context = compaction_context(&messages[..split_at], &messages[split_at..], focus, None);
+    request_tokens(&context) + settings.max_output_tokens().get() as usize
+}
+
+#[must_use]
+pub fn branch_summary_request_tokens(
+    abandoned: &[Message],
+    session_window: TokenCount,
+    settings: &CompactionSettings,
+) -> usize {
+    let budget = settings.threshold(session_window).get() as usize;
+    let Some(context) = branch_summary_context(abandoned, budget) else {
+        return 0;
+    };
+    let prompt = estimate_tokens(&context.messages);
+    (request_tokens(&context) + BRANCH_SUMMARY_MAX_TOKENS as usize)
+        .max(prompt + settings.reserve_tokens as usize)
+}
+
+#[must_use]
+pub fn window_fits(model: &Model, required_tokens: usize) -> bool {
+    let window = model.compaction_window().get();
+    window == 0 || required_tokens as u64 <= window
+}
+
+fn request_tokens(context: &LlmContext) -> usize {
+    context
+        .system_prompt
+        .as_deref()
+        .map_or(0, |prompt| prompt.len().div_ceil(CHARS_PER_TOKEN))
+        + estimate_tokens(&context.messages)
+}
+
 pub async fn summarise_branch(
     abandoned: &[Message],
     registry: &ApiRegistry,
@@ -2394,6 +2438,45 @@ mod tests {
         assert!(!text.contains(crate::harness::DIGEST_PREFIX));
         assert!(text.ends_with(BRANCH_SUMMARY_INSTRUCTIONS));
         assert!(branch_summary_context(&msgs[2..3], 100_000).is_none());
+    }
+
+    #[test]
+    fn the_summary_request_estimate_covers_the_prompt_input_and_output_budget() {
+        let msgs: Vec<Message> = (0..10)
+            .map(|i| user_msg(&format!("{i}: {}", "x".repeat(4_000))))
+            .collect();
+        let settings = CompactionSettings::default();
+        let focus = CompactionFocus::default();
+
+        assert_eq!(
+            summary_request_tokens(&msgs, msgs.len(), &focus, &settings),
+            0
+        );
+        let required = summary_request_tokens(&msgs, 2, &focus, &settings);
+        assert!(required > estimate_tokens(&msgs) + settings.max_output_tokens().get() as usize);
+        assert!(required > summary_request_tokens(&msgs[5..], 2, &focus, &settings));
+    }
+
+    #[test]
+    fn the_branch_summary_estimate_leaves_the_reserve_free() {
+        let msgs = vec![user_msg(&"x".repeat(4_000)), assistant_msg("done")];
+        let settings = CompactionSettings::default();
+        let window = TokenCount::new(200_000);
+
+        let required = branch_summary_request_tokens(&msgs, window, &settings);
+        assert!(required >= estimate_tokens(&msgs) + settings.reserve_tokens as usize);
+        assert_eq!(branch_summary_request_tokens(&[], window, &settings), 0);
+    }
+
+    #[test]
+    fn a_window_fits_a_request_up_to_its_size_and_an_unknown_one_fits_anything() {
+        let mut model = test_model();
+        model.context_window = TokenCount::new(1_000);
+        model.effective_context_window = None;
+        assert!(window_fits(&model, 1_000));
+        assert!(!window_fits(&model, 1_001));
+        model.context_window = TokenCount::ZERO;
+        assert!(window_fits(&model, usize::MAX));
     }
 
     #[test]

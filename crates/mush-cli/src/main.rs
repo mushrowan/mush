@@ -644,23 +644,28 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let context_window = compact_model
         .context_window
         .max(setup.client.model.context_window);
+    let session_model = (compact_model.id != setup.client.model.id)
+        .then(|| (setup.client.model.clone(), setup.client.options.clone()));
+    let target = mush_runtime::CompactionTarget {
+        model: compact_model,
+        options: compact_options,
+        window: context_window,
+        session: session_model,
+    };
     let reg_ref = setup.registry.clone();
     let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let ctx_tokens_for_transform = context_tokens_shared.clone();
     let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
     let cwd = std::sync::Arc::new(setup.client.cwd.clone());
-    let live = std::sync::Arc::new((compact_model.id == setup.client.model.id).then(|| {
-        mush_session::compact::LiveContext {
-            system_prompt: Some(setup.system_prompt.clone()),
-            tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
-        }
-    }));
+    let live = std::sync::Arc::new(mush_session::compact::LiveContext {
+        system_prompt: Some(setup.system_prompt.clone()),
+        tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
+    });
     let compaction_settings = setup.client.cfg.compaction.settings();
     let kernel = setup.kernel_state.clone();
     let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.compaction.enabled {
         Some(Box::new(move |msgs| {
-            let m = compact_model.clone();
-            let o = compact_options.clone();
+            let target = target.clone();
             let ctx = ctx_tokens_for_transform.clone();
             let owned = msgs.to_vec();
             let hooks = lifecycle_hooks.clone();
@@ -670,16 +675,22 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             let kernel = kernel.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
+                let target = target.fitting(mush_session::compact::summary_request_tokens(
+                    &owned,
+                    compaction_settings.keep_recent(&owned),
+                    &mush_session::compact::CompactionFocus::default(),
+                    &compaction_settings,
+                ));
                 let mut result = auto_compact(
                     owned,
                     tokens,
                     context_window,
                     &reg,
-                    &m,
-                    &o,
+                    &target.model,
+                    &target.options,
                     Some(&hooks),
                     Some(cwd.as_path()),
-                    live.as_ref().as_ref(),
+                    target.uses_session_model().then_some(live.as_ref()),
                     &compaction_settings,
                 )
                 .await;
