@@ -267,6 +267,70 @@ async fn a_rejected_host_request_raises_in_the_cell() {
 }
 
 #[tokio::test]
+async fn a_nan_or_oversized_payload_raises_in_the_cell_instead_of_leaving_the_wire() {
+    let kernel = kernel_with(Arc::new(Echo)).await;
+
+    let nan = kernel
+        .execute("await host_request('echo', {'x': float('nan')})")
+        .await
+        .unwrap();
+    let big = kernel
+        .execute("display({'text/plain': 'x' * (17 * 1024 * 1024)})")
+        .await
+        .unwrap();
+    let after = kernel.execute("1 + 1").await.unwrap();
+
+    assert_eq!(nan.error.unwrap().ename, "ValueError");
+    let big = big.error.unwrap();
+    assert_eq!(big.ename, "ValueError");
+    assert!(big.evalue.contains("frame cap"), "{}", big.evalue);
+    assert_eq!(after.result.as_deref(), Some("2"));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_huge_result_or_error_is_capped_in_transit() {
+    let kernel = kernel().await;
+
+    let result = kernel.execute("'x' * 2_000_000").await.unwrap();
+    let error = kernel
+        .execute("raise ValueError('y' * 2_000_000)")
+        .await
+        .unwrap();
+
+    let result = result.result.unwrap();
+    assert!(result.len() < 1_100_000, "{}", result.len());
+    assert!(result.ends_with("[... result truncated at 1048576 characters ...]"));
+    let error = error.error.unwrap();
+    assert!(error.evalue.len() < 1_100_000, "{}", error.evalue.len());
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unparseable_frame_fails_the_running_cell_instead_of_hanging_it() {
+    let kernel = kernel().await;
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        kernel.execute(
+            "import os, sys, time\nshim = next(m for m in list(sys.modules.values()) if getattr(m, '__file__', '') and m.__file__.endswith('mush_kernel.py'))\nos.write(shim._proto_fd, b'{not json\\n')\ntime.sleep(30)",
+        ),
+    )
+    .await
+    .expect("the bad frame fails the cell")
+    .unwrap();
+    let after = tokio::time::timeout(Duration::from_secs(5), kernel.execute("1 + 1"))
+        .await
+        .expect("the stuck cell was interrupted")
+        .unwrap();
+
+    assert!(!output.ok);
+    assert_eq!(output.error.unwrap().ename, "ProtocolError");
+    assert_eq!(after.result.as_deref(), Some("2"));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_bare_interrupt_with_nothing_running_is_dropped() {
     let kernel = kernel().await;
 

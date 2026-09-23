@@ -206,10 +206,15 @@ impl Kernel {
 
         tokio::spawn(tail_stderr(stderr, shared.clone()));
 
-        let mut lines = BufReader::new(stdout).lines();
-        let ready = tokio::time::timeout(config.ready_timeout, lines.next_line()).await;
+        let mut frames = Frames::new(stdout);
+        let ready = tokio::time::timeout(config.ready_timeout, frames.next()).await;
         let python_version = match ready {
-            Ok(Ok(Some(line))) => match serde_json::from_str::<Event>(&line) {
+            Ok(Ok(Some(Frame::Oversized))) => {
+                return Err(KernelError::Protocol(
+                    "first line was larger than a protocol frame".into(),
+                ));
+            }
+            Ok(Ok(Some(Frame::Line(line)))) => match serde_json::from_str::<Event>(&line) {
                 Ok(Event::Ready { protocol, python }) if protocol == PROTOCOL_VERSION => python,
                 Ok(Event::Ready { protocol, .. }) => {
                     return Err(KernelError::Protocol(format!(
@@ -234,7 +239,7 @@ impl Kernel {
             Err(_) => return Err(KernelError::ReadyTimeout(config.ready_timeout)),
         };
 
-        let reader = tokio::spawn(read_events(lines, shared.clone()));
+        let reader = tokio::spawn(read_events(frames, shared.clone()));
 
         Ok(Self {
             child: Mutex::new(Some(child)),
@@ -697,6 +702,36 @@ impl Shared {
         }
     }
 
+    fn fail_running(&self, reason: String) {
+        let Some(id) = self.running() else {
+            tracing::warn!(reason, "bad kernel frame with no running cell");
+            return;
+        };
+        let sender = self
+            .cells
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned();
+        if let Some(sender) = sender {
+            let _ = sender.send(Event::Error {
+                id: Some(id.clone()),
+                ename: "ProtocolError".into(),
+                evalue: reason,
+                traceback: Vec::new(),
+            });
+            let _ = sender.send(Event::Done {
+                id: id.clone(),
+                ok: false,
+                extra: serde_json::Map::new(),
+            });
+        }
+        let stdin = self.stdin.clone();
+        tokio::spawn(async move {
+            let _ = write_request(&stdin, &Request::Interrupt { id: Some(id) }).await;
+        });
+    }
+
     fn stderr_tail_text(&self) -> String {
         self.stderr_tail
             .lock()
@@ -708,15 +743,87 @@ impl Shared {
     }
 }
 
-async fn read_events(
-    mut lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    shared: Arc<Shared>,
-) {
-    while let Ok(Some(line)) = lines.next_line().await {
+const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
+
+enum Frame {
+    Line(String),
+    Oversized,
+}
+
+struct Frames<R> {
+    reader: BufReader<R>,
+    buf: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> Frames<R> {
+    fn new(stdout: R) -> Self {
+        Self {
+            reader: BufReader::new(stdout),
+            buf: Vec::new(),
+        }
+    }
+
+    async fn next(&mut self) -> std::io::Result<Option<Frame>> {
+        let mut oversized = false;
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                if oversized {
+                    return Ok(Some(Frame::Oversized));
+                }
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(self.take_line()));
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let chunk = newline.unwrap_or(available.len());
+            if !oversized && self.buf.len() + chunk > MAX_PROTOCOL_LINE_BYTES {
+                oversized = true;
+                self.buf = Vec::new();
+            }
+            if !oversized {
+                self.buf.extend_from_slice(&available[..chunk]);
+            }
+            match newline {
+                Some(at) => {
+                    self.reader.consume(at + 1);
+                    if oversized {
+                        return Ok(Some(Frame::Oversized));
+                    }
+                    return Ok(Some(self.take_line()));
+                }
+                None => self.reader.consume(chunk),
+            }
+        }
+    }
+
+    fn take_line(&mut self) -> Frame {
+        let line = String::from_utf8_lossy(&self.buf).into_owned();
+        self.buf.clear();
+        Frame::Line(line)
+    }
+}
+
+async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Arc<Shared>) {
+    while let Ok(Some(frame)) = frames.next().await {
+        let line = match frame {
+            Frame::Line(line) => line,
+            Frame::Oversized => {
+                shared.fail_running(format!(
+                    "oversized protocol line: exceeds {MAX_PROTOCOL_LINE_BYTES} bytes"
+                ));
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
         let event = match serde_json::from_str::<Event>(&line) {
             Ok(event) => event,
             Err(error) => {
                 tracing::warn!(%error, line, "unparseable kernel event");
+                shared.fail_running(format!("unparseable protocol frame: {error}"));
                 continue;
             }
         };
@@ -800,5 +907,25 @@ async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {
             tail.pop_front();
         }
         tail.push_back(line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_oversized_line_is_skipped_whole_and_the_next_line_still_reads() {
+        let mut input = vec![b'x'; MAX_PROTOCOL_LINE_BYTES + 10];
+        input.extend_from_slice(b"\nnext\ntail");
+        let mut frames = Frames::new(input.as_slice());
+
+        assert!(matches!(
+            frames.next().await.unwrap(),
+            Some(Frame::Oversized)
+        ));
+        assert!(matches!(frames.next().await.unwrap(), Some(Frame::Line(line)) if line == "next"));
+        assert!(matches!(frames.next().await.unwrap(), Some(Frame::Line(line)) if line == "tail"));
+        assert!(frames.next().await.unwrap().is_none());
     }
 }

@@ -35,6 +35,22 @@ _namespace: dict = {}
 _cell_count = 0
 
 
+_RESULT_TEXT_CAP = 1_048_576
+_RESULT_TRUNCATION_MARKER = f"\n[... result truncated at {_RESULT_TEXT_CAP} characters ...]"
+_PAYLOAD_CAP = 16 * 1024 * 1024
+
+
+def _cap_text(text: str) -> str:
+    if len(text) > _RESULT_TEXT_CAP:
+        return text[:_RESULT_TEXT_CAP] + _RESULT_TRUNCATION_MARKER
+    return text
+
+
+def _check_payload(event: str, data) -> None:
+    if len(json.dumps(data, ensure_ascii=False, allow_nan=False, default=str)) > _PAYLOAD_CAP:
+        raise ValueError(f"{event} payload exceeds the {_PAYLOAD_CAP}-character frame cap")
+
+
 def emit(event: dict) -> None:
     line = json.dumps(event, ensure_ascii=False, default=str)
     with _proto_lock:
@@ -208,6 +224,8 @@ def _drain_output() -> None:
 
 async def host_request(kind: str, payload=None):
     assert _loop is not None
+    payload = payload if payload is not None else {}
+    _check_payload("host_request", payload)
     request_id = uuid.uuid4().hex
     future = _loop.create_future()
     _pending_replies[request_id] = future
@@ -217,7 +235,7 @@ async def host_request(kind: str, payload=None):
             "id": request_id,
             "cell": _current_cell.get(),
             "kind": kind,
-            "payload": payload if payload is not None else {},
+            "payload": payload,
         }
     )
     try:
@@ -718,7 +736,7 @@ def _image_mime(data: bytes) -> str | None:
 def display(data: dict) -> None:
     if not isinstance(data, dict) or not data or not all(isinstance(k, str) for k in data):
         raise TypeError("display() takes a non-empty dict keyed by mime type")
-    json.dumps(data, allow_nan=False)
+    _check_payload("display", data)
     emit({"type": "display", "id": _current_cell.get(), "data": data})
 
 
@@ -771,6 +789,13 @@ def _install_preload() -> None:
     )
 
 
+def _safe_str(exc: BaseException) -> str:
+    try:
+        return str(exc)
+    except BaseException:  # noqa: BLE001
+        return "<exception str() failed>"
+
+
 def _format_traceback(exc: BaseException) -> list[str]:
     frames = traceback.extract_tb(exc.__traceback__)
     kept = [frame for frame in frames if frame.filename != __file__]
@@ -812,7 +837,7 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
                 value = await value
             if value is not None:
                 _namespace["_"] = value
-                emit({"type": "result", "id": cell_id, "text": repr(value)})
+                emit({"type": "result", "id": cell_id, "text": _cap_text(repr(value))})
     except (KeyboardInterrupt, asyncio.CancelledError):
         ok = False
         emit(
@@ -831,8 +856,8 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
                 "type": "error",
                 "id": cell_id,
                 "ename": type(exc).__name__,
-                "evalue": str(exc),
-                "traceback": _format_traceback(exc),
+                "evalue": _cap_text(_safe_str(exc)),
+                "traceback": [_cap_text(line) for line in _format_traceback(exc)],
             }
         )
     finally:
