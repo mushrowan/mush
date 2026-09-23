@@ -113,7 +113,8 @@ struct RequestTool {
 #[derive(Serialize)]
 struct RequestReasoning {
     effort: String,
-    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
 }
 
 fn build_request_body(
@@ -165,7 +166,7 @@ fn build_request_body(
 
     let reasoning = reasoning_effort.map(|effort| RequestReasoning {
         effort,
-        summary: "auto".into(),
+        summary: Some("auto".into()),
     });
 
     let include = if reasoning.is_some() {
@@ -173,6 +174,13 @@ fn build_request_body(
     } else {
         None
     };
+    let reasoning = reasoning.or_else(|| {
+        let effort = super::openai_off_effort(model).filter(|_| !is_codex)?;
+        Some(RequestReasoning {
+            effort,
+            summary: None,
+        })
+    });
 
     let prompt_cache_key = if cache_retention == CacheRetention::None {
         None
@@ -1363,6 +1371,57 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &[], &options, false);
         assert_eq!(body.prompt_cache_key.as_deref(), Some("sess_abc"));
         assert_eq!(body.prompt_cache_retention.as_deref(), Some("24h"));
+    }
+
+    #[test]
+    fn a_reasoning_model_with_thinking_off_asks_for_no_reasoning() {
+        let model = Model::builder()
+            .id("gpt-5.2".into())
+            .name("GPT-5.2".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai".into()))
+            .base_url("https://api.openai.com/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .build();
+        let off = |thinking| StreamOptions {
+            thinking,
+            ..Default::default()
+        };
+
+        for thinking in [None, Some(ThinkingLevel::Off)] {
+            let body = serde_json::to_value(build_request_body(
+                &model,
+                &None,
+                &[],
+                &[],
+                &off(thinking),
+                false,
+            ))
+            .unwrap();
+            assert_eq!(body["reasoning"], serde_json::json!({"effort": "none"}));
+            assert!(body.get("include").is_none());
+        }
+
+        let minimal_floor = Model {
+            supported_thinking_levels: vec![ThinkingLevel::Minimal, ThinkingLevel::High],
+            ..model.clone()
+        };
+        let body = build_request_body(&minimal_floor, &None, &[], &[], &off(None), false);
+        assert_eq!(body.reasoning.map(|r| r.effort).as_deref(), Some("minimal"));
+
+        let codex = build_request_body(&model, &None, &[], &[], &off(None), true);
+        assert!(codex.reasoning.is_none());
+        let plain = Model {
+            reasoning: false,
+            ..model
+        };
+        assert!(
+            build_request_body(&plain, &None, &[], &[], &off(None), false)
+                .reasoning
+                .is_none()
+        );
     }
 
     fn cache_replay_messages() -> Vec<Message> {

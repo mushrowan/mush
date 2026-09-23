@@ -117,6 +117,16 @@ pub(crate) fn openai_reasoning_effort(model: &Model, effort: &EffortLevel) -> Op
     Some(effort.name().to_string())
 }
 
+pub(crate) fn openai_off_effort(model: &Model) -> Option<String> {
+    if !model.reasoning {
+        return None;
+    }
+    match model.clamp_thinking(&ThinkingLevel::Off) {
+        ThinkingLevel::Off => Some("none".into()),
+        level => level.effort_level().map(|effort| effort.name().to_string()),
+    }
+}
+
 pub(crate) fn requested_effort(options: &StreamOptions) -> Option<EffortLevel> {
     options.effort.clone().or_else(|| {
         options

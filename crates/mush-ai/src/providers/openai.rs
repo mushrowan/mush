@@ -83,6 +83,8 @@ struct RequestBody {
     tools: Option<Vec<RequestTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
     stream_options: StreamOpts,
 }
 
@@ -164,6 +166,19 @@ fn build_request_body(
     let reasoning_effort = super::requested_effort(options)
         .as_ref()
         .and_then(|effort| super::openai_reasoning_effort(model, effort));
+    let off_effort = reasoning_effort
+        .is_none()
+        .then(|| super::openai_off_effort(model))
+        .flatten()
+        .filter(|_| accepts_reasoning_effort(model));
+    let (off_effort, reasoning) = if is_openrouter(model) {
+        (
+            None,
+            off_effort.map(|effort| serde_json::json!({ "effort": effort })),
+        )
+    } else {
+        (off_effort, None)
+    };
 
     RequestBody {
         model: model.id.to_string(),
@@ -176,11 +191,29 @@ fn build_request_body(
             None
         },
         tools: converted_tools,
-        reasoning_effort,
+        reasoning_effort: reasoning_effort.or(off_effort),
+        reasoning,
         stream_options: StreamOpts {
             include_usage: true,
         },
     }
+}
+
+fn is_openrouter(model: &Model) -> bool {
+    model.provider == Provider::OpenRouter || model.base_url.contains("openrouter.ai")
+}
+
+fn accepts_reasoning_effort(model: &Model) -> bool {
+    let base_url = model.base_url.as_str();
+    ![
+        "api.x.ai",
+        "api.z.ai",
+        "moonshot.",
+        "cloudflare",
+        "deepseek.com",
+    ]
+    .iter()
+    .any(|host| base_url.contains(host))
 }
 
 fn anthropic_cache_control(model: &Model, options: &StreamOptions) -> Option<serde_json::Value> {
@@ -830,6 +863,37 @@ mod tests {
         let body = build_request_body(&model, &None, &[], &[], &options);
         assert_eq!(body.reasoning_effort, Some("high".into()));
         assert!(body.temperature.is_none());
+    }
+
+    #[test]
+    fn a_reasoning_model_with_thinking_off_asks_for_no_reasoning() {
+        let openrouter = Model {
+            reasoning: true,
+            ..test_model()
+        };
+        let body = build_request_body(&openrouter, &None, &[], &[], &StreamOptions::default());
+        assert_eq!(body.reasoning, Some(serde_json::json!({"effort": "none"})));
+        assert!(body.reasoning_effort.is_none());
+
+        let direct = Model {
+            provider: Provider::Custom("openai".into()),
+            base_url: "https://api.openai.com/v1".into(),
+            ..openrouter.clone()
+        };
+        let off = StreamOptions {
+            thinking: Some(ThinkingLevel::Off),
+            ..Default::default()
+        };
+        let body = build_request_body(&direct, &None, &[], &[], &off);
+        assert_eq!(body.reasoning_effort.as_deref(), Some("none"));
+        assert!(body.reasoning.is_none());
+
+        let grok = Model {
+            base_url: "https://api.x.ai/v1".into(),
+            ..direct
+        };
+        let body = build_request_body(&grok, &None, &[], &[], &off);
+        assert!(body.reasoning_effort.is_none() && body.reasoning.is_none());
     }
 
     #[test]
