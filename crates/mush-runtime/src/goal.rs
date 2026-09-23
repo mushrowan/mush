@@ -29,6 +29,11 @@ pub struct Goal {
     pub error: Option<String>,
 }
 
+#[must_use]
+pub fn usage_tokens(usage: &mush_ai::types::Usage) -> u64 {
+    (usage.input_tokens + usage.output_tokens).get()
+}
+
 impl Goal {
     #[must_use]
     pub fn remaining_tokens(&self) -> Option<u64> {
@@ -334,6 +339,17 @@ fn budget_limit_prompt(goal: &Goal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goal_usage_counts_input_and_output_only() {
+        let usage = mush_ai::types::Usage {
+            input_tokens: 100u64.into(),
+            output_tokens: 20u64.into(),
+            cache_read_tokens: 90_000u64.into(),
+            cache_write_tokens: 5_000u64.into(),
+        };
+        assert_eq!(usage_tokens(&usage), 120);
+    }
 
     #[test]
     fn a_goal_continues_after_each_turn_until_complete() {

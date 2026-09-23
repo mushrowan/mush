@@ -1618,10 +1618,10 @@ impl InProcessConnection {
                     });
                 }
                 if let Some(goal) = &self.goal {
-                    goal.record_usage(message.usage.total_tokens().get());
+                    goal.record_usage(crate::goal::usage_tokens(&message.usage));
                 }
                 if let Some(autonomous) = &self.autonomous {
-                    autonomous.record_usage(message.usage.total_tokens().get());
+                    autonomous.record_usage(crate::autonomous::usage_tokens(&message.usage));
                     autonomous.record_assistant_turn();
                 }
                 self.assistant_turns_since_review += 1;

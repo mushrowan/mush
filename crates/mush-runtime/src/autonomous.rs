@@ -20,6 +20,11 @@ a reasonable assumption and check it. If you think you are blocked, prove it wit
 observe from the shell, keep that evidence, and look for safe progress while budget remains. Do not \
 end the run yourself; the gates decide completion when they are configured.";
 
+#[must_use]
+pub fn usage_tokens(usage: &mush_ai::types::Usage) -> u64 {
+    (usage.input_tokens + usage.output_tokens + usage.cache_write_tokens).get()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Limits {
     pub max_continuations: Option<u32>,
@@ -615,6 +620,17 @@ mod tests {
             subagent_keep_alive_ms: DEFAULT_SUBAGENT_KEEP_ALIVE_MS,
         });
         autonomous
+    }
+
+    #[test]
+    fn autonomous_usage_leaves_out_cache_reads() {
+        let usage = mush_ai::types::Usage {
+            input_tokens: 100u64.into(),
+            output_tokens: 20u64.into(),
+            cache_read_tokens: 90_000u64.into(),
+            cache_write_tokens: 5_000u64.into(),
+        };
+        assert_eq!(usage_tokens(&usage), 5_120);
     }
 
     #[test]
