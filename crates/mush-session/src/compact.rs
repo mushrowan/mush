@@ -791,7 +791,7 @@ pub async fn try_llm_compact(
 
     let split_at = messages.len() - keep;
 
-    let compact_options = compaction_stream_options(model, options, live.is_some(), settings);
+    let compact_options = compaction_stream_options(options, live.is_some(), settings);
     let mut old_start = 0;
     let mut diagnostics = CompactionDiagnostics {
         model_id: model.id.to_string(),
@@ -859,7 +859,7 @@ pub async fn summarise_branch(
         start += 1;
     }
     let context = compaction_context(&abandoned[start..], &[], &focus, None);
-    let compact_options = compaction_stream_options(model, options, false, settings);
+    let compact_options = compaction_stream_options(options, false, settings);
     call_for_text(registry, model, &context, &compact_options)
         .await
         .map(|outcome| with_file_operations(outcome.text, abandoned))
@@ -1176,7 +1176,6 @@ fn tool_result_text(result: &ToolResultMessage) -> String {
 }
 
 fn compaction_stream_options(
-    model: &Model,
     options: &StreamOptions,
     live: bool,
     settings: &CompactionSettings,
@@ -1184,7 +1183,8 @@ fn compaction_stream_options(
     let mut compact_options = options.clone();
     compact_options.max_tokens = Some(settings.max_output_tokens());
     if !live {
-        compact_options.thinking = model.reasoning.then_some(ThinkingLevel::Low);
+        compact_options.thinking = Some(ThinkingLevel::Off);
+        compact_options.effort = None;
     }
     compact_options
 }
@@ -2291,27 +2291,19 @@ mod tests {
     }
 
     #[test]
-    fn compaction_options_request_low_reasoning_for_reasoning_models() {
-        let model = Model::builder()
-            .id("openai/gpt-5.4-nano".into())
-            .name("GPT 5.4 Nano".into())
-            .api(Api::OpenaiCompletions)
-            .provider(Provider::OpenRouter)
-            .base_url("https://openrouter.ai/api/v1".into())
-            .context_window(TokenCount::new(400_000))
-            .max_output_tokens(TokenCount::new(128_000))
-            .reasoning(true)
-            .build();
+    fn non_live_compaction_requests_no_reasoning() {
         let options = StreamOptions {
-            thinking: None,
+            thinking: Some(ThinkingLevel::High),
             ..StreamOptions::default()
         };
 
         let compact_options =
-            compaction_stream_options(&model, &options, false, &CompactionSettings::default());
-
+            compaction_stream_options(&options, false, &CompactionSettings::default());
         assert_eq!(compact_options.max_tokens, Some(TokenCount::new(13_107)));
-        assert_eq!(compact_options.thinking, Some(ThinkingLevel::Low));
+        assert_eq!(compact_options.thinking, Some(ThinkingLevel::Off));
+
+        let live = compaction_stream_options(&options, true, &CompactionSettings::default());
+        assert_eq!(live.thinking, Some(ThinkingLevel::High));
     }
 
     #[test]
