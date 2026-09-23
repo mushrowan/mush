@@ -21,6 +21,22 @@ pub type ReloadCallback = std::sync::Arc<dyn Fn(&std::path::Path) -> ReloadedCon
 
 pub type ModelResolver = std::sync::Arc<dyn Fn(&str) -> Option<Model> + Send + Sync>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerTarget {
+    New,
+    Resume(mush_ai::types::SessionId),
+}
+
+pub type WorkerOpener = std::sync::Arc<
+    dyn Fn(
+            WorkerTarget,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Box<dyn crate::session::AgentConnection>, String>,
+        > + Send
+        + Sync,
+>;
+
 pub struct TuiConfig {
     pub model: Model,
     pub options: StreamOptions,
@@ -62,6 +78,7 @@ pub struct TuiConfig {
     pub mcp: Option<std::sync::Arc<mush_mcp::McpManager>>,
     pub skills: SkillCatalogue,
     pub autonomous: mush_runtime::AutonomousDefaults,
+    pub worker_opener: Option<WorkerOpener>,
 }
 
 impl TuiConfig {
@@ -173,6 +190,7 @@ impl TuiConfig {
             mcp: None,
             skills: SkillCatalogue::default(),
             autonomous: Default::default(),
+            worker_opener: None,
         }
     }
 }

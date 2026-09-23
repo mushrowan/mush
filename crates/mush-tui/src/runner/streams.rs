@@ -1193,6 +1193,7 @@ mod tests {
             mcp: None,
             skills: Default::default(),
             autonomous: Default::default(),
+            worker_opener: None,
         }
     }
 

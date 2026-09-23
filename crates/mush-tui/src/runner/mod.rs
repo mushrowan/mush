@@ -26,7 +26,7 @@ use crate::screen::Screen;
 
 pub use self::config::{
     ModelResolver, PaneSnapshot, ReloadCallback, ReloadedContext, SessionSaver, SessionSnapshot,
-    SkillCatalogue, TuiConfig,
+    SkillCatalogue, TuiConfig, WorkerOpener, WorkerTarget,
 };
 use self::input::LoopAction;
 pub use self::last_model::{LastModels, LastModelsSaver, canonical_dir};
@@ -62,13 +62,14 @@ pub async fn run_tui(
         startup_discovery,
     )
     .await
+    .map(drop)
 }
 
 pub async fn run_tui_attached(
     tui_config: TuiConfig,
     connection: Box<dyn AgentConnection>,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
-) -> io::Result<()> {
+) -> io::Result<mush_ai::types::SessionId> {
     run_tui_with(
         tui_config,
         connection,
@@ -90,7 +91,7 @@ async fn run_tui_with(
     ipc_listener: Option<mush_agent::IpcListener>,
     exit: ExitPolicy,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
-) -> io::Result<()> {
+) -> io::Result<mush_ai::types::SessionId> {
     let env = crate::terminal_policy::TtyEnvironment::detect();
     if !env.is_tty() {
         let reason = env.broken_reason().unwrap_or("unknown");
@@ -291,7 +292,7 @@ async fn run_tui_with(
     sigwinch_task.abort();
     terminal_guard.disarm();
     verify_terminal_restored(vec!["exit path: run_tui clean return".into()]);
-    Ok(())
+    Ok(runtime.session.connection.state().session_id)
 }
 
 fn report_loop_progress(

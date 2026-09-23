@@ -340,6 +340,25 @@ fn watch_config(
     }
 }
 
+pub(super) async fn reattach(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    mut connection: Box<dyn AgentConnection>,
+) {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut app = build_initial_app(tui_config, &cwd);
+    app.theme = session.app.theme.clone();
+    app.oauth_usage = session.app.oauth_usage.take();
+    app.oauth_usage_provider = session.app.oauth_usage_provider.take();
+    seed_from_state(&mut app, tui_config, &connection.state());
+    let history = connection.history().await;
+    let context = connection.transcript().await;
+    replay_history(&mut app, &history, &context);
+    let label = session.label.take();
+    *session = Session::with_connection(app, connection);
+    session.label = label;
+}
+
 fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {
     let mut app = App::new(tui_config.model.id.clone(), tui_config.model.context_window);
     tui_config.seed_app(&mut app);

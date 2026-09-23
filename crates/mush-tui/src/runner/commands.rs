@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::session::Session;
 use crate::slash::{self, SlashAction};
 
-use super::TuiConfig;
+use super::{TuiConfig, WorkerOpener, WorkerTarget};
 
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
@@ -43,6 +43,36 @@ pub(super) async fn run_session_command(
     });
     super::streams::apply_session_events(session, tui_config, events);
     changed
+}
+
+async fn switch_worker(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    opener: &WorkerOpener,
+    target: WorkerTarget,
+) -> bool {
+    let previous = tui_config.session_id.clone();
+    let state = session.connection.state();
+    let kept = state.context_len > 0
+        || state.tree_len > 0
+        || state.title.is_some()
+        || state.turn_active
+        || state.active_turns > 0;
+    let connection = match opener(target).await {
+        Ok(connection) => connection,
+        Err(error) => {
+            session.app.push_system_message(error);
+            return false;
+        }
+    };
+    super::runtime::reattach(session, tui_config, connection).await;
+    if kept && tui_config.session_id != previous {
+        let short: String = previous.as_str().chars().take(8).collect();
+        session.app.push_system_message(format!(
+            "detached from {short}, it keeps running (mush list, mush --resume {short})"
+        ));
+    }
+    true
 }
 
 async fn send_schedule(
@@ -203,16 +233,19 @@ pub(super) async fn handle_slash_action(
         pending_prompt,
     } = env;
     let mut state_changed = false;
-    let changes_conversation = matches!(
-        action,
-        SlashAction::New { .. }
-            | SlashAction::Resume { .. }
-            | SlashAction::Undo
-            | SlashAction::Branch { .. }
-            | SlashAction::NavigateTree { .. }
-            | SlashAction::Fork { .. }
-            | SlashAction::Clone
-    );
+    let switches_worker = tui_config.worker_opener.is_some()
+        && matches!(action, SlashAction::New { .. } | SlashAction::Resume { .. });
+    let changes_conversation = !switches_worker
+        && matches!(
+            action,
+            SlashAction::New { .. }
+                | SlashAction::Resume { .. }
+                | SlashAction::Undo
+                | SlashAction::Branch { .. }
+                | SlashAction::NavigateTree { .. }
+                | SlashAction::Fork { .. }
+                | SlashAction::Clone
+        );
     let state = session.connection.state();
     if changes_conversation
         && state.controlled
@@ -427,8 +460,15 @@ pub(super) async fn handle_slash_action(
             session.app.push_system_message(report);
         }
         SlashAction::New { name, prompt } => {
-            let created =
-                run_session_command(session, tui_config, mush_runtime::SessionCommand::New).await;
+            let created = match tui_config.worker_opener.clone() {
+                Some(opener) => {
+                    switch_worker(session, tui_config, &opener, WorkerTarget::New).await
+                }
+                None => {
+                    run_session_command(session, tui_config, mush_runtime::SessionCommand::New)
+                        .await
+                }
+            };
             state_changed = true;
             if !created {
                 if let Some(prompt) = prompt {
@@ -516,12 +556,25 @@ pub(super) async fn handle_slash_action(
             }
         }
         SlashAction::Resume { session_id } => {
-            state_changed = run_session_command(
-                session,
-                tui_config,
-                mush_runtime::SessionCommand::Resume { id: session_id },
-            )
-            .await;
+            state_changed = match tui_config.worker_opener.clone() {
+                Some(opener) => {
+                    switch_worker(
+                        session,
+                        tui_config,
+                        &opener,
+                        WorkerTarget::Resume(session_id),
+                    )
+                    .await
+                }
+                None => {
+                    run_session_command(
+                        session,
+                        tui_config,
+                        mush_runtime::SessionCommand::Resume { id: session_id },
+                    )
+                    .await
+                }
+            };
         }
         SlashAction::Reload => {
             let Some(reload) = tui_config.reload_context.clone() else {
@@ -1111,6 +1164,146 @@ mod tests {
         let last = session.app.messages.last().expect("the prompt shows");
         assert_eq!(last.role, crate::app::MessageRole::User);
         assert_eq!(last.content, "fix it");
+    }
+
+    type Asked = std::sync::Arc<std::sync::Mutex<Vec<WorkerTarget>>>;
+
+    fn opener_to(connection: Option<Session>) -> (WorkerOpener, Asked) {
+        let asked: Asked = std::sync::Arc::default();
+        let handed = std::sync::Mutex::new(connection.map(|session| session.connection));
+        let seen = std::sync::Arc::clone(&asked);
+        let opener: WorkerOpener = std::sync::Arc::new(move |target| {
+            seen.lock().unwrap().push(target);
+            let connection = handed.lock().unwrap().take();
+            Box::pin(async move { connection.ok_or_else(|| "the daemon is gone".to_string()) })
+        });
+        (opener, asked)
+    }
+
+    fn slash(
+        session: &mut Session,
+        config: &mut TuiConfig,
+        action: SlashAction,
+        pending_prompt: &mut Option<String>,
+    ) {
+        futures::executor::block_on(handle_slash_action(
+            session,
+            action,
+            SlashEnv {
+                tui_config: config,
+                cwd: std::path::Path::new("/tmp"),
+                pending_prompt,
+            },
+        ));
+    }
+
+    #[test]
+    fn new_with_a_daemon_attaches_a_fresh_worker_instead_of_replacing_this_one() {
+        let mut session = conversation_session(vec![user("old"), assistant("reply")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+        let fresh = conversation_session(vec![]);
+        let fresh_id = fresh.connection.state().session_id;
+        let (opener, asked) = opener_to(Some(fresh));
+        config.worker_opener = Some(opener);
+        let mut pending_prompt = None;
+
+        slash(
+            &mut session,
+            &mut config,
+            SlashAction::New {
+                name: Some("port prime".into()),
+                prompt: Some("fix it".into()),
+            },
+            &mut pending_prompt,
+        );
+
+        assert_eq!(*asked.lock().unwrap(), [WorkerTarget::New]);
+        assert_eq!(config.session_id, fresh_id);
+        assert_ne!(config.session_id, old_id);
+        assert_eq!(
+            session.connection.state().title.as_deref(),
+            Some("port prime")
+        );
+        assert_eq!(pending_prompt.as_deref(), Some("fix it"));
+        assert!(session.in_process().runtime.conversation.is_empty());
+        let short: String = old_id.as_str().chars().take(8).collect();
+        assert!(
+            session
+                .app
+                .messages
+                .iter()
+                .any(|message| message.content.contains(&format!("detached from {short}")))
+        );
+    }
+
+    #[test]
+    fn resume_with_a_daemon_attaches_the_worker_of_that_session() {
+        let mut session = conversation_session(vec![user("old")]);
+        let mut config = TuiConfig::for_test();
+        let target = conversation_session(vec![user("over there"), assistant("hello")]);
+        let target_id = target.connection.state().session_id;
+        let (opener, asked) = opener_to(Some(target));
+        config.worker_opener = Some(opener);
+
+        slash(
+            &mut session,
+            &mut config,
+            SlashAction::Resume {
+                session_id: target_id.clone(),
+            },
+            &mut None,
+        );
+
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [WorkerTarget::Resume(target_id.clone())]
+        );
+        assert_eq!(config.session_id, target_id);
+        assert!(
+            session
+                .app
+                .messages
+                .iter()
+                .any(|message| message.content == "over there")
+        );
+        assert!(
+            !session
+                .app
+                .messages
+                .iter()
+                .any(|message| message.content == "old")
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_cannot_open_a_worker_leaves_this_one_attached() {
+        let mut session = conversation_session(vec![user("old")]);
+        let mut config = TuiConfig::for_test();
+        let old_id = config.session_id.clone();
+        let (opener, _) = opener_to(None);
+        config.worker_opener = Some(opener);
+
+        slash(
+            &mut session,
+            &mut config,
+            SlashAction::New {
+                name: None,
+                prompt: Some("keep me".into()),
+            },
+            &mut None,
+        );
+
+        assert_eq!(config.session_id, old_id);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+        assert_eq!(session.app.input.text, "keep me");
+        assert!(
+            session
+                .app
+                .messages
+                .last()
+                .is_some_and(|message| message.content.contains("the daemon is gone"))
+        );
     }
 
     #[test]

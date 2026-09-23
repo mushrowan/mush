@@ -52,8 +52,8 @@ pub use mush_runtime::AgentConnection;
 pub use mush_runtime::session::DEFAULT_RLM_MAX_DEPTH;
 pub use runner::{
     DiscoveryUpdate, LastModels, LastModelsSaver, PaneSnapshot, ReloadCallback, ReloadedContext,
-    SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig, canonical_dir, run_tui,
-    run_tui_attached,
+    SessionSaver, SessionSnapshot, SkillCatalogue, TuiConfig, WorkerOpener, WorkerTarget,
+    canonical_dir, run_tui, run_tui_attached,
 };
 pub use terminal_policy::{
     IMAGE_PROBE_ENV, ImageProbeMode, KEYBOARD_ENHANCEMENT_ENV, KeyboardEnhancementMode,

@@ -1101,20 +1101,23 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket).await?;
             let mut tui_config = client_config(&cli, &client, &log_buffer, None, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
+            tui_config.worker_opener = Some(daemon::worker_opener(cli.worker_args()));
             if connection.worker_build() != mush_daemon::build_id() {
                 tui_config.startup_notice = Some(format!(
                     "this worker is from another build of mush. mush stop {} and start again to pick up the new one",
                     &descriptor.session_id[..8.min(descriptor.session_id.len())]
                 ));
             }
-            mush_tui::run_tui_attached(tui_config, Box::new(connection), Some(discovery_rx))
-                .await
-                .map_err(|e| eyre!("TUI error: {e}"))?;
+            let attached =
+                mush_tui::run_tui_attached(tui_config, Box::new(connection), Some(discovery_rx))
+                    .await
+                    .map_err(|e| eyre!("TUI error: {e}"))?;
+            let attached = attached.as_str();
             eprintln!(
                 "{}",
                 Style::Dim.stderr(format_args!(
                     "detached, mush --resume {} reattaches",
-                    &descriptor.session_id[..8.min(descriptor.session_id.len())]
+                    &attached[..8.min(attached.len())]
                 ))
             );
         }
@@ -1735,6 +1738,7 @@ fn client_config(
         mcp: worker.and_then(|worker| worker.mcp.clone()),
         skills: client.skills(),
         autonomous: client.cfg.autonomous.settings(),
+        worker_opener: None,
     }
 }
 

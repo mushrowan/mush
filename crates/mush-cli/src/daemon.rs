@@ -352,6 +352,25 @@ pub async fn send(session: &str, text: &str) -> Result<()> {
     }
 }
 
+pub fn worker_opener(worker_args: Vec<String>) -> mush_tui::WorkerOpener {
+    std::sync::Arc::new(move |target: mush_tui::WorkerTarget| {
+        let args = worker_args.clone();
+        Box::pin(async move {
+            let target = match target {
+                mush_tui::WorkerTarget::New => OpenTarget::New,
+                mush_tui::WorkerTarget::Resume(id) => OpenTarget::Resume(id.to_string()),
+            };
+            let descriptor = open(target, args)
+                .await
+                .map_err(|error| error.to_string())?;
+            let connection = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(Box::new(connection) as Box<dyn mush_runtime::AgentConnection>)
+        })
+    })
+}
+
 pub fn session_spawner(worker_args: Vec<String>) -> mush_runtime::SessionSpawner {
     std::sync::Arc::new(move |request: mush_runtime::CreateSessionRequest| {
         let mut args = worker_args.clone();
