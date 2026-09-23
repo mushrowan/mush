@@ -1302,7 +1302,8 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             }
             let project =
                 mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
-            let role = setup::RlmRole::child(&spec.name, spec.depth, seed.rlm_max_depth);
+            let max_depth = family.max_depth();
+            let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth);
             let system_prompt =
                 setup::build_rlm_system_prompt(&project, &seed.cwd, &seed.kernel_packages, &role);
             let mut worker = mush_runtime::WorkerConfig::new(turn_config(
@@ -1321,7 +1322,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 .unwrap_or(ThinkingLevel::Off)
                 .normalize_visible();
             worker.rlm_depth = spec.depth;
-            worker.rlm_max_depth = seed.rlm_max_depth;
+            worker.rlm_max_depth = max_depth;
             worker.kernel_state = Some(ipython.clone());
             worker.saver = seed.saver.clone();
             worker.injections = mush_agent::AgentInjections {
@@ -1442,32 +1443,6 @@ fn worker_config(
     worker.models = models;
     worker.subagent_model = session.meta.subagent_model.clone();
     worker.paused = session.meta.paused.clone();
-    let role = setup::RlmRole {
-        depth: worker.rlm_depth,
-        max_depth: worker.rlm_max_depth,
-        child_name: None,
-    };
-    worker.system_prompt_builder = Some(std::sync::Arc::new({
-        let discovery = cli.discovery();
-        let rlm = setup.client.rlm;
-        let kernel_packages = setup.kernel_packages.clone();
-        let cwd = setup.client.cwd.clone();
-        let role = role.clone();
-        let system = cli
-            .system
-            .clone()
-            .or(setup.client.cfg.system_prompt.clone());
-        let append = cli.append_system.clone();
-        move || {
-            let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
-            setup::apply_prompt_overrides(&mut project, system.as_deref(), append.as_deref());
-            if rlm {
-                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages, &role)
-            } else {
-                build_system_prompt_from_context(&project, &cwd)
-            }
-        }
-    }));
     if let Some(ipython) = &setup.ipython_tool {
         let root = mush_runtime::Identity::root(
             session
@@ -1518,6 +1493,39 @@ fn worker_config(
         worker.notes = Some(notes);
         worker.host_commands = Some(host_commands);
     }
+    let role = setup::RlmRole {
+        depth: worker.rlm_depth,
+        max_depth: worker.rlm_max_depth,
+        child_name: None,
+    };
+    worker.system_prompt_builder = Some(std::sync::Arc::new({
+        let discovery = cli.discovery();
+        let rlm = setup.client.rlm;
+        let kernel_packages = setup.kernel_packages.clone();
+        let cwd = setup.client.cwd.clone();
+        let role = role.clone();
+        let family = worker.family.clone();
+        let system = cli
+            .system
+            .clone()
+            .or(setup.client.cfg.system_prompt.clone());
+        let append = cli.append_system.clone();
+        move || {
+            let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
+            setup::apply_prompt_overrides(&mut project, system.as_deref(), append.as_deref());
+            if rlm {
+                let role = setup::RlmRole {
+                    max_depth: family
+                        .as_ref()
+                        .map_or(role.max_depth, |family| family.max_depth()),
+                    ..role.clone()
+                };
+                setup::build_rlm_system_prompt(&project, &cwd, &kernel_packages, &role)
+            } else {
+                build_system_prompt_from_context(&project, &cwd)
+            }
+        }
+    }));
     worker.autonomous = Some(std::sync::Arc::new(mush_runtime::Autonomous::new(
         setup.client.cwd.clone(),
     )));

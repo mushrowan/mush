@@ -347,7 +347,7 @@ pub struct Family {
     inner: Mutex<Inner>,
     factory: Option<ChildFactory>,
     registry_path: Mutex<Option<PathBuf>>,
-    max_depth: u32,
+    max_depth: std::sync::atomic::AtomicU32,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -412,13 +412,18 @@ impl Family {
             }),
             factory,
             registry_path: Mutex::new(registry_path),
-            max_depth,
+            max_depth: std::sync::atomic::AtomicU32::new(max_depth),
         })
     }
 
     #[must_use]
     pub fn max_depth(&self) -> u32 {
+        self.max_depth.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_max_depth(&self, max_depth: u32) {
         self.max_depth
+            .store(max_depth, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn root_inbox(&self) -> AgentInbox {
@@ -709,10 +714,10 @@ impl Family {
         if prompt.trim().is_empty() {
             return Err("prompt is required".into());
         }
-        if caller.depth + 1 > self.max_depth {
+        let max_depth = self.max_depth();
+        if caller.depth + 1 > max_depth {
             return Err(format!(
-                "recursion depth {} is the limit, this agent cannot spawn children",
-                self.max_depth
+                "recursion depth {max_depth} is the limit, this agent cannot spawn children"
             ));
         }
         let factory = self

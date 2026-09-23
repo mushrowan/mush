@@ -1806,7 +1806,25 @@ impl AgentConnection for InProcessConnection {
                 self.runtime.models.set_thinking(level.clone());
                 self.runtime.thinking_level = level;
             }
-            ClientCommand::SetRlmMaxDepth(depth) => self.runtime.set_rlm_max_depth(depth),
+            ClientCommand::SetRlmMaxDepth(depth) => {
+                let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
+                self.runtime.set_rlm_max_depth(depth);
+                if self.family_member.is_none()
+                    && let Some(family) = &self.family
+                {
+                    family.set_max_depth(depth);
+                }
+                if could_spawn != (self.runtime.rlm_depth < depth)
+                    && let Some(build) = &self.system_prompt_builder
+                {
+                    let prompt = build();
+                    self.runtime.system_prompt = Some(prompt.clone());
+                    self.queued
+                        .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
+                            Some(prompt),
+                        )));
+                }
+            }
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::ReloadSystemPrompt => {
                 if let Some(build) = &self.system_prompt_builder {
@@ -3044,6 +3062,44 @@ mod tests {
         assert!(!autonomous.due());
         connection.start_pending().await;
         assert!(!connection.state().turn_active);
+    }
+
+    #[tokio::test]
+    async fn setting_the_max_depth_reaches_the_family_and_the_system_prompt() {
+        let (mut connection, _requests) = connection();
+        let family = crate::family::Family::new(
+            crate::family::Identity::root("root"),
+            "root".into(),
+            2,
+            None,
+            None,
+        );
+        connection.set_family(Some(Arc::clone(&family)));
+        connection.set_system_prompt_builder(Some(Arc::new({
+            let family = Arc::clone(&family);
+            move || format!("max depth {}", family.max_depth())
+        })));
+
+        connection
+            .send(ClientCommand::SetRlmMaxDepth(3))
+            .await
+            .unwrap();
+        assert_eq!(family.max_depth(), 3);
+        assert!(connection.runtime.system_prompt.is_none());
+
+        let events = connection
+            .send(ClientCommand::SetRlmMaxDepth(0))
+            .await
+            .unwrap();
+        assert_eq!(family.max_depth(), 0);
+        assert_eq!(
+            connection.runtime.system_prompt.as_deref(),
+            Some("max depth 0")
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ClientEvent::Session(SessionEvent::SystemPromptChanged(Some(_)))
+        )));
     }
 
     #[tokio::test]
