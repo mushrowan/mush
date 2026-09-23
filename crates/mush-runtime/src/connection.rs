@@ -217,6 +217,7 @@ pub struct InProcessConnection {
         std::sync::Arc<crate::family::Family>,
         crate::family::ChildId,
     )>,
+    turn_error: Option<String>,
     known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
     goal: Option<std::sync::Arc<crate::goal::GoalStore>>,
     known_goal: Option<crate::goal::Goal>,
@@ -362,6 +363,7 @@ impl InProcessConnection {
             deferred_deliveries: VecDeque::new(),
             family: None,
             family_member: None,
+            turn_error: None,
             known_children: std::collections::HashMap::new(),
             goal: None,
             known_goal: None,
@@ -1627,7 +1629,17 @@ impl InProcessConnection {
             }
         }
         match event {
+            AgentEvent::Error { error } => {
+                self.turn_error = Some(error.clone());
+            }
             AgentEvent::MessageEnd { message } => {
+                self.turn_error =
+                    (message.stop_reason == mush_ai::types::StopReason::Error).then(|| {
+                        message
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| "assistant response failed".into())
+                    });
                 if let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) {
                     meta.context_tokens.store(
                         message.usage.total_input_tokens().get(),
@@ -1672,10 +1684,17 @@ impl InProcessConnection {
                 self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
                 self.fork_compaction_due = !cancelled && self.fork_compaction_due();
+                let failed = self.turn_error.take();
                 if !cancelled && let Some(goal) = &self.goal {
-                    goal.turn_ended();
+                    match &failed {
+                        Some(error) => goal.turn_failed(error),
+                        None => goal.turn_ended(),
+                    }
                 }
-                if !cancelled && let Some(autonomous) = &self.autonomous {
+                if !cancelled
+                    && failed.is_none()
+                    && let Some(autonomous) = &self.autonomous
+                {
                     autonomous.turn_ended();
                 }
             }
@@ -2969,6 +2988,44 @@ mod tests {
         fn background_work(&self) -> bool {
             self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
+    }
+
+    #[tokio::test]
+    async fn an_errored_turn_fails_the_goal_and_stops_autonomous_mode() {
+        let (mut connection, _requests) = connection();
+        connection.set_deps(ToolRegistry::new(), ApiRegistry::new());
+        let goal = Arc::new(crate::goal::GoalStore::new(None));
+        connection.set_goal_store(Some(Arc::clone(&goal)));
+        let autonomous = Arc::new(crate::autonomous::Autonomous::new(std::env::temp_dir()));
+        connection.set_autonomous(Some(Arc::clone(&autonomous)));
+        connection
+            .send(ClientCommand::Autonomous(
+                crate::autonomous::AutonomousCommand::On {
+                    limits: crate::autonomous::Limits::unlimited(),
+                    gates: crate::autonomous::Gates::default(),
+                    subagent_keep_alive_ms: 0,
+                },
+            ))
+            .await
+            .unwrap();
+        connection
+            .send(ClientCommand::Goal(crate::goal::GoalCommand::Create {
+                objective: "never reachable".into(),
+                token_budget: None,
+            }))
+            .await
+            .unwrap();
+
+        connection.start_pending().await;
+        assert!(connection.state().turn_active);
+        drain_turn(&mut connection).await;
+
+        let failed = goal.get().unwrap();
+        assert_eq!(failed.status, crate::goal::GoalStatus::Failed);
+        assert!(failed.error.is_some());
+        assert!(!autonomous.due());
+        connection.start_pending().await;
+        assert!(!connection.state().turn_active);
     }
 
     #[tokio::test]

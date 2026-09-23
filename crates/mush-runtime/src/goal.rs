@@ -272,6 +272,23 @@ impl GoalStore {
         self.persist(goal.as_ref());
     }
 
+    pub fn turn_failed(&self, error: &str) {
+        let mut inner = self.lock();
+        inner.due = None;
+        let Some(goal) = inner.goal.as_mut() else {
+            return;
+        };
+        if goal.status != GoalStatus::Active {
+            return;
+        }
+        goal.status = GoalStatus::Failed;
+        goal.error = Some(error.to_string());
+        goal.updated_at = Timestamp::now();
+        let goal = goal.clone();
+        drop(inner);
+        self.persist(Some(&goal));
+    }
+
     pub fn take_due_prompt(&self) -> Option<String> {
         let mut inner = self.lock();
         let due = inner.due.take()?;
