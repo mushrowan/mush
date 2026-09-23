@@ -48,11 +48,19 @@ pub(crate) trait MessageVisitor {
 
 pub(crate) fn walk_messages<V: MessageVisitor + ?Sized>(messages: &[Message], visitor: &mut V) {
     let boundary = recent_boundary(messages);
+    let mut skipped_calls = std::collections::HashSet::new();
     for (i, msg) in messages.iter().enumerate() {
         let is_old_turn = i < boundary;
         match msg {
             Message::User(user) => visitor.on_user(user),
+            Message::Assistant(asst) if !asst.is_replayable() => {
+                skipped_calls.extend(asst.content.iter().filter_map(|part| match part {
+                    AssistantContentPart::ToolCall(call) => Some(&call.id),
+                    _ => None,
+                }));
+            }
             Message::Assistant(asst) => visitor.on_assistant(asst),
+            Message::ToolResult(tr) if skipped_calls.contains(&tr.tool_call_id) => {}
             Message::ToolResult(tr) => visitor.on_tool_result(tr, is_old_turn),
             Message::Event(event) => visitor.on_user(
                 &crate::types::UserMessage::builder()
@@ -254,6 +262,83 @@ pub(super) fn event_fixture() -> Message {
 mod tests {
     use super::*;
     use crate::types::*;
+
+    #[test]
+    fn errored_and_aborted_turns_are_skipped_with_their_tool_results() {
+        #[derive(Default)]
+        struct Wire(Vec<String>);
+        impl MessageVisitor for Wire {
+            fn on_user(&mut self, message: &UserMessage) {
+                self.0.push(format!("user {}", message.text()));
+            }
+            fn on_assistant(&mut self, message: &AssistantMessage) {
+                self.0.push(format!("assistant {}", message.text()));
+            }
+            fn on_tool_result(&mut self, message: &ToolResultMessage, _: bool) {
+                self.0.push(format!("result {}", message.tool_call_id));
+            }
+        }
+        let user = |text: &str| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let assistant = |text: &str, call: &str, stop_reason| {
+            Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![
+                        AssistantContentPart::Text(TextContent { text: text.into() }),
+                        AssistantContentPart::ToolCall(ToolCall {
+                            id: call.into(),
+                            name: "bash".into(),
+                            arguments: serde_json::json!({}),
+                        }),
+                    ])
+                    .model("m".into())
+                    .provider(Provider::Anthropic)
+                    .api(Api::AnthropicMessages)
+                    .stop_reason(stop_reason)
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let result = |call: &str| {
+            Message::ToolResult(ToolResultMessage {
+                tool_call_id: call.into(),
+                tool_name: "bash".into(),
+                content: Vec::new(),
+                outcome: ToolOutcome::Error,
+                timestamp_ms: Timestamp::zero(),
+                details: None,
+            })
+        };
+        let messages = vec![
+            user("one"),
+            assistant("errored", "a", StopReason::Error),
+            result("a"),
+            user("two"),
+            assistant("aborted", "b", StopReason::Aborted),
+            result("b"),
+            user("three"),
+            assistant("kept", "c", StopReason::ToolUse),
+            result("c"),
+        ];
+        let mut wire = Wire::default();
+        walk_messages(&messages, &mut wire);
+        assert_eq!(
+            wire.0,
+            [
+                "user one",
+                "user two",
+                "user three",
+                "assistant kept",
+                "result c"
+            ]
+        );
+    }
 
     #[test]
     fn rereviewer_provider_reference_is_bounded_and_hashes_exact_ordered_receipts() {

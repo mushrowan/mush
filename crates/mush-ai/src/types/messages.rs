@@ -86,6 +86,11 @@ pub struct AssistantMessage {
 
 impl AssistantMessage {
     #[must_use]
+    pub fn is_replayable(&self) -> bool {
+        !matches!(self.stop_reason, StopReason::Error | StopReason::Aborted)
+    }
+
+    #[must_use]
     pub fn text(&self) -> String {
         self.content
             .iter()
