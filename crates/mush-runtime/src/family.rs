@@ -308,6 +308,7 @@ struct Inner {
     root_inbox: Option<mpsc::UnboundedSender<Delivery>>,
     root_observe: Option<mpsc::UnboundedSender<ObserveRequest>>,
     root_note: Option<String>,
+    root_note_at: Option<Instant>,
     children: BTreeMap<ChildId, Node>,
     reserved_names: std::collections::HashSet<(Option<ChildId>, String)>,
 }
@@ -373,6 +374,7 @@ impl Family {
                 root_inbox: None,
                 root_observe: None,
                 root_note: None,
+                root_note_at: None,
                 children,
                 reserved_names: std::collections::HashSet::new(),
             }),
@@ -1052,36 +1054,44 @@ impl Family {
         self.lock().root_note.take()
     }
 
-    pub fn progress_note(&self, caller: &Identity, text: &str) -> Result<(), String> {
-        let text: String = text.trim().chars().take(PROGRESS_NOTE_CHARS).collect();
+    pub fn progress_note(&self, caller: &Identity, text: &str) -> Result<Option<Duration>, String> {
+        let text = text.trim();
         if text.is_empty() {
             return Err("a progress note needs some text".into());
         }
-        let Some(id) = caller.id.as_deref() else {
-            self.lock().root_note = Some(text);
-            return Ok(());
+        if text.chars().count() > PROGRESS_NOTE_CHARS {
+            return Err(format!(
+                "a progress note must be at most {PROGRESS_NOTE_CHARS} characters"
+            ));
+        }
+        let throttled = |last: Option<Instant>| {
+            last.map(|at| at.elapsed())
+                .filter(|elapsed| *elapsed < PROGRESS_NOTE_INTERVAL)
+                .map(|elapsed| PROGRESS_NOTE_INTERVAL - elapsed)
         };
         {
             let mut inner = self.lock();
+            let Some(id) = caller.id.as_deref() else {
+                if let Some(retry) = throttled(inner.root_note_at) {
+                    return Ok(Some(retry));
+                }
+                inner.root_note_at = Some(Instant::now());
+                inner.root_note = Some(text.to_string());
+                return Ok(None);
+            };
             let node = inner
                 .children
                 .get_mut(id)
                 .ok_or_else(|| format!("{id} is not in the family"))?;
-            if node
-                .last_note_at
-                .is_some_and(|at| at.elapsed() < PROGRESS_NOTE_INTERVAL)
-            {
-                return Err(format!(
-                    "progress notes are limited to one every {} seconds",
-                    PROGRESS_NOTE_INTERVAL.as_secs()
-                ));
+            if let Some(retry) = throttled(node.last_note_at) {
+                return Ok(Some(retry));
             }
             node.last_note_at = Some(Instant::now());
-            node.summary.progress_note = Some(text);
+            node.summary.progress_note = Some(text.to_string());
             node.summary.updated_at = Timestamp::now();
         }
         self.persist();
-        Ok(())
+        Ok(None)
     }
 
     fn sender_label(&self, caller: &Identity, relationship: &str) -> String {
@@ -1891,10 +1901,17 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             "rlm.progress_note" => {
                 let text = str_field("text")
                     .ok_or_else(|| mush_kernel::HostError("text is required".into()))?;
-                self.family
+                let retry = self
+                    .family
                     .progress_note(&self.identity, &text)
                     .map_err(mush_kernel::HostError)?;
-                Ok(serde_json::json!({ "ok": true }))
+                Ok(match retry {
+                    None => serde_json::json!({ "accepted": true }),
+                    Some(retry) => serde_json::json!({
+                        "accepted": false,
+                        "retry_after_ms": u64::try_from(retry.as_millis()).unwrap_or(u64::MAX),
+                    }),
+                })
             }
             "agent_message.send" => {
                 let message = str_field("message")
@@ -2821,10 +2838,18 @@ mod tests {
             depth: 1,
         };
 
-        family.progress_note(&child, "halfway").unwrap();
-        let throttled = family.progress_note(&child, "nearly").unwrap_err();
-        assert!(throttled.contains("one every"));
-        family.progress_note(&root, "reading the results").unwrap();
+        assert_eq!(family.progress_note(&child, "halfway"), Ok(None));
+        let throttled = family.progress_note(&child, "nearly").unwrap();
+        assert!(throttled.is_some_and(|retry| retry <= PROGRESS_NOTE_INTERVAL));
+        let too_long = "x".repeat(PROGRESS_NOTE_CHARS + 1);
+        assert!(family.progress_note(&child, &too_long).is_err());
+        assert_eq!(family.progress_note(&root, "reading the results"), Ok(None));
+        assert!(
+            family
+                .progress_note(&root, "still reading")
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             family.take_root_note().as_deref(),
             Some("reading the results")

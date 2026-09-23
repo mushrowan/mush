@@ -462,8 +462,8 @@ class _Rlm:
     async def delete_subagent(self, target) -> ChildSummary:
         return ChildSummary(await host_request("rlm.delete_subagent", {"target": _child_target(target)}))
 
-    async def progress_note(self, text: str) -> None:
-        await host_request("rlm.progress_note", {"text": text})
+    async def progress_note(self, text: str) -> dict:
+        return await host_request("rlm.progress_note", {"text": text})
 
     async def create_session(self, prompt: str, *, name: str | None = None, model: str | None = None) -> dict:
         payload = {"prompt": prompt}
