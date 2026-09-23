@@ -608,8 +608,13 @@ impl InProcessConnection {
         let Some(goal) = self.goal.clone() else {
             return;
         };
-        if self.turn_active()
-            || self.compaction.is_some()
+        if self.turn_active() {
+            if let Some(prompt) = goal.take_budget_notice() {
+                self.steer(prompt, Vec::new()).await;
+            }
+            return;
+        }
+        if self.compaction.is_some()
             || self.runtime.pending_prompt.is_some()
             || self.children_running()
             || self.background_bash_running()

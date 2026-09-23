@@ -239,9 +239,28 @@ impl GoalStore {
         }
         goal.tokens_used += tokens;
         goal.updated_at = Timestamp::now();
+        if goal
+            .token_budget
+            .is_some_and(|budget| goal.tokens_used >= budget)
+        {
+            goal.status = GoalStatus::BudgetLimited;
+        }
         let goal = goal.clone();
+        if goal.status == GoalStatus::BudgetLimited {
+            inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
+        }
         drop(inner);
         self.persist(Some(&goal));
+    }
+
+    pub fn take_budget_notice(&self) -> Option<String> {
+        let mut inner = self.lock();
+        if inner.due != Some(Continuation::BudgetLimit) {
+            return None;
+        }
+        inner.due = None;
+        inner.budget_notice_sent = true;
+        inner.goal.as_ref().map(budget_limit_prompt)
     }
 
     pub fn turn_ended(&self) {
@@ -476,6 +495,28 @@ mod tests {
         assert_eq!(resumed.status, GoalStatus::Active);
         assert_eq!(resumed.token_budget, None);
         assert!(store.take_due_prompt().is_some());
+    }
+
+    #[test]
+    fn the_budget_limits_the_goal_at_the_message_that_spends_it() {
+        let store = GoalStore::new(None);
+        store
+            .apply(GoalCommand::Create {
+                objective: "x".into(),
+                token_budget: Some(500),
+            })
+            .unwrap();
+        store.take_due_prompt();
+
+        store.record_usage(300);
+        assert!(store.take_budget_notice().is_none());
+        store.record_usage(300);
+        assert_eq!(store.get().unwrap().status, GoalStatus::BudgetLimited);
+        let notice = store.take_budget_notice().unwrap();
+        assert!(notice.starts_with("[goal: budget limit]"));
+        assert!(store.take_budget_notice().is_none());
+        store.turn_ended();
+        assert!(store.take_due_prompt().is_none());
     }
 
     #[test]
