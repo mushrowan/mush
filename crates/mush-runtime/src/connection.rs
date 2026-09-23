@@ -609,7 +609,7 @@ impl InProcessConnection {
             return;
         };
         if self.turn_active() {
-            if let Some(prompt) = goal.take_budget_notice() {
+            if let Some(prompt) = goal.take_turn_notice() {
                 self.steer(prompt, Vec::new()).await;
             }
             return;

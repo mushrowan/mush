@@ -2232,14 +2232,25 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     .as_ref()
                     .ok_or_else(|| mush_kernel::HostError("goals are not available here".into()))?;
                 let command = match kind {
-                    "goal.create" => crate::goal::GoalCommand::Create {
-                        objective: str_field("objective").ok_or_else(|| {
+                    "goal.create" => {
+                        let objective = str_field("objective").ok_or_else(|| {
                             mush_kernel::HostError("objective is required".into())
-                        })?,
-                        token_budget: payload
-                            .get("token_budget")
-                            .and_then(serde_json::Value::as_u64),
-                    },
+                        })?;
+                        let token_budget = match payload.get("token_budget") {
+                            None | Some(serde_json::Value::Null) => None,
+                            Some(value) => Some(
+                                value.as_u64().filter(|budget| *budget > 0).ok_or_else(|| {
+                                    mush_kernel::HostError(
+                                        "token_budget must be a positive integer".into(),
+                                    )
+                                })?,
+                            ),
+                        };
+                        store
+                            .create_from_host(objective, token_budget)
+                            .map_err(mush_kernel::HostError)?;
+                        return Ok(self.goal_reply());
+                    }
                     "goal.complete" => crate::goal::GoalCommand::Complete {
                         summary: str_field("summary"),
                     },
