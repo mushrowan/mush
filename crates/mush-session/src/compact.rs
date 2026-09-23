@@ -11,7 +11,7 @@ const COMPACTION_MAX_BACKOFF_SECS: u64 = 16;
 
 const CHARS_PER_TOKEN: usize = 4;
 
-const IMAGE_CHAR_ESTIMATE: usize = 1000;
+const IMAGE_CHAR_ESTIMATE: usize = 4800;
 
 pub use mush_ai::types::COMPACTION_SUMMARY_PREFIX;
 
@@ -224,7 +224,7 @@ fn message_char_count(msg: &Message) -> usize {
 }
 
 fn estimate_message_tokens(msg: &Message) -> usize {
-    message_char_count(msg) / CHARS_PER_TOKEN
+    message_char_count(msg).div_ceil(CHARS_PER_TOKEN)
 }
 
 fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
@@ -1427,8 +1427,8 @@ mod tests {
 
     #[test]
     fn estimate_tokens_basic() {
-        let msgs = vec![user_msg("hello world")]; // 11 chars / 4 = 2
-        assert_eq!(estimate_tokens(&msgs), 2);
+        let msgs = vec![user_msg("hello world")];
+        assert_eq!(estimate_tokens(&msgs), 3);
     }
 
     #[test]
@@ -1457,6 +1457,7 @@ mod tests {
     fn estimate_uses_chars_per_token_ratio() {
         let msg = user_msg(&"a".repeat(40));
         assert_eq!(estimate_message_tokens(&msg), 40 / CHARS_PER_TOKEN);
+        assert_eq!(estimate_message_tokens(&user_msg(&"a".repeat(41))), 11);
     }
 
     fn assistant_parts(content: Vec<AssistantContentPart>) -> Message {
