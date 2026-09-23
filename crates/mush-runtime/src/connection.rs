@@ -213,6 +213,10 @@ pub struct InProcessConnection {
     observe_inbox: Option<crate::family::ObserveInbox>,
     deferred_deliveries: VecDeque<crate::family::Delivery>,
     family: Option<std::sync::Arc<crate::family::Family>>,
+    family_member: Option<(
+        std::sync::Arc<crate::family::Family>,
+        crate::family::ChildId,
+    )>,
     known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
     goal: Option<std::sync::Arc<crate::goal::GoalStore>>,
     known_goal: Option<crate::goal::Goal>,
@@ -357,6 +361,7 @@ impl InProcessConnection {
             observe_inbox: None,
             deferred_deliveries: VecDeque::new(),
             family: None,
+            family_member: None,
             known_children: std::collections::HashMap::new(),
             goal: None,
             known_goal: None,
@@ -580,9 +585,11 @@ impl InProcessConnection {
     }
 
     fn children_running(&self) -> bool {
-        self.family
-            .as_ref()
-            .is_some_and(|family| family.all().iter().any(|child| !child.status.settled()))
+        match (&self.family_member, &self.family) {
+            (Some((family, id)), _) => family.descendants_running(Some(id)),
+            (None, Some(family)) => family.descendants_running(None),
+            (None, None) => false,
+        }
     }
 
     async fn continue_goal(&mut self) {
@@ -621,6 +628,16 @@ impl InProcessConnection {
 
     pub fn set_family(&mut self, family: Option<std::sync::Arc<crate::family::Family>>) {
         self.family = family;
+    }
+
+    pub fn set_family_member(
+        &mut self,
+        member: Option<(
+            std::sync::Arc<crate::family::Family>,
+            crate::family::ChildId,
+        )>,
+    ) {
+        self.family_member = member;
     }
 
     #[must_use]

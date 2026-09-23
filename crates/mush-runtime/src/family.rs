@@ -495,6 +495,18 @@ impl Family {
     }
 
     #[must_use]
+    pub fn descendants_running(&self, id: Option<&str>) -> bool {
+        let inner = self.lock();
+        match id {
+            Some(id) => subtree_busy(&inner, id),
+            None => inner
+                .children
+                .values()
+                .any(|node| !node.summary.status.settled()),
+        }
+    }
+
+    #[must_use]
     pub fn all(&self) -> Vec<ChildSummary> {
         self.lock()
             .children
@@ -2680,12 +2692,21 @@ mod tests {
             .unwrap();
         wait_for(&family, &beta.rlm_child_id, ChildStatus::Running).await;
 
+        let gamma = family
+            .spawn(&root, "quick".into(), "gamma".into(), None, None, &family)
+            .await
+            .unwrap();
+        assert!(family.descendants_running(Some(&alpha.rlm_child_id)));
+        assert!(!family.descendants_running(Some(&gamma.rlm_child_id)));
+        assert!(family.descendants_running(None));
+
         let early = family
-            .collect(&root, Vec::new(), Duration::from_millis(300))
+            .collect(&root, vec!["alpha".into()], Duration::from_millis(300))
             .await
             .unwrap();
         assert_eq!(early[0].status, ChildStatus::Running);
-        assert!(notices(&mut root_inbox).is_empty());
+        let mut seen = notices(&mut root_inbox);
+        assert!(!seen.iter().any(|notice| notice.contains("child:alpha")));
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while family.children_of(&alpha_identity)[0].status != ChildStatus::Idle {
@@ -2694,17 +2715,22 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let settled = settle(&family, &root).await;
-        assert_eq!(settled[0].status, ChildStatus::Idle);
+        assert!(
+            settled
+                .iter()
+                .all(|child| child.status == ChildStatus::Idle)
+        );
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut seen = Vec::new();
-        while seen.is_empty() {
+        while seen.len() < 2 {
             assert!(Instant::now() < deadline);
-            seen = notices(&mut root_inbox);
+            seen.extend(notices(&mut root_inbox));
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(
-            seen,
-            vec!["[child-exited: no-reply child:alpha]\n\nLast assistant text: alpha says hi"]
+        assert!(
+            seen.contains(
+                &"[child-exited: no-reply child:alpha]\n\nLast assistant text: alpha says hi"
+                    .to_string()
+            )
         );
     }
 

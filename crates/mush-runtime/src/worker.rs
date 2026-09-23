@@ -30,6 +30,7 @@ pub struct WorkerConfig {
     pub agent_inbox: Option<crate::family::AgentInbox>,
     pub observe_inbox: Option<crate::family::ObserveInbox>,
     pub family: Option<Arc<crate::family::Family>>,
+    pub family_member: Option<(Arc<crate::family::Family>, crate::family::ChildId)>,
     pub goal: Option<Arc<crate::goal::GoalStore>>,
     pub scheduler: Option<Arc<crate::schedule::Scheduler>>,
     pub notes: Option<Arc<crate::notes::Notes>>,
@@ -64,6 +65,7 @@ impl WorkerConfig {
             agent_inbox: None,
             observe_inbox: None,
             family: None,
+            family_member: None,
             goal: None,
             scheduler: None,
             notes: None,
@@ -126,6 +128,7 @@ impl WorkerConfig {
             connection.attach_agent_inbox(inbox);
         }
         connection.set_family(self.family);
+        connection.set_family_member(self.family_member);
         connection.set_goal_store(self.goal);
         connection.set_scheduler(self.scheduler);
         connection.set_notes(self.notes);

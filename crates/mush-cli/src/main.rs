@@ -1284,7 +1284,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             let notes = mush_runtime::Notes::new(None);
             if let Some(host) = ipython.mush_host() {
                 host.set_extension(std::sync::Arc::new(
-                    mush_runtime::RlmHandler::new(family, identity)
+                    mush_runtime::RlmHandler::new(family.clone(), identity)
                         .with_goal(goal.clone())
                         .with_scheduler(scheduler.clone())
                         .with_notes(notes.clone())
@@ -1328,6 +1328,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             worker.goal = Some(goal);
             worker.scheduler = Some(scheduler);
             worker.notes = Some(notes);
+            worker.family_member = Some((family, spec.id.clone()));
             Ok(mush_runtime::ChildParts {
                 config: worker,
                 tools: mush_agent::tool::ToolRegistry::from_shared(vec![
