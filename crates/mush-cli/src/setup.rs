@@ -769,21 +769,26 @@ pub fn build_rlm_system_prompt(
     role: &RlmRole,
 ) -> String {
     let cwd_str = cwd.display().to_string();
-    let mut prompt = match &context.system_prompt {
-        Some(file) => file.content.trim_end().to_string(),
-        None => rlm_base_prompt(&cwd_str, packages),
-    };
+    let custom = context
+        .system_prompt
+        .as_ref()
+        .map(|file| file.content.trim_end());
+    let mut prompt = custom.map_or_else(|| rlm_base_prompt(&cwd_str, packages), str::to_string);
+    let mut role_sections = String::new();
     if role.depth < role.max_depth {
-        prompt.push_str("\n\n");
-        prompt.push_str(SUBAGENTS_PROMPT);
+        role_sections.push_str("\n\n");
+        role_sections.push_str(SUBAGENTS_PROMPT);
     }
     if let Some(name) = &role.child_name {
-        prompt.push_str("\n\n");
-        prompt.push_str(&child_doctrine(name, role.depth));
+        role_sections.push_str("\n\n");
+        role_sections.push_str(&child_doctrine(name, role.depth));
     }
     if role.depth < role.max_depth || role.child_name.is_some() {
-        prompt.push_str("\n\n");
-        prompt.push_str(OBSERVE_PROMPT);
+        role_sections.push_str("\n\n");
+        role_sections.push_str(OBSERVE_PROMPT);
+    }
+    if custom.is_none() {
+        prompt.push_str(&role_sections);
     }
     push_project_context(&mut prompt, &context.agents_md);
     if context
@@ -798,6 +803,10 @@ pub fn build_rlm_system_prompt(
              names a skill with `$skill-name`, read it first.\n\n",
         );
         prompt.push_str(&format_available_skills(&context.skills));
+    }
+    if custom.is_some() {
+        push_date_and_cwd(&mut prompt, &cwd_str);
+        prompt.push_str(&role_sections);
     }
     push_append(&mut prompt, context);
     prompt
@@ -827,8 +836,19 @@ pub fn build_system_prompt_from_context(
         );
         prompt.push_str(&format_available_skills(&context.skills));
     }
+    if context.system_prompt.is_some() {
+        push_date_and_cwd(&mut prompt, &cwd_str);
+    }
     push_append(&mut prompt, context);
     prompt
+}
+
+fn push_date_and_cwd(prompt: &mut String, cwd: &str) {
+    let _ = write!(
+        prompt,
+        "\n\nCurrent date: {}\nCurrent working directory: {cwd}",
+        chrono::Local::now().format("%Y-%m-%d")
+    );
 }
 
 fn push_append(prompt: &mut String, context: &loader::ProjectContext) {
@@ -1307,9 +1327,43 @@ mod tests {
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
         assert!(prompt.starts_with("you are a terse reviewer"));
-        assert!(prompt.ends_with("\n\nalways answer in british english"));
+        assert!(
+            prompt.ends_with(
+                "\nCurrent working directory: /repo\n\nalways answer in british english"
+            )
+        );
+        assert!(prompt.contains("\n\nCurrent date: "));
         assert!(!prompt.contains("You are running inside mush"));
         assert!(prompt.contains("## /repo/AGENTS.md\n\nproject rules"));
+    }
+
+    #[test]
+    fn an_rlm_system_md_keeps_context_skills_cwd_and_the_child_doctrine() {
+        let context = ProjectContext {
+            agents_md: vec![mush_ext::AgentsMd {
+                path: "/repo/AGENTS.md".into(),
+                content: "repo rules".into(),
+            }],
+            system_prompt: Some(mush_ext::PromptFile {
+                path: "/repo/.mush/SYSTEM.md".into(),
+                content: "custom base".into(),
+            }),
+            ..ProjectContext::default()
+        };
+
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::child("worker", 1, 2),
+        );
+
+        assert!(prompt.starts_with("custom base\n\n# Project Context"));
+        let cwd_at = prompt.find("Current working directory: /repo").unwrap();
+        let doctrine_at = prompt.find("You are a child agent").unwrap();
+        assert!(prompt.find("## /repo/AGENTS.md").unwrap() < cwd_at);
+        assert!(cwd_at < doctrine_at);
+        assert!(!prompt.contains("the `ipython` tool is your only tool"));
     }
 
     #[test]

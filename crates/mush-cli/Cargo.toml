@@ -43,6 +43,7 @@ mush-daemon.workspace = true
 mush-treesitter.workspace = true
 mush-lsp.workspace = true
 tokio.workspace = true
+chrono.workspace = true
 tokio-util.workspace = true
 anstream.workspace = true
 clap.workspace = true

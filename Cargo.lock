@@ -2790,6 +2790,7 @@ version = "0.1.0"
 dependencies = [
  "anstream",
  "atty",
+ "chrono",
  "clap",
  "color-eyre",
  "console-subscriber",
