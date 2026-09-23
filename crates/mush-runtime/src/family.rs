@@ -23,6 +23,7 @@ pub const PROGRESS_NOTE_INTERVAL: Duration = Duration::from_secs(10);
 pub const MESSAGE_MAX_CHARS: usize = 16 * 1024;
 pub const MAX_PENDING_MESSAGES: usize = 20;
 pub const TASK_LABEL: &str = "[task from parent]";
+const DELETED_REASON: &str = "Deleted by parent orchestrator";
 const TICK: Duration = Duration::from_millis(50);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -295,6 +296,9 @@ struct Node {
     task: Option<tokio::task::JoinHandle<()>>,
     last_note_at: Option<Instant>,
     replied: bool,
+    notified: bool,
+    awaiting_quiet: bool,
+    cancel_reason: Option<String>,
 }
 
 struct Inner {
@@ -341,6 +345,9 @@ fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
                 task: None,
                 last_note_at: None,
                 replied: false,
+                notified: false,
+                awaiting_quiet: false,
+                cancel_reason: None,
             };
             (node.summary.id.clone(), node)
         })
@@ -728,6 +735,9 @@ impl Family {
                 task: Some(task),
                 last_note_at: None,
                 replied: false,
+                notified: false,
+                awaiting_quiet: false,
+                cancel_reason: None,
             },
         );
         self.persist();
@@ -740,23 +750,56 @@ impl Family {
     }
 
     fn update(&self, id: &str, apply: impl FnOnce(&mut ChildSummary)) {
-        {
+        let settled_parent = {
             let mut inner = self.lock();
             let Some(node) = inner.children.get_mut(id) else {
                 return;
             };
+            let was_settled = node.summary.status.settled();
             apply(&mut node.summary);
             node.summary.updated_at = Timestamp::now();
-        }
+            (!was_settled && node.summary.status.settled())
+                .then(|| node.summary.parent.clone())
+                .flatten()
+        };
         self.persist();
+        if let Some(parent) = settled_parent {
+            self.settle_if_quiet(&parent);
+        }
+    }
+
+    fn settle_if_quiet(&self, id: &str) {
+        let settled = {
+            let mut inner = self.lock();
+            if subtree_busy(&inner, id) {
+                return;
+            }
+            let Some(node) = inner.children.get_mut(id) else {
+                return;
+            };
+            if !node.awaiting_quiet {
+                return;
+            }
+            node.awaiting_quiet = false;
+            node.summary.status == ChildStatus::Running
+        };
+        if settled {
+            self.update(id, |child| child.status = ChildStatus::Idle);
+            self.post_exit_notice(id, ExitNotice::NoReply);
+        }
     }
 
     fn record(&self, id: &str, event: &ClientEvent, model: Option<&mush_ai::types::Model>) {
         match event {
-            ClientEvent::TurnStarted => self.update(id, |child| {
-                child.status = ChildStatus::Running;
-                child.turns += 1;
-            }),
+            ClientEvent::TurnStarted => {
+                if let Some(node) = self.lock().children.get_mut(id) {
+                    node.awaiting_quiet = false;
+                }
+                self.update(id, |child| {
+                    child.status = ChildStatus::Running;
+                    child.turns += 1;
+                });
+            }
             ClientEvent::Agent {
                 event: AgentEvent::MessageStart { .. },
                 ..
@@ -821,26 +864,36 @@ impl Family {
                 self.post_exit_notice(id, ExitNotice::Failed);
             }
             ClientEvent::TurnEnded { cancelled } => {
+                let busy = subtree_busy(&self.lock(), id);
+                let mut ended = None;
                 self.update(id, |child| {
                     child.streaming = false;
                     child.tool_running = None;
                     child.awaiting_confirmation = None;
                     if child.status == ChildStatus::Running {
-                        child.status = if *cancelled {
+                        ended = Some(if *cancelled {
                             ChildStatus::Cancelled
+                        } else if busy {
+                            ChildStatus::Running
                         } else {
                             ChildStatus::Idle
-                        };
+                        });
+                        child.status = ended.unwrap_or(child.status);
                     }
                 });
-                self.post_exit_notice(
-                    id,
-                    if *cancelled {
-                        ExitNotice::Cancelled
-                    } else {
-                        ExitNotice::NoReply
-                    },
-                );
+                match ended {
+                    Some(ChildStatus::Cancelled) => {
+                        self.post_exit_notice(id, ExitNotice::Cancelled)
+                    }
+                    Some(ChildStatus::Idle) => self.post_exit_notice(id, ExitNotice::NoReply),
+                    Some(_) => {
+                        if let Some(node) = self.lock().children.get_mut(id) {
+                            node.awaiting_quiet = true;
+                        }
+                        self.settle_if_quiet(id);
+                    }
+                    None => {}
+                }
             }
             _ => {}
         }
@@ -882,20 +935,24 @@ impl Family {
 
     pub async fn delete(&self, caller: &Identity, target: &str) -> Result<ChildSummary, String> {
         let id = self.resolve(caller, target)?;
-        let shutdown = self
-            .lock()
-            .children
-            .get_mut(&id)
-            .and_then(|node| node.shutdown.take());
+        let (shutdown, running) = {
+            let mut inner = self.lock();
+            let Some(node) = inner.children.get_mut(&id) else {
+                return Err(format!("{id} vanished"));
+            };
+            let running = !node.summary.status.settled();
+            if running {
+                node.cancel_reason = Some(DELETED_REASON.into());
+            }
+            (node.shutdown.take(), running)
+        };
         if let Some(shutdown) = shutdown {
             let _ = shutdown.send(());
         }
-        self.update(&id, |child| {
-            if !child.status.settled() {
-                child.status = ChildStatus::Cancelled;
-            }
-            child.status = ChildStatus::Deleted;
-        });
+        self.update(&id, |child| child.status = ChildStatus::Deleted);
+        if running {
+            self.post_exit_notice(&id, ExitNotice::Cancelled);
+        }
         let task = self
             .lock()
             .children
@@ -1282,10 +1339,10 @@ impl Family {
             let Some(node) = inner.children.get_mut(id) else {
                 return;
             };
-            if node.replied {
+            if node.notified || (notice == ExitNotice::NoReply && node.replied) {
                 return;
             }
-            node.replied = true;
+            node.notified = true;
             let name = node.summary.name.clone();
             let parent = node.summary.parent.clone();
             let session = node.summary.session_id.clone();
@@ -1297,7 +1354,14 @@ impl Family {
                     ),
                     _ => format!("[child-exited: no-reply child:{name}]"),
                 },
-                ExitNotice::Cancelled => format!("[child-exited: cancelled child:{name}]"),
+                ExitNotice::Cancelled => match node
+                    .cancel_reason
+                    .as_deref()
+                    .or(node.summary.error.as_deref())
+                {
+                    Some(reason) => format!("[child-exited: cancelled child:{name}]\n\n{reason}"),
+                    None => format!("[child-exited: cancelled child:{name}]"),
+                },
                 ExitNotice::Failed => format!(
                     "[child-failed child:{name}]\n\n{}",
                     node.summary.error.as_deref().unwrap_or("unknown error")
@@ -1379,6 +1443,21 @@ fn tool_label(tool_name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+fn subtree_busy(inner: &Inner, id: &str) -> bool {
+    let mut queue = vec![id.to_string()];
+    while let Some(parent) = queue.pop() {
+        for node in inner.children.values() {
+            if node.summary.parent.as_deref() == Some(parent.as_str()) {
+                if !node.summary.status.settled() {
+                    return true;
+                }
+                queue.push(node.summary.id.clone());
+            }
+        }
+    }
+    false
+}
+
 fn running_children(inner: &Inner, parent: &Option<ChildId>) -> usize {
     inner
         .children
@@ -1415,6 +1494,7 @@ async fn drive_child(
                 child.status = ChildStatus::Failed;
                 child.error = Some(error.to_string());
             });
+            family.post_exit_notice(&id, ExitNotice::Failed);
             return;
         }
     }
@@ -2385,6 +2465,179 @@ mod tests {
                 "[child-exited: no-reply child:auth]\n\nLast assistant text: child says hi"
                     .to_string()
             ]
+        );
+    }
+
+    fn stall_factory(stalled: &'static str, release: Arc<tokio::sync::Notify>) -> ChildFactory {
+        Arc::new(move |spec: ChildSpec, _family: Arc<Family>| {
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                let mut registry = ApiRegistry::new();
+                if spec.name == stalled {
+                    registry.register(Box::new(crate::testing::Stall { release }));
+                } else {
+                    registry.register(Box::new(Echo {
+                        requests: Arc::new(StdMutex::new(Vec::new())),
+                        reply: format!("{} says hi", spec.name),
+                    }));
+                }
+                Ok(ChildParts {
+                    config: WorkerConfig::new(echo_config(echo_model())),
+                    tools: ToolRegistry::new(),
+                    registry,
+                })
+            })
+        })
+    }
+
+    async fn wait_for(family: &Family, id: &str, status: ChildStatus) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family
+            .all()
+            .iter()
+            .find(|child| child.id == id)
+            .is_none_or(|child| child.status != status)
+        {
+            assert!(Instant::now() < deadline, "{id} never reached {status:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn notices(inbox: &mut AgentInbox) -> Vec<String> {
+        std::iter::from_fn(|| inbox.try_recv().ok())
+            .map(|delivery| delivery.event.content)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_child_settles_only_when_its_own_children_are_quiet() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            3,
+            Some(stall_factory("beta", Arc::clone(&release))),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let alpha = family
+            .spawn(
+                &root,
+                "delegate".into(),
+                "alpha".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        let alpha_identity = Identity {
+            id: Some(alpha.rlm_child_id.clone()),
+            name: "alpha".into(),
+            depth: 1,
+        };
+        let beta = family
+            .spawn(
+                &alpha_identity,
+                "slow".into(),
+                "beta".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        wait_for(&family, &beta.rlm_child_id, ChildStatus::Running).await;
+
+        let early = family
+            .collect(&root, Vec::new(), Duration::from_millis(300))
+            .await
+            .unwrap();
+        assert_eq!(early[0].status, ChildStatus::Running);
+        assert!(notices(&mut root_inbox).is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family.children_of(&alpha_identity)[0].status != ChildStatus::Idle {
+            assert!(Instant::now() < deadline);
+            release.notify_one();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let settled = settle(&family, &root).await;
+        assert_eq!(settled[0].status, ChildStatus::Idle);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        while seen.is_empty() {
+            assert!(Instant::now() < deadline);
+            seen = notices(&mut root_inbox);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            seen,
+            vec!["[child-exited: no-reply child:alpha]\n\nLast assistant text: alpha says hi"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_does_not_hide_a_later_failure() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+        if let Some(node) = family.lock().children.get_mut(&slow.rlm_child_id) {
+            node.replied = true;
+        }
+
+        family.record(
+            &slow.rlm_child_id,
+            &ClientEvent::Agent {
+                generation: crate::session::StreamGeneration(0),
+                event: AgentEvent::Error {
+                    error: "provider exploded".into(),
+                },
+                applied: crate::Applied::Nothing,
+            },
+            None,
+        );
+        assert_eq!(
+            notices(&mut root_inbox),
+            vec!["[child-failed child:slow]\n\nprovider exploded"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_running_child_says_why_it_was_cancelled() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+
+        family.delete(&root, "slow").await.unwrap();
+        assert_eq!(
+            notices(&mut root_inbox),
+            vec!["[child-exited: cancelled child:slow]\n\nDeleted by parent orchestrator"]
         );
     }
 
