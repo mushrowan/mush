@@ -516,6 +516,7 @@ mod tests {
                 mush_agent::LifecycleHooks::default(),
                 std::path::PathBuf::from("/tmp"),
                 None,
+                None,
             );
             let config = AgentConfig {
                 model: model.clone(),

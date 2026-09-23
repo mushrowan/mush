@@ -656,6 +656,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         }
     }));
     let compaction_settings = setup.client.cfg.compaction.settings();
+    let kernel = setup.kernel_state.clone();
     let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.compaction.enabled {
         Some(Box::new(move |msgs| {
             let m = compact_model.clone();
@@ -666,9 +667,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             let cwd = cwd.clone();
             let reg = reg_ref.clone();
             let live = live.clone();
+            let kernel = kernel.clone();
             Box::pin(async move {
                 let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-                let result = auto_compact(
+                let mut result = auto_compact(
                     owned,
                     tokens,
                     context_window,
@@ -682,6 +684,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 )
                 .await;
                 if result.summarised_count > 0 {
+                    if let Some(notice) =
+                        mush_runtime::kernel_notice::after_compaction(kernel.as_deref()).await
+                    {
+                        result.messages.push(notice);
+                    }
                     ctx.store(
                         mush_session::compact::estimate_tokens(&result.messages) as u64,
                         std::sync::atomic::Ordering::Relaxed,

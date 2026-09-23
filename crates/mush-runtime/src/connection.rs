@@ -190,6 +190,7 @@ pub struct InProcessConnection {
     compaction: Option<tokio::task::JoinHandle<CompactionTaskResult>>,
     compaction_auto: bool,
     fork_compaction_due: bool,
+    kernel_compaction_notice_due: bool,
     failed_compaction: Option<FailedCompaction>,
     branch_summary: Option<(
         mush_session::tree::EntryId,
@@ -345,6 +346,7 @@ impl InProcessConnection {
             compaction: None,
             compaction_auto: false,
             fork_compaction_due: false,
+            kernel_compaction_notice_due: false,
             failed_compaction: None,
             branch_summary: None,
             refine: None,
@@ -893,9 +895,22 @@ impl InProcessConnection {
                 .start_compaction(CompactionFocus::default(), true)
                 .await;
         }
+        self.deliver_kernel_compaction_notice().await;
         let started = self.start_pending_prompt().await;
         self.runtime.save_if_dirty();
         started
+    }
+
+    async fn deliver_kernel_compaction_notice(&mut self) {
+        if self.turn_active() || !std::mem::take(&mut self.kernel_compaction_notice_due) {
+            return;
+        }
+        if let Some(notice) =
+            crate::kernel_notice::after_compaction(self.runtime.kernel_state.as_deref()).await
+        {
+            self.runtime.conversation.append_message(notice);
+            self.runtime.save_now_and_settle();
+        }
     }
 
     fn fork_compaction_due(&self) -> bool {
@@ -1441,6 +1456,7 @@ impl InProcessConnection {
                 }
                 self.runtime.save_now_and_settle();
                 self.compact_refine_pending = true;
+                self.kernel_compaction_notice_due = true;
                 ClientEvent::Compacted(applied)
             }
             CompactionTaskResult::Failed {
@@ -2393,6 +2409,89 @@ mod tests {
         assert!(!connection.state().compacting);
         assert!(connection.transcript().await.len() < 30);
         assert_eq!(*saved.lock().unwrap(), 1);
+    }
+
+    struct LiveKernel(Option<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for LiveKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            None
+        }
+        async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
+            self.0.clone().map(Ok)
+        }
+        async fn reset(&self) {}
+        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
+    }
+
+    async fn compacted_with(kernel: LiveKernel) -> Vec<Message> {
+        let (mut connection, _) = connection();
+        connection.runtime.conversation = ConversationState::from_messages(
+            (0..30)
+                .map(|i| user(&format!("turn {i}: {}", "x".repeat(400))))
+                .collect(),
+        );
+        connection.runtime.set_kernel_state(Some(Arc::new(kernel)));
+        connection
+            .send(ClientCommand::Compact {
+                focus: CompactionFocus::default(),
+                auto: false,
+            })
+            .await
+            .unwrap();
+        wait_for(&mut connection, |event| {
+            matches!(event, ClientEvent::Compacted(_))
+        })
+        .await;
+        connection.start_pending().await;
+        connection.start_pending().await;
+        connection.transcript().await
+    }
+
+    #[tokio::test]
+    async fn a_manual_compaction_tells_the_model_which_python_names_are_still_live() {
+        let transcript = compacted_with(LiveKernel(Some(vec!["df".into(), "load".into()]))).await;
+
+        let notices: Vec<String> = transcript
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) if crate::kernel_notice::is_notice(&user.text()) => {
+                    Some(user.text())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            notices,
+            [
+                "[python-state]\n\nYour Python kernel persisted through compaction; its remaining \
+              variables, imports, and helpers are still available. These names are still \
+              defined: df, load."
+            ]
+        );
+        assert!(
+            matches!(transcript.last(), Some(Message::User(user)) if user.text() == notices[0])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_compaction_with_no_running_kernel_adds_no_python_notice() {
+        let transcript = compacted_with(LiveKernel(None)).await;
+
+        assert!(!transcript.iter().any(|message| matches!(
+            message,
+            Message::User(user) if crate::kernel_notice::is_notice(&user.text())
+        )));
     }
 
     #[tokio::test]

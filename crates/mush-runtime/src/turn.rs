@@ -213,6 +213,7 @@ impl SessionRuntime {
             injections.lifecycle_hooks.clone(),
             cwd.clone(),
             live,
+            self.kernel_state.clone(),
         );
 
         let steering = build_steering_callback(steering_queue.clone());
@@ -279,6 +280,7 @@ pub fn build_context_transform(
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
     live: Option<mush_session::compact::LiveContext>,
+    kernel: Option<Arc<dyn mush_kernel::KernelState>>,
 ) -> Option<mush_agent::TransformFn> {
     if !do_auto_compact {
         return None;
@@ -300,6 +302,7 @@ pub fn build_context_transform(
         let cwd = cwd.clone();
         let registry = registry.clone();
         let live = live.clone();
+        let kernel = kernel.clone();
         Box::pin(async move {
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
@@ -325,7 +328,7 @@ pub fn build_context_transform(
                 );
                 return mush_agent::ContextTransformResult::Unchanged;
             }
-            let result = auto_compact(
+            let mut result = auto_compact(
                 owned_messages,
                 effective_compaction_tokens,
                 compaction_window,
@@ -338,6 +341,12 @@ pub fn build_context_transform(
                 &settings,
             )
             .await;
+            if result.summarised_count > 0
+                && let Some(notice) =
+                    crate::kernel_notice::after_compaction(kernel.as_deref()).await
+            {
+                result.messages.push(notice);
+            }
             let tokens_after = estimated_tokens_u64(&result.messages);
             baseline_estimated_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
             if result.summarised_count > 0 {
@@ -604,6 +613,7 @@ mod tests {
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
             None,
+            None,
         )
         .expect("auto-compaction enabled should build a transform");
 
@@ -627,6 +637,69 @@ mod tests {
         }
     }
 
+    struct NamedKernel;
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for NamedKernel {
+        async fn snapshot(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
+            Ok(None)
+        }
+        async fn restore_from(
+            &self,
+            _path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            None
+        }
+        async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
+            Some(Ok(vec!["df".into(), "load".into()]))
+        }
+        async fn reset(&self) {}
+        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
+    }
+
+    #[tokio::test]
+    async fn an_auto_compaction_tells_the_model_which_python_names_are_still_live() {
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap();
+        let transform = build_context_transform(
+            model,
+            StreamOptions::default(),
+            true,
+            mush_session::compact::CompactionSettings::default(),
+            TokenCount::new(10_000),
+            ApiRegistry::new(),
+            Arc::new(std::sync::atomic::AtomicU64::new(6_000)),
+            0,
+            mush_agent::LifecycleHooks::default(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+            Some(Arc::new(NamedKernel)),
+        )
+        .expect("auto-compaction enabled should build a transform");
+        let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
+        grown.push(user_msg("x".repeat(16_000)));
+
+        let mush_agent::ContextTransformResult::Compacted(compaction) = transform(&grown).await
+        else {
+            panic!("expected a compaction");
+        };
+
+        let Some(Message::User(last)) = compaction.messages.last() else {
+            panic!("{:?}", compaction.messages.last());
+        };
+        assert_eq!(
+            last.text(),
+            "[python-state]\n\nYour Python kernel persisted through compaction; its remaining \
+             variables, imports, and helpers are still available. These names are still \
+             defined: df, load."
+        );
+    }
+
     #[tokio::test]
     async fn context_transform_does_not_double_count_initial_payload_estimate() {
         let model = mush_ai::models::all_models_with_user()
@@ -648,6 +721,7 @@ mod tests {
             estimated_tokens_u64(&messages),
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
+            None,
             None,
         )
         .expect("auto-compaction enabled should build a transform");
