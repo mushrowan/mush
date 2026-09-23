@@ -74,7 +74,6 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("endpoints", "show openrouter providers serving a model"),
     ("logs", "show recent log entries"),
     ("mcp", "MCP server status, tools, schemas, reconnect"),
-    ("injection", "toggle prompt injection preview"),
     (
         "settings",
         "view or modify runtime settings (anthropic betas, scope)",
@@ -84,9 +83,8 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "login-complete",
         "finish oauth login with the authorization code",
     ),
-    ("locks", "list all file locks"),
-    ("label", "set pane label"),
-    ("panes", "list all panes"),
+    ("card", "show this agent's card"),
+    ("thinking-expand", "expand or collapse thinking blocks"),
     ("debug", "dump internal state (for bug reports)"),
     ("reload", "rebuild AGENTS.md, prompt templates, and skills"),
     ("refresh-models", "refresh discovered model catalogue"),
@@ -503,6 +501,17 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    #[test]
+    fn every_menu_command_parses_as_a_builtin() {
+        for (name, _) in BUILTIN_SLASH_COMMANDS {
+            let parsed = crate::slash::parse(&format!("/{name}"));
+            assert!(
+                !matches!(parsed, Ok(crate::slash::SlashAction::Other { .. })),
+                "/{name} is in the menu but does not parse"
+            );
+        }
     }
 
     #[test]
