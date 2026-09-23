@@ -129,7 +129,7 @@ pub struct App {
     pub settings_menu: Option<crate::settings::SettingsMenuState>,
     pub theme: crate::theme::Theme,
     pub keymap: crate::keybinds::KeyMap,
-    pub confirm_quit_pending: bool,
+    pub quit_hint_until: Option<std::time::Instant>,
     pub compacting: bool,
     pub turn: crate::turn_activity::TurnActivity,
     hint_deck: crate::feature_hints::FeatureHintDeck,
@@ -156,6 +156,8 @@ pub struct PendingOAuth {
     pub provider_name: String,
     pub pkce: mush_ai::oauth::PkceChallenge,
 }
+
+pub const QUIT_HINT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn agent_sender(event: &mush_ai::types::EventMessage) -> Option<String> {
     use mush_ai::types::EventOrigin;
@@ -226,7 +228,7 @@ impl App {
             settings_menu: None,
             theme: crate::theme::Theme::default(),
             keymap: crate::keybinds::KeyMap::default(),
-            confirm_quit_pending: false,
+            quit_hint_until: None,
             compacting: false,
             turn: crate::turn_activity::TurnActivity::default(),
             hint_deck: crate::feature_hints::FeatureHintDeck::default(),
@@ -324,6 +326,16 @@ impl App {
                 )
             },
         );
+    }
+
+    #[must_use]
+    pub fn quit_hint_armed(&self) -> bool {
+        self.quit_hint_until
+            .is_some_and(|until| std::time::Instant::now() < until)
+    }
+
+    pub fn arm_quit_hint(&mut self) {
+        self.quit_hint_until = Some(std::time::Instant::now() + QUIT_HINT_WINDOW);
     }
 
     #[must_use]

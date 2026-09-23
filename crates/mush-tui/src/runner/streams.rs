@@ -248,7 +248,14 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
     pane.app.stream.active = false;
     pane.app.active_tools.clear();
     pane.app.end_turn();
-    pane.app.status = Some("aborted".into());
+    pane.app.status = Some(
+        if pane.app.quit_hint_armed() {
+            "aborted, press ctrl+c again to exit"
+        } else {
+            "aborted"
+        }
+        .into(),
+    );
     let restored = pane.app.take_queued_messages();
     if !restored.is_empty() {
         let text = restored.join("\n");

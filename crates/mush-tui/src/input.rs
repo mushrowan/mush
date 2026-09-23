@@ -81,7 +81,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     {
         return handle_quit_or_abort(app);
     }
-    app.confirm_quit_pending = false;
+    app.quit_hint_until = None;
 
     if app.keymap.matches(crate::keybinds::Action::PasteImage, key) {
         return Some(AppEvent::PasteImage);
@@ -838,14 +838,13 @@ fn cycle_favourite_model(app: &mut App, direction: isize) -> Option<AppEvent> {
 }
 
 fn handle_quit_or_abort(app: &mut App) -> Option<AppEvent> {
-    if app.is_busy() {
-        app.confirm_quit_pending = false;
-        return Some(AppEvent::Abort);
-    }
-    if app.confirm_quit_pending {
+    if app.quit_hint_armed() {
         return Some(AppEvent::Quit);
     }
-    app.confirm_quit_pending = true;
+    app.arm_quit_hint();
+    if app.is_busy() {
+        return Some(AppEvent::Abort);
+    }
     app.status = Some("press ctrl+c again to exit".into());
     None
 }

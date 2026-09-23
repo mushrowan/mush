@@ -513,7 +513,7 @@ fn ctrl_c_leaves_what_i_typed_alone() {
 }
 
 #[test]
-fn ctrl_c_stops_then_arms_then_quits() {
+fn ctrl_c_stops_and_arms_then_quits() {
     let mut app = conversation(1);
     app.start_streaming();
 
@@ -526,14 +526,9 @@ fn ctrl_c_stops_then_arms_then_quits() {
         &mut app,
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
     );
-    let third = handle_key(
-        &mut app,
-        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-    );
 
     assert!(matches!(first, Some(AppEvent::Abort)), "{first:?}");
-    assert!(second.is_none(), "{second:?}");
-    assert!(matches!(third, Some(AppEvent::Quit)), "{third:?}");
+    assert!(matches!(second, Some(AppEvent::Quit)), "{second:?}");
 }
 
 #[test]

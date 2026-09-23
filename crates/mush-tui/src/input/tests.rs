@@ -76,7 +76,7 @@ fn ctrl_c_with_empty_input_arms_quit_confirm() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
-    assert!(app.confirm_quit_pending);
+    assert!(app.quit_hint_armed());
     assert_eq!(
         app.status.as_ref().map(|s| s.text.as_str()),
         Some("press ctrl+c again to exit")
@@ -99,7 +99,7 @@ fn ctrl_c_with_text_arms_quit_without_clearing() {
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
     assert_eq!(app.input.text, "draft prompt");
-    assert!(app.confirm_quit_pending);
+    assert!(app.quit_hint_armed());
 }
 
 #[test]
@@ -117,21 +117,36 @@ fn ctrl_c_twice_quits_with_text_still_in_the_composer() {
 fn any_other_key_resets_quit_confirm() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
-    assert!(app.confirm_quit_pending);
+    assert!(app.quit_hint_armed());
     let _ = handle_key(&mut app, key(KeyCode::Char('a')));
-    assert!(!app.confirm_quit_pending);
+    assert!(!app.quit_hint_armed());
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(event.is_none());
     assert_eq!(app.input.text, "a");
 }
 
 #[test]
-fn ctrl_c_when_busy_aborts_without_confirm() {
+fn ctrl_c_when_busy_aborts_and_arms_the_exit_hint() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
     let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
     assert!(matches!(event, Some(AppEvent::Abort)));
-    assert!(!app.confirm_quit_pending);
+    assert!(app.quit_hint_armed());
+
+    let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+    assert!(matches!(event, Some(AppEvent::Quit)), "{event:?}");
+}
+
+#[test]
+fn the_exit_hint_expires() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let _ = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+    app.quit_hint_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+
+    let event = handle_key(&mut app, ctrl(KeyCode::Char('c')));
+
+    assert!(event.is_none(), "{event:?}");
+    assert!(app.quit_hint_armed());
 }
 
 #[test]
@@ -575,7 +590,7 @@ fn configured_global_bindings_are_used() {
     );
 
     assert!(event.is_none());
-    assert!(app.confirm_quit_pending);
+    assert!(app.quit_hint_armed());
 }
 
 #[test]
