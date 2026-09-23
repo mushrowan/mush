@@ -88,6 +88,10 @@ pub fn handle_agent_event(
                 }
             }
         }
+        AgentEvent::PartialDiscarded { error } => {
+            app.start_streaming();
+            app.status = Some(format!("provider error, retrying: {error}").into());
+        }
         AgentEvent::TurnStart { .. } => {
             app.active_tools.clear();
             if !app.stream.active {
@@ -241,6 +245,45 @@ mod tests {
         let last = ctx.app.messages.last().expect("should have a message");
         assert_eq!(last.role, MessageRole::System);
         assert!(last.content.contains("400 Bad Request"));
+    }
+
+    #[test]
+    fn a_discarded_partial_clears_the_stream_and_says_why() {
+        use mush_ai::types::TokenCount;
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.start_streaming();
+        app.push_thinking_delta("pondering");
+        app.push_text_delta("half an ans");
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            image_protos: &mut image_protos,
+        };
+
+        let event = AgentEvent::PartialDiscarded {
+            error: "connection reset by peer".into(),
+        };
+        handle_agent_event(
+            &mut ctx,
+            &event,
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
+
+        assert!(ctx.app.stream.active);
+        assert_eq!(ctx.app.stream.text, "");
+        assert_eq!(ctx.app.stream.thinking, "");
+        assert!(ctx.app.messages.is_empty());
+        assert!(
+            ctx.app
+                .status
+                .as_ref()
+                .is_some_and(|status| status.text.contains("connection reset by peer"))
+        );
     }
 
     #[test]

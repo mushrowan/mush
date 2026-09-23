@@ -1,5 +1,8 @@
 use futures::StreamExt;
-use mush_ai::registry::{ApiRegistry, LlmContext, ToolDefinition};
+use mush_ai::registry::{
+    ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, StreamErrorKind, ToolDefinition,
+    classify_stream_error_message, retry_backoff,
+};
 use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
@@ -21,6 +24,9 @@ pub enum AgentEvent {
     },
     MessageEnd {
         message: AssistantMessage,
+    },
+    PartialDiscarded {
+        error: String,
     },
     ToolExecStart {
         tool_call_id: ToolCallId,
@@ -271,18 +277,13 @@ pub fn agent_loop(
 
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
 
-                const MAX_RETRIES: u32 = 5;
-                const MAX_BACKOFF_SECS: u64 = 16;
                 let mut final_message: Option<AssistantMessage> = None;
                 let mut last_error: Option<String> = None;
                 let mut retry_after: Option<std::time::Duration> = None;
 
                 'attempt: for attempt in 0..=MAX_RETRIES {
                     if attempt > 0 {
-                        let backoff = std::time::Duration::from_secs(
-                            (1u64 << (attempt - 1)).min(MAX_BACKOFF_SECS),
-                        );
-                        let Some(delay) = mush_ai::registry::retry_delay(backoff, retry_after.take()) else {
+                        let Some(delay) = mush_ai::registry::retry_delay(retry_backoff(attempt), retry_after.take()) else {
                             tracing::warn!(attempt, "the provider asked to wait past the retry cap, giving up");
                             break 'attempt;
                         };
@@ -313,7 +314,7 @@ pub fn agent_loop(
 
                     let mut local_final: Option<AssistantMessage> = None;
                     let mut started = false;
-                    let mut had_content = false;
+                    let mut streamed = false;
 
                     loop {
                         let event = tokio::select! {
@@ -329,30 +330,12 @@ pub fn agent_loop(
                             StreamEvent::Done { message, .. } => {
                                 local_final = Some(message.clone());
                             }
-                            StreamEvent::TextDelta { delta, .. }
-                            | StreamEvent::ThinkingDelta { delta, .. }
-                                if !delta.is_empty() =>
-                            {
-                                had_content = true;
-                            }
-                            StreamEvent::ToolCallStart { .. }
-                            | StreamEvent::ToolCallDelta { .. } => {
-                                had_content = true;
-                            }
                             StreamEvent::Error { message, .. } => {
                                 let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
-                                let has_text = message.content.iter().any(|part| {
-                                    matches!(part, AssistantContentPart::Text(text) if !text.text.trim().is_empty())
-                                });
-                                if !has_text
-                                    && attempt < MAX_RETRIES
-                                    && mush_ai::registry::is_retryable_stream_error_message(&error_msg)
-                                {
-                                    tracing::warn!(
-                                        error = %error_msg,
-                                        attempt,
-                                        "stream broke before any text arrived, retrying"
-                                    );
+                                if attempt < MAX_RETRIES && retry_stream_error(&error_msg, attempt) {
+                                    if streamed {
+                                        yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
+                                    }
                                     last_error = Some(format!("stream error: {error_msg}"));
                                     continue 'attempt;
                                 }
@@ -394,22 +377,27 @@ pub fn agent_loop(
                             }
                             _ => {}
                         }
+                        streamed = true;
                         yield AgentEvent::StreamEvent { event };
                     }
 
-                    if let Some(msg) = &local_final
-                        && msg.stop_reason == StopReason::Error
-                        && !had_content
-                        && let Some(err_msg) = msg.error_message.as_deref()
-                        && mush_ai::registry::is_retryable_stream_error_message(err_msg)
-                        && attempt < MAX_RETRIES
-                    {
-                        tracing::warn!(
-                            error = %err_msg,
-                            "retryable stream error from provider, scheduling retry"
-                        );
-                        last_error = Some(format!("stream error: {err_msg}"));
-                        continue 'attempt;
+                    let failure = match &local_final {
+                        None => Some(STREAM_ENDED_EARLY.to_string()),
+                        Some(msg) if msg.stop_reason == StopReason::Error => msg.error_message.clone(),
+                        Some(_) => None,
+                    };
+                    if let Some(error_msg) = failure {
+                        let retrying = attempt < MAX_RETRIES && retry_stream_error(&error_msg, attempt);
+                        if retrying && streamed {
+                            yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
+                        }
+                        last_error = Some(match local_final {
+                            None => error_msg,
+                            Some(_) => format!("stream error: {error_msg}"),
+                        });
+                        if retrying {
+                            continue 'attempt;
+                        }
                     }
 
                     final_message = local_final;
@@ -417,8 +405,7 @@ pub fn agent_loop(
                 }
 
                 let Some(assistant_msg) = final_message else {
-                    let error = last_error
-                        .unwrap_or_else(|| "stream ended without a final message".into());
+                    let error = last_error.unwrap_or_else(|| STREAM_ENDED_EARLY.into());
                     yield AgentEvent::Error { error };
                     yield AgentEvent::AgentEnd;
                     return;
@@ -717,6 +704,20 @@ fn is_file_modifying_tool(name: &str) -> bool {
     )
 }
 
+fn retry_stream_error(error: &str, attempt: u32) -> bool {
+    match classify_stream_error_message(error) {
+        StreamErrorKind::Refusal => {
+            tracing::warn!(reason = %error, attempt, "the provider refused the request, retrying");
+            true
+        }
+        StreamErrorKind::Transient => {
+            tracing::warn!(%error, attempt, "retryable stream error, retrying");
+            true
+        }
+        StreamErrorKind::Permanent => false,
+    }
+}
+
 fn tool_calls_in_message(message: &AssistantMessage) -> impl Iterator<Item = &ToolCall> {
     message.content.iter().filter_map(|part| match part {
         AssistantContentPart::ToolCall(tool_call) => Some(tool_call),
@@ -974,7 +975,9 @@ mod tests {
                     .provider(model.provider.clone())
                     .api(model.api)
                     .stop_reason(StopReason::Error)
-                    .error_message("error decoding response body")
+                    .error_message(
+                        "invalid_request_error: messages: text content blocks must be non-empty",
+                    )
                     .timestamp_ms(Timestamp::zero())
                     .build();
                 let s = async_stream::stream! {
@@ -1858,5 +1861,297 @@ mod tests {
             .count();
         assert_eq!(turn_ends, 1, "the model should not be asked again");
         assert_eq!(seen.lock().unwrap().clone(), vec!["hi".to_string()]);
+    }
+
+    type Script = fn(usize, &Model) -> Vec<StreamEvent>;
+
+    struct ScriptedProvider {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        script: Script,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for ScriptedProvider {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &Model,
+            _context: &mush_ai::registry::LlmContext,
+            _options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter((self.script)(call, model))))
+        }
+    }
+
+    fn reply(
+        model: &Model,
+        content: Vec<AssistantContentPart>,
+        error: Option<&str>,
+    ) -> AssistantMessage {
+        AssistantMessage::builder()
+            .content(content)
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(if error.is_some() {
+                StopReason::Error
+            } else {
+                StopReason::Stop
+            })
+            .maybe_error_message(error.map(str::to_string))
+            .timestamp_ms(Timestamp::zero())
+            .build()
+    }
+
+    fn text(text: &str) -> AssistantContentPart {
+        AssistantContentPart::Text(TextContent { text: text.into() })
+    }
+
+    fn answered(model: &Model) -> Vec<StreamEvent> {
+        let message = reply(model, vec![text("whole answer")], None);
+        vec![
+            StreamEvent::Start {
+                partial: message.clone(),
+            },
+            StreamEvent::TextDelta {
+                content_index: 0,
+                delta: "whole answer".into(),
+            },
+            StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            },
+        ]
+    }
+
+    fn refused(model: &Model) -> Vec<StreamEvent> {
+        let message = reply(
+            model,
+            Vec::new(),
+            Some("claude declined to respond (category: cyber). retry on another model"),
+        );
+        vec![
+            StreamEvent::Start {
+                partial: message.clone(),
+            },
+            StreamEvent::Done {
+                reason: StopReason::Error,
+                message,
+            },
+        ]
+    }
+
+    async fn run_scripted(script: Script) -> (usize, Vec<AgentEvent>) {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(ScriptedProvider {
+            calls: calls.clone(),
+            script,
+        }));
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::from_boxed(vec![Box::new(CounterTool)]),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 1,
+            hooks: Box::new(NoopHooks),
+            injections: AgentInjections::default(),
+            cancel: None,
+        };
+        let messages = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text("hi".into()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+        let events = agent_loop(config, messages).collect().await;
+        (calls.load(std::sync::atomic::Ordering::SeqCst), events)
+    }
+
+    fn message_ends(events: &[AgentEvent]) -> Vec<&AssistantMessage> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::MessageEnd { message } => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn discarded(events: &[AgentEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::PartialDiscarded { error } => Some(error.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_reset_after_text_discards_the_partial_and_retries() {
+        let (calls, events) = run_scripted(|call, model| {
+            if call > 0 {
+                return answered(model);
+            }
+            let partial = reply(
+                model,
+                vec![text("half an ans")],
+                Some(
+                    "error decoding response body: error reading a body from connection: \
+                     Connection reset by peer (os error 104)",
+                ),
+            );
+            vec![
+                StreamEvent::Start {
+                    partial: partial.clone(),
+                },
+                StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "half an ans".into(),
+                },
+                StreamEvent::Error {
+                    reason: StopReason::Error,
+                    message: partial,
+                },
+            ]
+        })
+        .await;
+
+        assert_eq!(calls, 2);
+        assert_eq!(discarded(&events).len(), 1);
+        assert!(discarded(&events)[0].contains("Connection reset by peer"));
+        let ends = message_ends(&events);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].text(), "whole answer");
+        let discard_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::PartialDiscarded { .. }))
+            .unwrap();
+        let end_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::MessageEnd { .. }))
+            .unwrap();
+        assert!(discard_at < end_at);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. }))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_anthropic_refusal_is_retried() {
+        let (calls, events) = run_scripted(|call, model| {
+            if call == 0 {
+                refused(model)
+            } else {
+                answered(model)
+            }
+        })
+        .await;
+
+        assert_eq!(calls, 2);
+        let ends = message_ends(&events);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].stop_reason, StopReason::Stop);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_codex_cyber_policy_refusal_after_a_tool_call_is_retried_without_a_stub() {
+        let (calls, events) = run_scripted(|call, model| {
+            if call > 0 {
+                return answered(model);
+            }
+            let partial = reply(
+                model,
+                vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_refused".into(),
+                    name: "counter".into(),
+                    arguments: serde_json::json!({}),
+                })],
+                Some(
+                    "invalid_request: cyber_policy: This content was flagged for possible \
+                     cybersecurity risk.",
+                ),
+            );
+            vec![
+                StreamEvent::Start {
+                    partial: partial.clone(),
+                },
+                StreamEvent::ToolCallStart { content_index: 0 },
+                StreamEvent::Error {
+                    reason: StopReason::Error,
+                    message: partial,
+                },
+            ]
+        })
+        .await;
+
+        assert_eq!(calls, 2);
+        assert_eq!(discarded(&events).len(), 1);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolExecEnd { .. }))
+        );
+        assert_eq!(message_ends(&events).len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_on_every_attempt_surfaces_the_error() {
+        let (calls, events) = run_scripted(|_, model| refused(model)).await;
+
+        assert_eq!(calls, MAX_RETRIES as usize + 1);
+        let ends = message_ends(&events);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].stop_reason, StopReason::Error);
+        assert!(
+            ends[0]
+                .error_message
+                .as_deref()
+                .is_some_and(|error| error.starts_with("claude declined to respond"))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_ends_without_a_final_message_is_retried() {
+        let (calls, events) = run_scripted(|call, model| {
+            if call > 0 {
+                return answered(model);
+            }
+            vec![
+                StreamEvent::Start {
+                    partial: reply(model, Vec::new(), None),
+                },
+                StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "cut o".into(),
+                },
+            ]
+        })
+        .await;
+
+        assert_eq!(calls, 2);
+        assert_eq!(discarded(&events), [STREAM_ENDED_EARLY]);
+        let ends = message_ends(&events);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].text(), "whole answer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_that_always_ends_early_reports_it() {
+        let (calls, events) = run_scripted(|_, _| Vec::new()).await;
+
+        assert_eq!(calls, MAX_RETRIES as usize + 1);
+        assert!(discarded(&events).is_empty());
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Error { error } if error == STREAM_ENDED_EARLY)
+        ));
     }
 }

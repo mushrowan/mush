@@ -878,6 +878,19 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     ))
                 );
             }
+            AgentEvent::PartialDiscarded { error } => {
+                if in_text {
+                    println!();
+                    in_text = false;
+                }
+                eprintln!(
+                    "{}",
+                    Style::Yellow.stderr(format_args!(
+                        "⚠ discarding the partial response and retrying: {}",
+                        format_error(&error)
+                    ))
+                );
+            }
             AgentEvent::SteeringInjected { messages } => {
                 eprintln!(
                     "{}",
