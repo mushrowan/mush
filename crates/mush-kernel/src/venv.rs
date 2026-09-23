@@ -78,6 +78,11 @@ pub const DEFAULT_PACKAGES: &[Package] = &[
         import_name: "tyro",
         label: "tyro",
     },
+    Package {
+        spec: "dill",
+        import_name: "dill",
+        label: "dill",
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

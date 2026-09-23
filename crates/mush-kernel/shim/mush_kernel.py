@@ -880,22 +880,70 @@ def _finish_locked(cell_id: str) -> None:
         _interrupt_next = False
 
 
+_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
+
+
+class _SnapshotSizeLimitExceeded(Exception):
+    pass
+
+
+class _CappedWriter:
+    def __init__(self, sink, limit: int):
+        self._sink = sink
+        self._limit = limit
+        self.written = 0
+
+    def write(self, chunk) -> int:
+        size = len(chunk)
+        if self.written + size > self._limit:
+            raise _SnapshotSizeLimitExceeded()
+        self._sink.write(chunk)
+        self.written += size
+        return size
+
+
+class _LocalPickler(pickle.Pickler):
+    def reducer_override(self, obj):
+        if isinstance(obj, (types.FunctionType, type)) and getattr(obj, "__module__", None) == "__main__":
+            raise pickle.PicklingError(f"{obj!r} is defined in the kernel and needs dill to be saved")
+        return NotImplemented
+
+
+def _serializer():
+    try:
+        import dill
+    except Exception:  # noqa: BLE001
+        return None
+    dill.settings["recurse"] = True
+    return dill
+
+
+def _dump(value, sink, serializer) -> None:
+    if serializer is None:
+        _LocalPickler(sink).dump(value)
+    else:
+        serializer.dump(value, sink)
+
+
 def _snapshot(request: dict) -> None:
     cell_id = request["id"]
     max_bytes = int(request.get("max_variable_bytes") or 16 * 1024 * 1024)
+    serializer = _serializer()
     saved, skipped = [], []
     payload = {}
+    total = 0
     for name, value in list(_namespace.items()):
-        if name.startswith("_") or name in _PRELOADED or isinstance(value, types.ModuleType):
+        if name.startswith("_") or name in _PRELOADED:
             continue
+        budget = _SNAPSHOT_MAX_BYTES - total
+        buffer = io.BytesIO()
         try:
-            blob = pickle.dumps(value)
+            _dump(value, _CappedWriter(buffer, min(max_bytes, budget)), serializer)
         except Exception:  # noqa: BLE001
             skipped.append(name)
             continue
-        if len(blob) > max_bytes:
-            skipped.append(name)
-            continue
+        blob = buffer.getvalue()
+        total += len(blob)
         payload[name] = blob
         saved.append(name)
     try:
@@ -918,10 +966,11 @@ def _restore(request: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         emit({"type": "done", "id": cell_id, "ok": False, "reason": str(exc)})
         return
+    loads = getattr(_serializer(), "loads", pickle.loads)
     restored, failed = [], []
     for name, blob in payload.items():
         try:
-            _namespace[name] = pickle.loads(blob)
+            _namespace[name] = loads(blob)
             restored.append(name)
         except Exception:  # noqa: BLE001
             failed.append(name)
@@ -929,11 +978,7 @@ def _restore(request: dict) -> None:
 
 
 def _list_names(request: dict) -> None:
-    names = sorted(
-        name
-        for name, value in _namespace.items()
-        if not name.startswith("_") and name not in _PRELOADED and not isinstance(value, types.ModuleType)
-    )
+    names = sorted(name for name in _namespace if isinstance(name, str) and not name.startswith("_") and name not in _PRELOADED)
     emit({"type": "done", "id": request["id"], "ok": True, "names": names})
 
 
@@ -1076,7 +1121,11 @@ _PRELOADED = frozenset()
 
 
 def main() -> None:
-    global _PRELOADED
+    global _PRELOADED, _namespace
+    sys.modules["mush_kernel"] = sys.modules[__name__]
+    user_module = types.ModuleType("__main__")
+    sys.modules["__main__"] = user_module
+    _namespace = user_module.__dict__
     _install_preload()
     _PRELOADED = frozenset(_namespace)
     _capture_fds()

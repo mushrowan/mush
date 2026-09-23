@@ -521,7 +521,7 @@ async fn a_snapshot_survives_a_fresh_kernel() {
     let path = dir.path().join("state.pickle");
     let first = kernel().await;
     first
-        .execute("keep = {'a': [1, 2]}\nimport os\nunpicklable = lambda: 1")
+        .execute("keep = {'a': [1, 2]}\nunpicklable = (i for i in range(3))")
         .await
         .unwrap();
 
@@ -537,6 +537,82 @@ async fn a_snapshot_survives_a_fresh_kernel() {
     assert_eq!(output.result.as_deref(), Some("2"));
     assert_eq!(second.list_names().await.unwrap(), ["keep"]);
     second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn without_dill_cell_functions_and_classes_are_skipped_not_saved_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.pickle");
+    let kernel = kernel().await;
+    kernel
+        .execute(
+            "def helper():\n    return 1\nclass Thing:\n    pass\nthing = Thing()\nplain = [1]",
+        )
+        .await
+        .unwrap();
+    let has_dill = kernel
+        .execute("import importlib.util\nimportlib.util.find_spec('dill') is not None")
+        .await
+        .unwrap();
+
+    let report = kernel.snapshot(&path, None).await.unwrap();
+
+    if has_dill.result.as_deref() == Some("True") {
+        assert_eq!(report.skipped, Vec::<String>::new());
+    } else {
+        assert_eq!(report.saved, ["plain"]);
+        assert_eq!(report.skipped, ["helper", "Thing", "thing", "importlib"]);
+    }
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn with_dill_functions_classes_and_imports_survive_a_fresh_kernel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.pickle");
+    let first = kernel().await;
+    let has_dill = first
+        .execute("import importlib.util\nimportlib.util.find_spec('dill') is not None")
+        .await
+        .unwrap();
+    if has_dill.result.as_deref() != Some("True") {
+        first.shutdown().await.unwrap();
+        return;
+    }
+    first
+        .execute("import json\ndef helper(x):\n    return x + 1\nclass Thing:\n    def value(self):\n        return helper(41)\nthing = Thing()")
+        .await
+        .unwrap();
+
+    let report = first.snapshot(&path, None).await.unwrap();
+    first.shutdown().await.unwrap();
+    let second = kernel().await;
+    second.restore(&path).await.unwrap();
+    let output = second
+        .execute("(thing.value(), json.dumps(helper(1)), Thing.__name__)")
+        .await
+        .unwrap();
+
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(
+        output.result.as_deref(),
+        Some("(42, '2', 'Thing')"),
+        "{output:?}"
+    );
+    second.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn cells_run_in_a_real_main_module() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute("import sys\ndef f():\n    pass\n(f.__module__, sys.modules['__main__'].f is f)")
+        .await
+        .unwrap();
+
+    assert_eq!(output.result.as_deref(), Some("('__main__', True)"));
+    kernel.shutdown().await.unwrap();
 }
 
 #[tokio::test]
