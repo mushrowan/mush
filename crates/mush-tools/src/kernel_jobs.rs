@@ -55,7 +55,6 @@ pub struct JobNotice {
     pub origin: Option<String>,
 }
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 const KILL_GRACE: Duration = Duration::from_secs(5);
 const CANCEL_TERM_GRACE: Duration = Duration::from_millis(500);
 const CANCEL_KILL_WAIT: Duration = Duration::from_secs(2);
@@ -312,10 +311,13 @@ impl KernelJobs {
 
         let jobs = self.clone();
         let job_id = id.clone();
-        let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
         tokio::spawn(async move {
-            let end = match tokio::time::timeout(timeout, child.wait()).await {
-                Ok(Ok(status)) => {
+            let waited = match timeout {
+                Some(limit) => tokio::time::timeout(limit, child.wait()).await.ok(),
+                None => Some(child.wait().await),
+            };
+            let end = match waited {
+                Some(Ok(status)) => {
                     let killed = cell.state.lock().await.end == Some(JobEnd::Killed);
                     if killed {
                         JobEnd::Killed
@@ -323,8 +325,8 @@ impl KernelJobs {
                         JobEnd::Exited(status.code().unwrap_or(-1))
                     }
                 }
-                Ok(Err(error)) => JobEnd::Failed(error.to_string()),
-                Err(_) => {
+                Some(Err(error)) => JobEnd::Failed(error.to_string()),
+                None => {
                     kill_group(cell.state.lock().await.pgid);
                     let _ = child.wait().await;
                     JobEnd::TimedOut
@@ -596,6 +598,20 @@ mod tests {
         assert_eq!(mid.output, "started\n");
         assert_eq!(done.end, Some(JobEnd::Killed));
         assert!(!done.output.contains("never"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_job_without_a_timeout_is_never_timed_out() {
+        let jobs = KernelJobs::default();
+
+        let (id, _) = jobs
+            .start(&cwd(), "sleep 0.5", None, None, None)
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(24 * 60 * 60)).await;
+        let done = jobs.wait(&id).await.unwrap();
+
+        assert_eq!(done.end, Some(JobEnd::Exited(0)));
     }
 
     #[tokio::test]
