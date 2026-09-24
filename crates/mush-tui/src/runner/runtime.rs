@@ -110,7 +110,6 @@ pub enum DiscoveryUpdate {
 }
 
 pub(super) struct RunnerRuntime {
-    pub cwd: PathBuf,
     pub session: Session,
     pub pending_prompt: Option<String>,
     pub connection_closed: bool,
@@ -126,7 +125,6 @@ impl RunnerRuntime {
     #[cfg(test)]
     pub(super) fn from_pane(session: Session) -> Self {
         Self {
-            cwd: PathBuf::new(),
             session,
             pending_prompt: None,
             connection_closed: false,
@@ -143,8 +141,8 @@ impl RunnerRuntime {
         tui_config: &mut TuiConfig,
         mut connection: Box<dyn AgentConnection>,
     ) -> Self {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let mut app = build_initial_app(tui_config, &cwd);
+        follow_session_cwd(tui_config, &connection.state());
+        let mut app = build_initial_app(tui_config, &tui_config.cwd.clone());
         seed_from_state(&mut app, tui_config, &connection.state());
         let history = connection.history().await;
         let context = connection.transcript().await;
@@ -166,7 +164,6 @@ impl RunnerRuntime {
         tracing::debug!(has_poller = usage_rx.is_some(), "usage poller setup");
 
         Self {
-            cwd,
             session,
             pending_prompt: None,
             connection_closed: false,
@@ -372,8 +369,8 @@ pub(super) async fn reattach(
     tui_config: &mut TuiConfig,
     mut connection: Box<dyn AgentConnection>,
 ) {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let mut app = build_initial_app(tui_config, &cwd);
+    follow_session_cwd(tui_config, &connection.state());
+    let mut app = build_initial_app(tui_config, &tui_config.cwd.clone());
     app.theme = session.app.theme.clone();
     app.oauth_usage = session.app.oauth_usage.take();
     app.oauth_usage_provider = session.app.oauth_usage_provider.take();
@@ -384,6 +381,15 @@ pub(super) async fn reattach(
     let label = session.label.take();
     *session = Session::with_connection(app, connection);
     session.label = label;
+}
+
+fn follow_session_cwd(tui_config: &mut TuiConfig, state: &mush_runtime::ConnectionState) {
+    let Some(cwd) = state.cwd.as_ref().filter(|cwd| cwd.is_dir()) else {
+        return;
+    };
+    if std::env::set_current_dir(cwd).is_ok() {
+        tui_config.cwd = cwd.clone();
+    }
 }
 
 fn build_initial_app(tui_config: &TuiConfig, cwd: &Path) -> App {

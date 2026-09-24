@@ -1,5 +1,4 @@
 use std::io;
-use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
@@ -68,7 +67,6 @@ impl std::fmt::Debug for LoopAction {
 
 pub(super) struct InputDeps<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
     pub image_picker: &'a Option<ratatui_image::picker::Picker>,
     pub resize: &'a mut ResizeState,
@@ -457,7 +455,6 @@ async fn handle_streaming_key_event(
                 action,
                 SlashEnv {
                     tui_config: deps.tui_config,
-                    cwd: deps.cwd,
                     pending_prompt: deps.pending_prompt,
                 },
             )
@@ -582,7 +579,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 action,
                                 SlashEnv {
                                     tui_config: deps.tui_config,
-                                    cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
                             )
@@ -600,7 +596,6 @@ pub(super) async fn handle_idle_terminal_events(
                                 },
                                 SlashEnv {
                                     tui_config: deps.tui_config,
-                                    cwd: deps.cwd,
                                     pending_prompt: deps.pending_prompt,
                                 },
                             )
@@ -926,7 +921,6 @@ mod tests {
             let mut resize = ResizeState::default();
             let mut deps = InputDeps {
                 tui_config: &mut tui_config,
-                cwd: std::path::Path::new(""),
                 pending_prompt: &mut pending_prompt,
                 image_picker: &image_picker,
                 resize: &mut resize,
@@ -1060,7 +1054,6 @@ mod tests {
         let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
-            cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
             resize: &mut resize,
@@ -1094,7 +1087,6 @@ mod tests {
         let mut resize = ResizeState::default();
         let mut deps = InputDeps {
             tui_config: &mut tui_config,
-            cwd: std::path::Path::new(""),
             pending_prompt: &mut pending_prompt,
             image_picker: &image_picker,
             resize: &mut resize,

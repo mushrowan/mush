@@ -141,7 +141,15 @@ async fn wait_until_gone(socket: &Path) -> bool {
 }
 
 pub async fn open(target: OpenTarget, args: Vec<String>) -> Result<WorkerDescriptor> {
-    open_in(target, args, std::env::current_dir()?).await
+    let cwd = match &target {
+        OpenTarget::Resume(id) => session_home(id),
+        _ => None,
+    };
+    let cwd = match cwd {
+        Some(cwd) => cwd,
+        None => std::env::current_dir()?,
+    };
+    open_in(target, args, cwd).await
 }
 
 async fn open_in(
@@ -350,6 +358,12 @@ pub async fn send(session: &str, text: &str) -> Result<()> {
         IpcMessageKind::ControlReply(Reply::Error { code }) => Err(eyre!("{code}")),
         other => Err(eyre!("unexpected reply: {other:?}")),
     }
+}
+
+fn session_home(id: &str) -> Option<std::path::PathBuf> {
+    let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+    let cwd = std::path::PathBuf::from(store.resolve(id).ok()?.cwd);
+    cwd.is_dir().then_some(cwd)
 }
 
 pub fn worker_opener(worker_args: Vec<String>) -> mush_tui::WorkerOpener {

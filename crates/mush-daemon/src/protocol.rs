@@ -156,6 +156,7 @@ mod tests {
             pending_prompt: false,
             controlled: false,
             last_request: None,
+            cwd: None,
         }
     }
 

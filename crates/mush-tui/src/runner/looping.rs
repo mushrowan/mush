@@ -67,7 +67,6 @@ fn input_parts<'a>(
 ) -> (&'a mut crate::session::Session, InputDeps<'a>) {
     let RunnerRuntime {
         session,
-        cwd,
         pending_prompt,
         resize,
         ..
@@ -76,7 +75,6 @@ fn input_parts<'a>(
         session,
         InputDeps {
             tui_config,
-            cwd,
             pending_prompt,
             image_picker,
             resize,

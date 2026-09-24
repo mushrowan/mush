@@ -150,6 +150,8 @@ pub struct ConnectionState {
     pub controlled: bool,
     #[serde(default)]
     pub last_request: Option<mush_ai::request_snapshot::RequestDigest>,
+    #[serde(default)]
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -2095,6 +2097,7 @@ impl AgentConnection for InProcessConnection {
             pending_prompt: self.runtime.pending_prompt.is_some(),
             controlled: self.runtime.control.is_some(),
             last_request: mush_ai::request_snapshot::last_request(self.runtime.session_id.as_str()),
+            cwd: self.injections.cwd.clone(),
         }
     }
 

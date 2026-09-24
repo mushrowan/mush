@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::session::Session;
 use crate::slash::{self, SlashAction};
 
@@ -7,7 +5,6 @@ use super::{TuiConfig, WorkerOpener, WorkerTarget};
 
 pub(super) struct SlashEnv<'a> {
     pub tui_config: &'a mut TuiConfig,
-    pub cwd: &'a Path,
     pub pending_prompt: &'a mut Option<String>,
 }
 
@@ -229,7 +226,6 @@ pub(super) async fn handle_slash_action(
 ) -> bool {
     let SlashEnv {
         tui_config,
-        cwd,
         pending_prompt,
     } = env;
     let mut state_changed = false;
@@ -589,7 +585,7 @@ pub(super) async fn handle_slash_action(
                     .push_system_message("/reload not supported in this build".to_string());
                 return false;
             };
-            let reloaded = reload(cwd);
+            let reloaded = reload(&tui_config.cwd);
             let _ = session
                 .connection
                 .send(mush_runtime::ClientCommand::ReloadSystemPrompt)
@@ -994,7 +990,6 @@ mod tests {
             action,
             SlashEnv {
                 tui_config: config,
-                cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
             },
         ));
@@ -1163,7 +1158,6 @@ mod tests {
             },
             SlashEnv {
                 tui_config: &mut config,
-                cwd: std::path::Path::new("/tmp"),
                 pending_prompt: &mut pending_prompt,
             },
         ));
@@ -1201,7 +1195,6 @@ mod tests {
             action,
             SlashEnv {
                 tui_config: config,
-                cwd: std::path::Path::new("/tmp"),
                 pending_prompt,
             },
         ));
@@ -1284,6 +1277,38 @@ mod tests {
                 .iter()
                 .any(|message| message.content == "old")
         );
+    }
+
+    #[test]
+    fn resume_with_a_daemon_moves_into_the_folder_of_that_session() {
+        let home = tempfile::tempdir().unwrap();
+        let home_path = home.path().canonicalize().unwrap();
+        let mut session = conversation_session(vec![user("old")]);
+        let mut config = TuiConfig::for_test();
+        let mut target = conversation_session(vec![user("over there")]);
+        target
+            .in_process()
+            .set_injections(mush_agent::AgentInjections {
+                cwd: Some(home_path.clone()),
+                ..Default::default()
+            });
+        let target_id = target.connection.state().session_id;
+        let (opener, _) = opener_to(Some(target));
+        config.worker_opener = Some(opener);
+
+        slash(
+            &mut session,
+            &mut config,
+            SlashAction::Resume {
+                session_id: target_id,
+            },
+            &mut None,
+        );
+
+        assert_eq!(config.cwd, home_path);
+        assert_eq!(std::env::current_dir().unwrap(), home_path);
+        let name = home_path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(session.app.cwd.ends_with(&name), "{}", session.app.cwd);
     }
 
     #[test]

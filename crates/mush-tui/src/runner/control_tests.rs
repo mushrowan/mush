@@ -275,7 +275,6 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
         },
         super::commands::SlashEnv {
             tui_config: &mut config,
-            cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
         },
     )
@@ -306,7 +305,6 @@ async fn reviewer_session_switch_does_not_receive_the_previous_control_turn() {
         },
         super::commands::SlashEnv {
             tui_config: &mut config,
-            cwd: std::path::Path::new("/tmp"),
             pending_prompt: &mut runtime.pending_prompt,
         },
     )
@@ -1097,7 +1095,6 @@ async fn new_session_invalidates_timer_and_refuses_switch_during_turn() {
             },
             super::commands::SlashEnv {
                 tui_config: &mut config,
-                cwd: &runtime.cwd,
                 pending_prompt: &mut runtime.pending_prompt,
             },
         )
