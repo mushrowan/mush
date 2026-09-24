@@ -486,7 +486,7 @@ impl Worker {
             }
             Request::Command {
                 command, envelope, ..
-            } => self.dispatch(connection, command, envelope).await,
+            } => self.dispatch(connection, key, command, envelope).await,
             other => handle(connection, other).await,
         };
         let state = self.hub.state_delta(connection);
@@ -510,6 +510,7 @@ impl Worker {
     async fn dispatch(
         &mut self,
         connection: &mut InProcessConnection,
+        sender: ClientKey,
         command: ClientCommand,
         envelope: Envelope,
     ) -> Result<Reply, ConnectionError> {
@@ -526,7 +527,20 @@ impl Worker {
         if let Some(stored) = self.journal.stored(&key) {
             return stored.map(|events| Reply::Events { events });
         }
+        let echo = echo(&command, &connection.state());
         let result = connection.send(command).await;
+        if let (Ok(_), Some(event)) = (&result, echo) {
+            self.log.record(&event);
+            let sequence = self.hub.record(event.clone());
+            self.hub.broadcast_except(
+                sender,
+                &Frame::Event {
+                    event,
+                    state: None,
+                    sequence,
+                },
+            );
+        }
         self.journal.record(key, result.clone());
         result.map(|events| Reply::Events { events })
     }
@@ -572,6 +586,28 @@ impl Worker {
             snapshot: !caught_up,
         }
     }
+}
+
+fn echo(command: &ClientCommand, state: &ConnectionState) -> Option<ClientEvent> {
+    let busy = state.turn_active || state.compacting;
+    let (text, images, queued) = match command {
+        ClientCommand::Prompt { text, images } | ClientCommand::QueuePrompt { text, images } => {
+            (text, images, busy)
+        }
+        ClientCommand::Steer { text, images } => (text, images, true),
+        ClientCommand::RetractSteer { text } => {
+            return Some(ClientEvent::SteerRetracted { text: text.clone() });
+        }
+        _ => return None,
+    };
+    if text.trim().is_empty() && images.is_empty() {
+        return None;
+    }
+    Some(ClientEvent::UserInput {
+        text: text.clone(),
+        images: images.clone(),
+        queued,
+    })
 }
 
 fn empty(connection: &InProcessConnection) -> bool {

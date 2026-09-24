@@ -606,6 +606,21 @@ impl App {
         self.messages.push(msg);
     }
 
+    pub fn retract_queued_message(&mut self, text: &str) {
+        let position = self
+            .messages
+            .iter()
+            .rposition(|m| m.queued && m.content == text)
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .rposition(|m| m.queued && m.content.trim() == text.trim())
+            });
+        if let Some(position) = position {
+            self.messages.remove(position);
+        }
+    }
+
     pub fn pop_last_queued_message(&mut self) -> Option<String> {
         let idx = self.messages.iter().rposition(|m| m.queued)?;
         let msg = self.messages.remove(idx);

@@ -309,6 +309,62 @@ async fn a_steer_over_the_socket_during_a_tool_call_is_injected_and_announced() 
 }
 
 #[tokio::test]
+async fn a_steer_and_its_retraction_reach_the_other_client_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let (connection, _requests, gate) = mush_runtime::testing::tool_then_text_connection();
+    let _task = tokio::spawn(serve(connection, listener, None, Default::default()));
+    let mut first = DaemonConnection::connect(&socket).await.unwrap();
+    let mut second = DaemonConnection::connect(&socket).await.unwrap();
+
+    first.send(prompt("start")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for command in [
+        ClientCommand::Steer {
+            text: "do y".into(),
+            images: Vec::new(),
+        },
+        ClientCommand::RetractSteer {
+            text: "do y".into(),
+        },
+    ] {
+        first.send(command).await.unwrap();
+    }
+    gate.notify_one();
+
+    let seen = drain_turn(&mut second).await;
+    let inputs: Vec<_> = seen
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                ClientEvent::UserInput { .. } | ClientEvent::SteerRetracted { .. }
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            &inputs[..],
+            [
+                ClientEvent::UserInput { text: start, queued: false, .. },
+                ClientEvent::UserInput { text: steer, queued: true, .. },
+                ClientEvent::SteerRetracted { text: retracted },
+            ] if start == "start" && steer == "do y" && retracted == "do y"
+        ),
+        "{inputs:?}"
+    );
+    let own = drain_turn(&mut first).await;
+    assert!(
+        !own.iter().any(|event| matches!(
+            event,
+            ClientEvent::UserInput { .. } | ClientEvent::SteerRetracted { .. }
+        )),
+        "{own:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_prompt_after_aborting_a_hung_tool_over_the_socket_starts_a_new_turn() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("worker.sock");
@@ -453,7 +509,13 @@ async fn two_clients_share_a_worker_and_both_see_the_turn() {
     assert!(matches!(started[..], [ClientEvent::TurnStarted]));
 
     let seen = drain_turn(&mut second).await;
-    assert!(matches!(seen.first(), Some(ClientEvent::TurnStarted)));
+    assert!(matches!(
+        &seen[..2],
+        [
+            ClientEvent::UserInput { text, queued: false, .. },
+            ClientEvent::TurnStarted,
+        ] if text == "hello"
+    ));
     assert!(seen.iter().any(|event| matches!(
         event,
         ClientEvent::Agent {

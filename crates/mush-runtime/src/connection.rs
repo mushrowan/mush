@@ -103,6 +103,14 @@ pub enum ClientEvent {
     },
     ToolsCancelled(Vec<ToolCallId>),
     MessageInjected(mush_ai::types::EventMessage),
+    UserInput {
+        text: String,
+        images: Vec<PendingImage>,
+        queued: bool,
+    },
+    SteerRetracted {
+        text: String,
+    },
     ToolOutput {
         exec_id: String,
         line: String,

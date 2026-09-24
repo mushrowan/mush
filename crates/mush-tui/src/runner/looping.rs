@@ -322,6 +322,20 @@ pub(super) async fn apply_command_events(
                 session.app.push_event_message(&event);
                 session.app.start_streaming();
             }
+            ClientEvent::UserInput {
+                text,
+                images,
+                queued,
+            } => {
+                let images: Vec<Vec<u8>> = images.into_iter().map(|image| image.data).collect();
+                match (queued, images.is_empty()) {
+                    (true, true) => session.app.push_queued_message(text),
+                    (true, false) => session.app.push_queued_message_with_images(text, images),
+                    (false, true) => session.app.push_user_message(text),
+                    (false, false) => session.app.push_user_message_with_images(text, images),
+                }
+            }
+            ClientEvent::SteerRetracted { text } => session.app.retract_queued_message(&text),
             ClientEvent::ToolOutput { exec_id, line } => {
                 session.app.push_tool_output_by_exec_id(&exec_id, &line);
             }
@@ -477,6 +491,44 @@ async fn handle_idle_iteration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn another_clients_input_shows_up_and_its_retraction_clears_it() {
+        let mut config = super::super::TuiConfig::for_test();
+        let mut session = crate::session::Session::new(crate::app::App::new(
+            config.model.id.clone(),
+            config.model.context_window,
+        ));
+        let input = |text: &str, queued| ClientEvent::UserInput {
+            text: text.into(),
+            images: Vec::new(),
+            queued,
+        };
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![input("hello", false), input("steer", true)],
+        )
+        .await;
+        let shown: Vec<_> = session
+            .app
+            .messages
+            .iter()
+            .map(|message| (message.content.as_str(), message.queued))
+            .collect();
+        assert_eq!(shown, [("hello", false), ("steer", true)]);
+
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![ClientEvent::SteerRetracted {
+                text: "steer".into(),
+            }],
+        )
+        .await;
+        assert_eq!(session.app.messages.len(), 1);
+        assert!(!session.app.has_queued_messages());
+    }
 
     #[tokio::test]
     async fn a_closed_connection_is_noticed_once() {
