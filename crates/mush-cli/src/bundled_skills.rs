@@ -3,13 +3,49 @@ use std::path::{Path, PathBuf};
 use mush_ext::loader::Skill;
 use mush_ext::skill_scan::{SkillSource, parse_skill};
 
-const BUNDLED: [(&str, &str); 2] = [
-    ("goal", include_str!("../skills/goal/SKILL.md")),
+const BUNDLED: [(&str, &str); 11] = [
     (
-        "rlm-heartbeat",
+        "agent-message/SKILL.md",
+        include_str!("../skills/agent-message/SKILL.md"),
+    ),
+    (
+        "agent-observe/SKILL.md",
+        include_str!("../skills/agent-observe/SKILL.md"),
+    ),
+    (
+        "attach-image/SKILL.md",
+        include_str!("../skills/attach-image/SKILL.md"),
+    ),
+    (
+        "compact/SKILL.md",
+        include_str!("../skills/compact/SKILL.md"),
+    ),
+    ("edit/SKILL.md", include_str!("../skills/edit/SKILL.md")),
+    ("goal/SKILL.md", include_str!("../skills/goal/SKILL.md")),
+    ("refine/SKILL.md", include_str!("../skills/refine/SKILL.md")),
+    (
+        "rlm-heartbeat/SKILL.md",
         include_str!("../skills/rlm-heartbeat/SKILL.md"),
     ),
+    (
+        "skill-creator/SKILL.md",
+        include_str!("../skills/skill-creator/SKILL.md"),
+    ),
+    (
+        "websearch/SKILL.md",
+        include_str!("../skills/websearch/SKILL.md"),
+    ),
+    (
+        "skill-creator/references/python-skills.md",
+        include_str!("../skills/skill-creator/references/python-skills.md"),
+    ),
 ];
+
+fn bundled_skill_files() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUNDLED
+        .iter()
+        .filter_map(|(path, content)| Some((path.strip_suffix("/SKILL.md")?, *content)))
+}
 
 #[must_use]
 pub fn root() -> PathBuf {
@@ -21,8 +57,8 @@ fn skill_path(root: &Path, name: &str) -> PathBuf {
 }
 
 pub fn install(root: &Path) -> std::io::Result<()> {
-    for (name, content) in BUNDLED {
-        let path = skill_path(root, name);
+    for (relative, content) in BUNDLED {
+        let path = root.join(relative);
         if std::fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
             continue;
         }
@@ -33,8 +69,7 @@ pub fn install(root: &Path) -> std::io::Result<()> {
 
 #[must_use]
 pub fn skills(root: &Path) -> Vec<Skill> {
-    BUNDLED
-        .iter()
+    bundled_skill_files()
         .flat_map(|(name, content)| {
             parse_skill(content, &skill_path(root, name), SkillSource::Bundled).skills
         })
@@ -57,7 +92,7 @@ mod tests {
 
     #[test]
     fn every_bundled_skill_parses_cleanly_and_matches_its_directory() {
-        for (name, content) in BUNDLED {
+        for (name, content) in bundled_skill_files() {
             let path = skill_path(Path::new("/bundled"), name);
             let parsed = parse_skill(content, &path, SkillSource::Bundled);
             assert!(
@@ -83,7 +118,15 @@ mod tests {
         let goal = skill_path(dir.path(), "goal");
         std::fs::write(&goal, "stale").unwrap();
         install(dir.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(&goal).unwrap(), BUNDLED[0].1);
+        assert_eq!(
+            std::fs::read_to_string(&goal).unwrap(),
+            include_str!("../skills/goal/SKILL.md")
+        );
+        assert!(
+            dir.path()
+                .join("skill-creator/references/python-skills.md")
+                .is_file()
+        );
     }
 
     #[test]

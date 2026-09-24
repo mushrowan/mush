@@ -93,6 +93,7 @@ pub struct MushHost {
     cwd: Arc<Path>,
     jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
+    web_search: std::sync::RwLock<Option<Arc<dyn AgentTool>>>,
     diffs: std::sync::Mutex<std::collections::HashMap<String, Vec<CellDiff>>>,
     sent: std::sync::Mutex<std::collections::HashMap<String, Vec<SentMessage>>>,
     extension: std::sync::RwLock<Option<Arc<dyn HostRequestHandler>>>,
@@ -103,6 +104,7 @@ impl MushHost {
         Self {
             edit: Arc::new(crate::edit::EditTool::new(cwd.clone()).without_read_ledger()),
             jobs: crate::kernel_jobs::KernelJobs::default(),
+            web_search: std::sync::RwLock::new(None),
             cwd,
             diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
             sent: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -152,6 +154,13 @@ impl MushHost {
                 text: text.clone(),
             });
         }
+    }
+
+    pub fn set_web_search(&self, tool: Arc<dyn AgentTool>) {
+        *self
+            .web_search
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tool);
     }
 
     pub fn set_extension(&self, extension: Arc<dyn HostRequestHandler>) {
@@ -220,7 +229,7 @@ fn job_id(payload: &Value) -> Result<&str, HostError> {
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
     fn cancellable(&self, kind: &str) -> bool {
-        kind == "bash.wait"
+        matches!(kind, "bash.wait" | "websearch")
     }
 
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
@@ -287,6 +296,20 @@ impl HostRequestHandler for MushHost {
             "bash.kill" => {
                 self.jobs.kill(job_id(&payload)?).await.map_err(HostError)?;
                 Ok(json!({}))
+            }
+            "websearch" => {
+                let tool = self
+                    .web_search
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .ok_or_else(|| HostError("web search is not available here".into()))?;
+                let result = tool.execute(payload).await;
+                let text = extract_text(&result);
+                if !result.outcome.is_success() {
+                    return Err(HostError(text));
+                }
+                Ok(json!({ "text": text }))
             }
             "edit" => {
                 let args = json!({
@@ -1292,6 +1315,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_takes_old_str_and_new_str_keywords() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello world\n").unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": format!(
+                    "await edit(path={:?}, old_str='world', new_str='there')",
+                    path.display().to_string()
+                )
+            }))
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello there\n");
+        tool.shutdown().await;
+    }
+
+    struct CannedSearch;
+
+    #[async_trait::async_trait]
+    impl AgentTool for CannedSearch {
+        fn name(&self) -> &str {
+            "web_search"
+        }
+        fn label(&self) -> &str {
+            "Web Search"
+        }
+        fn description(&self) -> &str {
+            "canned"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({ "type": "object" })
+        }
+        fn output_limit(&self) -> mush_agent::tool::OutputLimit {
+            mush_agent::tool::OutputLimit::Head
+        }
+        async fn execute(&self, args: Value) -> ToolResult {
+            ToolResult::text(format!(
+                "results for {} ({})",
+                args["query"].as_str().unwrap_or_default(),
+                args["num_results"]
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn websearch_runs_the_hosts_search_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = MushHost::new(dir.path().into());
+        host.set_web_search(Arc::new(CannedSearch));
+        let tool = IpythonTool::with_mush_host(host, dir.path().into());
+
+        let result = tool
+            .execute(json!({ "code": "print(await websearch('rust nightly', num_results=3))" }))
+            .await;
+
+        assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert_eq!(extract_text(&result).trim(), "results for rust nightly (3)");
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn edit_works_after_the_file_changes_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
@@ -1326,11 +1414,16 @@ mod tests {
 
         let result = tool
             .execute(json!({
-                "code": format!("attach_image({:?})", path.display().to_string())
+                "code": format!("print(await attach_image({:?}))", path.display().to_string())
             }))
             .await;
 
         assert!(result.outcome.is_success(), "{}", extract_text(&result));
+        assert!(
+            extract_text(&result).starts_with(&format!("attached {}", path.display())),
+            "{}",
+            extract_text(&result)
+        );
         let images: Vec<_> = result
             .content
             .iter()

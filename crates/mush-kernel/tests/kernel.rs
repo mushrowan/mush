@@ -876,3 +876,16 @@ async fn python_skills_are_callable_by_import_name_and_a_broken_one_explains_its
     assert_eq!(names.result.as_deref(), Some("(True, True)"));
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn child_summaries_answer_to_session_name_and_active_session_id() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute("c = ChildSummary({'name': 'auth', 'session_id': 's1'})\n(c.session_name, c.active_session_id)")
+        .await
+        .unwrap();
+
+    assert_eq!(output.result.as_deref(), Some("('auth', 's1')"));
+    kernel.shutdown().await.unwrap();
+}

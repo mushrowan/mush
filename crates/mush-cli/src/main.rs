@@ -1277,6 +1277,7 @@ struct ChildSeed {
     confirm_tools: bool,
     forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
     kernel: config::KernelConfig,
+    web_search: mush_tools::web_search::WebSearchConfig,
     kernel_packages: Vec<String>,
     cwd: std::path::PathBuf,
     discovery: mush_ext::DiscoveryOptions,
@@ -1377,6 +1378,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             let (sinks, signals) = mush_runtime::kernel_channels();
             let cfg = config::Config {
                 kernel: seed.kernel.clone(),
+                web_search: seed.web_search.clone(),
                 ..config::Config::default()
             };
             let mut project =
@@ -1495,6 +1497,7 @@ fn worker_config(
         max_turns: setup.max_turns,
         provider_api_keys: setup.client.cfg.api_keys.to_map(),
         confirm_tools: setup.client.cfg.confirm_tools,
+        web_search: setup.client.cfg.web_search.clone(),
         forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars::with_classes(
             setup.client.cfg.forbidden_chars.iter().copied(),
             setup.client.cfg.forbidden_char_classes.iter().copied(),

@@ -404,6 +404,8 @@ class ChildSummary:
         self.usage = reply.get("usage") or {}
         self.cost = reply.get("cost") or {}
         self.paused = reply.get("paused")
+        self.session_name = self.name
+        self.active_session_id = self.session_id or None
 
     @property
     def settled(self) -> bool:
@@ -758,7 +760,11 @@ refine = _Refine()
 agent_observe = _AgentObserve()
 
 
-async def edit(path: str, old: str, new: str) -> str:
+async def edit(path: str, old_str: str | None = None, new_str: str | None = None, *, old: str | None = None, new: str | None = None) -> str:
+    old = old_str if old is None else old
+    new = new_str if new is None else new
+    if old is None or new is None:
+        raise TypeError("edit() needs old_str and new_str")
     payload = {"path": os.path.abspath(os.path.expanduser(os.fspath(path))), "old": old, "new": new}
     if _current_origin.get() is not None:
         payload["origin"] = _current_origin.get()
@@ -792,6 +798,12 @@ def display(data: dict) -> None:
     emit({"type": "display", "id": _current_cell.get(), "data": data})
 
 
+class _Text(str):
+    def __await__(self):
+        return str(self)
+        yield
+
+
 def attach_image(*paths: str) -> str:
     if not paths:
         raise TypeError("attach_image() needs at least one path")
@@ -810,7 +822,15 @@ def attach_image(*paths: str) -> str:
             raise ValueError(f"{path} is not a png, jpeg, gif or webp image")
         display({_ATTACHMENT_MIME: {"mime_type": mime, "data": base64.b64encode(data).decode("ascii"), "path": resolved}})
         attached.append(resolved)
-    return "attached " + ", ".join(attached)
+    return _Text("attached " + ", ".join(attached))
+
+
+async def websearch(query: str, num_results: int | None = None) -> str:
+    payload = {"query": query}
+    if num_results is not None:
+        payload["num_results"] = num_results
+    reply = await host_request("websearch", payload)
+    return str(reply.get("text", ""))
 
 
 def _install_preload() -> None:
@@ -823,6 +843,7 @@ def _install_preload() -> None:
             "edit": edit,
             "display": display,
             "attach_image": attach_image,
+            "websearch": websearch,
             "host_request": host_request,
             "BashResult": BashResult,
             "BashHandle": BashHandle,

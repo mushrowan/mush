@@ -117,6 +117,12 @@ pub fn build_ipython_tool(
     if let Some(sink) = sinks.notices {
         host.jobs().set_notice_sink(sink);
     }
+    host.set_web_search(Arc::new(
+        mush_tools::web_search::WebSearchTool::with_config(
+            mush_ai::http::client(),
+            &cfg.web_search,
+        ),
+    ));
     let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
     let python_skills = python_skills(skills);
     let config = ipython.kernel_config_mut();
