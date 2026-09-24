@@ -1,4 +1,4 @@
-use mush_session::harness::{Action, Kind, RefinementResult};
+use mush_session::harness::{Kind, RefinementResult};
 
 fn plural(kind: Kind, count: usize) -> String {
     match (kind, count) {
@@ -6,14 +6,6 @@ fn plural(kind: Kind, count: usize) -> String {
         (Kind::Memory, _) => "memories".into(),
         (kind, 1) => kind.as_str().into(),
         (kind, _) => format!("{}s", kind.as_str()),
-    }
-}
-
-fn past(action: Action) -> &'static str {
-    match action {
-        Action::Create => "created",
-        Action::Update => "updated",
-        Action::Delete => "deleted",
     }
 }
 
@@ -53,7 +45,7 @@ fn headline(result: &RefinementResult) -> String {
             .iter()
             .all(|edit| edit.edit.action == first.edit.action)
         {
-            past(first.edit.action)
+            first.edit.action.past_tense()
         } else {
             "changed"
         };

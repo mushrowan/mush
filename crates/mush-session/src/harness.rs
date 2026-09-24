@@ -77,6 +77,15 @@ impl Action {
             Self::Delete => "delete",
         }
     }
+
+    #[must_use]
+    pub const fn past_tense(self) -> &'static str {
+        match self {
+            Self::Create => "created",
+            Self::Update => "updated",
+            Self::Delete => "deleted",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1346,12 +1355,15 @@ impl RefinementResult {
 
     #[must_use]
     pub fn notice(&self) -> String {
-        let mut lines = vec![compact(&self.summary, OVERVIEW_CONTENT_CHARS)];
+        let mut lines = vec![
+            "these harness edits are already applied, nothing to do".to_string(),
+            format!("summary: {}", compact(&self.summary, OVERVIEW_CONTENT_CHARS)),
+        ];
         for edit in self.applied_edits.iter().filter(|edit| edit.applied) {
             let entry = edit.after.as_ref().or(edit.before.as_ref());
             lines.push(format!(
                 "- {} {} [{}:{}] {}: {}",
-                edit.edit.action.as_str(),
+                edit.edit.action.past_tense(),
                 edit.edit.kind.as_str(),
                 entry.map_or(self.scope, |e| e.scope).as_str(),
                 edit.id,

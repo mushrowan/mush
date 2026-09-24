@@ -921,7 +921,7 @@ mod tests {
         };
         assert_eq!(
             notice.text(),
-            "[self-refinement]\n\nremember the port\n- create memory [local:port] port: 8080"
+            "[self-refinement]\n\nthese harness edits are already applied, nothing to do\nsummary: remember the port\n- created memory [local:port] port: 8080"
         );
         assert!(crate::harness::is_refinement_notice(&notice.text()));
 

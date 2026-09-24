@@ -2336,7 +2336,7 @@ mod tests {
         let turn = requests.lock().unwrap()[1].messages.clone();
         assert_eq!(turn.len(), 4);
         assert!(
-            matches!(&turn[1], Message::User(u) if u.text() == "[user-refinement]\n\nremember the runner\n- create memory [local:test_runner] test runner: cargo nextest run"),
+            matches!(&turn[1], Message::User(u) if u.text() == "[user-refinement]\n\nthese harness edits are already applied, nothing to do\nsummary: remember the runner\n- created memory [local:test_runner] test runner: cargo nextest run"),
             "{turn:?}"
         );
         let Message::User(digest) = &turn[2] else {
@@ -2408,7 +2408,7 @@ mod tests {
         let turn = requests.lock().unwrap()[2].messages.clone();
         assert!(!turn.iter().any(is_digest), "{turn:?}");
         assert!(
-            matches!(&turn[turn.len() - 2], Message::User(u) if u.text().starts_with("[user-refinement]\n\nremember the runner")),
+            matches!(&turn[turn.len() - 2], Message::User(u) if u.text().starts_with("[user-refinement]\n\nthese harness edits are already applied")),
             "{turn:?}"
         );
 
