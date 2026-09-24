@@ -50,6 +50,20 @@ pub struct Skill {
     pub path: PathBuf,
     pub source: SkillSource,
     pub disable_model_invocation: bool,
+    pub python: Option<PythonSkill>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonSkill {
+    pub import_name: String,
+    pub package_dir: PathBuf,
+}
+
+impl PythonSkill {
+    #[must_use]
+    pub fn pyproject(&self) -> PathBuf {
+        self.package_dir.join("pyproject.toml")
+    }
 }
 
 fn resolve_config_dir() -> Option<PathBuf> {
@@ -163,6 +177,7 @@ pub fn parse_skills_from_agents_md(content: &str) -> Vec<Skill> {
                 path: PathBuf::from(location),
                 source: SkillSource::AgentsMd,
                 disable_model_invocation: false,
+                python: None,
             });
         }
 

@@ -90,6 +90,31 @@ pub struct ManagedVenv {
     pub dir: PathBuf,
     pub python_version: String,
     pub packages: Vec<String>,
+    pub skills: Vec<SkillPackage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillPackage {
+    pub import_name: String,
+    pub dir: PathBuf,
+}
+
+impl SkillPackage {
+    fn installed(&self) -> Option<InstalledSkill> {
+        let pyproject = std::fs::read(self.dir.join("pyproject.toml")).ok()?;
+        Some(InstalledSkill {
+            import_name: self.import_name.clone(),
+            dir: self.dir.clone(),
+            pyproject_sha256: sha256_hex(&pyproject),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InstalledSkill {
+    import_name: String,
+    dir: PathBuf,
+    pyproject_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +122,16 @@ struct Marker {
     schema: u32,
     python_version: String,
     packages: Vec<String>,
+    #[serde(default)]
+    skills: Vec<InstalledSkill>,
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl ManagedVenv {
@@ -109,6 +144,7 @@ impl ManagedVenv {
                 .iter()
                 .map(|package| package.spec.to_string())
                 .collect(),
+            skills: Vec::new(),
         }
     }
 
@@ -131,7 +167,7 @@ impl ManagedVenv {
         self.dir.with_file_name(name)
     }
 
-    fn marker(&self) -> Marker {
+    fn base_marker(&self) -> Marker {
         let mut packages = self.packages.clone();
         packages.sort();
         packages.dedup();
@@ -139,16 +175,47 @@ impl ManagedVenv {
             schema: MARKER_SCHEMA,
             python_version: self.python_version.clone(),
             packages,
+            skills: Vec::new(),
         }
+    }
+
+    fn read_marker(&self) -> Option<Marker> {
+        std::fs::read_to_string(self.dir.join(MARKER_FILE))
+            .ok()
+            .and_then(|json| serde_json::from_str::<Marker>(&json).ok())
+    }
+
+    fn write_marker(&self, marker: &Marker) -> Result<(), KernelError> {
+        std::fs::write(
+            self.dir.join(MARKER_FILE),
+            serde_json::to_string_pretty(marker)?,
+        )?;
+        Ok(())
+    }
+
+    fn base_current(&self, marker: Option<&Marker>) -> bool {
+        let expected = self.base_marker();
+        self.python_path().is_file()
+            && marker.is_some_and(|marker| {
+                marker.schema == expected.schema
+                    && marker.python_version == expected.python_version
+                    && marker.packages == expected.packages
+            })
+    }
+
+    fn stale_skills(&self, marker: Option<&Marker>) -> Vec<(&SkillPackage, InstalledSkill)> {
+        let installed = marker.map_or(&[][..], |marker| &marker.skills[..]);
+        self.skills
+            .iter()
+            .filter_map(|skill| Some((skill, skill.installed()?)))
+            .filter(|(_, wanted)| !installed.contains(wanted))
+            .collect()
     }
 
     #[must_use]
     pub fn is_current(&self) -> bool {
-        self.python_path().is_file()
-            && std::fs::read_to_string(self.dir.join(MARKER_FILE))
-                .ok()
-                .and_then(|json| serde_json::from_str::<Marker>(&json).ok())
-                .is_some_and(|marker| marker == self.marker())
+        let marker = self.read_marker();
+        self.base_current(marker.as_ref()) && self.stale_skills(marker.as_ref()).is_empty()
     }
 
     pub async fn ensure(&self, progress: &(dyn Fn(&str) + Sync)) -> Result<PathBuf, KernelError> {
@@ -160,16 +227,56 @@ impl ManagedVenv {
             std::fs::create_dir_all(parent)?;
         }
         let _lock = BootstrapLock::acquire(&self.lock_dir()).await?;
-        if self.is_current() {
-            return Ok(self.python_path());
+        let mut marker = self.read_marker();
+        if !self.base_current(marker.as_ref()) {
+            self.bootstrap(&uv, progress).await?;
+            let mut fresh = self.base_marker();
+            fresh.skills = marker.map(|old| old.skills).unwrap_or_default();
+            self.write_marker(&fresh)?;
+            marker = Some(fresh);
         }
+        let mut marker = marker.unwrap_or_else(|| self.base_marker());
+        let python = self.python_path().to_string_lossy().into_owned();
+        for (skill, wanted) in self.stale_skills(Some(&marker)) {
+            progress(&format!("installing python skill {}", skill.import_name));
+            let dir = skill.dir.to_string_lossy().into_owned();
+            let args = [
+                "pip",
+                "install",
+                "--quiet",
+                "--python",
+                &python,
+                "--editable",
+                &dir,
+            ];
+            if let Err(error) = run(&uv, &args, &self.dir).await {
+                progress(&format!(
+                    "python skill {} failed to install and is unavailable: {error}",
+                    skill.import_name
+                ));
+                continue;
+            }
+            marker
+                .skills
+                .retain(|installed| installed.import_name != wanted.import_name);
+            marker.skills.push(wanted);
+            self.write_marker(&marker)?;
+        }
+        Ok(self.python_path())
+    }
+
+    async fn bootstrap(
+        &self,
+        uv: &Path,
+        progress: &(dyn Fn(&str) + Sync),
+    ) -> Result<(), KernelError> {
         if !self.python_path().is_file() {
             progress(&format!(
                 "setting up the kernel's python {} in {}",
                 self.python_version,
                 self.dir.display()
             ));
-            run(&uv, &["venv", "--python", &self.python_version], &self.dir).await?;
+            run(uv, &["venv", "--python", &self.python_version], &self.dir).await?;
         }
         if !self.packages.is_empty() {
             progress(&format!(
@@ -181,13 +288,9 @@ impl ManagedVenv {
             let python_str = python.to_string_lossy().into_owned();
             args.push(&python_str);
             args.extend(self.packages.iter().map(String::as_str));
-            run(&uv, &args, &self.dir).await?;
+            run(uv, &args, &self.dir).await?;
         }
-        std::fs::write(
-            self.dir.join(MARKER_FILE),
-            serde_json::to_string_pretty(&self.marker())?,
-        )?;
-        Ok(self.python_path())
+        Ok(())
     }
 }
 
@@ -301,7 +404,7 @@ mod tests {
 
         std::fs::write(
             venv.dir.join(MARKER_FILE),
-            serde_json::to_string(&venv.marker()).unwrap(),
+            serde_json::to_string(&venv.base_marker()).unwrap(),
         )
         .unwrap();
         assert!(venv.is_current());
@@ -309,6 +412,63 @@ mod tests {
         let mut more = venv.clone();
         more.packages.push("polars".into());
         assert!(!more.is_current());
+    }
+
+    #[test]
+    fn a_skill_is_stale_until_the_marker_holds_its_pyproject_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("word-count");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("pyproject.toml"),
+            "[project]\nname = \"a\"\n",
+        )
+        .unwrap();
+        let mut venv = ManagedVenv::at(dir.path().join("venv"));
+        venv.skills.push(SkillPackage {
+            import_name: "word_count".into(),
+            dir: skill_dir.clone(),
+        });
+        std::fs::create_dir_all(venv.python_path().parent().unwrap()).unwrap();
+        std::fs::write(venv.python_path(), "").unwrap();
+        let mut marker = venv.base_marker();
+        venv.write_marker(&marker).unwrap();
+        assert!(!venv.is_current());
+
+        marker.skills.push(venv.skills[0].installed().unwrap());
+        venv.write_marker(&marker).unwrap();
+        assert!(venv.is_current());
+
+        std::fs::write(
+            skill_dir.join("pyproject.toml"),
+            "[project]\nname = \"b\"\n",
+        )
+        .unwrap();
+        assert!(!venv.is_current());
+
+        std::fs::remove_file(skill_dir.join("pyproject.toml")).unwrap();
+        assert!(venv.is_current());
+    }
+
+    #[test]
+    fn a_marker_from_before_skills_still_counts_as_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv = ManagedVenv::at(dir.path().join("venv"));
+        std::fs::create_dir_all(venv.python_path().parent().unwrap()).unwrap();
+        std::fs::write(venv.python_path(), "").unwrap();
+        let marker = venv.base_marker();
+        std::fs::write(
+            venv.dir.join(MARKER_FILE),
+            serde_json::json!({
+                "schema": marker.schema,
+                "python_version": marker.python_version,
+                "packages": marker.packages,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(venv.is_current());
     }
 
     #[tokio::test]
@@ -319,7 +479,7 @@ mod tests {
         std::fs::write(venv.python_path(), "").unwrap();
         std::fs::write(
             venv.dir.join(MARKER_FILE),
-            serde_json::to_string(&venv.marker()).unwrap(),
+            serde_json::to_string(&venv.base_marker()).unwrap(),
         )
         .unwrap();
 

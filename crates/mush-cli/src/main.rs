@@ -1379,9 +1379,13 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 kernel: seed.kernel.clone(),
                 ..config::Config::default()
             };
+            let mut project =
+                mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
+            seed.prompt_overrides.apply(&mut project);
             let ipython = std::sync::Arc::new(setup::build_ipython_tool(
                 &cfg,
                 &seed.cwd,
+                &project.skills,
                 setup::KernelSinks {
                     output: Some(sinks.output),
                     notices: Some(sinks.notices),
@@ -1411,13 +1415,8 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             let max_depth = family.max_depth();
             let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth)
                 .spawned_by(parent_agent_name(&spec, &seed.session_dir));
-            let system_prompt = rlm_system_prompt(
-                &seed.cwd,
-                &seed.discovery,
-                &seed.prompt_overrides,
-                &seed.kernel_packages,
-                &role,
-            );
+            let system_prompt =
+                setup::build_rlm_system_prompt(&project, &seed.cwd, &seed.kernel_packages, &role);
             let mut worker = mush_runtime::WorkerConfig::new(turn_config(
                 &seed,
                 &session.meta.id,

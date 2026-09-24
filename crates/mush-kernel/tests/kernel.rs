@@ -689,6 +689,7 @@ async fn a_managed_venv_is_bootstrapped_with_uv_and_hosts_a_kernel() {
         dir: dir.path().join("kernel-venv"),
         python_version: mush_kernel::venv::PYTHON_VERSION.into(),
         packages: vec!["tomli".into()],
+        skills: Vec::new(),
     };
     let seen = std::sync::Mutex::new(Vec::new());
     let kernel = Kernel::start_with_progress(
@@ -815,4 +816,63 @@ async fn a_kernel_whose_owner_died_exits_even_with_a_busy_cell() {
 
     assert!(exited.is_ok(), "the kernel outlived its owner");
     drop(stdin);
+}
+
+#[tokio::test]
+async fn python_skills_are_callable_by_import_name_and_a_broken_one_explains_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("word_count");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("__init__.py"),
+        "from collections import Counter\n\nasync def run(text: str, top: int = 5) -> str:\n    \"\"\"Count words.\"\"\"\n    return ' '.join(w for w, _ in Counter(text.split()).most_common(top))\n",
+    )
+    .unwrap();
+    let helper = dir.path().join("plain_helper");
+    std::fs::create_dir_all(&helper).unwrap();
+    std::fs::write(helper.join("__init__.py"), "VALUE = 3\n").unwrap();
+    let kernel = Kernel::start(
+        KernelConfig {
+            env: vec![(
+                "PYTHONPATH".into(),
+                dir.path().to_string_lossy().into_owned(),
+            )],
+            skills: vec![
+                "word_count".into(),
+                "plain_helper".into(),
+                "not_installed_skill".into(),
+            ],
+            ..KernelConfig::default()
+        },
+        Arc::new(NoHost),
+    )
+    .await
+    .unwrap();
+
+    let called = kernel
+        .execute("(await word_count('a b a', top=1), await word_count.run('b b a', top=1), word_count.__doc__)")
+        .await
+        .unwrap();
+    let plain = kernel.execute("plain_helper.VALUE").await.unwrap();
+    let broken = kernel
+        .execute("await not_installed_skill('x')")
+        .await
+        .unwrap();
+    let names = kernel
+        .execute("import rlm\ncallable(rlm.spawn), rlm.host_request is host_request")
+        .await
+        .unwrap();
+
+    assert_eq!(called.result.as_deref(), Some("('a', 'b', 'Count words.')"));
+    assert_eq!(plain.result.as_deref(), Some("3"));
+    let error = broken.error.unwrap();
+    assert_eq!(error.ename, "RuntimeError");
+    assert!(
+        error.evalue.contains("not_installed_skill")
+            && error.evalue.contains("ModuleNotFoundError"),
+        "{}",
+        error.evalue
+    );
+    assert_eq!(names.result.as_deref(), Some("(True, True)"));
+    kernel.shutdown().await.unwrap();
 }

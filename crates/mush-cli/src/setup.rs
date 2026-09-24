@@ -95,9 +95,17 @@ fn managed_venv(cfg: &config::Config) -> Option<mush_kernel::ManagedVenv> {
     })
 }
 
+fn python_skills(discovered: &[loader::Skill]) -> Vec<loader::PythonSkill> {
+    crate::bundled_skills::with_discovered(discovered, &crate::bundled_skills::root())
+        .into_iter()
+        .filter_map(|skill| skill.python)
+        .collect()
+}
+
 pub fn build_ipython_tool(
     cfg: &config::Config,
     cwd: &std::path::Path,
+    skills: &[loader::Skill],
     sinks: KernelSinks,
     orphans: Option<mush_tools::orphans::OrphanJournal>,
 ) -> mush_tools::ipython::IpythonTool {
@@ -110,8 +118,23 @@ pub fn build_ipython_tool(
         host.jobs().set_notice_sink(sink);
     }
     let mut ipython = mush_tools::ipython::IpythonTool::with_mush_host(host, cwd_arc);
-    ipython.kernel_config_mut().python = cfg.kernel.python.clone();
-    ipython.kernel_config_mut().managed_venv = managed_venv(cfg);
+    let python_skills = python_skills(skills);
+    let config = ipython.kernel_config_mut();
+    config.python = cfg.kernel.python.clone();
+    config.skills = python_skills
+        .iter()
+        .map(|skill| skill.import_name.clone())
+        .collect();
+    config.managed_venv = managed_venv(cfg).map(|mut venv| {
+        venv.skills = python_skills
+            .into_iter()
+            .map(|skill| mush_kernel::SkillPackage {
+                import_name: skill.import_name,
+                dir: skill.package_dir,
+            })
+            .collect();
+        venv
+    });
     if let Some(sink) = sinks.output {
         ipython = ipython.with_output_sink(sink);
     }
@@ -254,6 +277,7 @@ impl AppSetup {
             let ipython = Arc::new(build_ipython_tool(
                 cfg,
                 cwd,
+                &project_context.skills,
                 KernelSinks {
                     output: args.output_sink.clone(),
                     notices: args.kernel_notice_sink.clone(),
@@ -523,7 +547,7 @@ pub fn format_error(error: &str) -> String {
     }
 }
 
-fn format_available_skills(skills: &[loader::Skill]) -> String {
+fn format_available_skills(skills: &[loader::Skill], kernel: bool) -> String {
     let mut skills: Vec<&loader::Skill> = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
@@ -534,6 +558,18 @@ fn format_available_skills(skills: &[loader::Skill]) -> String {
     for skill in skills {
         out.push_str("  <skill>\n");
         out.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
+        if kernel {
+            match &skill.python {
+                Some(python) => {
+                    out.push_str("    <type>python</type>\n");
+                    out.push_str(&format!(
+                        "    <python_import>{}</python_import>\n",
+                        escape_xml(&python.import_name)
+                    ));
+                }
+                None => out.push_str("    <type>markdown</type>\n"),
+            }
+        }
         out.push_str(&format!(
             "    <description>{}</description>\n",
             escape_xml(&skill.description)
@@ -822,9 +858,11 @@ pub fn build_rlm_system_prompt(
             "\n\nSkills provide specialised instructions for specific tasks. When a task matches a \
              skill's description, read its SKILL.md with `Path(location).read_text()` before \
              acting, and resolve relative paths in it against the skill's directory. If the user \
-             names a skill with `$skill-name`, read it first.\n\n",
+             names a skill with `$skill-name`, read it first. Skills with a python_import are \
+             prepared in the persistent Python kernel when available and can be called directly \
+             by that import name.\n\n",
         );
-        prompt.push_str(&format_available_skills(&skills));
+        prompt.push_str(&format_available_skills(&skills, true));
     }
     if custom.is_some() {
         push_date_and_cwd(&mut prompt, &cwd_str);
@@ -856,7 +894,7 @@ pub fn build_system_prompt_from_context(
              Use the skill tool to load a skill when a task matches its description. \
              If the user explicitly names a skill with `$skill-name`, load that skill before answering.\n\n",
         );
-        prompt.push_str(&format_available_skills(&context.skills));
+        prompt.push_str(&format_available_skills(&context.skills, false));
     }
     if context.system_prompt.is_some() {
         push_date_and_cwd(&mut prompt, &cwd_str);
@@ -1299,6 +1337,7 @@ mod tests {
                 path: "/home/u/.config/mush/skills/nix/SKILL.md".into(),
                 source: mush_ext::SkillSource::User,
                 disable_model_invocation: false,
+                python: None,
             }],
             skill_diagnostics: vec![],
             system_prompt: None,
@@ -1355,6 +1394,7 @@ mod tests {
                 path: "/repo/.mush/skills/goal/SKILL.md".into(),
                 source: mush_ext::SkillSource::Project,
                 disable_model_invocation: false,
+                python: None,
             }],
             ..ProjectContext::default()
         };
@@ -1528,6 +1568,7 @@ mod tests {
                 path: "/skills/nix/SKILL.md".into(),
                 source: mush_ext::SkillSource::User,
                 disable_model_invocation: false,
+                python: None,
             }],
             append_system_prompt: Some(mush_ext::PromptFile {
                 path: "/repo/.mush/APPEND_SYSTEM.md".into(),
@@ -1588,6 +1629,7 @@ mod tests {
                 path: "/tmp/secret/SKILL.md".into(),
                 source: mush_ext::SkillSource::User,
                 disable_model_invocation: true,
+                python: None,
             }],
             skill_diagnostics: vec![],
             system_prompt: None,
@@ -1676,6 +1718,7 @@ mod tests {
                     path: "/tmp/zeta/SKILL.md".into(),
                     source: mush_ext::SkillSource::User,
                     disable_model_invocation: false,
+                    python: None,
                 },
                 Skill {
                     name: "alpha".into(),
@@ -1683,6 +1726,7 @@ mod tests {
                     path: "/tmp/alpha/SKILL.md".into(),
                     source: mush_ext::SkillSource::User,
                     disable_model_invocation: false,
+                    python: None,
                 },
             ],
             skill_diagnostics: vec![],
@@ -1705,6 +1749,41 @@ mod tests {
     }
 
     #[test]
+    fn the_kernel_listing_names_each_skill_type_and_python_import() {
+        let skills = [
+            Skill {
+                name: "word-count".into(),
+                description: "count words".into(),
+                path: "/s/word-count/SKILL.md".into(),
+                source: mush_ext::SkillSource::User,
+                disable_model_invocation: false,
+                python: Some(mush_ext::PythonSkill {
+                    import_name: "word_count".into(),
+                    package_dir: "/s/word-count".into(),
+                }),
+            },
+            Skill {
+                name: "notes".into(),
+                description: "take notes".into(),
+                path: "/s/notes/SKILL.md".into(),
+                source: mush_ext::SkillSource::User,
+                disable_model_invocation: false,
+                python: None,
+            },
+        ];
+
+        let kernel = format_available_skills(&skills, true);
+        let classic = format_available_skills(&skills, false);
+
+        assert!(kernel.contains(
+            "<name>word-count</name>\n    <type>python</type>\n    <python_import>word_count</python_import>\n"
+        ));
+        assert!(kernel.contains("<name>notes</name>\n    <type>markdown</type>\n"));
+        assert!(!classic.contains("<type>"));
+        assert!(!classic.contains("python_import"));
+    }
+
+    #[test]
     fn skill_fields_are_xml_escaped() {
         let skills = [Skill {
             name: "a&b".into(),
@@ -1712,9 +1791,10 @@ mod tests {
             path: "/tmp/a&b/SKILL.md".into(),
             source: mush_ext::SkillSource::User,
             disable_model_invocation: false,
+            python: None,
         }];
 
-        let block = format_available_skills(&skills);
+        let block = format_available_skills(&skills, false);
 
         assert!(block.contains("<name>a&amp;b</name>"));
         assert!(block.contains(

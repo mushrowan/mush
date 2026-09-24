@@ -94,6 +94,7 @@ mod tests {
             path: "/home/u/.config/mush/skills/goal/SKILL.md".into(),
             source: SkillSource::User,
             disable_model_invocation: false,
+            python: None,
         };
 
         let merged = with_discovered(std::slice::from_ref(&user_goal), Path::new("/bundled"));

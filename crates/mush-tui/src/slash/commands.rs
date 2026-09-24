@@ -1513,6 +1513,7 @@ mod tests {
                     path: "/home/u/.config/mush/skills/nix/SKILL.md".into(),
                     source: mush_ext::SkillSource::User,
                     disable_model_invocation: false,
+                    python: None,
                 },
                 mush_ext::Skill {
                     name: "deploy".into(),
@@ -1520,6 +1521,7 @@ mod tests {
                     path: "/repo/.mush/skills/deploy/SKILL.md".into(),
                     source: mush_ext::SkillSource::Project,
                     disable_model_invocation: true,
+                    python: None,
                 },
             ],
             diagnostics: vec![mush_ext::SkillDiagnostic {
@@ -1558,6 +1560,7 @@ mod tests {
             path,
             source: mush_ext::SkillSource::User,
             disable_model_invocation: false,
+            python: None,
         }
     }
 

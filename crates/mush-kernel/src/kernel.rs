@@ -26,6 +26,7 @@ pub struct KernelConfig {
     pub managed_venv: Option<crate::venv::ManagedVenv>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
+    pub skills: Vec<String>,
     pub ready_timeout: Duration,
     pub busy_wait: Duration,
 }
@@ -37,6 +38,7 @@ impl Default for KernelConfig {
             managed_venv: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
+            skills: Vec::new(),
             ready_timeout: Duration::from_secs(20),
             busy_wait: Duration::from_secs(5),
         }
@@ -222,6 +224,7 @@ impl Kernel {
             .current_dir(&config.cwd)
             .env("PYTHONUNBUFFERED", "1")
             .env("MUSH_KERNEL_OWNER_PID", std::process::id().to_string())
+            .env("MUSH_KERNEL_SKILLS", config.skills.join(","))
             .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

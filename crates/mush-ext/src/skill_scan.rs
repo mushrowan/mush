@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::loader::Skill;
+use crate::loader::{PythonSkill, Skill};
 
 pub const MAX_NAME_LENGTH: usize = 64;
 pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
@@ -181,14 +181,69 @@ pub fn parse_skill(content: &str, path: &Path, source: SkillSource) -> ScanResul
         return result;
     };
 
+    let python = if path.file_name().is_some_and(|file| file == "SKILL.md") {
+        path.parent()
+            .and_then(|dir| detect_python_skill(dir, &name, &mut result.diagnostics))
+    } else {
+        None
+    };
     result.skills.push(Skill {
         name,
         description,
         path: path.to_path_buf(),
         source,
         disable_model_invocation: frontmatter.disable_model_invocation,
+        python,
     });
     result
+}
+
+#[must_use]
+pub fn python_import_name(skill_name: &str) -> String {
+    skill_name.replace('-', "_")
+}
+
+fn is_python_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn detect_python_skill(
+    dir: &Path,
+    name: &str,
+    diagnostics: &mut Vec<SkillDiagnostic>,
+) -> Option<PythonSkill> {
+    let pyproject = dir.join("pyproject.toml");
+    if !pyproject.is_file() {
+        return None;
+    }
+    let import_name = python_import_name(name);
+    if !is_python_identifier(&import_name) {
+        diagnostics.push(SkillDiagnostic::warning(
+            &pyproject,
+            format!("python skill import name \"{import_name}\" is invalid"),
+        ));
+        return None;
+    }
+    if !dir
+        .join("src")
+        .join(&import_name)
+        .join("__init__.py")
+        .is_file()
+    {
+        diagnostics.push(SkillDiagnostic::warning(
+            &pyproject,
+            format!("python skill package src/{import_name}/__init__.py not found"),
+        ));
+        return None;
+    }
+    Some(PythonSkill {
+        import_name,
+        package_dir: dir.to_path_buf(),
+    })
 }
 
 fn parent_holds_skill_md(entry: &ignore::DirEntry) -> bool {
@@ -324,6 +379,53 @@ mod tests {
 
         assert!(result.skills.is_empty());
         assert_eq!(warnings(&result), ["description is required"]);
+    }
+
+    #[test]
+    fn a_pyproject_with_a_src_package_makes_a_python_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(dir.path(), "word-count", "description: d");
+        let skill_dir = path.parent().unwrap();
+        std::fs::write(skill_dir.join("pyproject.toml"), "[project]\n").unwrap();
+        std::fs::create_dir_all(skill_dir.join("src/word_count")).unwrap();
+        std::fs::write(skill_dir.join("src/word_count/__init__.py"), "").unwrap();
+
+        let result = load_skill_file(&path, SkillSource::User);
+
+        assert!(warnings(&result).is_empty());
+        assert_eq!(
+            result.skills[0].python,
+            Some(PythonSkill {
+                import_name: "word_count".into(),
+                package_dir: skill_dir.to_path_buf(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_pyproject_without_its_package_stays_markdown_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(dir.path(), "word-count", "description: d");
+        std::fs::write(path.with_file_name("pyproject.toml"), "[project]\n").unwrap();
+
+        let result = load_skill_file(&path, SkillSource::User);
+
+        assert_eq!(result.skills[0].python, None);
+        assert_eq!(
+            warnings(&result),
+            ["python skill package src/word_count/__init__.py not found"]
+        );
+    }
+
+    #[test]
+    fn a_skill_without_a_pyproject_is_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_skill(dir.path(), "notes", "description: d");
+
+        let result = load_skill_file(&path, SkillSource::User);
+
+        assert_eq!(result.skills[0].python, None);
+        assert!(warnings(&result).is_empty());
     }
 
     #[test]

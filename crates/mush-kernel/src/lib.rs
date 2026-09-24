@@ -10,7 +10,7 @@ pub use kernel::{
 };
 pub use protocol::{Event, PROTOCOL_VERSION, Request};
 pub use python::PythonPlan;
-pub use venv::{DEFAULT_PACKAGES, ManagedVenv, Package};
+pub use venv::{DEFAULT_PACKAGES, ManagedVenv, Package, SkillPackage};
 
 #[async_trait::async_trait]
 pub trait KernelState: Send + Sync {

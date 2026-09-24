@@ -841,6 +841,69 @@ def _install_preload() -> None:
     )
 
 
+class _SkillModule(types.ModuleType):
+    async def __call__(self, *args, **kwargs):
+        result = self.run(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+
+class _BrokenSkill:
+    def __init__(self, name: str, error: BaseException) -> None:
+        self._name = name
+        self._error = f"{type(error).__name__}: {_safe_str(error)}"
+
+    def _fail(self):
+        raise RuntimeError(f"python skill {self._name} is unavailable: {self._error}")
+
+    def __call__(self, *args, **kwargs):
+        self._fail()
+
+    def __getattr__(self, attribute: str):
+        if attribute.startswith("__"):
+            raise AttributeError(attribute)
+        self._fail()
+
+    def __repr__(self) -> str:
+        return f"<unavailable python skill {self._name}: {self._error}>"
+
+
+def _load_skill(name: str):
+    try:
+        module = __import__(name)
+    except BaseException as exc:  # noqa: BLE001
+        return _BrokenSkill(name, exc)
+    run = getattr(module, "run", None)
+    if callable(run):
+        module.__class__ = _SkillModule
+        module.__doc__ = run.__doc__
+        try:
+            module.__signature__ = inspect.signature(run)
+        except (TypeError, ValueError):
+            pass
+    return module
+
+
+def _rlm_module() -> types.ModuleType:
+    module = types.ModuleType("rlm")
+    for attribute in dir(rlm):
+        if not attribute.startswith("_"):
+            setattr(module, attribute, getattr(rlm, attribute))
+    module.host_request = host_request
+    module.HostError = HostError
+    module.emit = display
+    return module
+
+
+def _install_skills() -> None:
+    sys.modules.setdefault("rlm", _rlm_module())
+    names = os.environ.get("MUSH_KERNEL_SKILLS", "")
+    for name in filter(None, names.split(",")):
+        if name.isidentifier():
+            _namespace[name] = _load_skill(name)
+
+
 def _safe_str(exc: BaseException) -> str:
     try:
         return str(exc)
@@ -1219,8 +1282,9 @@ def main() -> None:
     sys.modules["__main__"] = user_module
     _namespace = user_module.__dict__
     _install_preload()
-    _PRELOADED = frozenset(_namespace)
     _capture_fds()
+    _install_skills()
+    _PRELOADED = frozenset(_namespace)
     _start_owner_watchdog()
     signal.signal(signal.SIGINT, _on_sigint)
     asyncio.run(_serve())
