@@ -326,3 +326,51 @@ pub fn stalled_connection() -> (InProcessConnection, Arc<tokio::sync::Notify>) {
     );
     (connection, release)
 }
+
+#[cfg(test)]
+static DIRS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+pub struct IsolatedDirs {
+    pub data: tempfile::TempDir,
+    pub config: tempfile::TempDir,
+    previous: [(&'static str, Option<std::ffi::OsString>); 2],
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl IsolatedDirs {
+    pub async fn acquire() -> Self {
+        let lock = DIRS_LOCK.lock().await;
+        let data = tempfile::tempdir().unwrap_or_else(|error| panic!("data tempdir: {error}"));
+        let config = tempfile::tempdir().unwrap_or_else(|error| panic!("config tempdir: {error}"));
+        let previous = [
+            ("MUSH_DATA_DIR", std::env::var_os("MUSH_DATA_DIR")),
+            ("MUSH_CONFIG_DIR", std::env::var_os("MUSH_CONFIG_DIR")),
+        ];
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", data.path());
+            std::env::set_var("MUSH_CONFIG_DIR", config.path());
+        }
+        Self {
+            data,
+            config,
+            previous,
+            _lock: lock,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for IsolatedDirs {
+    fn drop(&mut self) {
+        for (key, value) in &self.previous {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}

@@ -2221,15 +2221,6 @@ mod tests {
         )
     }
 
-    fn shared_data_dir() {
-        static DATA: std::sync::LazyLock<tempfile::TempDir> = std::sync::LazyLock::new(|| {
-            let dir = tempfile::tempdir().unwrap();
-            unsafe { std::env::set_var("MUSH_DATA_DIR", dir.path()) };
-            dir
-        });
-        std::sync::LazyLock::force(&DATA);
-    }
-
     fn connection_replying(reply: &str) -> (InProcessConnection, crate::testing::Requests) {
         let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
         let mut registry = ApiRegistry::new();
@@ -2289,7 +2280,7 @@ mod tests {
 
     #[tokio::test]
     async fn refine_applies_the_planned_edits_and_the_next_turn_carries_the_digest() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) = connection_replying(
             "{\"summary\":\"remember the runner\",\"rationale\":\"seen twice\",\"expectedOutcome\":\"fewer misses\",\"edits\":[{\"action\":\"create\",\"kind\":\"memory\",\"title\":\"test runner\",\"content\":\"cargo nextest run\"}]}",
         );
@@ -2384,7 +2375,7 @@ mod tests {
     #[tokio::test]
     async fn a_mid_session_refine_reaches_the_model_as_a_notice_and_the_digest_waits_for_a_cold_boundary()
      {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) = connection_replying(
             "{\"summary\":\"remember the runner\",\"edits\":[{\"action\":\"create\",\"kind\":\"memory\",\"title\":\"test runner\",\"content\":\"cargo nextest run\"}]}",
         );
@@ -2421,7 +2412,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_turn_after_a_compaction_carries_the_digest_again() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) = connection();
         connection.runtime.saver = Some(Arc::new(|_| {}));
         let mut state = mush_session::harness::State::default();
@@ -2466,7 +2457,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refine_that_returns_no_json_fails_without_touching_the_harness() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, _) = connection_replying("i have nothing to add");
         connection.runtime.saver = Some(Arc::new(|_| {}));
 
@@ -2489,7 +2480,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_refine_reviews_after_the_interval_and_refines_when_approved() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));
@@ -2554,7 +2545,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_subagent_never_runs_the_auto_refine_review() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));
@@ -2584,7 +2575,7 @@ mod tests {
 
     #[tokio::test]
     async fn auto_refine_stays_quiet_when_disabled() {
-        shared_data_dir();
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let (mut connection, requests) =
             connection_replying("{\"shouldRefine\": true, \"rationale\": \"worth keeping\"}");
         connection.runtime.saver = Some(Arc::new(|_| {}));
@@ -3757,8 +3748,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_resumed_kernel_names_what_came_back_once_before_the_first_request() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let kernel = restoring_kernel(Ok(mush_kernel::RestoreReport {
             restored: vec!["df".into(), "helper".into()],
             failed: vec!["sock".into()],
@@ -3799,8 +3789,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_resume_restore_tells_the_model_the_kernel_starts_fresh() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let kernel = restoring_kernel(Err("kernel exited".into()));
         let (mut connection, requests) = resumed_worker(&kernel, true);
 
@@ -3821,8 +3810,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_resume_without_a_snapshot_starts_at_once_with_no_notice() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let kernel = restoring_kernel(Ok(mush_kernel::RestoreReport::default()));
         let (mut connection, requests) = resumed_worker(&kernel, false);
 
@@ -4593,9 +4581,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_session_account_is_checked_against_the_logins_and_saved() {
-        let config = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("MUSH_CONFIG_DIR");
-        unsafe { std::env::set_var("MUSH_CONFIG_DIR", config.path()) };
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let work = mush_ai::types::AccountLabel::parse("work").unwrap();
         let (mut connection, _requests) = connection();
 
@@ -4639,11 +4625,6 @@ mod tests {
             connection.runtime.snapshot().accounts.get("anthropic"),
             Some(&work)
         );
-
-        match previous {
-            Some(dir) => unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir) },
-            None => unsafe { std::env::remove_var("MUSH_CONFIG_DIR") },
-        }
     }
 
     #[tokio::test]

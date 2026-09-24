@@ -904,8 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn resuming_a_session_with_a_snapshot_restores_its_kernel_in_the_background() {
-        let data = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MUSH_DATA_DIR", data.path()) };
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let saved = mush_session::Session::new("model", "/tmp");
         SessionStore::new(SessionStore::default_dir())
             .save(&saved)
