@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use crate::app::{App, ChatDetail, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
+use crate::soft_wrap::{self, Break};
 use crate::widgets::shimmer::shimmer_spans;
 use std::cell::Ref;
 
@@ -568,11 +569,15 @@ fn render_user_message_box(
         ]));
     }
     for line in msg.content.lines() {
-        for wrapped in wrap_text(line, content_width) {
+        for (wrapped, after) in wrap_rows(line, content_width) {
             let pad = content_width.saturating_sub(text_cell_width(&wrapped));
             let indent = " ".repeat(USER_PAD);
             let trailing = " ".repeat(pad + USER_PAD);
-            lines.push(Line::styled(format!("{indent}{wrapped}{trailing}"), bg));
+            let row = Line::styled(format!("{indent}{wrapped}{trailing}"), bg);
+            lines.push(match after {
+                Some(after) => soft_wrap::continuation(row, after),
+                None => row,
+            });
         }
     }
     lines.push(blank());
@@ -1006,13 +1011,18 @@ fn push_box_content_line(
     style: Style,
     lines: &mut Vec<Line<'static>>,
 ) {
-    for wrapped in wrap_text(text, inner_width) {
+    for (wrapped, after) in wrap_rows(text, inner_width) {
         push_panel_line(
             vec![Span::styled(wrapped, style)],
             inner_width + PANEL_PAD * 2,
             bg,
             lines,
         );
+        if let Some(after) = after
+            && let Some(row) = lines.pop()
+        {
+            lines.push(soft_wrap::continuation(row, after));
+        }
     }
 }
 
@@ -1210,6 +1220,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         .collect();
 
     let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut breaks: Vec<Break> = Vec::new();
     let mut row: Vec<(char, Style, usize)> = Vec::new();
     let mut row_width: usize = 0;
     let mut last_space: Option<usize> = None;
@@ -1220,11 +1231,13 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
                 let tail: Vec<(char, Style, usize)> = row.drain(sp + 1..).collect();
                 let _space = row.pop();
                 rows.push(strip_row(&row));
+                breaks.push(Break::AtSpace);
                 row_width = tail.iter().map(|(_, _, w)| w).sum();
                 row = tail;
                 last_space = row.iter().rposition(|(c, _, _)| *c == ' ');
             } else {
                 rows.push(strip_row(&row));
+                breaks.push(Break::MidWord);
                 row.clear();
                 row_width = 0;
                 last_space = None;
@@ -1242,7 +1255,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     }
 
     let mut result: Vec<Line<'a>> = Vec::with_capacity(rows.len());
-    for cells in rows {
+    for (index, cells) in rows.into_iter().enumerate() {
         let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
         let mut buf = String::new();
         let mut cur_style: Option<Style> = None;
@@ -1265,7 +1278,11 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         {
             spans.push(Span::styled(buf, s));
         }
-        result.push(Line::from(spans).style(line_style));
+        let row = Line::from(spans).style(line_style);
+        result.push(match index.checked_sub(1).and_then(|i| breaks.get(i)) {
+            Some(after) => soft_wrap::continuation(row, *after),
+            None => row,
+        });
     }
 
     result
@@ -1279,25 +1296,32 @@ fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
     row[..end].iter().map(|(c, s, _)| (*c, *s)).collect()
 }
 
+#[cfg(test)]
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 || text.is_empty() {
-        return vec![text.to_string()];
-    }
-    if text_cell_width(text) <= width {
-        return vec![text.to_string()];
+    wrap_rows(text, width)
+        .into_iter()
+        .map(|(row, _)| row)
+        .collect()
+}
+
+fn wrap_rows(text: &str, width: usize) -> Vec<(String, Option<Break>)> {
+    if width == 0 || text.is_empty() || text_cell_width(text) <= width {
+        return vec![(text.to_string(), None)];
     }
 
-    let mut lines = Vec::new();
+    let mut lines: Vec<(String, Option<Break>)> = Vec::new();
     let mut current = String::new();
     let mut current_width: usize = 0;
+    let mut current_break: Option<Break> = None;
 
     for word in text.split(' ') {
         let word_width = text_cell_width(word);
 
         if word_width > width {
             if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
+                lines.push((std::mem::take(&mut current), current_break));
                 current_width = 0;
+                current_break = Some(Break::AtSpace);
             }
             let chunks = split_word_by_cell_width(word, width);
             let last_index = chunks.len().saturating_sub(1);
@@ -1306,7 +1330,8 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
                     current_width = text_cell_width(&chunk);
                     current = chunk;
                 } else {
-                    lines.push(chunk);
+                    lines.push((chunk, current_break));
+                    current_break = Some(Break::MidWord);
                 }
             }
         } else if current.is_empty() {
@@ -1317,16 +1342,17 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
             current.push_str(word);
             current_width += 1 + word_width;
         } else {
-            lines.push(std::mem::take(&mut current));
+            lines.push((std::mem::take(&mut current), current_break));
+            current_break = Some(Break::AtSpace);
             current = word.to_string();
             current_width = word_width;
         }
     }
     if !current.is_empty() {
-        lines.push(current);
+        lines.push((current, current_break));
     }
     if lines.is_empty() {
-        lines.push(String::new());
+        lines.push((String::new(), None));
     }
     lines
 }

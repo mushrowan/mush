@@ -2,9 +2,11 @@ use std::ops::RangeInclusive;
 
 use crate::app::App;
 use crate::screen::SelectionKind;
+use crate::soft_wrap::Break;
 
 pub(crate) fn text_for(
     lines: &[String],
+    breaks: &[Option<Break>],
     range: &RangeInclusive<(usize, usize)>,
     kind: SelectionKind,
 ) -> String {
@@ -26,33 +28,55 @@ pub(crate) fn text_for(
             .collect::<Vec<_>>()
             .join("\n");
     }
-    if kind == SelectionKind::Line {
-        return lines
-            .iter()
-            .take(end_line + 1)
-            .skip(start_line)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    let Some(line) = lines.get(start_line) else {
-        return String::new();
+    let pieces: Vec<(usize, String)> = if kind == SelectionKind::Line {
+        (start_line..=end_line)
+            .filter_map(|row| Some((row, lines.get(row)?.clone())))
+            .collect()
+    } else {
+        let Some(line) = lines.get(start_line) else {
+            return String::new();
+        };
+        if start_line == end_line {
+            return line
+                .chars()
+                .skip(start_column)
+                .take(end_column + 1 - start_column)
+                .collect();
+        }
+        let mut pieces = vec![(start_line, line.chars().skip(start_column).collect())];
+        for row in start_line + 1..end_line {
+            if let Some(line) = lines.get(row) {
+                pieces.push((row, line.clone()));
+            }
+        }
+        if let Some(line) = lines.get(end_line) {
+            pieces.push((end_line, line.chars().take(end_column + 1).collect()));
+        }
+        pieces
     };
-    if start_line == end_line {
-        return line
-            .chars()
-            .skip(start_column)
-            .take(end_column + 1 - start_column)
-            .collect();
+    join_rows(&pieces, breaks)
+}
+
+fn join_rows(pieces: &[(usize, String)], breaks: &[Option<Break>]) -> String {
+    let mut out = String::new();
+    for (index, (row, piece)) in pieces.iter().enumerate() {
+        if index == 0 {
+            out.push_str(piece);
+            continue;
+        }
+        match breaks.get(*row).copied().flatten() {
+            Some(after) => {
+                out.truncate(out.trim_end_matches(' ').len());
+                out.push_str(after.joiner());
+                out.push_str(piece.trim_start_matches(' '));
+            }
+            None => {
+                out.push('\n');
+                out.push_str(piece);
+            }
+        }
     }
-    let mut out: Vec<String> = vec![line.chars().skip(start_column).collect()];
-    for line in lines.iter().take(end_line).skip(start_line + 1) {
-        out.push(line.clone());
-    }
-    if let Some(line) = lines.get(end_line) {
-        out.push(line.chars().take(end_column + 1).collect());
-    }
-    out.join("\n")
+    out
 }
 
 pub(crate) fn strip_padding(text: &str) -> String {
@@ -78,8 +102,14 @@ pub(crate) fn transcript_rows(app: &App) -> Vec<String> {
 
 pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
     let range = app.viewport.selection()?;
-    let lines = transcript_rows(app);
-    let text = text_for(&lines, &range, app.viewport.selection_kind());
+    let guards = crate::widgets::message_list::transcript_guards(app, app.viewport.area().width);
+    let transcript = guards.flatten();
+    let lines: Vec<String> = transcript.iter().map(ToString::to_string).collect();
+    let breaks: Vec<Option<Break>> = transcript
+        .iter()
+        .map(|line| crate::soft_wrap::break_before(line))
+        .collect();
+    let text = text_for(&lines, &breaks, &range, app.viewport.selection_kind());
     Some(if strip_indent {
         strip_padding(&text)
     } else {
@@ -96,7 +126,7 @@ mod tests {
         let lines = vec![" abcdefg".to_string(), " uvwxyz".to_string()];
 
         assert_eq!(
-            text_for(&lines, &((0, 3)..=(1, 6)), SelectionKind::Block),
+            text_for(&lines, &[], &((0, 3)..=(1, 6)), SelectionKind::Block),
             "cdef\nwxyz"
         );
     }
@@ -110,7 +140,7 @@ mod tests {
         ];
 
         assert_eq!(
-            text_for(&lines, &((1, 4)..=(2, 4)), SelectionKind::Line),
+            text_for(&lines, &[], &((1, 4)..=(2, 4)), SelectionKind::Line),
             "   hello\n     hello"
         );
     }
@@ -124,8 +154,35 @@ mod tests {
         ];
 
         assert_eq!(
-            text_for(&lines, &((1, 0)..=(2, 9)), SelectionKind::Char),
+            text_for(&lines, &[], &((1, 0)..=(2, 9)), SelectionKind::Char),
             "   hello\n     hello"
+        );
+    }
+
+    #[test]
+    fn soft_wrapped_rows_copy_as_one_line() {
+        let lines = vec![
+            " the quick brown".to_string(),
+            " fox jumps".to_string(),
+            " supercalifrag".to_string(),
+            " ilistic".to_string(),
+            " next paragraph".to_string(),
+        ];
+        let breaks = [
+            None,
+            Some(Break::AtSpace),
+            Some(Break::AtSpace),
+            Some(Break::MidWord),
+            None,
+        ];
+
+        assert_eq!(
+            text_for(&lines, &breaks, &((0, 5)..=(4, 4)), SelectionKind::Char),
+            "quick brown fox jumps supercalifragilistic\n next"
+        );
+        assert_eq!(
+            text_for(&lines, &breaks, &((0, 0)..=(1, 0)), SelectionKind::Line),
+            " the quick brown fox jumps"
         );
     }
 
@@ -144,7 +201,7 @@ mod tests {
         let lines = vec![" world".to_string()];
 
         assert_eq!(
-            text_for(&lines, &((0, 1)..=(0, 5)), SelectionKind::Char),
+            text_for(&lines, &[], &((0, 1)..=(0, 5)), SelectionKind::Char),
             "world"
         );
     }

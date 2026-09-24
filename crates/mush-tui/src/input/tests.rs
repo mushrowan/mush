@@ -2657,3 +2657,37 @@ fn ctrl_g_asks_for_the_external_editor() {
     assert!(matches!(event, Some(AppEvent::ExternalEditor)));
     assert_eq!(app.input.text, "draft");
 }
+
+#[test]
+fn yanking_across_a_soft_wrap_copies_one_line() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages.push(crate::display_types::DisplayMessage::new(
+        crate::display_types::MessageRole::Assistant,
+        "alpha bravo charlie delta echo foxtrot golf hotel india",
+    ));
+    let area = Rect::new(0, 0, 24, 20);
+    let guards = crate::widgets::message_list::transcript_guards(&app, area.width);
+    let transcript = guards.flatten();
+    let rows: Vec<String> = transcript.iter().map(ToString::to_string).collect();
+    let last = rows.iter().rposition(|row| !row.trim().is_empty()).unwrap();
+    let first = rows.iter().position(|row| row.contains("alpha")).unwrap();
+    assert!(last > first, "the message should wrap: {rows:?}");
+    app.viewport.place(&transcript, area);
+    drop(transcript);
+    drop(guards);
+
+    app.interaction.mode = AppMode::Normal;
+    app.interaction.focus = crate::app_event::Focus::Log;
+    app.viewport.cursor_to(first);
+    handle_key(&mut app, key(KeyCode::Char('V')));
+    app.viewport.cursor_to(last);
+    let event = handle_key(&mut app, key(KeyCode::Char('y')));
+
+    match event {
+        Some(AppEvent::Copy { text }) => assert_eq!(
+            text,
+            "alpha bravo charlie delta echo foxtrot golf hotel india"
+        ),
+        other => panic!("expected a copy, got {other:?}"),
+    }
+}

@@ -33,6 +33,7 @@ pub mod session_picker;
 pub mod settings;
 pub mod slash;
 pub mod slash_menu;
+mod soft_wrap;
 pub mod streaming;
 pub mod subagents;
 pub mod syntax;
