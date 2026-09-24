@@ -16,6 +16,7 @@ insert::cycle_favourite_backward = Alt-Shift-m
 insert::cycle_thinking_level = Ctrl-t
 insert::edit_steering = Alt-k | Up | Ctrl-k
 insert::enter_search = Ctrl-f
+insert::external_editor = Ctrl-g
 insert::insert_newline = Alt-Enter | Shift-Enter | Ctrl-j
 insert::paste_image = Ctrl-v
 insert::select_all = Ctrl-a

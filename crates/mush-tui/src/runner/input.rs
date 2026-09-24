@@ -193,6 +193,10 @@ async fn handle_common_app_event(
             paste_clipboard_image(&mut session.app).await;
             Some(LoopAction::Redraw)
         }
+        AppEvent::ExternalEditor => {
+            super::external_editor::edit(&mut session.app, deps.tui_config.terminal_policy);
+            Some(LoopAction::Redraw)
+        }
         AppEvent::Copy { text } => {
             let env = crate::clipboard::Environment::detect();
             copy_to_clipboard(&mut session.app, text, &env, &mut std::io::stdout());

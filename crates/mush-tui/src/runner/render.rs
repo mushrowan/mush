@@ -20,6 +20,9 @@ pub(super) fn draw_panes(
     settings: &crate::settings::ScopedSettings,
 ) -> io::Result<()> {
     terminal.backend_mut().flush()?;
+    if session.app.render_state.force_clear.replace(false) {
+        terminal.clear()?;
+    }
     let title = terminal_title(&session.app);
     if screen.title.as_deref() != Some(title.as_str()) {
         super::terminal::set_title(&title);

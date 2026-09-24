@@ -20,6 +20,7 @@ pub enum AppEvent {
     CycleThinkingLevel,
     PasteImage,
     EditSteering,
+    ExternalEditor,
     ValidateAndSaveApiKey {
         entry_id: String,
         provider_name: String,

@@ -254,6 +254,7 @@ pub struct RenderState {
     pub stream_markdown_cache: RefCell<Option<(usize, String, Text<'static>)>>,
     pub tool_box_cache: RefCell<Vec<Option<CachedToolBoxLines>>>,
     pub status_bar_cache: RefCell<Option<CachedStatusBar>>,
+    pub force_clear: Cell<bool>,
 }
 
 impl RenderState {
@@ -265,6 +266,7 @@ impl RenderState {
             stream_markdown_cache: RefCell::new(None),
             tool_box_cache: RefCell::new(Vec::new()),
             status_bar_cache: RefCell::new(None),
+            force_clear: Cell::new(false),
         }
     }
 }

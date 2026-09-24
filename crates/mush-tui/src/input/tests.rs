@@ -2648,3 +2648,12 @@ fn up_and_down_move_between_lines_before_reaching_history() {
     handle_key(&mut app, key(KeyCode::Up));
     assert_eq!(app.input.text, "earlier");
 }
+
+#[test]
+fn ctrl_g_asks_for_the_external_editor() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.text = "draft".into();
+    let event = handle_key(&mut app, ctrl(KeyCode::Char('g')));
+    assert!(matches!(event, Some(AppEvent::ExternalEditor)));
+    assert_eq!(app.input.text, "draft");
+}

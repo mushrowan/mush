@@ -698,7 +698,7 @@ impl App {
         true
     }
 
-    fn set_input_text(&mut self, text: String) {
+    pub(crate) fn set_input_text(&mut self, text: String) {
         self.input.text = text;
         self.input.cursor = self.input.text.len();
         self.input.anchor = None;

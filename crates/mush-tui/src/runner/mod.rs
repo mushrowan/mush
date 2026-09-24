@@ -8,6 +8,7 @@ mod config;
 #[cfg(test)]
 mod control_tests;
 mod diag;
+mod external_editor;
 mod input;
 mod last_model;
 mod looping;
