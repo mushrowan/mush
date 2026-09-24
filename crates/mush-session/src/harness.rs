@@ -1223,9 +1223,11 @@ fn validate_update(edit: &Edit) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Map<String, Value>")]
 pub struct AppliedEdit {
     #[serde(flatten)]
     pub edit: Edit,
+    #[serde(rename = "entry_id")]
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<Entry>,
@@ -1234,6 +1236,41 @@ pub struct AppliedEdit {
     pub applied: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredAppliedEdit {
+    #[serde(flatten)]
+    edit: Edit,
+    #[serde(default)]
+    entry_id: Option<String>,
+    #[serde(default)]
+    before: Option<Entry>,
+    #[serde(default)]
+    after: Option<Entry>,
+    applied: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+impl TryFrom<Map<String, Value>> for AppliedEdit {
+    type Error = serde_json::Error;
+
+    fn try_from(map: Map<String, Value>) -> Result<Self, Self::Error> {
+        let stored: StoredAppliedEdit = serde_json::from_value(Value::Object(map))?;
+        let id = stored
+            .entry_id
+            .or_else(|| stored.edit.id.clone())
+            .unwrap_or_default();
+        Ok(Self {
+            edit: stored.edit,
+            id,
+            before: stored.before,
+            after: stored.after,
+            applied: stored.applied,
+            error: stored.error,
+        })
+    }
 }
 
 impl AppliedEdit {
@@ -1500,6 +1537,26 @@ mod tests {
             state.refinements[0].changes,
             vec!["create memory:always_run_nextest"]
         );
+    }
+
+    #[test]
+    fn an_applied_edit_with_an_explicit_id_round_trips() {
+        let mut state = State::default();
+        let mut edit = create(Kind::Memory, "nextest", "cargo nextest run");
+        edit.id = Some("nextest".into());
+        let result = state.apply(&proposal(vec![edit]), "ref_1", Scope::Local, None);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: RefinementResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn an_applied_edit_saved_with_a_duplicated_id_still_loads() {
+        let json = r#"{"action":"delete","kind":"memory","id":"nextest","id":"nextest","applied":true}"#;
+        let edit: AppliedEdit = serde_json::from_str(json).unwrap();
+        assert_eq!(edit.id, "nextest");
+        assert_eq!(edit.edit.id.as_deref(), Some("nextest"));
+        assert!(edit.applied);
     }
 
     #[test]
