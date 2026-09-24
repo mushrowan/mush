@@ -654,15 +654,16 @@ siblings, your children) with their status and latest progress note. \
 family member's conversation. Both are read-only. Prefer a progress note or a message over \
 reading someone else's transcript.";
 
-fn child_doctrine(name: &str, depth: u32) -> String {
-    format!(
-        "You are a child agent named `{name}` (depth {depth}), spawned by your parent agent. Task \
-         prompts from it are labelled `[task from parent]`. When the task calls for an answer, \
-         send it with `await agent_message.send(message, receiver_role=\"parent\")`; the parent \
-         only sees what you send or write to disk, never your transcript. Not every message \
-         needs a reply; finish up and go idle when you are done. For long work, report brief \
-         progress with `await rlm.progress_note('...')` (512 characters, one per ten seconds)."
-    )
+fn child_doctrine(parent: Option<&str>) -> String {
+    [
+        format!(
+            "You are a child agent spawned by {}. Task prompts are labeled `[task from parent]`.",
+            parent.unwrap_or("your parent agent")
+        ),
+        "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
+        "For long-running work, report brief progress with `await rlm.progress_note('...')` (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply.".to_string(),
+    ]
+    .join("\n")
 }
 
 fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
@@ -754,6 +755,7 @@ pub struct RlmRole {
     pub depth: u32,
     pub max_depth: u32,
     pub child_name: Option<String>,
+    pub parent_name: Option<String>,
 }
 
 impl RlmRole {
@@ -763,6 +765,7 @@ impl RlmRole {
             depth: 0,
             max_depth,
             child_name: None,
+            parent_name: None,
         }
     }
 
@@ -772,7 +775,14 @@ impl RlmRole {
             depth,
             max_depth,
             child_name: Some(name.to_string()),
+            parent_name: None,
         }
+    }
+
+    #[must_use]
+    pub fn spawned_by(mut self, parent: impl Into<String>) -> Self {
+        self.parent_name = Some(parent.into());
+        self
     }
 }
 
@@ -793,9 +803,9 @@ pub fn build_rlm_system_prompt(
         role_sections.push_str("\n\n");
         role_sections.push_str(SUBAGENTS_PROMPT);
     }
-    if let Some(name) = &role.child_name {
+    if role.child_name.is_some() {
         role_sections.push_str("\n\n");
-        role_sections.push_str(&child_doctrine(name, role.depth));
+        role_sections.push_str(&child_doctrine(role.parent_name.as_deref()));
     }
     if role.depth < role.max_depth || role.child_name.is_some() {
         role_sections.push_str("\n\n");
@@ -1374,13 +1384,26 @@ mod tests {
             &context,
             std::path::Path::new("/repo"),
             &[],
-            &RlmRole::child("auth", 2, 2),
+            &RlmRole::child("auth", 2, 2).spawned_by("planner"),
         );
 
-        assert!(prompt.contains("You are a child agent named `auth` (depth 2)"));
+        assert!(prompt.contains(
+            "You are a child agent spawned by planner. Task prompts are labeled `[task from parent]`."
+        ));
         assert!(prompt.contains("[task from parent]"));
         assert!(!prompt.contains("await rlm.spawn("));
         assert!(prompt.contains("await agent_observe.list_agents()"));
+    }
+
+    #[test]
+    fn a_child_with_no_parent_name_says_its_parent_agent() {
+        let prompt = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::child("auth", 1, 2),
+        );
+        assert!(prompt.contains("You are a child agent spawned by your parent agent."));
     }
 
     #[test]

@@ -1330,6 +1330,18 @@ fn turn_config(
     }
 }
 
+fn parent_agent_name(spec: &mush_runtime::ChildSpec, session_dir: &std::path::Path) -> String {
+    if spec.parent.id.is_some() {
+        return spec.parent.name.clone();
+    }
+    let parent = SessionId::from(spec.parent_session_id.as_str());
+    let path = SessionStore::new(session_dir.to_path_buf()).session_path(&parent);
+    mush_session::store::load_meta(&path)
+        .ok()
+        .and_then(|meta| meta.title)
+        .unwrap_or_else(|| spec.parent_session_id.clone())
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
@@ -1397,7 +1409,8 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 ));
             }
             let max_depth = family.max_depth();
-            let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth);
+            let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth)
+                .spawned_by(parent_agent_name(&spec, &seed.session_dir));
             let system_prompt = rlm_system_prompt(
                 &seed.cwd,
                 &seed.discovery,
@@ -1622,6 +1635,7 @@ fn worker_config(
         depth: worker.rlm_depth,
         max_depth,
         child_name: None,
+        parent_name: None,
     };
     worker.system_prompt_builder = Some(std::sync::Arc::new({
         let discovery = cli.discovery();
@@ -1972,7 +1986,10 @@ mod tests {
         let prompt = rlm_system_prompt(dir.path(), &discovery, &overrides, &[], &role);
 
         assert!(prompt.starts_with("base from the flag"), "{prompt}");
-        assert!(prompt.contains("child agent named `worker`"), "{prompt}");
+        assert!(
+            prompt.contains("You are a child agent spawned by"),
+            "{prompt}"
+        );
         assert!(
             prompt.trim_end().ends_with("tail from the flag"),
             "{prompt}"
