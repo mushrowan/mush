@@ -107,10 +107,17 @@ pub struct CompletionState {
     pub model_completions: Vec<ModelCompletion>,
     pub completions: Vec<String>,
     pub(crate) tab_state: Option<TabState>,
+    pub(crate) history: Option<HistoryCursor>,
     pub favourite_models: Vec<String>,
     pub favourites_locked: bool,
     pub recent_models: Vec<String>,
     pub templates: Vec<mush_ext::PromptTemplate>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HistoryCursor {
+    pub(crate) index: usize,
+    pub(crate) draft: String,
 }
 
 #[derive(Debug, Clone)]

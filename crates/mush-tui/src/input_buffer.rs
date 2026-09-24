@@ -130,6 +130,32 @@ impl InputBuffer {
         }
     }
 
+    pub fn cursor_up(&mut self) -> bool {
+        let Some(line_start) = self.text[..self.cursor].rfind('\n').map(|i| i + 1) else {
+            return false;
+        };
+        let column = self.text[line_start..self.cursor].chars().count();
+        let above_start = self.text[..line_start - 1].rfind('\n').map_or(0, |i| i + 1);
+        self.cursor = column_offset(&self.text, above_start, line_start - 1, column);
+        self.ensure_cursor_visible();
+        true
+    }
+
+    pub fn cursor_down(&mut self) -> bool {
+        let Some(line_end) = self.text[self.cursor..].find('\n').map(|i| self.cursor + i) else {
+            return false;
+        };
+        let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let column = self.text[line_start..self.cursor].chars().count();
+        let below_start = line_end + 1;
+        let below_end = self.text[below_start..]
+            .find('\n')
+            .map_or(self.text.len(), |i| below_start + i);
+        self.cursor = column_offset(&self.text, below_start, below_end, column);
+        self.ensure_cursor_visible();
+        true
+    }
+
     pub fn cursor_word_left(&mut self) {
         self.cursor = word_boundary_left(&self.text, self.cursor);
         self.ensure_cursor_visible();
@@ -288,6 +314,13 @@ impl Default for InputBuffer {
 }
 
 pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
+
+fn column_offset(text: &str, start: usize, end: usize, column: usize) -> usize {
+    text[start..end]
+        .char_indices()
+        .nth(column)
+        .map_or(end, |(offset, _)| start + offset)
+}
 
 pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     let before = &s[..cursor];

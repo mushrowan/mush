@@ -2606,3 +2606,45 @@ fn a_digit_holds_a_count_for_the_next_motion() {
     assert_eq!(app.viewport.cursor().line, 193);
     assert_eq!(app.interaction.pending_count, None);
 }
+
+#[test]
+fn up_and_down_walk_prompt_history_and_restore_the_draft() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("first");
+    app.push_user_message("second");
+    app.input.text = "draft".into();
+    app.input.cursor = 5;
+
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input.text, "second");
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input.text, "first");
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input.text, "first");
+
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input.text, "second");
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input.text, "draft");
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input.text, "draft");
+}
+
+#[test]
+fn up_and_down_move_between_lines_before_reaching_history() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("earlier");
+    app.input.text = "abcdef\nxy".into();
+    app.input.cursor = app.input.text.len();
+
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input.text, "abcdef\nxy");
+    assert_eq!(app.input.cursor, 2);
+
+    handle_key(&mut app, key(KeyCode::Down));
+    assert_eq!(app.input.cursor, app.input.text.len());
+
+    handle_key(&mut app, key(KeyCode::Up));
+    handle_key(&mut app, key(KeyCode::Up));
+    assert_eq!(app.input.text, "earlier");
+}

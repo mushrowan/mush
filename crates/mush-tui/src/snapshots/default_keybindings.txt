@@ -1,7 +1,9 @@
+edit::cursor_down = Down
 edit::cursor_left = Left | Ctrl-b
 edit::cursor_line_end = End | Ctrl-e
 edit::cursor_line_start = Home
 edit::cursor_right = Right
+edit::cursor_up = Up
 edit::cursor_word_left = Alt-Left | Ctrl-Left | Alt-b
 edit::cursor_word_right = Alt-Right | Ctrl-Right | Alt-f
 edit::delete_char = Ctrl-d

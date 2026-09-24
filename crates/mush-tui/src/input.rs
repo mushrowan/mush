@@ -185,6 +185,7 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
         let text = app.input.take_text();
+        app.completion.history = None;
         match classify_submission(app, &text) {
             Submission::Prompt => {}
             Submission::Command(action) if action.is_safe_during_stream() => {
@@ -297,6 +298,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             app.viewport.to_bottom();
             let text = app.input.take_text();
+            app.completion.history = None;
             match classify_submission(app, &text) {
                 Submission::Prompt => {}
                 Submission::Command(action) => return Some(AppEvent::SlashCommand { action }),
@@ -617,11 +619,23 @@ fn handle_editing(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
         }
         _ if app.keymap.matches_in(
             crate::keybinds::KeyScope::Edit,
-            crate::keybinds::Action::CursorLeft,
+            crate::keybinds::Action::CursorUp,
             key,
         ) =>
         {
-            app.input.cursor_left()
+            if !app.input.cursor_up() {
+                app.history_previous();
+            }
+        }
+        _ if app.keymap.matches_in(
+            crate::keybinds::KeyScope::Edit,
+            crate::keybinds::Action::CursorDown,
+            key,
+        ) =>
+        {
+            if !app.input.cursor_down() {
+                app.history_next();
+            }
         }
         _ if app.keymap.matches_in(
             crate::keybinds::KeyScope::Edit,
@@ -786,6 +800,7 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 return None;
             }
             let text = app.input.take_text();
+            app.completion.history = None;
             match classify_submission(app, &text) {
                 Submission::Command(action) => Some(AppEvent::SlashCommand { action }),
                 Submission::Prompt | Submission::Refused => None,

@@ -648,7 +648,61 @@ impl App {
 
     pub fn input_char(&mut self, c: char) {
         self.completion.tab_state = None;
+        self.completion.history = None;
         self.input.insert_char(c);
+    }
+
+    fn prompt_history(&self) -> Vec<&str> {
+        self.messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User && !message.queued)
+            .map(|message| message.content.as_str())
+            .filter(|content| !content.trim().is_empty())
+            .collect()
+    }
+
+    pub fn history_previous(&mut self) -> bool {
+        let history = self.prompt_history();
+        let index = match &self.completion.history {
+            Some(cursor) if cursor.index == 0 => return !history.is_empty(),
+            Some(cursor) => cursor.index - 1,
+            None if history.is_empty() => return false,
+            None => history.len() - 1,
+        };
+        let text = history[index].to_string();
+        let draft = self
+            .completion
+            .history
+            .take()
+            .map_or_else(|| self.input.text.clone(), |cursor| cursor.draft);
+        self.completion.history = Some(crate::app_state::HistoryCursor { index, draft });
+        self.set_input_text(text);
+        true
+    }
+
+    pub fn history_next(&mut self) -> bool {
+        let Some(cursor) = self.completion.history.take() else {
+            return false;
+        };
+        let history = self.prompt_history();
+        if cursor.index + 1 < history.len() {
+            let text = history[cursor.index + 1].to_string();
+            self.completion.history = Some(crate::app_state::HistoryCursor {
+                index: cursor.index + 1,
+                draft: cursor.draft,
+            });
+            self.set_input_text(text);
+        } else {
+            self.set_input_text(cursor.draft);
+        }
+        true
+    }
+
+    fn set_input_text(&mut self, text: String) {
+        self.input.text = text;
+        self.input.cursor = self.input.text.len();
+        self.input.anchor = None;
+        self.input.ensure_cursor_visible();
     }
 
     pub fn tab_complete(&mut self) {

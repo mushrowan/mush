@@ -448,6 +448,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::CursorLineStart
         | Action::CursorLeft
         | Action::CursorRight
+        | Action::CursorUp
+        | Action::CursorDown
         | Action::CursorWordLeft
         | Action::CursorWordRight
         | Action::DeleteChar
@@ -813,6 +815,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Edit,
         Action::CursorRight,
         &[(KeyCode::Right, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorUp,
+        &[(KeyCode::Up, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Edit,
+        Action::CursorDown,
+        &[(KeyCode::Down, KeyModifiers::NONE)],
     ),
     (
         KeyScope::Edit,
