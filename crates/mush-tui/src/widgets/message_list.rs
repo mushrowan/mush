@@ -403,7 +403,11 @@ fn build_message_lines(
         render_user_message_box(style.theme, msg, width, &mut lines);
     } else {
         let content_width = message_content_width(width as usize);
-        let md = crate::markdown::render_with_width(&msg.content, style.theme, Some(content_width));
+        let md = if matches!(msg.role, MessageRole::System) {
+            crate::markdown::render_lines_with_width(&msg.content, style.theme, Some(content_width))
+        } else {
+            crate::markdown::render_with_width(&msg.content, style.theme, Some(content_width))
+        };
         for line in md.lines {
             lines.extend(indent_line(line, content_width));
         }

@@ -886,7 +886,7 @@ pub(crate) fn account_report(
     let active = session_accounts.get(oauth_provider).or(default);
     let mut lines = vec![format!("{oauth_provider} accounts:")];
     for label in accounts.labels() {
-        let marker = if Some(label) == active { "*" } else { " " };
+        let marker = if Some(label) == active { "●" } else { " " };
         let note = if Some(label) == default {
             " (default for new sessions)"
         } else {

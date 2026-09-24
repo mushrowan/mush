@@ -29,7 +29,15 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
 }
 
 pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
-    render_with_options(source, theme, width, CodeHighlighting::Enabled)
+    render_with_options(source, theme, width, CodeHighlighting::Enabled, Breaks::Soft)
+}
+
+pub fn render_lines_with_width(
+    source: &str,
+    theme: &Theme,
+    width: Option<usize>,
+) -> Text<'static> {
+    render_with_options(source, theme, width, CodeHighlighting::Enabled, Breaks::Hard)
 }
 
 pub(crate) fn render_streaming_with_width(
@@ -37,7 +45,7 @@ pub(crate) fn render_streaming_with_width(
     theme: &Theme,
     width: Option<usize>,
 ) -> Text<'static> {
-    render_with_options(source, theme, width, CodeHighlighting::Disabled)
+    render_with_options(source, theme, width, CodeHighlighting::Disabled, Breaks::Soft)
 }
 
 fn render_with_options(
@@ -45,6 +53,7 @@ fn render_with_options(
     theme: &Theme,
     width: Option<usize>,
     code_highlighting: CodeHighlighting,
+    breaks: Breaks,
 ) -> Text<'static> {
     #[cfg(test)]
     RENDER_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -56,7 +65,7 @@ fn render_with_options(
         return render_plain_text(source);
     }
 
-    Text::from(render_pulldown(source, theme, width, code_highlighting))
+    Text::from(render_pulldown(source, theme, width, code_highlighting, breaks))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,19 +74,40 @@ enum CodeHighlighting {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Breaks {
+    Soft,
+    Hard,
+}
+
 fn render_pulldown(
     source: &str,
     theme: &Theme,
     width: Option<usize>,
     code_highlighting: CodeHighlighting,
+    breaks: Breaks,
 ) -> Vec<Line<'static>> {
     let source = normalise_thematic_breaks(source);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
 
-    let mut renderer = MarkdownRenderer::new(theme, width, code_highlighting);
+    let mut renderer = MarkdownRenderer::new(theme, width, code_highlighting, breaks);
+    let mut after_break = None;
     for (event, range) in Parser::new_ext(&source, options).into_offset_iter() {
+        if let Some(start) = after_break.take() {
+            let indent = source.get(start..range.start).unwrap_or_default();
+            if !indent.is_empty() && indent.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+                renderer.push_text(indent);
+            }
+        }
+        if breaks == Breaks::Hard
+            && matches!(event, Event::SoftBreak)
+            && renderer.list_stack.is_empty()
+            && renderer.quote_depth == 0
+        {
+            after_break = Some(range.end);
+        }
         renderer.handle(event, &source[range]);
     }
     renderer.finish()
@@ -110,6 +140,7 @@ struct MarkdownRenderer<'a> {
     in_table: bool,
     link_stack: Vec<LinkCapture>,
     code_highlighting: CodeHighlighting,
+    breaks: Breaks,
 }
 
 struct LinkCapture {
@@ -118,7 +149,12 @@ struct LinkCapture {
 }
 
 impl<'a> MarkdownRenderer<'a> {
-    fn new(theme: &'a Theme, width: Option<usize>, code_highlighting: CodeHighlighting) -> Self {
+    fn new(
+        theme: &'a Theme,
+        width: Option<usize>,
+        code_highlighting: CodeHighlighting,
+        breaks: Breaks,
+    ) -> Self {
         Self {
             theme,
             width,
@@ -132,6 +168,7 @@ impl<'a> MarkdownRenderer<'a> {
             in_table: false,
             link_stack: Vec::new(),
             code_highlighting,
+            breaks,
         }
     }
 
@@ -157,6 +194,7 @@ impl<'a> MarkdownRenderer<'a> {
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(&text),
             Event::Code(code) => self.push_inline_code(&code),
+            Event::SoftBreak if self.breaks == Breaks::Hard => self.push_current_line(),
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => self.push_current_line(),
             Event::Rule => {
@@ -620,6 +658,51 @@ mod tests {
             .iter()
             .map(Line::to_string)
             .collect()
+    }
+
+    fn rendered_lines(source: &str) -> Vec<String> {
+        render_lines_with_width(source, &t(), None)
+            .lines
+            .iter()
+            .map(Line::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn line_mode_keeps_each_source_line_on_its_own_row() {
+        let lines = rendered_lines(
+            "anthropic accounts:\n● default (default for new sessions)\n  home\nadd one with /login anthropic [<label>]",
+        );
+        assert_eq!(
+            lines,
+            [
+                "anthropic accounts:",
+                "● default (default for new sessions)",
+                "  home",
+                "add one with /login anthropic [<label>]",
+            ],
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn line_mode_still_renders_markdown() {
+        let lines = rendered_lines("use `/login [provider]`\nthen **wait**\n```\ncode\n```");
+        assert_eq!(lines[0], "use /login [provider]");
+        assert_eq!(lines[1], "then wait");
+        assert!(lines.iter().any(|line| line.contains("code")), "{lines:#?}");
+    }
+
+    #[test]
+    fn line_mode_does_not_double_indent_list_continuations() {
+        let lines = rendered_lines("- one `a`\n  two");
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(!lines[1].starts_with("    "), "{lines:#?}");
+    }
+
+    #[test]
+    fn prose_mode_still_joins_soft_breaks() {
+        assert_eq!(rendered("one `a`\ntwo"), ["one a two"]);
     }
 
     #[test]
