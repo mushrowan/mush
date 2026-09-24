@@ -5,7 +5,7 @@ use crate::registry::{
     retry_delay, retry_stream_error,
 };
 use crate::stream::StreamEvent;
-use crate::types::{Model, StopReason, StreamOptions};
+use crate::types::{AssistantContentPart, Model, StopReason, StreamOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OneshotError {
@@ -35,7 +35,7 @@ pub struct Retried<T> {
 
 pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, OneshotError> {
     let mut text = String::new();
-    let mut finished = false;
+    let mut finished = None;
     while let Some(event) = stream.next().await {
         match event {
             StreamEvent::TextDelta { delta, .. } => text.push_str(&delta),
@@ -47,7 +47,7 @@ pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, Ones
                             .unwrap_or_else(|| "stream ended with error".into()),
                     ));
                 }
-                finished = true;
+                finished = Some(message);
                 break;
             }
             StreamEvent::Error { message, .. } => {
@@ -61,13 +61,30 @@ pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, Ones
         }
     }
 
-    if !finished {
-        Err(OneshotError::Stream(STREAM_ENDED_EARLY.into()))
-    } else if text.is_empty() {
-        Err(OneshotError::EmptyResponse)
-    } else {
-        Ok(text)
+    let Some(message) = finished else {
+        return Err(OneshotError::Stream(STREAM_ENDED_EARLY.into()));
+    };
+    if !text.is_empty() {
+        return Ok(text);
     }
+    let parts: Vec<String> = message
+        .content
+        .iter()
+        .map(|part| match part {
+            AssistantContentPart::Text(text) => format!("text({} chars)", text.text.len()),
+            AssistantContentPart::Thinking(_) => "thinking".into(),
+            AssistantContentPart::ToolCall(call) => format!("tool_call({})", call.name),
+            AssistantContentPart::ServerToolUse(_) => "server_tool_use".into(),
+            AssistantContentPart::AdvisorToolResult(_) => "advisor_tool_result".into(),
+        })
+        .collect();
+    tracing::warn!(
+        model = %message.model,
+        stop_reason = ?message.stop_reason,
+        ?parts,
+        "one-shot stream completed without text"
+    );
+    Err(OneshotError::EmptyResponse)
 }
 
 pub async fn collect_text(
