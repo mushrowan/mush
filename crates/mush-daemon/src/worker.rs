@@ -622,6 +622,7 @@ mod tests {
             title: None,
             model_id: "m".into(),
             subagent_model: None,
+            accounts: Default::default(),
             thinking_level: mush_ai::types::ThinkingLevel::Off,
             context_tokens: mush_ai::types::TokenCount::ZERO,
             context_len: 0,

@@ -258,9 +258,9 @@ pub async fn handle(
         SlashAction::Settings { args } => {
             handle_settings(app, tui_config, args);
             let _ = connection
-                .send(mush_runtime::ClientCommand::SetStreamOptions(
+                .send(mush_runtime::ClientCommand::SetStreamOptions(Box::new(
                     tui_config.options.clone(),
-                ))
+                )))
                 .await;
             None
         }
@@ -283,6 +283,20 @@ pub async fn handle(
                 Some(id) => format!("subagents will use {id}"),
                 None => "subagents will use whatever model this session is on".to_string(),
             });
+            None
+        }
+        SlashAction::Account { label } => {
+            match label {
+                None => app.push_system_message(account_report(&tui_config.model, &app.accounts)),
+                Some(label) => {
+                    if let Err(error) = connection
+                        .send(mush_runtime::ClientCommand::SetAccount(Some(label.clone())))
+                        .await
+                    {
+                        app.push_system_message(error.to_string());
+                    }
+                }
+            }
             None
         }
         SlashAction::Pause { reason } => {
@@ -318,7 +332,7 @@ pub async fn handle(
                 .await;
             None
         }
-        SlashAction::Login { provider: _ } => None,
+        SlashAction::Login { .. } => None,
         SlashAction::LoginComplete { code: _ } => None,
         SlashAction::Card => {
             if let Some(card) = &tui_config.agent_card {
@@ -821,10 +835,42 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
     true
 }
 
+pub(crate) fn account_report(
+    model: &mush_ai::types::Model,
+    session_accounts: &mush_ai::types::SessionAccounts,
+) -> String {
+    let Some(oauth_provider) = mush_ai::auth::oauth_provider_id(&model.provider) else {
+        return format!("{} has no account logins", model.provider);
+    };
+    let store = mush_ai::oauth::load_credentials().unwrap_or_default();
+    let Some(accounts) = store.accounts(oauth_provider) else {
+        return format!(
+            "no {oauth_provider} accounts yet, run /login {oauth_provider} [<label>] to add one"
+        );
+    };
+    let default = accounts.default_label();
+    let active = session_accounts.get(oauth_provider).or(default);
+    let mut lines = vec![format!("{oauth_provider} accounts:")];
+    for label in accounts.labels() {
+        let marker = if Some(label) == active { "*" } else { " " };
+        let note = if Some(label) == default {
+            " (default for new sessions)"
+        } else {
+            ""
+        };
+        lines.push(format!("{marker} {label}{note}"));
+    }
+    lines.push(format!(
+        "switch with /account <label>, add one with /login {oauth_provider} <label>"
+    ));
+    lines.join("\n")
+}
+
 pub(crate) async fn handle_login_start(
     app: &mut App,
     tui_config: &TuiConfig,
     provider_id_opt: Option<&str>,
+    account: Option<mush_ai::types::AccountLabel>,
 ) {
     use mush_ai::oauth;
 
@@ -853,10 +899,10 @@ pub(crate) async fn handle_login_start(
     };
 
     match provider.begin_browser_login().await {
-        Ok(login) => start_browser_login(app, provider.as_ref(), login),
+        Ok(login) => start_browser_login(app, provider.as_ref(), login, account),
         Err(e) => {
             tracing::warn!(%provider_id, %e, "loopback oauth login unavailable");
-            start_paste_login(app, provider.as_ref(), &provider_id);
+            start_paste_login(app, provider.as_ref(), &provider_id, account);
         }
     }
 }
@@ -865,6 +911,7 @@ fn start_browser_login(
     app: &mut App,
     provider: &dyn mush_ai::oauth::OAuthProvider,
     login: mush_ai::oauth::BrowserLogin,
+    account: Option<mush_ai::types::AccountLabel>,
 ) {
     let opened = open::that_detached(&login.auth_url).is_ok();
     let open_note = if opened {
@@ -879,17 +926,21 @@ fn start_browser_login(
     ));
     app.status = Some(format!("waiting for {} sign-in…", provider.name()).into());
     app.pending_oauth = None;
-    app.pending_browser_login = Some(crate::browser_login::PendingBrowserLogin::spawn(
-        provider.id(),
-        provider.name(),
-        login.await_credentials(),
-    ));
+    app.pending_browser_login = Some(
+        crate::browser_login::PendingBrowserLogin::spawn(
+            provider.id(),
+            provider.name(),
+            login.await_credentials(),
+        )
+        .for_account(account),
+    );
 }
 
 fn start_paste_login(
     app: &mut App,
     provider: &dyn mush_ai::oauth::OAuthProvider,
     provider_id: &str,
+    account: Option<mush_ai::types::AccountLabel>,
 ) {
     let (prompt, pkce) = match provider.begin_login() {
         Ok(v) => v,
@@ -917,6 +968,7 @@ fn start_paste_login(
     app.pending_oauth = Some(crate::app::PendingOAuth {
         provider_id: provider_id.to_string(),
         provider_name: provider.name().to_string(),
+        account,
         pkce,
     });
 }
@@ -929,12 +981,7 @@ fn open_login_picker_overlay(app: &mut App, tui_config: &TuiConfig) {
 pub(crate) fn build_login_entries(tui_config: &TuiConfig) -> Vec<crate::login_picker::LoginEntry> {
     use mush_ai::login;
 
-    let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
-    let oauth_present: Vec<(String, Option<String>)> = oauth_store
-        .providers
-        .iter()
-        .map(|(id, c)| (id.clone(), c.account_id.clone()))
-        .collect();
+    let oauth_present = login::oauth_logins();
     let credential_store = mush_ai::credentials::default_store();
     let inputs = login::SourceInputs {
         oauth_present: &oauth_present,
@@ -948,7 +995,7 @@ pub(crate) fn build_login_entries(tui_config: &TuiConfig) -> Vec<crate::login_pi
             let source = login::resolve_source(&provider, &inputs);
             let account_id = match &provider.method {
                 login::LoginMethod::OAuth { oauth_provider_id } if source.is_some() => {
-                    login::oauth_account_id(oauth_provider_id)
+                    login::oauth_account_id(oauth_provider_id, None)
                 }
                 _ => None,
             };

@@ -7,7 +7,11 @@ mod store;
 pub mod usage;
 
 pub use pkce::{PkceChallenge, generate_pkce};
-pub use store::{CredentialStore, OAuthCredentials, load_credentials, save_credentials};
+pub use store::{
+    CredentialStore, OAuthCredentials, ProviderAccounts, load_credentials, save_credentials,
+};
+
+use crate::types::AccountLabel;
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum OAuthError {
@@ -133,44 +137,50 @@ fn available_provider_names() -> Vec<String> {
         .collect()
 }
 
-pub async fn get_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthError> {
+pub async fn get_oauth_token(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Result<Option<String>, OAuthError> {
     let provider = match get_provider(provider_id) {
         Some(p) => p,
         None => return Ok(None),
     };
 
     let mut store = load_credentials()?;
-    let Some(creds) = store.providers.get(provider_id) else {
+    let Some((label, creds)) = store.get(provider_id, account) else {
         return Ok(None);
     };
+    let label = label.clone();
 
-    let updated = if creds.is_expired() {
-        let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
-        if refreshed.account_id.is_none() {
-            refreshed.account_id = creds.account_id.clone();
-        }
-        refreshed
-    } else {
-        creds.clone()
-    };
+    if !creds.is_expired() {
+        return Ok(Some(provider.api_key(creds)));
+    }
 
-    let token = provider.api_key(&updated);
-    store.providers.insert(provider_id.into(), updated);
+    let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
+    if refreshed.account_id.is_none() {
+        refreshed.account_id = creds.account_id.clone();
+    }
+    let token = provider.api_key(&refreshed);
+    store.insert(provider_id, label, refreshed);
     save_credentials(&store)?;
 
     Ok(Some(token))
 }
 
-pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<String>, OAuthError> {
+pub async fn force_refresh_oauth_token(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Result<Option<String>, OAuthError> {
     let provider = match get_provider(provider_id) {
         Some(p) => p,
         None => return Ok(None),
     };
 
     let mut store = load_credentials()?;
-    let Some(creds) = store.providers.get(provider_id) else {
+    let Some((label, creds)) = store.get(provider_id, account) else {
         return Ok(None);
     };
+    let label = label.clone();
 
     let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
     if refreshed.account_id.is_none() {
@@ -178,31 +188,67 @@ pub async fn force_refresh_oauth_token(provider_id: &str) -> Result<Option<Strin
     }
 
     let token = provider.api_key(&refreshed);
-    store.providers.insert(provider_id.into(), refreshed);
+    store.insert(provider_id, label, refreshed);
     save_credentials(&store)?;
 
     Ok(Some(token))
 }
 
-pub fn remove_credentials(provider_id: &str) -> Result<bool, OAuthError> {
+pub fn save_login(
+    provider_id: &str,
+    account: Option<AccountLabel>,
+    creds: OAuthCredentials,
+) -> Result<AccountLabel, OAuthError> {
     let mut store = load_credentials()?;
-    let removed = store.providers.remove(provider_id).is_some();
-    if removed {
+    let label = account
+        .or_else(|| {
+            store
+                .accounts(provider_id)
+                .and_then(|accounts| accounts.default_label().cloned())
+        })
+        .unwrap_or_else(AccountLabel::default_label);
+    store.insert(provider_id, label.clone(), creds);
+    save_credentials(&store)?;
+    Ok(label)
+}
+
+pub fn remove_credentials(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Result<Option<AccountLabel>, OAuthError> {
+    let mut store = load_credentials()?;
+    let removed = store.remove(provider_id, account);
+    if removed.is_some() {
         save_credentials(&store)?;
     }
     Ok(removed)
 }
 
-pub async fn get_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
-    get_oauth_token("anthropic").await
+pub fn set_default_account(provider_id: &str, account: &AccountLabel) -> Result<bool, OAuthError> {
+    let mut store = load_credentials()?;
+    let changed = store.set_default(provider_id, account);
+    if changed {
+        save_credentials(&store)?;
+    }
+    Ok(changed)
 }
 
-pub async fn force_refresh_anthropic_oauth_token() -> Result<Option<String>, OAuthError> {
-    force_refresh_oauth_token("anthropic").await
+pub async fn get_anthropic_oauth_token(
+    account: Option<&AccountLabel>,
+) -> Result<Option<String>, OAuthError> {
+    get_oauth_token("anthropic", account).await
 }
 
-pub async fn get_openai_codex_oauth_token() -> Result<Option<String>, OAuthError> {
-    get_oauth_token("openai-codex").await
+pub async fn force_refresh_anthropic_oauth_token(
+    account: Option<&AccountLabel>,
+) -> Result<Option<String>, OAuthError> {
+    force_refresh_oauth_token("anthropic", account).await
+}
+
+pub async fn get_openai_codex_oauth_token(
+    account: Option<&AccountLabel>,
+) -> Result<Option<String>, OAuthError> {
+    get_oauth_token("openai-codex", account).await
 }
 
 #[cfg(test)]

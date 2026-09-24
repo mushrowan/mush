@@ -42,6 +42,7 @@ pub struct WorkerConfig {
     pub recovery_notice: Option<String>,
     pub models: crate::models::ModelSelection,
     pub subagent_model: Option<String>,
+    pub accounts: mush_ai::types::SessionAccounts,
     pub paused: Option<mush_session::Pause>,
 }
 
@@ -79,6 +80,7 @@ impl WorkerConfig {
             recovery_notice: None,
             models: crate::models::ModelSelection::default(),
             subagent_model: None,
+            accounts: mush_ai::types::SessionAccounts::default(),
             paused: None,
         }
     }
@@ -106,6 +108,7 @@ impl WorkerConfig {
         runtime.subagent_model = self.subagent_model;
         runtime.paused = self.paused;
         runtime.models = self.models;
+        runtime.set_accounts(self.accounts);
         runtime.system_prompt = self.system_prompt;
         runtime.rlm_depth = self.rlm_depth;
         runtime.rlm_max_depth_base = (self.rlm_max_depth, self.rlm_max_depth_source);

@@ -1,5 +1,5 @@
 use crate::conversation::ConversationState;
-use mush_ai::types::{Message, ModelId, PaneId, Timestamp};
+use mush_ai::types::{Message, ModelId, PaneId, SessionAccounts, Timestamp};
 use serde::{Deserialize, Serialize};
 
 pub use mush_ai::types::SessionId;
@@ -17,6 +17,8 @@ pub struct SessionMeta {
     pub parent: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "SessionAccounts::is_empty")]
+    pub accounts: SessionAccounts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<Pause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +86,7 @@ impl Session {
                 cwd: cwd.into(),
                 parent: None,
                 subagent_model: None,
+                accounts: SessionAccounts::default(),
                 paused: None,
                 rlm_max_depth: None,
                 lifecycle: Lifecycle::Live,

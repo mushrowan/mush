@@ -1611,6 +1611,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
         mush_session::SessionMeta {
@@ -1625,6 +1626,7 @@ fn test_sessions() -> Vec<mush_session::SessionMeta> {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
     ]
@@ -2109,7 +2111,11 @@ fn login_picker_enter_on_logged_out_oauth_emits_login_action_and_closes() {
     let event = handle_key(&mut app, key(KeyCode::Enter));
     match event {
         Some(AppEvent::SlashCommand {
-            action: crate::slash::SlashAction::Login { provider: Some(id) },
+            action:
+                crate::slash::SlashAction::Login {
+                    provider: Some(id),
+                    account: None,
+                },
         }) => assert_eq!(id, "openai-codex"),
         other => panic!("expected SlashAction::Login, got {other:?}"),
     }

@@ -1,9 +1,11 @@
+mod account;
 mod content;
 mod events;
 mod messages;
 mod model;
 mod newtypes;
 
+pub use account::*;
 pub use content::*;
 pub use events::*;
 pub use messages::*;

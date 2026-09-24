@@ -144,12 +144,27 @@ pub fn resolve_source(provider: &LoginProvider, inputs: &SourceInputs<'_>) -> Op
 }
 
 #[must_use]
-pub fn oauth_account_id(oauth_provider_id: &str) -> Option<String> {
+pub fn oauth_logins() -> Vec<(String, Option<String>)> {
+    let store = crate::oauth::load_credentials().unwrap_or_default();
+    store
+        .providers
+        .iter()
+        .filter_map(|(id, accounts)| {
+            let (_, creds) = accounts.get(None)?;
+            Some((id.clone(), creds.account_id.clone()))
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn oauth_account_id(
+    oauth_provider_id: &str,
+    account: Option<&crate::types::AccountLabel>,
+) -> Option<String> {
     crate::oauth::load_credentials().ok().and_then(|store| {
         store
-            .providers
-            .get(oauth_provider_id)
-            .and_then(|c| c.account_id.clone())
+            .get(oauth_provider_id, account)
+            .and_then(|(_, creds)| creds.account_id.clone())
     })
 }
 

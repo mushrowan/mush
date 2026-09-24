@@ -8,6 +8,7 @@ struct Selection {
     current: String,
     subagent: Option<String>,
     thinking: Option<mush_ai::types::ThinkingLevel>,
+    accounts: mush_ai::types::SessionAccounts,
 }
 
 impl ModelSelection {
@@ -17,6 +18,7 @@ impl ModelSelection {
             current,
             subagent,
             thinking: None,
+            accounts: mush_ai::types::SessionAccounts::default(),
         })))
     }
 
@@ -49,6 +51,15 @@ impl ModelSelection {
     #[must_use]
     pub fn subagent(&self) -> Option<String> {
         self.lock().subagent.clone()
+    }
+
+    pub fn set_accounts(&self, accounts: mush_ai::types::SessionAccounts) {
+        self.lock().accounts = accounts;
+    }
+
+    #[must_use]
+    pub fn accounts(&self) -> mush_ai::types::SessionAccounts {
+        self.lock().accounts.clone()
     }
 
     #[must_use]
@@ -125,6 +136,19 @@ mod tests {
 
         models.set_subagent(None);
         assert!(models.for_child(None).is_none());
+    }
+
+    #[test]
+    fn a_child_sees_the_accounts_the_session_holds() {
+        let models = ModelSelection::new("one".into(), None);
+        assert!(models.accounts().is_empty());
+        let mut accounts = mush_ai::types::SessionAccounts::default();
+        accounts.set(
+            "anthropic",
+            Some(mush_ai::types::AccountLabel::parse("work").unwrap()),
+        );
+        models.set_accounts(accounts.clone());
+        assert_eq!(models.accounts(), accounts);
     }
 
     #[test]

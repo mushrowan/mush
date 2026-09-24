@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::credentials::{CredentialStore, default_store};
 use crate::login;
-use crate::types::{ApiKey, Provider};
+use crate::types::{AccountLabel, ApiKey, Provider};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedAuth {
@@ -17,7 +17,15 @@ pub async fn resolve_auth(
     provider: &Provider,
     config_api_keys: &HashMap<String, ApiKey>,
     credential_store: &dyn CredentialStore,
+    account: Option<&AccountLabel>,
 ) -> ResolvedAuth {
+    let oauth_id = oauth_provider_id(provider);
+    if let Some(oauth_id) = oauth_id
+        && account.is_some()
+    {
+        return oauth_auth(oauth_id, account).await;
+    }
+
     if let Some(key) = env_api_key(provider) {
         return ResolvedAuth {
             api_key: Some(key),
@@ -39,22 +47,30 @@ pub async fn resolve_auth(
         };
     }
 
-    if let Some(oauth_provider_id) = oauth_provider_id(provider)
-        && let Ok(Some(token)) = crate::oauth::get_oauth_token(oauth_provider_id).await
-    {
-        return ResolvedAuth {
-            api_key: ApiKey::new(token),
-            account_id: login::oauth_account_id(oauth_provider_id),
-        };
+    match oauth_id {
+        Some(oauth_id) => oauth_auth(oauth_id, None).await,
+        None => ResolvedAuth::default(),
     }
+}
 
-    ResolvedAuth::default()
+async fn oauth_auth(oauth_id: &str, account: Option<&AccountLabel>) -> ResolvedAuth {
+    match crate::oauth::get_oauth_token(oauth_id, account).await {
+        Ok(Some(token)) => ResolvedAuth {
+            api_key: ApiKey::new(token),
+            account_id: login::oauth_account_id(oauth_id, account),
+        },
+        Ok(None) => ResolvedAuth::default(),
+        Err(error) => {
+            tracing::warn!(%error, provider = oauth_id, ?account, "oauth token lookup failed");
+            ResolvedAuth::default()
+        }
+    }
 }
 
 pub async fn resolve_auth_from_default_sources(provider: &Provider) -> ResolvedAuth {
     let config_api_keys = load_config_api_keys();
     let credential_store = default_store();
-    resolve_auth(provider, &config_api_keys, credential_store.as_ref()).await
+    resolve_auth(provider, &config_api_keys, credential_store.as_ref(), None).await
 }
 
 #[must_use]
@@ -76,7 +92,8 @@ fn env_api_key(provider: &Provider) -> Option<ApiKey> {
     }
 }
 
-fn oauth_provider_id(provider: &Provider) -> Option<&'static str> {
+#[must_use]
+pub fn oauth_provider_id(provider: &Provider) -> Option<&'static str> {
     match provider {
         Provider::Anthropic => Some("anthropic"),
         Provider::Custom(name) if name == "openai-codex" => Some("openai-codex"),
@@ -159,8 +176,13 @@ mod tests {
         let mut config_api_keys = HashMap::new();
         config_api_keys.insert("openai".into(), key.clone());
 
-        let resolved =
-            resolve_auth(&Provider::Custom("openai".into()), &config_api_keys, &store).await;
+        let resolved = resolve_auth(
+            &Provider::Custom("openai".into()),
+            &config_api_keys,
+            &store,
+            None,
+        )
+        .await;
 
         assert_eq!(
             resolved,
@@ -177,8 +199,13 @@ mod tests {
         let store = FileCredentialStore::at(dir.path().join("api-keys.json"));
         store.set("openai", "sk-openai-stored-test").unwrap();
 
-        let resolved =
-            resolve_auth(&Provider::Custom("openai".into()), &HashMap::new(), &store).await;
+        let resolved = resolve_auth(
+            &Provider::Custom("openai".into()),
+            &HashMap::new(),
+            &store,
+            None,
+        )
+        .await;
 
         assert_eq!(
             resolved,
@@ -187,5 +214,21 @@ mod tests {
                 account_id: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_named_account_skips_api_keys_and_misses_without_a_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileCredentialStore::at(dir.path().join("api-keys.json"));
+        let mut config_api_keys = HashMap::new();
+        config_api_keys.insert("anthropic".into(), ApiKey::new("sk-ant-config").unwrap());
+
+        let with_key = resolve_auth(&Provider::Anthropic, &config_api_keys, &store, None).await;
+        assert_eq!(with_key.api_key, ApiKey::new("sk-ant-config"));
+
+        let named = AccountLabel::parse("nobody-logged-in-as-this").unwrap();
+        let resolved =
+            resolve_auth(&Provider::Anthropic, &config_api_keys, &store, Some(&named)).await;
+        assert_eq!(resolved, ResolvedAuth::default());
     }
 }

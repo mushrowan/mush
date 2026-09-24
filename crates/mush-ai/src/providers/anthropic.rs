@@ -203,7 +203,8 @@ impl ApiProvider for AnthropicProvider {
             .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
 
         if api_key.is_oauth_token()
-            && let Ok(Some(fresh)) = crate::oauth::get_anthropic_oauth_token().await
+            && let Ok(Some(fresh)) =
+                crate::oauth::get_anthropic_oauth_token(options.oauth_account.as_ref()).await
             && let Some(fresh_key) = ApiKey::new(fresh)
         {
             api_key = fresh_key;
@@ -318,7 +319,9 @@ impl ApiProvider for AnthropicProvider {
                 model = %model.id,
                 "anthropic returned 401 with oauth token, forcing refresh + single retry"
             );
-            match crate::oauth::force_refresh_anthropic_oauth_token().await {
+            match crate::oauth::force_refresh_anthropic_oauth_token(options.oauth_account.as_ref())
+                .await
+            {
                 Ok(Some(fresh)) => {
                     if let Some(fresh_key) = ApiKey::new(fresh) {
                         let key = fresh_key.expose();

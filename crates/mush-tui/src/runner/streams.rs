@@ -201,7 +201,8 @@ async fn reconcile_openrouter_generation(
     tui_config: &TuiConfig,
 ) {
     let (key, _) =
-        crate::event_handler::resolve_auth_for_model(model, &tui_config.provider_api_keys).await;
+        crate::event_handler::resolve_auth_for_model(model, &tui_config.provider_api_keys, None)
+            .await;
     let Some(key) = key else {
         tracing::debug!("openrouter /generation lookup skipped: no api key");
         return;
@@ -394,6 +395,7 @@ pub(crate) fn apply_session_events(
             SessionEvent::Status(status) => session.app.status = Some(status.into()),
             SessionEvent::Failed(message) => session.app.push_system_message(message),
             SessionEvent::ThinkingLevel(level) => session.app.thinking_level = level,
+            SessionEvent::Accounts(accounts) => session.app.accounts = accounts,
         }
     }
 }

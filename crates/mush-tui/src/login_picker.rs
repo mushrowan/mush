@@ -68,12 +68,7 @@ impl LoginPickerState {
     }
 
     pub fn rebuild_sources(&mut self) {
-        let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
-        let oauth_present: Vec<(String, Option<String>)> = oauth_store
-            .providers
-            .iter()
-            .map(|(id, c)| (id.clone(), c.account_id.clone()))
-            .collect();
+        let oauth_present = login::oauth_logins();
         let credential_store = default_store();
         let inputs = SourceInputs {
             oauth_present: &oauth_present,
@@ -89,7 +84,7 @@ impl LoginPickerState {
             entry.source = login::resolve_source(&provider, &inputs);
             entry.account_id = match &entry.method {
                 LoginMethod::OAuth { oauth_provider_id } if entry.source.is_some() => {
-                    login::oauth_account_id(oauth_provider_id)
+                    login::oauth_account_id(oauth_provider_id, None)
                 }
                 _ => None,
             };

@@ -7,8 +7,8 @@ use mush_agent::{AgentConfig, AgentInjections, agent_loop};
 use mush_ai::ApiKey;
 use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
-    ImageContent, Message, Model, PaneId, StreamOptions, TextContent, Timestamp, TokenCount,
-    ToolCallId, UserContent, UserContentPart, UserMessage,
+    AccountLabel, ImageContent, Message, Model, PaneId, StreamOptions, TextContent, Timestamp,
+    TokenCount, ToolCallId, UserContent, UserContentPart, UserMessage,
 };
 use mush_session::compact::LiveContext;
 use tokio::sync::Mutex;
@@ -50,6 +50,7 @@ pub struct TurnPrep {
     pub target: CompactionTarget,
     pub api_key: Option<ApiKey>,
     pub account_id: Option<String>,
+    pub oauth_account: Option<AccountLabel>,
 }
 
 #[derive(Clone)]
@@ -107,11 +108,13 @@ pub fn resolve_runtime_model(id: &str, default: &Model) -> Model {
 pub async fn resolve_auth_for_model(
     model: &Model,
     provider_api_keys: &HashMap<String, ApiKey>,
+    account: Option<&AccountLabel>,
 ) -> (Option<ApiKey>, Option<String>) {
     let resolved = mush_ai::auth::resolve_auth(
         &model.provider,
         provider_api_keys,
         mush_ai::credentials::default_store().as_ref(),
+        account,
     )
     .await;
     (resolved.api_key, resolved.account_id)
@@ -121,10 +124,13 @@ pub async fn resolve_auth_into_options(
     model: &Model,
     mut options: StreamOptions,
     provider_api_keys: &HashMap<String, ApiKey>,
+    account: Option<AccountLabel>,
 ) -> StreamOptions {
-    let (api_key, account_id) = resolve_auth_for_model(model, provider_api_keys).await;
+    let (api_key, account_id) =
+        resolve_auth_for_model(model, provider_api_keys, account.as_ref()).await;
     options.api_key = api_key;
     options.account_id = account_id;
+    options.oauth_account = account;
     options
 }
 
@@ -201,18 +207,27 @@ impl SessionRuntime {
         config: &TurnConfig,
     ) -> StreamOptions {
         options.session_id = Some(self.session_id.clone());
-        resolve_auth_into_options(model, options, &config.provider_api_keys).await
+        resolve_auth_into_options(
+            model,
+            options,
+            &config.provider_api_keys,
+            self.account_for(model),
+        )
+        .await
     }
 
     pub async fn prepare_turn(&self, config: &TurnConfig) -> TurnPrep {
         let model = self.model(&config.default_model);
         let target = self.compaction_target(config).await;
-        let (api_key, account_id) = resolve_auth_for_model(&model, &config.provider_api_keys).await;
+        let oauth_account = self.account_for(&model);
+        let (api_key, account_id) =
+            resolve_auth_for_model(&model, &config.provider_api_keys, oauth_account.as_ref()).await;
         TurnPrep {
             model,
             target,
             api_key,
             account_id,
+            oauth_account,
         }
     }
 
@@ -233,6 +248,7 @@ impl SessionRuntime {
             target,
             api_key,
             account_id,
+            oauth_account,
         } = prep;
         if let Some(kernel) = &self.kernel_state {
             kernel.set_model(
@@ -290,6 +306,7 @@ impl SessionRuntime {
         call_options.session_id = Some(self.session_id.clone());
         call_options.api_key = api_key;
         call_options.account_id = account_id;
+        call_options.oauth_account = oauth_account;
         call_options.thinking = Some(thinking_level);
 
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -684,7 +701,8 @@ mod tests {
             ..StreamOptions::default()
         };
 
-        let options = resolve_auth_into_options(&model, stale_options, &provider_api_keys).await;
+        let options =
+            resolve_auth_into_options(&model, stale_options, &provider_api_keys, None).await;
 
         assert_eq!(options.api_key, Some(fresh_key));
         assert_eq!(options.account_id, None);

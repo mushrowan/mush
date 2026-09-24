@@ -445,9 +445,15 @@ pub(super) async fn handle_slash_action(
                 refresh_models_after_login(session, tui_config).await;
             }
         }
-        SlashAction::Login { provider } => {
+        SlashAction::Login { provider, account } => {
             let pane = &mut *session;
-            slash::handle_login_start(&mut pane.app, tui_config, provider.as_deref()).await;
+            slash::handle_login_start(
+                &mut pane.app,
+                tui_config,
+                provider.as_deref(),
+                account.clone(),
+            )
+            .await;
         }
         SlashAction::Credits => {
             handle_credits(session, tui_config).await;
@@ -757,9 +763,13 @@ pub(super) async fn complete_login(app: &mut crate::app::App, code: String) -> b
     }
 
     match provider.exchange_code(trimmed, &pending.pkce).await {
-        Ok(creds) => {
-            save_login_credentials(app, &pending.provider_id, &pending.provider_name, creds)
-        }
+        Ok(creds) => save_login_credentials(
+            app,
+            &pending.provider_id,
+            &pending.provider_name,
+            pending.account.clone(),
+            creds,
+        ),
         Err(e) => {
             app.push_system_message(format!("oauth login failed: {e}"));
             app.pending_oauth = Some(pending);
@@ -772,16 +782,13 @@ fn save_login_credentials(
     app: &mut crate::app::App,
     provider_id: &str,
     provider_name: &str,
+    account: Option<mush_ai::types::AccountLabel>,
     creds: mush_ai::oauth::OAuthCredentials,
 ) -> bool {
-    use mush_ai::oauth;
-
-    let mut store = oauth::load_credentials().unwrap_or_default();
-    store.providers.insert(provider_id.to_string(), creds);
-    match oauth::save_credentials(&store) {
-        Ok(()) => {
+    match mush_ai::oauth::save_login(provider_id, account, creds) {
+        Ok(label) => {
             app.push_system_message(format!(
-                "✓ logged in to {provider_name} (credentials saved)"
+                "✓ logged in to {provider_name} as {label} (credentials saved)"
             ));
             true
         }
@@ -832,6 +839,7 @@ pub(super) fn drain_finished_browser_logins(session: &mut Session) -> DrainedLog
                     &mut pane.app,
                     &pending.provider_id,
                     &pending.provider_name,
+                    pending.account.clone(),
                     creds,
                 );
             }
@@ -860,6 +868,7 @@ async fn handle_credits(pane: &mut crate::session::Session, tui_config: &TuiConf
     let (key, _) = crate::event_handler::resolve_auth_for_model(
         &openrouter_model,
         &tui_config.provider_api_keys,
+        None,
     )
     .await;
     let Some(key) = key else {
@@ -898,6 +907,7 @@ async fn handle_endpoints(
     let (key, _) = crate::event_handler::resolve_auth_for_model(
         &openrouter_model,
         &tui_config.provider_api_keys,
+        None,
     )
     .await;
     let Some(key) = key else {
@@ -1482,7 +1492,8 @@ mod tests {
 
         let stored = mush_ai::oauth::load_credentials().expect("load credentials");
         assert_eq!(
-            stored.providers["anthropic"].access_token, "access-token",
+            stored.get("anthropic", None).unwrap().1.access_token,
+            "access-token",
             "credentials should land in the oauth store"
         );
         assert!(
@@ -1494,6 +1505,39 @@ mod tests {
             messages.contains("Anthropic"),
             "the pane should say which provider logged in, got {messages:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_labelled_browser_login_adds_a_second_account() {
+        let _config = isolated_config_dir().await;
+        let work = mush_ai::types::AccountLabel::parse("work").unwrap();
+
+        let mut session = session();
+        session.app.pending_browser_login = Some(PendingBrowserLogin::spawn(
+            "anthropic",
+            "Anthropic (Claude Pro/Max)",
+            async { Ok(credentials()) },
+        ));
+        drain_when_settled(&mut session).await;
+        session.app.pending_browser_login = Some(
+            PendingBrowserLogin::spawn("anthropic", "Anthropic (Claude Pro/Max)", async {
+                Ok(credentials())
+            })
+            .for_account(Some(work.clone())),
+        );
+        drain_when_settled(&mut session).await;
+
+        let stored = mush_ai::oauth::load_credentials().expect("load credentials");
+        let labels: Vec<&str> = stored
+            .accounts("anthropic")
+            .unwrap()
+            .labels()
+            .map(mush_ai::types::AccountLabel::as_str)
+            .collect();
+        assert_eq!(labels, ["default", "work"]);
+        assert_eq!(stored.get("anthropic", None).unwrap().0.as_str(), "default");
+        let message = session.app.messages.last().unwrap().content.clone();
+        assert!(message.contains("as work"), "got {message:?}");
     }
 
     #[tokio::test]

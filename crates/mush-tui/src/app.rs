@@ -136,6 +136,7 @@ pub struct App {
     feature_hint: Option<&'static str>,
     pub compaction_model_id: Option<ModelId>,
     pub subagent_model_id: Option<ModelId>,
+    pub accounts: mush_ai::types::SessionAccounts,
     pub paused: Option<mush_session::Pause>,
     pub session_title: Option<String>,
     pub detail: ChatDetail,
@@ -154,6 +155,7 @@ mod streaming;
 pub struct PendingOAuth {
     pub provider_id: String,
     pub provider_name: String,
+    pub account: Option<mush_ai::types::AccountLabel>,
     pub pkce: mush_ai::oauth::PkceChallenge,
 }
 
@@ -200,6 +202,7 @@ impl App {
             thinking_display: ThinkingDisplay::default(),
             interaction: InteractionState::default(),
             subagent_model_id: None,
+            accounts: mush_ai::types::SessionAccounts::default(),
             paused: None,
             completion: CompletionState::default(),
             navigation: NavigationState::default(),

@@ -17,6 +17,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             cwd: "/tmp/project".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
         SessionMeta {
@@ -31,6 +32,7 @@ fn session_picker_module_exposes_state_and_filtering() {
             cwd: "/tmp/other".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
     ];
@@ -68,6 +70,7 @@ fn drain_incoming_appends_and_flips_loading() {
         cwd: "/tmp/project".into(),
         parent: None,
         subagent_model: None,
+        accounts: Default::default(),
         lifecycle: mush_session::Lifecycle::Live,
     };
     let newer = SessionMeta {
@@ -82,6 +85,7 @@ fn drain_incoming_appends_and_flips_loading() {
         cwd: "/tmp/project".into(),
         parent: None,
         subagent_model: None,
+        accounts: Default::default(),
         lifecycle: mush_session::Lifecycle::Live,
     };
     tx.send(older).unwrap();
@@ -118,6 +122,7 @@ fn meta(id: &str, cwd: &str) -> SessionMeta {
         cwd: cwd.into(),
         parent: None,
         subagent_model: None,
+        accounts: Default::default(),
         lifecycle: mush_session::Lifecycle::Live,
     }
 }

@@ -81,7 +81,14 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "settings",
         "view or modify runtime settings (anthropic betas, scope)",
     ),
-    ("login", "open the login picker (oauth + api keys)"),
+    (
+        "login",
+        "open the login picker, or sign in with [<provider> [<account>]]",
+    ),
+    (
+        "account",
+        "show or switch this session's account ([<label>])",
+    ),
     (
         "login-complete",
         "finish oauth login with the authorization code",
@@ -106,7 +113,8 @@ pub(super) struct RunnerRuntime {
     pub pending_prompt: Option<String>,
     pub connection_closed: bool,
     pub resize: super::input::ResizeState,
-    usage_rx: Option<tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage>>,
+    usage_rx: Option<UsageReceiver>,
+    usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
     _config_watcher: Option<RecommendedWatcher>,
     config_rx: Option<mpsc::Receiver<crate::theme::Theme>>,
     discovery_rx: Option<mpsc::Receiver<DiscoveryUpdate>>,
@@ -122,6 +130,7 @@ impl RunnerRuntime {
             connection_closed: false,
             resize: super::input::ResizeState::default(),
             usage_rx: None,
+            usage_poller: None,
             _config_watcher: None,
             config_rx: None,
             discovery_rx: None,
@@ -145,10 +154,13 @@ impl RunnerRuntime {
         let usage_poller = tui_config.http_client.as_ref().and_then(|client| {
             mush_ai::oauth::load_credentials()
                 .ok()
-                .filter(|store| store.providers.contains_key("anthropic"))
+                .filter(|store| store.has_provider("anthropic"))
                 .map(|_| mush_ai::oauth::usage::UsagePoller::new(client.clone()))
         });
-        let usage_rx = usage_poller.map(spawn_usage_poller);
+        if let Some(poller) = &usage_poller {
+            poller.set_account(session.app.accounts.get("anthropic").cloned());
+        }
+        let usage_rx = usage_poller.clone().map(spawn_usage_poller);
         tracing::debug!(has_poller = usage_rx.is_some(), "usage poller setup");
 
         Self {
@@ -158,6 +170,7 @@ impl RunnerRuntime {
             connection_closed: false,
             resize: super::input::ResizeState::default(),
             usage_rx,
+            usage_poller,
             _config_watcher,
             config_rx,
             discovery_rx: None,
@@ -274,39 +287,51 @@ impl RunnerRuntime {
     }
 
     pub(super) fn poll_usage(&mut self) -> bool {
+        let account = self.session.app.accounts.get("anthropic").cloned();
+        let switched = self
+            .usage_poller
+            .as_ref()
+            .is_some_and(|poller| poller.set_account(account.clone()));
+        if switched {
+            self.session.app.oauth_usage = None;
+        }
         let Some(rx) = &mut self.usage_rx else {
-            return false;
+            return switched;
         };
 
         let mut latest = None;
-        while let Ok(usage) = rx.try_recv() {
-            latest = Some(usage);
+        while let Ok((fetched_for, usage)) = rx.try_recv() {
+            if fetched_for == account {
+                latest = Some(usage);
+            }
         }
 
         let Some(usage) = latest else {
-            return false;
+            return switched;
         };
 
-        {
-            let pane = &mut self.session;
-            pane.app.oauth_usage = Some(usage.clone());
-            pane.app.oauth_usage_provider = Some("anthropic".into());
-        }
+        let pane = &mut self.session;
+        pane.app.oauth_usage = Some(usage);
+        pane.app.oauth_usage_provider = Some("anthropic".into());
         true
     }
 }
 
-fn spawn_usage_poller(
-    poller: mush_ai::oauth::usage::UsagePoller,
-) -> tokio::sync::mpsc::UnboundedReceiver<mush_ai::oauth::usage::OAuthUsage> {
+type UsageReceiver = tokio::sync::mpsc::UnboundedReceiver<(
+    Option<mush_ai::types::AccountLabel>,
+    mush_ai::oauth::usage::OAuthUsage,
+)>;
+
+fn spawn_usage_poller(poller: mush_ai::oauth::usage::UsagePoller) -> UsageReceiver {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         loop {
             if tx.is_closed() {
                 break;
             }
+            let account = poller.account();
             if let Some(usage) = poller.get_usage().await
-                && tx.send(usage).is_err()
+                && tx.send((account, usage)).is_err()
             {
                 break;
             }
@@ -426,6 +451,7 @@ fn seed_from_state(
         .subagent_model
         .as_deref()
         .map(mush_ai::types::ModelId::from);
+    app.accounts = state.accounts.clone();
     app.paused = state.paused.clone();
     if state.turn_active {
         app.start_streaming();
@@ -1029,6 +1055,23 @@ mod tests {
         assert_eq!(runtime.session.app.shimmer_phase(), 1);
     }
 
+    fn usage_at(utilization: f32) -> mush_ai::oauth::usage::OAuthUsage {
+        mush_ai::oauth::usage::OAuthUsage {
+            five_hour: Some(mush_ai::oauth::usage::UsageWindow {
+                utilization,
+                resets_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+            }),
+            seven_day: None,
+        }
+    }
+
+    fn five_hour(app: &App) -> Option<f32> {
+        app.oauth_usage
+            .as_ref()
+            .and_then(|usage| usage.five_hour.as_ref())
+            .map(|window| window.utilization)
+    }
+
     #[test]
     fn poll_usage_drains_background_updates_without_awaiting_http() {
         let app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
@@ -1036,25 +1079,30 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         runtime.usage_rx = Some(rx);
 
-        tx.send(mush_ai::oauth::usage::OAuthUsage {
-            five_hour: Some(mush_ai::oauth::usage::UsageWindow {
-                utilization: 42.0,
-                resets_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
-            }),
-            seven_day: None,
-        })
-        .unwrap();
+        tx.send((None, usage_at(42.0))).unwrap();
 
         assert!(runtime.poll_usage());
         let app = &runtime.session.app;
         assert_eq!(app.oauth_usage_provider.as_deref(), Some("anthropic"));
-        assert_eq!(
-            app.oauth_usage
-                .as_ref()
-                .and_then(|usage| usage.five_hour.as_ref())
-                .map(|window| window.utilization),
-            Some(42.0)
-        );
+        assert_eq!(five_hour(app), Some(42.0));
+    }
+
+    #[test]
+    fn usage_fetched_for_another_account_is_dropped() {
+        let mut app = App::new("claude-sonnet-4-5".into(), TokenCount::new(200_000));
+        let work = mush_ai::types::AccountLabel::parse("work").unwrap();
+        app.accounts.set("anthropic", Some(work.clone()));
+        let mut runtime = RunnerRuntime::from_pane(Session::new(app));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime.usage_rx = Some(rx);
+
+        tx.send((None, usage_at(10.0))).unwrap();
+        assert!(!runtime.poll_usage());
+        assert_eq!(five_hour(&runtime.session.app), None);
+
+        tx.send((Some(work), usage_at(20.0))).unwrap();
+        assert!(runtime.poll_usage());
+        assert_eq!(five_hour(&runtime.session.app), Some(20.0));
     }
 
     #[test]

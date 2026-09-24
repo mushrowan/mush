@@ -1104,6 +1104,7 @@ pub async fn resolve_api_key(options: &mut StreamOptions, model: &Model, cfg: &c
         &model.provider,
         &cfg.api_keys.to_map(),
         mush_ai::credentials::default_store().as_ref(),
+        None,
     )
     .await;
     options.api_key = resolved.api_key;
@@ -1134,9 +1135,9 @@ pub fn default_model_id(cfg: &config::Config, cwd: &std::path::Path) -> String {
     let has_anthropic_auth = cfg.api_keys.anthropic.is_some()
         || std::env::var("ANTHROPIC_API_KEY").is_ok()
         || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
-        || oauth_store.providers.contains_key("anthropic");
+        || oauth_store.has_provider("anthropic");
 
-    let has_openai_codex_auth = oauth_store.providers.contains_key("openai-codex");
+    let has_openai_codex_auth = oauth_store.has_provider("openai-codex");
 
     if has_anthropic_auth {
         return "claude-opus-5-5".into();

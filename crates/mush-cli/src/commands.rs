@@ -147,8 +147,8 @@ pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Re
     let has_openai_cfg = cfg.api_keys.openai.is_some();
 
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
-    let has_anthropic_oauth = oauth_store.providers.contains_key("anthropic");
-    let has_openai_codex_oauth = oauth_store.providers.contains_key("openai-codex");
+    let has_anthropic_oauth = oauth_store.has_provider("anthropic");
+    let has_openai_codex_oauth = oauth_store.has_provider("openai-codex");
 
     print!("  anthropic:   ");
     if has_anthropic_env {
@@ -199,7 +199,10 @@ pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Re
     Ok(())
 }
 
-pub async fn login(provider_id: Option<String>) -> Result<()> {
+pub async fn login(
+    provider_id: Option<String>,
+    account: Option<mush_ai::types::AccountLabel>,
+) -> Result<()> {
     use mush_ai::oauth;
 
     let provider_id = match provider_id {
@@ -237,14 +240,15 @@ pub async fn login(provider_id: Option<String>) -> Result<()> {
         }
     };
 
-    let mut store =
-        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
-    store.providers.insert(provider_id, creds);
-    oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
+    let label = oauth::save_login(&provider_id, account, creds)
+        .map_err(|e| eyre!("failed to save credentials: {e}"))?;
 
     eprintln!(
         "\n{}",
-        Style::Green.stderr(format_args!("✓ logged in to {}", provider.name()))
+        Style::Green.stderr(format_args!(
+            "✓ logged in to {} as {label}",
+            provider.name()
+        ))
     );
 
     eprintln!("refreshing model catalogue...");
@@ -300,23 +304,67 @@ async fn login_via_paste(
         .map_err(|e| eyre!("login failed: {e}"))
 }
 
-pub fn logout(provider_id: Option<String>) -> Result<()> {
+pub fn logout(
+    provider_id: Option<String>,
+    account: Option<&mush_ai::types::AccountLabel>,
+) -> Result<()> {
     use mush_ai::oauth;
 
     let provider_id = provider_id.unwrap_or_else(|| "anthropic".into());
 
-    let mut store =
-        oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
-
-    if store.providers.remove(&provider_id).is_some() {
-        oauth::save_credentials(&store).map_err(|e| eyre!("failed to save credentials: {e}"))?;
-        eprintln!(
+    match oauth::remove_credentials(&provider_id, account)
+        .map_err(|e| eyre!("failed to update credentials: {e}"))?
+    {
+        Some(label) => eprintln!(
             "{}",
-            Style::Green.stderr(format_args!("✓ logged out from {provider_id}"))
-        );
-    } else {
-        eprintln!("not logged in to {provider_id}");
+            Style::Green.stderr(format_args!("✓ logged out of {provider_id} ({label})"))
+        ),
+        None => match account {
+            Some(label) => eprintln!("no {provider_id} account called {label}"),
+            None => eprintln!("not logged in to {provider_id}"),
+        },
     }
 
+    Ok(())
+}
+
+pub fn accounts(
+    provider_id: Option<String>,
+    default: Option<&mush_ai::types::AccountLabel>,
+) -> Result<()> {
+    use mush_ai::oauth;
+
+    let provider_id = provider_id.unwrap_or_else(|| "anthropic".into());
+
+    if let Some(label) = default {
+        if !oauth::set_default_account(&provider_id, label)
+            .map_err(|e| eyre!("failed to update credentials: {e}"))?
+        {
+            return Err(eyre!("no {provider_id} account called {label}"));
+        }
+        eprintln!(
+            "{}",
+            Style::Green.stderr(format_args!(
+                "✓ new sessions use the {label} {provider_id} account"
+            ))
+        );
+        return Ok(());
+    }
+
+    let store = oauth::load_credentials().map_err(|e| eyre!("failed to load credentials: {e}"))?;
+    let Some(accounts) = store.accounts(&provider_id) else {
+        eprintln!(
+            "no {provider_id} accounts, add one with: mush login {provider_id} --account <label>"
+        );
+        return Ok(());
+    };
+    let default = accounts.default_label();
+    for label in accounts.labels() {
+        if Some(label) == default {
+            println!("{label} (default)");
+        } else {
+            println!("{label}");
+        }
+    }
     Ok(())
 }

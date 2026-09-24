@@ -1592,6 +1592,7 @@ fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                     Some(AppEvent::SlashCommand {
                         action: crate::slash::SlashAction::Login {
                             provider: Some(oauth_provider_id),
+                            account: None,
                         },
                     })
                 }
@@ -1682,9 +1683,9 @@ fn perform_logout(app: &App, entry_id: &str) -> String {
 
     match method {
         LoginMethod::OAuth { oauth_provider_id } => {
-            match mush_ai::oauth::remove_credentials(&oauth_provider_id) {
-                Ok(true) => format!("logged out of {entry_id}"),
-                Ok(false) => format!("no credentials stored for {entry_id}"),
+            match mush_ai::oauth::remove_credentials(&oauth_provider_id, None) {
+                Ok(Some(label)) => format!("logged out of {entry_id} ({label})"),
+                Ok(None) => format!("no credentials stored for {entry_id}"),
                 Err(e) => format!("logout failed: {e}"),
             }
         }

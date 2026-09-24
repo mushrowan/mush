@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::account::AccountLabel;
 use super::newtypes::{ApiKey, BaseUrl, ModelId, SessionId, Temperature, TokenCount};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -242,6 +243,7 @@ pub struct StreamOptions {
     pub effort: Option<EffortLevel>,
     pub session_id: Option<SessionId>,
     pub account_id: Option<String>,
+    pub oauth_account: Option<AccountLabel>,
     pub cache_retention: Option<CacheRetention>,
     pub anthropic_betas: Option<AnthropicBetas>,
     pub force_budget_thinking: bool,

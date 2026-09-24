@@ -658,6 +658,7 @@ fn session_picker_open_close() {
         cwd: "/tmp".into(),
         parent: None,
         subagent_model: None,
+        accounts: Default::default(),
         lifecycle: mush_session::Lifecycle::Live,
     }];
 
@@ -685,6 +686,7 @@ fn session_picker_filter() {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
         SessionMeta {
@@ -699,6 +701,7 @@ fn session_picker_filter() {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
     ];
@@ -728,6 +731,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
         SessionMeta {
@@ -742,6 +746,7 @@ fn session_picker_filter_is_fuzzy_subsequence() {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
     ];
@@ -775,6 +780,7 @@ fn session_picker_scope_filter() {
             cwd: "/home/user/project".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
         SessionMeta {
@@ -789,6 +795,7 @@ fn session_picker_scope_filter() {
             cwd: "/home/user/other".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         },
     ];

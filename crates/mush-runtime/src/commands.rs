@@ -70,6 +70,7 @@ pub enum SessionEvent {
     Status(String),
     Failed(String),
     ThinkingLevel(mush_ai::types::ThinkingLevel),
+    Accounts(mush_ai::types::SessionAccounts),
 }
 
 impl SessionRuntime {
@@ -113,6 +114,7 @@ impl SessionRuntime {
                 let id = SessionId::new();
                 let lease = self.next_lease(&id);
                 self.restore_rlm_max_depth(None);
+                self.set_accounts(mush_ai::types::SessionAccounts::default());
                 self.replace_session(id, ConversationState::new(), None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
@@ -157,6 +159,7 @@ impl SessionRuntime {
                 }
                 let title = loaded.meta.title.clone();
                 self.restore_rlm_max_depth(loaded.meta.rlm_max_depth);
+                self.set_accounts(loaded.meta.accounts.clone());
                 self.replace_session(id, loaded.conversation, title.clone(), lease);
                 self.begin_kernel_restore();
                 self.title_generated = title.is_some();
@@ -315,10 +318,25 @@ impl SessionRuntime {
             system_prompt: self.system_prompt.clone(),
             parent: self.parent.clone(),
             subagent_model: self.subagent_model.clone(),
+            accounts: self.accounts.clone(),
             paused: self.paused.clone(),
             rlm_max_depth: (self.rlm_max_depth_source == crate::session::RlmMaxDepthSource::Chat)
                 .then_some(self.rlm_max_depth),
         }
+    }
+
+    pub fn set_accounts(&mut self, accounts: mush_ai::types::SessionAccounts) {
+        self.models.set_accounts(accounts.clone());
+        self.accounts = accounts;
+    }
+
+    #[must_use]
+    pub fn account_for(
+        &self,
+        model: &mush_ai::types::Model,
+    ) -> Option<mush_ai::types::AccountLabel> {
+        let oauth_provider = mush_ai::auth::oauth_provider_id(&model.provider)?;
+        self.accounts.get(oauth_provider).cloned()
     }
 
     pub fn save_now(&self) {
@@ -417,6 +435,7 @@ impl SessionRuntime {
         vec![
             SessionEvent::SessionIdChanged(self.session_id.clone()),
             SessionEvent::Title(self.title.clone()),
+            SessionEvent::Accounts(self.accounts.clone()),
         ]
     }
 
@@ -595,6 +614,27 @@ mod tests {
         runtime.restore_rlm_max_depth(Some(5));
         assert_eq!(runtime.rlm_max_depth, 5);
         assert_eq!(runtime.snapshot().rlm_max_depth, Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_new_session_starts_on_the_default_account() {
+        let mut runtime = SessionRuntime::new(ConversationState::new());
+        let mut accounts = mush_ai::types::SessionAccounts::default();
+        accounts.set(
+            "anthropic",
+            Some(mush_ai::types::AccountLabel::parse("work").unwrap()),
+        );
+        runtime.set_accounts(accounts);
+
+        let events = runtime.handle(SessionCommand::New).await;
+
+        assert!(runtime.accounts.is_empty());
+        assert!(runtime.models.accounts().is_empty());
+        assert!(
+            events.iter().any(
+                |event| matches!(event, SessionEvent::Accounts(accounts) if accounts.is_empty())
+            )
+        );
     }
 
     fn user(text: &str) -> Message {

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::OAuthError;
+use crate::types::AccountLabel;
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BETA_HEADER: &str = "oauth-2025-04-20";
@@ -40,8 +41,10 @@ impl OAuthUsage {
     pub const SEVEN_DAY: chrono::TimeDelta = chrono::TimeDelta::weeks(1);
 }
 
+#[derive(Clone)]
 pub struct UsagePoller {
     cached: Arc<Mutex<Option<CachedResult>>>,
+    account: Arc<Mutex<Option<AccountLabel>>>,
     client: crate::http::HttpClient,
 }
 
@@ -59,8 +62,28 @@ impl UsagePoller {
     pub fn new(client: crate::http::HttpClient) -> Self {
         Self {
             cached: Arc::new(Mutex::new(None)),
+            account: Arc::new(Mutex::new(None)),
             client,
         }
+    }
+
+    pub fn set_account(&self, account: Option<AccountLabel>) -> bool {
+        let Ok(mut current) = self.account.lock() else {
+            return false;
+        };
+        if *current == account {
+            return false;
+        }
+        *current = account;
+        if let Ok(mut cache) = self.cached.lock() {
+            *cache = None;
+        }
+        true
+    }
+
+    #[must_use]
+    pub fn account(&self) -> Option<AccountLabel> {
+        self.account.lock().ok().and_then(|account| account.clone())
     }
 
     pub async fn get_usage(&self) -> Option<OAuthUsage> {
@@ -122,7 +145,8 @@ impl UsagePoller {
     }
 
     async fn fetch(&self) -> Result<OAuthUsage, OAuthError> {
-        let token = super::get_anthropic_oauth_token()
+        let account = self.account();
+        let token = super::get_anthropic_oauth_token(account.as_ref())
             .await?
             .ok_or_else(|| OAuthError::TokenExchange("no anthropic oauth token".into()))?;
 

@@ -115,6 +115,9 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         app.model_id.abbreviated(),
         app.theme.status_model,
     ));
+    for (_, label) in app.accounts.iter() {
+        b.push_inline(Span::styled(format!(" @{label}"), app.theme.status_model));
+    }
 
     if app.interaction.status_bar.show_thinking {
         b.section_break();
@@ -547,6 +550,20 @@ mod tests {
             content.contains("c-s-4"),
             "expected abbreviated model: {content}"
         );
+    }
+
+    #[test]
+    fn status_bar_names_the_session_account() {
+        let mut app = App::new("claude-sonnet-4".into(), TokenCount::new(200_000));
+        let content = buffer_to_string(&render_status(&app, 120, 1));
+        assert!(!content.contains('@'), "{content}");
+        app.render_state.status_bar_cache.borrow_mut().take();
+        app.accounts.set(
+            "anthropic",
+            Some(mush_ai::types::AccountLabel::parse("work").unwrap()),
+        );
+        let content = buffer_to_string(&render_status(&app, 120, 1));
+        assert!(content.contains("c-s-4 @work"), "{content}");
     }
 
     #[test]

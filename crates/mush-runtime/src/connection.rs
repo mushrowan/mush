@@ -47,12 +47,13 @@ pub enum ClientCommand {
     },
     SetModel(String),
     SetSubagentModel(Option<String>),
+    SetAccount(Option<mush_ai::types::AccountLabel>),
     SetPaused(Option<mush_session::Pause>),
     SetThinking(ThinkingLevel),
     SetRlmMaxDepth(u32),
     SetSystemPrompt(Option<String>),
     ReloadSystemPrompt,
-    SetStreamOptions(mush_ai::types::StreamOptions),
+    SetStreamOptions(Box<mush_ai::types::StreamOptions>),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
     SummariseAndNavigate {
@@ -129,6 +130,8 @@ pub struct ConnectionState {
     pub model_id: String,
     #[serde(default)]
     pub subagent_model: Option<String>,
+    #[serde(default)]
+    pub accounts: mush_ai::types::SessionAccounts,
     #[serde(default)]
     pub paused: Option<mush_session::Pause>,
     pub thinking_level: ThinkingLevel,
@@ -1293,8 +1296,9 @@ impl InProcessConnection {
         let model = self.runtime.model(&self.config.default_model);
         let options = self.config.options.clone();
         let keys = self.config.provider_api_keys.clone();
+        let account = self.runtime.account_for(&model);
         let task = tokio::spawn(async move {
-            let options = resolve_auth_into_options(&model, options, &keys).await;
+            let options = resolve_auth_into_options(&model, options, &keys, account).await;
             mush_ai::oneshot::collect_text(&registry, &model, &context, &options)
                 .await
                 .map_err(|error| error.to_string())
@@ -1365,6 +1369,44 @@ impl InProcessConnection {
         Some(ClientEvent::Session(SessionEvent::Title(Some(title))))
     }
 
+    fn select_account(
+        &mut self,
+        model: &mush_ai::types::Model,
+        label: Option<mush_ai::types::AccountLabel>,
+    ) -> Result<String, ConnectionError> {
+        let oauth_provider =
+            mush_ai::auth::oauth_provider_id(&model.provider).ok_or_else(|| {
+                ConnectionError::Refused(format!("{} has no account logins", model.provider))
+            })?;
+        let store = mush_ai::oauth::load_credentials()
+            .map_err(|error| ConnectionError::Refused(error.to_string()))?;
+        let accounts = store.accounts(oauth_provider).ok_or_else(|| {
+            ConnectionError::Refused(format!("no {oauth_provider} accounts, run /login first"))
+        })?;
+        let chosen = match &label {
+            Some(label) => accounts
+                .get(Some(label))
+                .ok_or_else(|| {
+                    let known: Vec<&str> = accounts.labels().map(|label| label.as_str()).collect();
+                    ConnectionError::Refused(format!(
+                        "no {oauth_provider} account called {label}, known accounts: {}",
+                        known.join(", ")
+                    ))
+                })?
+                .0
+                .clone(),
+            None => accounts
+                .default_label()
+                .cloned()
+                .unwrap_or_else(mush_ai::types::AccountLabel::default_label),
+        };
+        let mut session_accounts = self.runtime.accounts.clone();
+        session_accounts.set(oauth_provider, label);
+        self.runtime.set_accounts(session_accounts);
+        self.runtime.save_now_and_settle();
+        Ok(format!("{oauth_provider} account: {chosen}"))
+    }
+
     fn spawn_title(&mut self) {
         if !self.config.generate_title || !self.runtime.title_due() || self.title.is_some() {
             return;
@@ -1374,11 +1416,14 @@ impl InProcessConnection {
         let registry = self.registry.clone();
         let model = self.config.default_model.clone();
         let keys = self.config.provider_api_keys.clone();
+        let oauth_account = self.runtime.account_for(&model);
         self.title = Some(tokio::spawn(async move {
-            let (api_key, account_id) = resolve_auth_for_model(&model, &keys).await;
+            let (api_key, account_id) =
+                resolve_auth_for_model(&model, &keys, oauth_account.as_ref()).await;
             let options = mush_ai::types::StreamOptions {
                 api_key,
                 account_id,
+                oauth_account,
                 ..Default::default()
             };
             tokio::time::timeout(
@@ -1892,6 +1937,16 @@ impl AgentConnection for InProcessConnection {
                 self.runtime.subagent_model = id;
                 self.runtime.save_now_and_settle();
             }
+            ClientCommand::SetAccount(label) => {
+                let model = self.runtime.model(&self.config.default_model);
+                let status = self.select_account(&model, label)?;
+                self.queued
+                    .push_back(ClientEvent::Session(SessionEvent::Accounts(
+                        self.runtime.accounts.clone(),
+                    )));
+                self.queued
+                    .push_back(ClientEvent::Session(SessionEvent::Status(status)));
+            }
             ClientCommand::SetPaused(pause) => {
                 if self.runtime.paused != pause {
                     self.runtime.paused = pause.clone();
@@ -1925,7 +1980,7 @@ impl AgentConnection for InProcessConnection {
                         )));
                 }
             }
-            ClientCommand::SetStreamOptions(options) => self.config.options = options,
+            ClientCommand::SetStreamOptions(options) => self.config.options = *options,
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);
             }
@@ -2020,6 +2075,7 @@ impl AgentConnection for InProcessConnection {
             title: self.runtime.title.clone(),
             model_id: self.runtime.model_id.clone(),
             subagent_model: self.runtime.subagent_model.clone(),
+            accounts: self.runtime.accounts.clone(),
             paused: self.runtime.paused.clone(),
             thinking_level: self.runtime.thinking_level.clone(),
             context_tokens: self.runtime.context_tokens,
@@ -4533,6 +4589,61 @@ mod tests {
         );
         assert!(connection.state().paused.is_none());
         assert!(connection.turn_active());
+    }
+
+    #[tokio::test]
+    async fn the_session_account_is_checked_against_the_logins_and_saved() {
+        let config = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("MUSH_CONFIG_DIR");
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", config.path()) };
+        let work = mush_ai::types::AccountLabel::parse("work").unwrap();
+        let (mut connection, _requests) = connection();
+
+        let refused = connection
+            .send(ClientCommand::SetAccount(Some(work.clone())))
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("run /login"), "{refused}");
+
+        let creds = || mush_ai::oauth::OAuthCredentials {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: u64::MAX,
+            account_id: None,
+        };
+        mush_ai::oauth::save_login("anthropic", None, creds()).unwrap();
+        mush_ai::oauth::save_login("anthropic", Some(work.clone()), creds()).unwrap();
+
+        let unknown = connection
+            .send(ClientCommand::SetAccount(Some(
+                mush_ai::types::AccountLabel::parse("nope").unwrap(),
+            )))
+            .await
+            .unwrap_err();
+        assert!(unknown.to_string().contains("default, work"), "{unknown}");
+
+        connection
+            .send(ClientCommand::SetAccount(Some(work.clone())))
+            .await
+            .unwrap();
+        let state = connection.state();
+        assert_eq!(state.accounts.get("anthropic"), Some(&work));
+        let model = connection.runtime.model(&connection.config.default_model);
+        assert_eq!(connection.runtime.account_for(&model), Some(work.clone()));
+        assert_eq!(
+            connection.runtime.models.accounts().get("anthropic"),
+            Some(&work),
+            "children inherit the switch"
+        );
+        assert_eq!(
+            connection.runtime.snapshot().accounts.get("anthropic"),
+            Some(&work)
+        );
+
+        match previous {
+            Some(dir) => unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir) },
+            None => unsafe { std::env::remove_var("MUSH_CONFIG_DIR") },
+        }
     }
 
     #[tokio::test]

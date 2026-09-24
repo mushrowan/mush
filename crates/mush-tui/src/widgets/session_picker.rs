@@ -189,6 +189,7 @@ mod tests {
             cwd: "/tmp".into(),
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             paused: None,
             rlm_max_depth: None,
             lifecycle: mush_session::Lifecycle::Live,

@@ -365,9 +365,18 @@ enum Command {
     },
     Login {
         provider: Option<String>,
+        #[arg(long)]
+        account: Option<mush_ai::types::AccountLabel>,
     },
     Logout {
         provider: Option<String>,
+        #[arg(long)]
+        account: Option<mush_ai::types::AccountLabel>,
+    },
+    Accounts {
+        provider: Option<String>,
+        #[arg(long)]
+        default: Option<mush_ai::types::AccountLabel>,
     },
     Models,
     Status,
@@ -481,8 +490,15 @@ async fn run() -> Result<()> {
         }
         Some(Command::Shutdown { force, json }) => return daemon::shutdown(force, json).await,
         Some(Command::Doctor { fix, json }) => return doctor::doctor(fix, json).await,
-        Some(Command::Login { provider }) => return commands::login(provider).await,
-        Some(Command::Logout { provider }) => return commands::logout(provider),
+        Some(Command::Login { provider, account }) => {
+            return commands::login(provider, account).await;
+        }
+        Some(Command::Logout { provider, account }) => {
+            return commands::logout(provider, account.as_ref());
+        }
+        Some(Command::Accounts { provider, default }) => {
+            return commands::accounts(provider, default.as_ref());
+        }
         Some(Command::Models) => return commands::list_models(),
         Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()).await,
         Some(Command::Delete { id }) => return commands::delete_session(&id),
@@ -1408,6 +1424,11 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             worker.rlm_depth = spec.depth;
             worker.rlm_max_depth = max_depth;
             worker.rlm_max_depth_source = mush_runtime::RlmMaxDepthSource::Inherited;
+            worker.accounts = if spec.resume_session.is_some() {
+                session.meta.accounts.clone()
+            } else {
+                seed.models.accounts()
+            };
             worker.kernel_state = Some(ipython.clone());
             worker.saver = seed.saver.clone();
             worker.injections = mush_agent::AgentInjections {
@@ -1545,6 +1566,7 @@ fn worker_config(
     worker.kernel_signals = Some(kernel_signals);
     worker.models = models;
     worker.subagent_model = session.meta.subagent_model.clone();
+    worker.accounts = session.meta.accounts.clone();
     worker.paused = session.meta.paused.clone();
     if let Some(ipython) = &setup.ipython_tool {
         let root = mush_runtime::Identity::root(
@@ -1801,6 +1823,7 @@ fn fork_session(source: Session, cwd: &str) -> Session {
     forked.system_prompt = source.system_prompt;
     forked.panes = source.panes;
     forked.meta.rlm_max_depth = source.meta.rlm_max_depth;
+    forked.meta.accounts = source.meta.accounts;
     forked.meta.message_count = forked.conversation.context_len();
     forked
 }
@@ -1813,6 +1836,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.system_prompt = snapshot.system_prompt;
     session.meta.parent = snapshot.parent;
     session.meta.subagent_model = snapshot.subagent_model;
+    session.meta.accounts = snapshot.accounts;
     session.meta.paused = snapshot.paused;
     session.meta.rlm_max_depth = snapshot.rlm_max_depth;
     session.meta.message_count = session.conversation.context_len();
@@ -1926,6 +1950,7 @@ mod tests {
             system_prompt: None,
             parent: None,
             subagent_model: None,
+            accounts: Default::default(),
             rlm_max_depth: None,
         }
     }

@@ -7,6 +7,7 @@ pub const BROWSER_LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 pub struct PendingBrowserLogin {
     pub provider_id: String,
     pub provider_name: String,
+    pub account: Option<mush_ai::types::AccountLabel>,
     outcome: oneshot::Receiver<Result<OAuthCredentials, String>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -29,9 +30,16 @@ impl PendingBrowserLogin {
         Self {
             provider_id: provider_id.into(),
             provider_name: provider_name.into(),
+            account: None,
             outcome,
             task,
         }
+    }
+
+    #[must_use]
+    pub fn for_account(mut self, account: Option<mush_ai::types::AccountLabel>) -> Self {
+        self.account = account;
+        self
     }
 
     pub fn poll(&mut self) -> Option<Result<OAuthCredentials, String>> {

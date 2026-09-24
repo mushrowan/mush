@@ -42,6 +42,10 @@ pub enum SlashParseError {
     McpUsage,
     #[error("usage: /login-complete <code>")]
     LoginCodeUsage,
+    #[error("usage: /login [provider] [account]")]
+    LoginUsage,
+    #[error(transparent)]
+    AccountLabel(#[from] mush_ai::types::AccountLabelError),
     #[error("usage: /btw <question>")]
     SideUsage,
     #[error(
@@ -159,6 +163,10 @@ pub enum SlashAction {
     },
     Login {
         provider: Option<String>,
+        account: Option<mush_ai::types::AccountLabel>,
+    },
+    Account {
+        label: Option<mush_ai::types::AccountLabel>,
     },
     LoginComplete {
         code: String,
@@ -711,8 +719,11 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "settings" => Ok(SlashAction::Settings {
             args: args.to_string(),
         }),
-        "login" => Ok(SlashAction::Login {
-            provider: (!args.is_empty()).then(|| args.to_string()),
+        "login" => parse_login(args),
+        "account" | "accounts" => Ok(SlashAction::Account {
+            label: (!args.is_empty())
+                .then(|| mush_ai::types::AccountLabel::parse(args))
+                .transpose()?,
         }),
         "login-complete" | "login-code" if args.is_empty() => Err(SlashParseError::LoginCodeUsage),
         "login-complete" | "login-code" => Ok(SlashAction::LoginComplete {
@@ -860,6 +871,19 @@ fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
         }),
         _ => Err(SlashParseError::McpUsage),
     }
+}
+
+fn parse_login(args: &str) -> Result<SlashAction, SlashParseError> {
+    let mut words = args.split_whitespace();
+    let provider = words.next().map(str::to_string);
+    let account = words
+        .next()
+        .map(mush_ai::types::AccountLabel::parse)
+        .transpose()?;
+    if words.next().is_some() {
+        return Err(SlashParseError::LoginUsage);
+    }
+    Ok(SlashAction::Login { provider, account })
 }
 
 #[cfg(test)]
@@ -1112,6 +1136,47 @@ mod tests {
     #[test]
     fn parse_compact_rejects_unknown_flag() {
         assert!(parse("/compact --frobnicate 10k").is_err());
+    }
+
+    #[test]
+    fn parse_login_takes_an_optional_account() {
+        assert_eq!(
+            parse("/login").unwrap(),
+            SlashAction::Login {
+                provider: None,
+                account: None
+            }
+        );
+        assert_eq!(
+            parse("/login anthropic work").unwrap(),
+            SlashAction::Login {
+                provider: Some("anthropic".into()),
+                account: Some(mush_ai::types::AccountLabel::parse("work").unwrap()),
+            }
+        );
+        assert!(matches!(
+            parse("/login anthropic Work"),
+            Err(SlashParseError::AccountLabel(_))
+        ));
+        assert!(matches!(
+            parse("/login anthropic work extra"),
+            Err(SlashParseError::LoginUsage)
+        ));
+    }
+
+    #[test]
+    fn parse_account() {
+        assert_eq!(
+            parse("/account").unwrap(),
+            SlashAction::Account { label: None }
+        );
+        assert_eq!(
+            parse("/account personal").unwrap(),
+            SlashAction::Account {
+                label: Some(mush_ai::types::AccountLabel::parse("personal").unwrap())
+            }
+        );
+        assert!(parse("/account two words").is_err());
     }
 
     #[test]
