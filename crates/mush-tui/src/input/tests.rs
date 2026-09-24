@@ -1172,6 +1172,46 @@ fn slash_menu_opens_on_tab_with_commands() {
 }
 
 #[test]
+fn the_effort_menu_lists_levels_and_picking_one_runs_it() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion.slash_commands = vec![crate::app::SlashCommand {
+        name: "effort".into(),
+        description: "select reasoning/thinking level ([level])".into(),
+    }];
+    app.supported_thinking_levels = vec![ThinkingLevel::Medium, ThinkingLevel::High];
+    app.thinking_level = ThinkingLevel::High;
+    app.input.text = "/effort ".into();
+    app.input.cursor = app.input.text.len();
+    handle_key(&mut app, key(KeyCode::Tab));
+
+    let menu = app.completion.slash_menu.as_ref().unwrap();
+    let rows: Vec<(&str, &str)> = menu
+        .matches
+        .iter()
+        .map(|m| (m.name.as_str(), m.description.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("effort off", "No reasoning"),
+            ("effort medium", "Moderate reasoning"),
+            ("effort high", "Deep reasoning (current)"),
+        ]
+    );
+
+    handle_key(&mut app, key(KeyCode::Char('m')));
+    assert_eq!(app.completion.slash_menu.as_ref().unwrap().matches.len(), 1);
+    let event = handle_key(&mut app, key(KeyCode::Enter));
+    match event {
+        Some(AppEvent::SlashCommand {
+            action: crate::slash::SlashAction::Effort { level },
+        }) => assert_eq!(level.as_deref(), Some("medium")),
+        other => panic!("expected an effort command, got {other:?}"),
+    }
+    assert!(app.input.text.is_empty());
+}
+
+#[test]
 fn slash_menu_navigate_and_select() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.completion.slash_commands = vec![

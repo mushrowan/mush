@@ -188,6 +188,26 @@ pub(crate) struct TabState {
 }
 
 #[must_use]
+pub(crate) fn argument_prefix(text: &str) -> Option<(&str, &str)> {
+    let (command, rest) = text.strip_prefix('/')?.split_once(' ')?;
+    (!rest.contains(' ')).then_some((command, rest))
+}
+
+#[must_use]
+pub(crate) fn thinking_level_description(level: &str) -> &'static str {
+    match level {
+        "off" => "No reasoning",
+        "minimal" => "Very brief reasoning",
+        "low" => "Light reasoning",
+        "medium" => "Moderate reasoning",
+        "high" => "Deep reasoning",
+        "xhigh" => "Very deep reasoning",
+        "max" => "Maximum reasoning",
+        _ => "",
+    }
+}
+
+#[must_use]
 pub(crate) fn filter_command_matches(commands: &[SlashCommand], prefix: &str) -> Vec<SlashCommand> {
     commands
         .iter()

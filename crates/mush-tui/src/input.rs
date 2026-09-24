@@ -771,15 +771,25 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             .keymap
             .matches_in(KeyScope::Insert, Action::Confirm, key) =>
         {
-            if let Some(ref menu) = app.completion.slash_menu
-                && let Some(cmd) = menu.matches.get(menu.selected)
-            {
-                app.input.text = format!("/{}", cmd.name);
-                app.input.cursor = app.input.text.len();
-                app.input.ensure_cursor_visible();
-            }
+            let chosen = app
+                .completion
+                .slash_menu
+                .as_ref()
+                .and_then(|menu| menu.matches.get(menu.selected))
+                .map(|cmd| cmd.name.clone());
             app.close_slash_menu();
-            None
+            let name = chosen?;
+            app.input.text = format!("/{name}");
+            app.input.cursor = app.input.text.len();
+            app.input.ensure_cursor_visible();
+            if !name.contains(' ') {
+                return None;
+            }
+            let text = app.input.take_text();
+            match classify_submission(app, &text) {
+                Submission::Command(action) => Some(AppEvent::SlashCommand { action }),
+                Submission::Prompt | Submission::Refused => None,
+            }
         }
         _ if app
             .keymap

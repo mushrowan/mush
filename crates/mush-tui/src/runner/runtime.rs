@@ -27,6 +27,8 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "save session, start fresh ([--name <name> --] [prompt])",
     ),
     ("model", "show or switch model"),
+    ("effort", "select reasoning/thinking level ([level])"),
+    ("thinking", "alias for /effort"),
     ("sessions", "browse and resume sessions"),
     ("resume", "browse sessions, or resume one by id"),
     ("branch", "branch from an earlier user message"),

@@ -168,6 +168,9 @@ pub enum SlashAction {
     Account {
         label: Option<mush_ai::types::AccountLabel>,
     },
+    Effort {
+        level: Option<String>,
+    },
     LoginComplete {
         code: String,
     },
@@ -720,6 +723,9 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             args: args.to_string(),
         }),
         "login" => parse_login(args),
+        "effort" | "thinking" => Ok(SlashAction::Effort {
+            level: (!args.is_empty()).then(|| args.to_lowercase()),
+        }),
         "account" | "accounts" => Ok(SlashAction::Account {
             label: (!args.is_empty())
                 .then(|| mush_ai::types::AccountLabel::parse(args))
@@ -1162,6 +1168,20 @@ mod tests {
             parse("/login anthropic work extra"),
             Err(SlashParseError::LoginUsage)
         ));
+    }
+
+    #[test]
+    fn parse_effort_and_its_thinking_alias() {
+        assert_eq!(
+            parse("/effort").unwrap(),
+            SlashAction::Effort { level: None }
+        );
+        assert_eq!(
+            parse("/thinking High").unwrap(),
+            SlashAction::Effort {
+                level: Some("high".into())
+            }
+        );
     }
 
     #[test]

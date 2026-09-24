@@ -285,6 +285,10 @@ pub async fn handle(
             });
             None
         }
+        SlashAction::Effort { level } => {
+            handle_effort(app, tui_config.model.reasoning, level.as_deref());
+            None
+        }
         SlashAction::Account { label } => {
             match label {
                 None => app.push_system_message(account_report(&tui_config.model, &app.accounts)),
@@ -835,6 +839,36 @@ fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, va
     true
 }
 
+fn handle_effort(app: &mut App, reasoning: bool, requested: Option<&str>) {
+    if !reasoning {
+        app.status = Some("Current model does not support thinking".into());
+        return;
+    }
+    let levels = app.available_thinking_levels();
+    let Some(requested) = requested else {
+        app.input.text = "/effort ".into();
+        app.input.cursor = app.input.text.len();
+        app.open_slash_menu();
+        return;
+    };
+    let Some(level) = levels
+        .iter()
+        .find(|level| level.effort_name().unwrap_or("off") == requested)
+    else {
+        let names: Vec<&str> = levels
+            .iter()
+            .map(|level| level.effort_name().unwrap_or("off"))
+            .collect();
+        app.push_system_message(format!(
+            "Unknown thinking level '{requested}'. Available: {}",
+            names.join(", ")
+        ));
+        return;
+    };
+    app.thinking_level = level.clone();
+    app.status = Some(format!("Thinking level: {requested}").into());
+}
+
 pub(crate) fn account_report(
     model: &mush_ai::types::Model,
     session_accounts: &mush_ai::types::SessionAccounts,
@@ -1191,6 +1225,29 @@ pub(crate) fn format_skill_catalogue(catalogue: &crate::runner::SkillCatalogue) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_sets_a_known_level_and_names_the_choices_otherwise() {
+        let mut app = App::new("test".into(), mush_ai::types::TokenCount::new(200_000));
+        app.supported_thinking_levels = vec![ThinkingLevel::Low, ThinkingLevel::High];
+
+        handle_effort(&mut app, true, Some("high"));
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+        assert_eq!(
+            app.status.as_ref().map(|status| status.text.as_str()),
+            Some("Thinking level: high")
+        );
+
+        handle_effort(&mut app, true, Some("xhigh"));
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+        assert_eq!(
+            app.messages.last().unwrap().content,
+            "Unknown thinking level 'xhigh'. Available: off, low, high"
+        );
+
+        handle_effort(&mut app, false, Some("low"));
+        assert_eq!(app.thinking_level, ThinkingLevel::High);
+    }
 
     #[test]
     fn every_help_command_parses_as_a_builtin() {

@@ -2,8 +2,7 @@ use super::*;
 
 impl App {
     pub fn open_slash_menu(&mut self) {
-        let prefix = self.input.text.as_str();
-        let matches = filter_command_matches(&self.completion.slash_commands, prefix);
+        let matches = self.slash_matches();
         if matches.is_empty() {
             return;
         }
@@ -13,14 +12,52 @@ impl App {
     }
 
     pub fn update_slash_menu(&mut self) {
+        let matches = self.slash_matches();
         if let Some(ref mut menu) = self.completion.slash_menu {
-            let prefix = self.input.text.as_str();
-            menu.matches = filter_command_matches(&self.completion.slash_commands, prefix);
+            menu.matches = matches;
             menu.selected = 0;
 
             if menu.matches.is_empty() {
                 self.close_slash_menu();
             }
+        }
+    }
+
+    fn slash_matches(&self) -> Vec<crate::slash_menu::SlashCommand> {
+        let text = self.input.text.as_str();
+        match crate::slash_menu::argument_prefix(text) {
+            Some((command, prefix)) => self.argument_matches(command, prefix),
+            None => filter_command_matches(&self.completion.slash_commands, text),
+        }
+    }
+
+    fn argument_matches(
+        &self,
+        command: &str,
+        prefix: &str,
+    ) -> Vec<crate::slash_menu::SlashCommand> {
+        match command {
+            "effort" | "thinking" => {
+                let current = self.thinking_level.normalize_visible();
+                self.available_thinking_levels()
+                    .into_iter()
+                    .filter_map(|level| {
+                        let name = level.effort_name().unwrap_or("off").to_string();
+                        name.starts_with(prefix).then(|| {
+                            let description = crate::slash_menu::thinking_level_description(&name);
+                            crate::slash_menu::SlashCommand {
+                                name: format!("{command} {name}"),
+                                description: if level == current {
+                                    format!("{description} (current)")
+                                } else {
+                                    description.to_string()
+                                },
+                            }
+                        })
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
         }
     }
 

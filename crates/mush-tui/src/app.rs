@@ -800,6 +800,27 @@ impl App {
         }
     }
 
+    #[must_use]
+    pub fn available_thinking_levels(&self) -> Vec<ThinkingLevel> {
+        let mut levels = vec![ThinkingLevel::Off];
+        if self.supported_thinking_levels.is_empty() {
+            levels.extend([
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::Xhigh,
+            ]);
+        } else {
+            levels.extend(
+                self.supported_thinking_levels
+                    .iter()
+                    .filter(|level| **level != ThinkingLevel::Off)
+                    .cloned(),
+            );
+        }
+        levels
+    }
+
     pub fn cycle_thinking_level(&mut self) {
         self.thinking_level =
             next_thinking_level(&self.thinking_level, &self.supported_thinking_levels);
