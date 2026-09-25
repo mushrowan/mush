@@ -292,14 +292,25 @@ pub async fn handle(
         SlashAction::Account { label } => {
             match label {
                 None => app.push_system_message(account_report(&tui_config.model, &app.accounts)),
-                Some(label) => {
-                    if let Err(error) = connection
-                        .send(mush_runtime::ClientCommand::SetAccount(Some(label.clone())))
-                        .await
-                    {
-                        app.push_system_message(error.to_string());
+                Some(label) => match connection
+                    .send(mush_runtime::ClientCommand::SetAccount(Some(label.clone())))
+                    .await
+                {
+                    Ok(events) => {
+                        for event in events {
+                            match event {
+                                mush_runtime::ClientEvent::Session(
+                                    mush_runtime::SessionEvent::Accounts(accounts),
+                                ) => app.accounts = accounts,
+                                mush_runtime::ClientEvent::Session(
+                                    mush_runtime::SessionEvent::Status(status),
+                                ) => app.push_system_message(status),
+                                _ => {}
+                            }
+                        }
                     }
-                }
+                    Err(error) => app.push_system_message(error.to_string()),
+                },
             }
             None
         }

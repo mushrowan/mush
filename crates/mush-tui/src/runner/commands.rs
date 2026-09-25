@@ -1307,7 +1307,11 @@ mod tests {
 
         assert_eq!(config.cwd, home_path);
         assert_eq!(std::env::current_dir().unwrap(), home_path);
-        let name = home_path.file_name().unwrap().to_string_lossy().into_owned();
+        let name = home_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(session.app.cwd.ends_with(&name), "{}", session.app.cwd);
     }
 
@@ -1563,6 +1567,38 @@ mod tests {
         assert_eq!(stored.get("anthropic", None).unwrap().0.as_str(), "default");
         let message = session.app.messages.last().unwrap().content.clone();
         assert!(message.contains("as work"), "got {message:?}");
+    }
+
+    #[tokio::test]
+    async fn switching_account_updates_the_pane_and_says_so() {
+        let _config = isolated_config_dir().await;
+        let home = mush_ai::types::AccountLabel::parse("home").unwrap();
+        mush_ai::oauth::save_login("anthropic", None, credentials()).unwrap();
+        mush_ai::oauth::save_login("anthropic", Some(home.clone()), credentials()).unwrap();
+        let mut session = session();
+        let model = mush_ai::models::all_models()
+            .into_iter()
+            .find(|model| model.api == mush_ai::types::Api::AnthropicMessages)
+            .unwrap();
+        session.in_process().runtime.model_id = model.id.to_string();
+        let mut config = TuiConfig::for_test();
+
+        crate::slash::commands::handle(
+            &mut session.app,
+            session.connection.as_mut(),
+            &mut config,
+            &SlashAction::Account {
+                label: Some(home.clone()),
+            },
+        )
+        .await;
+
+        assert_eq!(session.app.accounts.get("anthropic"), Some(&home));
+        let message = session.app.messages.last().unwrap().content.clone();
+        assert!(
+            message.contains("anthropic account: home"),
+            "got {message:?}"
+        );
     }
 
     #[tokio::test]
