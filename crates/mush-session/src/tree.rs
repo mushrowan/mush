@@ -119,42 +119,54 @@ pub struct TreeRow<'a> {
 pub struct SessionTree {
     entries: Vec<SessionEntry>,
     leaf_id: Option<EntryId>,
+    #[serde(skip)]
+    positions: std::collections::HashMap<EntryId, usize>,
+    #[serde(skip)]
+    parents: Vec<Option<usize>>,
+    #[serde(skip)]
+    child_counts: Vec<usize>,
 }
 
 impl SessionTree {
     pub fn rebuild(entries: Vec<SessionEntry>, leaf_id: Option<EntryId>) -> Result<Self, String> {
+        let mut tree = Self::new();
+        tree.leaf_id = leaf_id;
         if entries.is_empty() {
-            return Ok(Self { entries, leaf_id });
+            return Ok(tree);
         }
-        let mut tree = Self { entries, leaf_id };
-        let mut seen = std::collections::HashSet::new();
-        for entry in &tree.entries {
+        tree.entries.reserve(entries.len());
+        for entry in entries {
             if entry
                 .parent_id
                 .as_ref()
-                .is_some_and(|parent| !seen.contains(parent))
+                .is_some_and(|parent| !tree.positions.contains_key(parent))
             {
                 return Err(String::from(
                     "session history parent missing or out of order",
                 ));
             }
             match &entry.kind {
-                EntryKind::BranchSummary { from_id, .. } if !seen.contains(from_id) => {
+                EntryKind::BranchSummary { from_id, .. }
+                    if !tree.positions.contains_key(from_id) =>
+                {
                     return Err(String::from("branch summary history missing"));
                 }
-                EntryKind::Compaction { first_kept_id, .. } if !seen.contains(first_kept_id) => {
+                EntryKind::Compaction { first_kept_id, .. }
+                    if !tree.positions.contains_key(first_kept_id) =>
+                {
                     return Err(String::from("compaction history missing"));
                 }
                 _ => {}
             }
-            if !seen.insert(entry.id.clone()) {
+            if tree.positions.contains_key(&entry.id) {
                 return Err(String::from("duplicate session history id"));
             }
+            tree.push(entry);
         }
         if tree
             .leaf_id
             .as_ref()
-            .is_some_and(|leaf| !seen.contains(leaf))
+            .is_some_and(|leaf| !tree.positions.contains_key(leaf))
         {
             return Err(String::from("session history leaf missing"));
         }
@@ -322,7 +334,24 @@ impl SessionTree {
         Self {
             entries: Vec::new(),
             leaf_id: None,
+            positions: std::collections::HashMap::new(),
+            parents: Vec::new(),
+            child_counts: Vec::new(),
         }
+    }
+
+    fn push(&mut self, entry: SessionEntry) {
+        let parent = entry
+            .parent_id
+            .as_ref()
+            .and_then(|parent| self.positions.get(parent).copied());
+        if let Some(parent) = parent {
+            self.child_counts[parent] += 1;
+        }
+        self.positions.insert(entry.id.clone(), self.entries.len());
+        self.parents.push(parent);
+        self.child_counts.push(0);
+        self.entries.push(entry);
     }
 
     pub fn append_message(&mut self, message: Message) -> EntryId {
@@ -345,7 +374,7 @@ impl SessionTree {
             kind,
         };
         let id = entry.id.clone();
-        self.entries.push(entry);
+        self.push(entry);
         self.leaf_id = Some(id.clone());
         id
     }
@@ -358,7 +387,7 @@ impl SessionTree {
             kind: EntryKind::ThinkingLevelChange { thinking_level },
         };
         let id = entry.id.clone();
-        self.entries.push(entry);
+        self.push(entry);
         self.leaf_id = Some(id.clone());
         id
     }
@@ -420,7 +449,7 @@ impl SessionTree {
             },
         };
         let id = entry.id.clone();
-        self.entries.push(entry);
+        self.push(entry);
         self.leaf_id = Some(id.clone());
         id
     }
@@ -455,7 +484,7 @@ impl SessionTree {
             },
         };
         let id = entry.id.clone();
-        self.entries.push(entry);
+        self.push(entry);
         self.leaf_id = Some(id.clone());
         Some(id)
     }
@@ -486,19 +515,14 @@ impl SessionTree {
     }
 
     fn branch_ending_at(&self, id: Option<&EntryId>) -> Vec<&SessionEntry> {
-        let index = self.build_index();
         let mut path = Vec::new();
-        let mut current = id;
-        while let Some(id) = current {
+        let mut current = id.and_then(|id| self.positions.get(id).copied());
+        while let Some(position) = current {
             if path.len() == self.entries.len() {
                 break;
             }
-            if let Some(entry) = index.get(&**id) {
-                path.push(*entry);
-                current = entry.parent_id.as_ref();
-            } else {
-                break;
-            }
+            path.push(&self.entries[position]);
+            current = self.parents[position];
         }
         path.reverse();
         path
@@ -513,7 +537,7 @@ impl SessionTree {
     }
 
     pub fn unanswered_tool_calls(&self, id: &EntryId) -> Vec<ToolCallId> {
-        let mut open: Vec<ToolCallId> = Vec::new();
+        let mut open: Vec<&ToolCallId> = Vec::new();
         for entry in self.branch_ending_at(Some(id)) {
             let EntryKind::Message { message } = &entry.kind else {
                 continue;
@@ -521,22 +545,21 @@ impl SessionTree {
             match message {
                 Message::Assistant(assistant) => {
                     open.extend(assistant.content.iter().filter_map(|part| match part {
-                        AssistantContentPart::ToolCall(call) => Some(call.id.clone()),
+                        AssistantContentPart::ToolCall(call) => Some(&call.id),
                         _ => None,
                     }));
                 }
-                Message::ToolResult(result) => open.retain(|call| call != &result.tool_call_id),
+                Message::ToolResult(result) => open.retain(|call| **call != result.tool_call_id),
                 Message::User(_) | Message::Event(_) => {}
             }
         }
-        open
+        open.into_iter().cloned().collect()
     }
 
     pub fn nearest_branchable_ancestor(&self, id: &EntryId) -> Option<&EntryId> {
-        let index = self.build_index();
-        let mut current = index.get(&**id)?.parent_id.as_ref();
+        let mut current = self.by_id(id)?.parent_id.as_ref();
         while let Some(candidate) = current {
-            let entry: &SessionEntry = index.get(&**candidate)?;
+            let entry = self.by_id(candidate)?;
             if self.unanswered_tool_calls(&entry.id).is_empty() {
                 return Some(&entry.id);
             }
@@ -704,7 +727,9 @@ impl SessionTree {
     }
 
     pub fn by_id(&self, id: &EntryId) -> Option<&SessionEntry> {
-        self.entries.iter().find(|e| e.id == *id)
+        self.positions
+            .get(id)
+            .map(|&position| &self.entries[position])
     }
 
     pub fn children(&self, parent_id: &EntryId) -> Vec<&SessionEntry> {
@@ -764,11 +789,9 @@ impl SessionTree {
     }
 
     pub fn is_branch_point(&self, id: &EntryId) -> bool {
-        self.children(id).len() > 1
-    }
-
-    fn build_index(&self) -> std::collections::HashMap<&str, &SessionEntry> {
-        self.entries.iter().map(|e| (&*e.id, e)).collect()
+        self.positions
+            .get(id)
+            .is_some_and(|&position| self.child_counts[position] > 1)
     }
 }
 
