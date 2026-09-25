@@ -262,12 +262,7 @@ impl SessionStore {
                 continue;
             }
             let mut entry: crate::tree::SessionEntry = serde_json::from_slice(line)?;
-            if let crate::tree::EntryKind::Message {
-                message: mush_ai::types::Message::ToolResult(result),
-            } = &mut entry.kind
-            {
-                result.cap_details();
-            }
+            cap_entry(&mut entry);
             entries.push(entry);
         }
         let logged = Logged {
@@ -280,6 +275,45 @@ impl SessionStore {
         session.conversation = crate::ConversationState::from_tree(tree);
         self.remember(id, logged);
         Ok(session)
+    }
+
+    pub fn slim_history(&self, id: &SessionId, apply: bool) -> Result<SlimReport, StoreError> {
+        let _lease = apply.then(|| self.acquire(id)).transpose()?;
+        let path = self.history_path(id);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SlimReport::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut slimmed = Vec::with_capacity(bytes.len());
+        let mut capped = 0;
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let mut entry: crate::tree::SessionEntry = serde_json::from_slice(line)?;
+            if cap_entry(&mut entry) {
+                capped += 1;
+                serde_json::to_writer(&mut slimmed, &entry)?;
+            } else {
+                slimmed.extend_from_slice(line);
+            }
+            slimmed.push(b'\n');
+        }
+        if apply && capped > 0 {
+            mush_ai::private_io::write_private(&path, &slimmed)?;
+            self.logged
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(id);
+        }
+        Ok(SlimReport {
+            before: bytes.len() as u64,
+            after: slimmed.len() as u64,
+            capped,
+        })
     }
 
     pub fn set_lifecycle(
@@ -399,6 +433,22 @@ fn ignored_session_reason(error: &StoreError) -> String {
         }
         StoreError::Json(error) if error.is_eof() => "zero-byte or truncated session file".into(),
         other => other.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SlimReport {
+    pub before: u64,
+    pub after: u64,
+    pub capped: usize,
+}
+
+fn cap_entry(entry: &mut crate::tree::SessionEntry) -> bool {
+    match &mut entry.kind {
+        crate::tree::EntryKind::Message {
+            message: mush_ai::types::Message::ToolResult(result),
+        } => result.cap_details(),
+        _ => false,
     }
 }
 
@@ -645,6 +695,89 @@ mod tests {
                 text: "shown to the model".into(),
             })]
         );
+    }
+
+    fn bloated_tool_result() -> Message {
+        Message::ToolResult(ToolResultMessage {
+            tool_call_id: ToolCallId::from("call"),
+            tool_name: ToolName::from("ipython"),
+            content: vec![ToolResultContentPart::Text(TextContent {
+                text: "shown to the model".into(),
+            })],
+            outcome: ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+            details: Some(serde_json::json!({
+                "stdout": "x\n".repeat(mush_ai::types::DETAIL_TEXT_LIMIT)
+            })),
+        })
+    }
+
+    #[test]
+    fn slimming_rewrites_only_bloated_entries_and_only_when_applied() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.conversation.append_message(user("before"));
+        session.conversation.append_message(bloated_tool_result());
+        session.conversation.append_message(user("after"));
+        store.save(&session).unwrap();
+        let path = store.history_path(&session.meta.id);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let loaded_before = store.load(&session.meta.id).unwrap().context();
+
+        let dry = store.slim_history(&session.meta.id, false).unwrap();
+        assert_eq!(dry.capped, 1);
+        assert!(dry.after + 60_000 < dry.before, "{dry:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let applied = store.slim_history(&session.meta.id, true).unwrap();
+        assert_eq!(applied, dry);
+        let slimmed = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(slimmed.len() as u64, applied.after);
+        let (before, after): (Vec<_>, Vec<_>) =
+            (original.lines().collect(), slimmed.lines().collect());
+        assert_eq!(before[0], after[0]);
+        assert_eq!(before[2], after[2]);
+        assert_eq!(
+            store.load(&session.meta.id).unwrap().context(),
+            loaded_before
+        );
+        assert_eq!(
+            store.slim_history(&session.meta.id, true).unwrap().capped,
+            0
+        );
+    }
+
+    #[test]
+    fn slimming_refuses_a_session_that_is_open() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.conversation.append_message(bloated_tool_result());
+        store.save(&session).unwrap();
+        let _lease = store.acquire(&session.meta.id).unwrap();
+
+        assert!(matches!(
+            store.slim_history(&session.meta.id, true),
+            Err(StoreError::Busy(_))
+        ));
+        assert_eq!(
+            store.slim_history(&session.meta.id, false).unwrap().capped,
+            1
+        );
+    }
+
+    #[test]
+    fn a_slimmed_session_keeps_appending_after_it() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.conversation.append_message(bloated_tool_result());
+        store.save(&session).unwrap();
+        store.slim_history(&session.meta.id, true).unwrap();
+
+        session.conversation.append_message(user("later"));
+        store.save(&session).unwrap();
+
+        let loaded = store.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 2);
     }
 
     #[test]

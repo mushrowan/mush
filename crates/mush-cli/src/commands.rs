@@ -36,6 +36,53 @@ pub fn delete_session(id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn slim_sessions(id: Option<&str>, all: bool, apply: bool) -> Result<()> {
+    let store = SessionStore::new(SessionStore::default_dir());
+    let sessions = match (id, all) {
+        (Some(id), false) => vec![
+            store
+                .resolve(id)
+                .map_err(|e| eyre!("failed to resolve session: {e}"))?,
+        ],
+        (None, true) => store
+            .list()
+            .map_err(|e| eyre!("failed to list sessions: {e}"))?,
+        _ => return Err(eyre!("name one session or pass --all")),
+    };
+    let megabytes = |bytes: u64| bytes as f64 / 1_000_000.0;
+    let (mut before, mut after) = (0, 0);
+    for session in sessions {
+        let title = session.title.as_deref().unwrap_or("(untitled)");
+        match store.slim_history(&session.id, apply) {
+            Ok(report) if report.capped > 0 => {
+                before += report.before;
+                after += report.after;
+                println!(
+                    "{title} ({}): {:.1}MB -> {:.1}MB, {} tool results capped",
+                    session.id,
+                    megabytes(report.before),
+                    megabytes(report.after),
+                    report.capped
+                );
+            }
+            Ok(_) => {}
+            Err(mush_session::StoreError::Busy(_)) => {
+                eprintln!(
+                    "skipped {title} ({}): open in a worker, stop it first",
+                    session.id
+                );
+            }
+            Err(error) => eprintln!("skipped {title} ({}): {error}", session.id),
+        }
+    }
+    let verb = if apply { "saved" } else { "would save" };
+    println!("{verb} {:.1}MB", megabytes(before - after));
+    if !apply && before > after {
+        println!("dry run, rerun with --apply to rewrite");
+    }
+    Ok(())
+}
+
 pub fn open_config() -> Result<()> {
     let path = config::config_path();
 

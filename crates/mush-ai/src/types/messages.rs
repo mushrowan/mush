@@ -181,7 +181,7 @@ pub fn cap_detail_text(details: &mut serde_json::Value, limit: usize) -> bool {
         if text.len() <= limit {
             continue;
         }
-        let start = text.ceil_char_boundary(text.len() - limit);
+        let start = text.ceil_char_boundary(text.len() - limit.saturating_sub(64));
         let start = text[start..]
             .find('\n')
             .filter(|&newline| newline < 4096)
@@ -294,7 +294,11 @@ mod tests {
         assert!(capped.ends_with("line 19999\n"));
         assert_eq!(details["stderr"], "small");
         assert_eq!(details["images"], 3);
-        assert!(!cap_detail_text(&mut details, 1 << 20));
+        assert!(capped.len() <= 1024);
+        assert!(
+            !cap_detail_text(&mut details, 1024),
+            "capping twice changes nothing"
+        );
     }
 
     #[test]

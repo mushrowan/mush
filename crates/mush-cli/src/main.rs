@@ -383,6 +383,13 @@ enum Command {
     Delete {
         id: String,
     },
+    Slim {
+        session: Option<String>,
+        #[arg(short, long)]
+        all: bool,
+        #[arg(long)]
+        apply: bool,
+    },
     Config,
 }
 
@@ -502,6 +509,11 @@ async fn run() -> Result<()> {
         Some(Command::Models) => return commands::list_models(),
         Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()).await,
         Some(Command::Delete { id }) => return commands::delete_session(&id),
+        Some(Command::Slim {
+            session,
+            all,
+            apply,
+        }) => return commands::slim_sessions(session.as_deref(), all, apply),
         Some(Command::Config) => return commands::open_config(),
         None => {}
     }
