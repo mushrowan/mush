@@ -144,9 +144,9 @@ impl RunnerRuntime {
         follow_session_cwd(tui_config, &connection.state());
         let mut app = build_initial_app(tui_config, &tui_config.cwd.clone());
         seed_from_state(&mut app, tui_config, &connection.state());
-        let history = connection.history().await;
+        let history = connection.recent_history(RESUME_WINDOW).await;
         let context = connection.transcript().await;
-        replay_history(&mut app, &history, &context);
+        replay_history(&mut app, history, &context);
         let session = Session::with_connection(app, connection);
 
         let (_config_watcher, config_rx) = watch_config(tui_config.config_path.as_ref());
@@ -375,9 +375,9 @@ pub(super) async fn reattach(
     app.oauth_usage = session.app.oauth_usage.take();
     app.oauth_usage_provider = session.app.oauth_usage_provider.take();
     seed_from_state(&mut app, tui_config, &connection.state());
-    let history = connection.history().await;
+    let history = connection.recent_history(RESUME_WINDOW).await;
     let context = connection.transcript().await;
-    replay_history(&mut app, &history, &context);
+    replay_history(&mut app, history, &context);
     let label = session.label.take();
     *session = Session::with_connection(app, connection);
     session.label = label;
@@ -483,15 +483,29 @@ fn initial_thinking_level(tui_config: &TuiConfig) -> ThinkingLevel {
         .normalize_visible()
 }
 
-fn replay_history(app: &mut App, history: &[Message], context: &[Message]) {
+const RESUME_WINDOW: usize = 2000;
+
+fn replay_history(app: &mut App, history: mush_session::tree::RecentHistory, context: &[Message]) {
     if context.is_empty() {
         return;
     }
-    crate::conversation_display::rebuild_display(app, history);
+    crate::conversation_display::rebuild_display(app, &history.messages);
+    if history.omitted > 0 {
+        app.messages.insert(
+            0,
+            crate::app::DisplayMessage::new(
+                crate::app::MessageRole::System,
+                format!(
+                    "{} earlier messages not shown, /export writes the full transcript",
+                    history.omitted
+                ),
+            ),
+        );
+    }
     crate::conversation_display::accumulate_session_stats(app, context);
-    let (usage, cost) = crate::conversation_display::session_spend(history);
-    app.stats.restore_totals(&usage, cost);
-    app.status = Some(format!("resumed session ({} messages)", history.len()).into());
+    app.stats.restore_totals(&history.usage, history.cost);
+    let total = history.omitted + history.messages.len();
+    app.status = Some(format!("resumed session ({total} messages)").into());
 }
 
 #[cfg(test)]
@@ -634,7 +648,11 @@ mod tests {
         let messages = vec![user_message("hello"), assistant_message("hi there")];
         let source = ConversationState::from_messages(messages.clone());
 
-        replay_history(&mut app, &source.display_history(), &source.context());
+        replay_history(
+            &mut app,
+            source.tree().recent_display_history(usize::MAX),
+            &source.context(),
+        );
 
         assert_eq!(app.messages.len(), 2);
         assert!(app.stats.total_tokens > TokenCount::ZERO);
@@ -680,11 +698,66 @@ mod tests {
 
         let config = test_config();
         let mut app = build_initial_app(&config, Path::new("."));
-        replay_history(&mut app, &source.display_history(), &source.context());
+        replay_history(
+            &mut app,
+            source.tree().recent_display_history(usize::MAX),
+            &source.context(),
+        );
 
         let expected = model.cost.input * 6.0;
         assert!((app.stats.total_cost.get() - expected).abs() < 1e-9);
         assert_eq!(app.stats.total_tokens, TokenCount::new(6_000_000));
+    }
+
+    #[test]
+    fn resume_shows_a_recent_window_but_counts_all_the_spend() {
+        use mush_session::ConversationState;
+
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .find(|model| model.cost.input > 0.0)
+            .expect("expected a priced model");
+        let mut source = ConversationState::new();
+        for i in 0..10u64 {
+            source.append_message(user_message(&format!("question {i}")));
+            source.append_message(Message::Assistant(
+                AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: format!("answer {i}"),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .usage(Usage {
+                        input_tokens: TokenCount::new(1_000_000),
+                        ..Usage::default()
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ));
+        }
+
+        let window = source.tree().recent_display_history(5);
+        assert_eq!(window.omitted, 16);
+        assert!(matches!(&window.messages[0], Message::User(_)));
+
+        let config = test_config();
+        let mut app = build_initial_app(&config, Path::new("."));
+        replay_history(&mut app, window, &source.context());
+
+        assert_eq!(app.messages.len(), 5);
+        assert!(
+            app.messages[0]
+                .content
+                .contains("16 earlier messages not shown")
+        );
+        assert_eq!(app.messages[1].content, "question 8");
+        let expected = model.cost.input * 10.0;
+        assert!((app.stats.total_cost.get() - expected).abs() < 1e-9);
+        assert_eq!(
+            app.status.as_ref().map(|s| s.text.as_str()),
+            Some("resumed session (20 messages)")
+        );
     }
 
     #[test]
@@ -703,7 +776,11 @@ mod tests {
 
         let config = test_config();
         let mut app = build_initial_app(&config, Path::new("."));
-        replay_history(&mut app, &source.display_history(), &source.context());
+        replay_history(
+            &mut app,
+            source.tree().recent_display_history(usize::MAX),
+            &source.context(),
+        );
 
         assert!(
             app.messages.len() > collapsed_len,

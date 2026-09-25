@@ -43,6 +43,8 @@ pub enum Request {
     },
     History {
         id: RequestId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     TreeSummary {
         id: RequestId,
@@ -63,7 +65,7 @@ impl Request {
             Self::Attach { id, .. }
             | Self::Command { id, .. }
             | Self::Transcript { id }
-            | Self::History { id }
+            | Self::History { id, .. }
             | Self::TreeSummary { id }
             | Self::NavigationImpact { id, .. }
             | Self::SystemPrompt { id } => *id,
@@ -71,16 +73,40 @@ impl Request {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecentWindow {
+    pub omitted: usize,
+    pub usage: mush_ai::types::Usage,
+    pub cost: mush_ai::types::Dollars,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
-    Attached { cursor: Cursor, snapshot: bool },
-    Events { events: Vec<ClientEvent> },
-    Transcript { messages: Vec<Message> },
-    History { messages: Vec<Message> },
-    TreeSummary { rows: Vec<TreeSummaryRow> },
-    NavigationImpact { abandons: usize },
-    SystemPrompt { prompt: Option<String> },
+    Attached {
+        cursor: Cursor,
+        snapshot: bool,
+    },
+    Events {
+        events: Vec<ClientEvent>,
+    },
+    Transcript {
+        messages: Vec<Message>,
+    },
+    History {
+        messages: Vec<Message>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recent: Option<RecentWindow>,
+    },
+    TreeSummary {
+        rows: Vec<TreeSummaryRow>,
+    },
+    NavigationImpact {
+        abandons: usize,
+    },
+    SystemPrompt {
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +249,29 @@ mod tests {
                 state: None,
                 sequence: 9,
             } if delta == "multi\nline"
+        ));
+    }
+
+    #[test]
+    fn history_requests_and_replies_from_older_builds_still_decode() {
+        let request: Request = decode(r#"{"type":"history","id":4}"#).unwrap();
+        assert!(matches!(request, Request::History { id: 4, limit: None }));
+
+        let reply: Reply = decode(r#"{"type":"history","messages":[]}"#).unwrap();
+        assert!(matches!(reply, Reply::History { recent: None, .. }));
+
+        let request = Request::History {
+            id: 5,
+            limit: Some(2000),
+        };
+        let bytes = encode(&request).unwrap();
+        let back: Request = decode(std::str::from_utf8(&bytes).unwrap().trim_end()).unwrap();
+        assert!(matches!(
+            back,
+            Request::History {
+                id: 5,
+                limit: Some(2000)
+            }
         ));
     }
 

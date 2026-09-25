@@ -73,6 +73,14 @@ pub enum EntryKind {
     },
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecentHistory {
+    pub messages: Vec<Message>,
+    pub omitted: usize,
+    pub usage: Usage,
+    pub cost: Dollars,
+}
+
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     pub entry: SessionEntry,
@@ -663,6 +671,46 @@ impl SessionTree {
             .into_iter()
             .filter_map(entry_to_message)
             .collect()
+    }
+
+    #[must_use]
+    pub fn recent_display_history(&self, limit: usize) -> RecentHistory {
+        let branch = self.current_branch();
+        let (usage, cost) = mush_ai::models::conversation_spend(branch.iter().filter_map(
+            |entry| match &entry.kind {
+                EntryKind::Message {
+                    message: Message::Assistant(assistant),
+                } => Some(assistant),
+                _ => None,
+            },
+        ));
+        let mut start = branch.len().saturating_sub(limit);
+        if start > 0 {
+            start = branch[start..]
+                .iter()
+                .position(|entry| {
+                    matches!(
+                        entry.kind,
+                        EntryKind::Message {
+                            message: Message::User(_)
+                        }
+                    )
+                })
+                .map_or(start, |offset| start + offset);
+        }
+        let omitted = branch[..start]
+            .iter()
+            .filter(|entry| !matches!(entry.kind, EntryKind::ThinkingLevelChange { .. }))
+            .count();
+        RecentHistory {
+            messages: branch[start..]
+                .iter()
+                .filter_map(|entry| entry_to_message(entry))
+                .collect(),
+            omitted,
+            usage,
+            cost,
+        }
     }
 
     pub fn context_len(&self) -> usize {

@@ -419,9 +419,47 @@ impl AgentConnection for DaemonConnection {
 
     async fn history(&mut self) -> Vec<Message> {
         let id = self.next_request_id();
-        match self.request(Request::History { id }).await {
-            Ok(Reply::History { messages }) => messages,
+        match self.request(Request::History { id, limit: None }).await {
+            Ok(Reply::History { messages, .. }) => messages,
             _ => Vec::new(),
+        }
+    }
+
+    async fn recent_history(&mut self, limit: usize) -> mush_session::tree::RecentHistory {
+        let id = self.next_request_id();
+        let request = Request::History {
+            id,
+            limit: Some(limit),
+        };
+        match self.request(request).await {
+            Ok(Reply::History {
+                messages,
+                recent: Some(recent),
+            }) => mush_session::tree::RecentHistory {
+                messages,
+                omitted: recent.omitted,
+                usage: recent.usage,
+                cost: recent.cost,
+            },
+            Ok(Reply::History {
+                messages,
+                recent: None,
+            }) => {
+                let (usage, cost) =
+                    mush_ai::models::conversation_spend(messages.iter().filter_map(|message| {
+                        match message {
+                            Message::Assistant(assistant) => Some(assistant),
+                            _ => None,
+                        }
+                    }));
+                mush_session::tree::RecentHistory {
+                    messages,
+                    omitted: 0,
+                    usage,
+                    cost,
+                }
+            }
+            _ => mush_session::tree::RecentHistory::default(),
         }
     }
 

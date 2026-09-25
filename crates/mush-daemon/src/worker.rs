@@ -632,9 +632,23 @@ async fn handle(
         Request::Transcript { .. } => Ok(Reply::Transcript {
             messages: connection.transcript().await,
         }),
-        Request::History { .. } => Ok(Reply::History {
+        Request::History { limit: None, .. } => Ok(Reply::History {
             messages: connection.history().await,
+            recent: None,
         }),
+        Request::History {
+            limit: Some(limit), ..
+        } => {
+            let recent = connection.recent_history(limit).await;
+            Ok(Reply::History {
+                messages: recent.messages,
+                recent: Some(crate::protocol::RecentWindow {
+                    omitted: recent.omitted,
+                    usage: recent.usage,
+                    cost: recent.cost,
+                }),
+            })
+        }
         Request::TreeSummary { .. } => Ok(Reply::TreeSummary {
             rows: connection.tree_summary().await,
         }),

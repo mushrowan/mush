@@ -539,6 +539,27 @@ pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
     }
 }
 
+pub fn conversation_spend<'a>(
+    messages: impl IntoIterator<Item = &'a crate::types::AssistantMessage>,
+) -> (Usage, Dollars) {
+    let mut models = std::collections::HashMap::<_, Option<Model>>::new();
+    let mut usage = Usage::default();
+    let mut cost = Dollars::ZERO;
+    for assistant in messages {
+        usage.input_tokens += assistant.usage.input_tokens;
+        usage.output_tokens += assistant.usage.output_tokens;
+        usage.cache_read_tokens += assistant.usage.cache_read_tokens;
+        usage.cache_write_tokens += assistant.usage.cache_write_tokens;
+        let model = models
+            .entry((assistant.provider.clone(), assistant.model.clone()))
+            .or_insert_with(|| find_model(&assistant.provider, assistant.model.as_str()));
+        if let Some(model) = model {
+            cost += calculate_cost(model, &assistant.usage).total();
+        }
+    }
+    (usage, cost)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{LazyLock, Mutex};

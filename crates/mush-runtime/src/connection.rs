@@ -194,6 +194,7 @@ pub trait AgentConnection: Send + std::any::Any {
     fn closed(&self) -> bool;
     async fn transcript(&mut self) -> Vec<Message>;
     async fn history(&mut self) -> Vec<Message>;
+    async fn recent_history(&mut self, limit: usize) -> mush_session::tree::RecentHistory;
     async fn tree_summary(&mut self) -> Vec<mush_session::tree::TreeSummaryRow>;
     async fn navigation_impact(&mut self, entry_id: &mush_session::tree::EntryId) -> usize;
     async fn system_prompt(&mut self) -> Option<String>;
@@ -2115,6 +2116,13 @@ impl AgentConnection for InProcessConnection {
 
     async fn history(&mut self) -> Vec<Message> {
         self.runtime.conversation.display_history()
+    }
+
+    async fn recent_history(&mut self, limit: usize) -> mush_session::tree::RecentHistory {
+        self.runtime
+            .conversation
+            .tree()
+            .recent_display_history(limit)
     }
 
     async fn tree_summary(&mut self) -> Vec<mush_session::tree::TreeSummaryRow> {
