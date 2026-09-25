@@ -261,7 +261,14 @@ impl SessionStore {
             if line.is_empty() {
                 continue;
             }
-            entries.push(serde_json::from_slice(line)?);
+            let mut entry: crate::tree::SessionEntry = serde_json::from_slice(line)?;
+            if let crate::tree::EntryKind::Message {
+                message: mush_ai::types::Message::ToolResult(result),
+            } = &mut entry.kind
+            {
+                result.cap_details();
+            }
+            entries.push(entry);
         }
         let logged = Logged {
             entries: entries.len(),
@@ -599,6 +606,45 @@ mod tests {
         let loaded = store.load(&session.meta.id).unwrap();
         assert_eq!(loaded.meta.id, session.meta.id);
         assert_eq!(loaded.context().len(), 1);
+    }
+
+    #[test]
+    fn loading_caps_oversized_tool_details_but_keeps_the_content() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        let stdout = "x\n".repeat(mush_ai::types::DETAIL_TEXT_LIMIT);
+        session
+            .conversation
+            .append_message(Message::ToolResult(ToolResultMessage {
+                tool_call_id: ToolCallId::from("call"),
+                tool_name: ToolName::from("ipython"),
+                content: vec![ToolResultContentPart::Text(TextContent {
+                    text: "shown to the model".into(),
+                })],
+                outcome: ToolOutcome::Success,
+                timestamp_ms: Timestamp::zero(),
+                details: Some(serde_json::json!({ "stdout": stdout })),
+            }));
+        store.save(&session).unwrap();
+
+        let loaded = store.load(&session.meta.id).unwrap();
+
+        let context = loaded.context();
+        let [Message::ToolResult(result)] = context.as_slice() else {
+            panic!("{context:?}");
+        };
+        let kept = result.details.as_ref().unwrap()["stdout"].as_str().unwrap();
+        assert!(
+            kept.len() <= mush_ai::types::DETAIL_TEXT_LIMIT + 64,
+            "{}",
+            kept.len()
+        );
+        assert_eq!(
+            result.content,
+            vec![ToolResultContentPart::Text(TextContent {
+                text: "shown to the model".into(),
+            })]
+        );
     }
 
     #[test]

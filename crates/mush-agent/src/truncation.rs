@@ -95,10 +95,13 @@ pub fn apply(result: ToolResult, limit: OutputLimit) -> ToolResult {
 }
 
 pub fn apply_for_tool(
-    result: ToolResult,
+    mut result: ToolResult,
     limit: OutputLimit,
     tool_name: Option<&str>,
 ) -> ToolResult {
+    if let Some(details) = result.details.as_mut() {
+        mush_ai::types::cap_detail_text(details, mush_ai::types::DETAIL_TEXT_LIMIT);
+    }
     match limit {
         OutputLimit::Head => {
             truncate_for_tool(result, MAX_LINES, MAX_BYTES, OutputLimit::Head, tool_name)
@@ -514,6 +517,18 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn oversized_details_are_capped_with_the_content() {
+        let stdout = "y\n".repeat(mush_ai::types::DETAIL_TEXT_LIMIT);
+        let result =
+            ToolResult::text("short").with_details(serde_json::json!({ "stdout": stdout }));
+
+        let out = apply(result, OutputLimit::Tail);
+
+        let kept = out.details.unwrap()["stdout"].as_str().unwrap().len();
+        assert!(kept <= mush_ai::types::DETAIL_TEXT_LIMIT + 64, "{kept}");
     }
 
     #[test]

@@ -167,6 +167,39 @@ pub struct ToolResultMessage {
     pub details: Option<serde_json::Value>,
 }
 
+pub const DETAIL_TEXT_LIMIT: usize = 64 * 1024;
+
+pub fn cap_detail_text(details: &mut serde_json::Value, limit: usize) -> bool {
+    let Some(fields) = details.as_object_mut() else {
+        return false;
+    };
+    let mut capped = false;
+    for value in fields.values_mut() {
+        let serde_json::Value::String(text) = value else {
+            continue;
+        };
+        if text.len() <= limit {
+            continue;
+        }
+        let start = text.ceil_char_boundary(text.len() - limit);
+        let start = text[start..]
+            .find('\n')
+            .filter(|&newline| newline < 4096)
+            .map_or(start, |newline| start + newline + 1);
+        *text = format!("[{} earlier bytes not kept]\n{}", start, &text[start..]);
+        capped = true;
+    }
+    capped
+}
+
+impl ToolResultMessage {
+    pub fn cap_details(&mut self) -> bool {
+        self.details
+            .as_mut()
+            .is_some_and(|details| cap_detail_text(details, DETAIL_TEXT_LIMIT))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
@@ -243,6 +276,26 @@ pub fn find_recent_boundary(messages: &[Message], pivot: TurnPivot, keep: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_detail_text_keeps_its_tail_and_small_fields_stay() {
+        let stdout: String = (0..20_000).map(|n| format!("line {n}\n")).collect();
+        let mut details = serde_json::json!({"stdout": stdout, "stderr": "small", "images": 3});
+
+        assert!(cap_detail_text(&mut details, 1024));
+
+        let capped = details["stdout"].as_str().unwrap();
+        assert!(capped.len() < 1100, "{}", capped.len());
+        assert!(capped.starts_with('['), "{capped}");
+        assert!(
+            capped.contains("earlier bytes not kept]\nline "),
+            "{capped}"
+        );
+        assert!(capped.ends_with("line 19999\n"));
+        assert_eq!(details["stderr"], "small");
+        assert_eq!(details["images"], 3);
+        assert!(!cap_detail_text(&mut details, 1 << 20));
+    }
 
     #[test]
     fn usage_total_tokens() {
