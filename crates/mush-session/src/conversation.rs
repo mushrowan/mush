@@ -129,7 +129,7 @@ impl ConversationState {
         self.tree.leaf_id()
     }
 
-    pub fn entries(&self) -> &[SessionEntry] {
+    pub fn entries(&self) -> &[std::sync::Arc<SessionEntry>] {
         self.tree.entries()
     }
 

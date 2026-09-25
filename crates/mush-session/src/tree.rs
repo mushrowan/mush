@@ -1,6 +1,7 @@
 use derive_more::Display;
 use mush_ai::types::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::harness::{RefinementResult, RefinementSource};
 
@@ -117,13 +118,16 @@ pub struct TreeRow<'a> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionTree {
-    entries: Vec<SessionEntry>,
+    entries: Vec<Arc<SessionEntry>>,
     leaf_id: Option<EntryId>,
     #[serde(skip)]
+    index: Arc<Index>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Index {
     positions: std::collections::HashMap<EntryId, usize>,
-    #[serde(skip)]
     parents: Vec<Option<usize>>,
-    #[serde(skip)]
     child_counts: Vec<usize>,
 }
 
@@ -139,7 +143,7 @@ impl SessionTree {
             if entry
                 .parent_id
                 .as_ref()
-                .is_some_and(|parent| !tree.positions.contains_key(parent))
+                .is_some_and(|parent| !tree.index.positions.contains_key(parent))
             {
                 return Err(String::from(
                     "session history parent missing or out of order",
@@ -147,18 +151,18 @@ impl SessionTree {
             }
             match &entry.kind {
                 EntryKind::BranchSummary { from_id, .. }
-                    if !tree.positions.contains_key(from_id) =>
+                    if !tree.index.positions.contains_key(from_id) =>
                 {
                     return Err(String::from("branch summary history missing"));
                 }
                 EntryKind::Compaction { first_kept_id, .. }
-                    if !tree.positions.contains_key(first_kept_id) =>
+                    if !tree.index.positions.contains_key(first_kept_id) =>
                 {
                     return Err(String::from("compaction history missing"));
                 }
                 _ => {}
             }
-            if tree.positions.contains_key(&entry.id) {
+            if tree.index.positions.contains_key(&entry.id) {
                 return Err(String::from("duplicate session history id"));
             }
             tree.push(entry);
@@ -166,7 +170,7 @@ impl SessionTree {
         if tree
             .leaf_id
             .as_ref()
-            .is_some_and(|leaf| !tree.positions.contains_key(leaf))
+            .is_some_and(|leaf| !tree.index.positions.contains_key(leaf))
         {
             return Err(String::from("session history leaf missing"));
         }
@@ -213,7 +217,7 @@ impl SessionTree {
             };
             let receipts =
                 EventMessage::summary(String::new(), Timestamp::zero(), &messages).receipts;
-            match &mut tree.entries[index].kind {
+            match &mut Arc::make_mut(&mut tree.entries[index]).kind {
                 EntryKind::BranchSummary { event_receipts, .. }
                 | EntryKind::Compaction { event_receipts, .. } => {
                     if receipts.is_empty() && !event_receipts.is_empty() {
@@ -334,24 +338,23 @@ impl SessionTree {
         Self {
             entries: Vec::new(),
             leaf_id: None,
-            positions: std::collections::HashMap::new(),
-            parents: Vec::new(),
-            child_counts: Vec::new(),
+            index: Arc::default(),
         }
     }
 
     fn push(&mut self, entry: SessionEntry) {
+        let index = Arc::make_mut(&mut self.index);
         let parent = entry
             .parent_id
             .as_ref()
-            .and_then(|parent| self.positions.get(parent).copied());
+            .and_then(|parent| index.positions.get(parent).copied());
         if let Some(parent) = parent {
-            self.child_counts[parent] += 1;
+            index.child_counts[parent] += 1;
         }
-        self.positions.insert(entry.id.clone(), self.entries.len());
-        self.parents.push(parent);
-        self.child_counts.push(0);
-        self.entries.push(entry);
+        index.positions.insert(entry.id.clone(), self.entries.len());
+        index.parents.push(parent);
+        index.child_counts.push(0);
+        self.entries.push(Arc::new(entry));
     }
 
     pub fn append_message(&mut self, message: Message) -> EntryId {
@@ -516,13 +519,13 @@ impl SessionTree {
 
     fn branch_ending_at(&self, id: Option<&EntryId>) -> Vec<&SessionEntry> {
         let mut path = Vec::new();
-        let mut current = id.and_then(|id| self.positions.get(id).copied());
+        let mut current = id.and_then(|id| self.index.positions.get(id).copied());
         while let Some(position) = current {
             if path.len() == self.entries.len() {
                 break;
             }
-            path.push(&self.entries[position]);
-            current = self.parents[position];
+            path.push(&*self.entries[position]);
+            current = self.index.parents[position];
         }
         path.reverse();
         path
@@ -533,6 +536,7 @@ impl SessionTree {
         self.entries
             .iter()
             .filter(|entry| entry.id.starts_with(&prefix))
+            .map(|entry| &**entry)
             .collect()
     }
 
@@ -722,20 +726,22 @@ impl SessionTree {
         messages
     }
 
-    pub fn entries(&self) -> &[SessionEntry] {
+    pub fn entries(&self) -> &[Arc<SessionEntry>] {
         &self.entries
     }
 
     pub fn by_id(&self, id: &EntryId) -> Option<&SessionEntry> {
-        self.positions
+        self.index
+            .positions
             .get(id)
-            .map(|&position| &self.entries[position])
+            .map(|&position| &*self.entries[position])
     }
 
     pub fn children(&self, parent_id: &EntryId) -> Vec<&SessionEntry> {
         self.entries
             .iter()
             .filter(|e| e.parent_id.as_ref() == Some(parent_id))
+            .map(|e| &**e)
             .collect()
     }
 
@@ -743,11 +749,12 @@ impl SessionTree {
         self.entries
             .iter()
             .filter(|e| e.parent_id.is_none())
+            .map(|e| &**e)
             .collect()
     }
 
     pub fn tree(&self) -> Vec<TreeNode> {
-        fn build_subtree<'a>(entry: &'a SessionEntry, all: &'a [SessionEntry]) -> TreeNode {
+        fn build_subtree(entry: &SessionEntry, all: &[Arc<SessionEntry>]) -> TreeNode {
             let children: Vec<TreeNode> = all
                 .iter()
                 .filter(|e| e.parent_id.as_ref() == Some(&entry.id))
@@ -789,9 +796,10 @@ impl SessionTree {
     }
 
     pub fn is_branch_point(&self, id: &EntryId) -> bool {
-        self.positions
+        self.index
+            .positions
             .get(id)
-            .is_some_and(|&position| self.child_counts[position] > 1)
+            .is_some_and(|&position| self.index.child_counts[position] > 1)
     }
 }
 
