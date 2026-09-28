@@ -2829,6 +2829,7 @@ dependencies = [
  "async-trait",
  "futures",
  "mush-ai",
+ "regex",
  "rustix 1.1.5",
  "serde",
  "serde_json",

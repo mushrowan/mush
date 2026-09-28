@@ -525,7 +525,7 @@ pub fn agent_loop(
                                     &hook_results,
                                     crate::hooks::HookPoint::PreToolUse,
                                 ).unwrap_or_else(|| "pre-tool hook blocked execution".into());
-                                let result = ToolResult::error(feedback);
+                                let result = ToolResult::error(crate::redact::redact(&feedback).into_owned());
                                 yield AgentEvent::ToolExecEnd {
                                     tool_call_id: tc.id.clone(),
                                     tool_name: tc.name.clone(),
@@ -639,7 +639,7 @@ pub fn agent_loop(
                                 crate::hooks::HookPoint::PostToolUse,
                             ) {
                                 result.content.push(ToolResultContentPart::Text(TextContent {
-                                    text: feedback,
+                                    text: crate::redact::redact(&feedback).into_owned(),
                                 }));
                             }
                         }
@@ -748,7 +748,8 @@ async fn execute_tool(tools: &ToolRegistry, tool_call: &ToolCall) -> ToolResult 
         Some(tool) => {
             let limit = tool.output_limit();
             tracing::debug!(tool = %tool_call.name, resolved = tool.name(), ?limit, args = %tool_call.arguments, "executing tool");
-            let result = tool.call(tool_call.arguments.clone()).await;
+            let mut result = tool.call(tool_call.arguments.clone()).await;
+            crate::redact::redact_result(&mut result);
             let output_text: String = result
                 .content
                 .iter()
@@ -822,6 +823,47 @@ mod tests {
             .context_window(TokenCount::new(200_000))
             .max_output_tokens(TokenCount::new(8192))
             .build()
+    }
+
+    struct LeakyTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for LeakyTool {
+        fn name(&self) -> &str {
+            "leaky"
+        }
+        fn label(&self) -> &str {
+            "Leaky"
+        }
+        fn description(&self) -> &str {
+            "prints an env line"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn output_limit(&self) -> crate::tool::OutputLimit {
+            crate::tool::OutputLimit::Head
+        }
+        async fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::text(["RESTIC_PASSWORD=", "hunter2hunter2"].concat())
+        }
+    }
+
+    #[test]
+    fn tool_output_is_redacted_before_it_leaves_execute_tool() {
+        let tools = ToolRegistry::from_boxed(vec![Box::new(LeakyTool)]);
+        let tc = ToolCall {
+            id: "tc_1".into(),
+            name: "leaky".into(),
+            arguments: serde_json::json!({}),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_tool(&tools, &tc));
+        let text = match &result.content[0] {
+            mush_ai::types::ToolResultContentPart::Text(t) => &t.text,
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(text, "RESTIC_PASSWORD=[REDACTED]");
     }
 
     #[test]

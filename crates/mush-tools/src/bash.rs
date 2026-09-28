@@ -229,6 +229,13 @@ pub type OutputSink = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 type LineSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+#[must_use]
+pub fn redacting_sink(sink: OutputSink) -> OutputSink {
+    std::sync::Arc::new(move |exec_id: &str, line: &str| {
+        sink(exec_id, &mush_agent::redact::redact(line));
+    })
+}
+
 pub struct BashTool {
     cwd: Arc<Path>,
     output_sink: Option<OutputSink>,
@@ -245,7 +252,7 @@ impl BashTool {
     }
 
     pub fn with_output_sink(mut self, sink: OutputSink) -> Self {
-        self.output_sink = Some(sink);
+        self.output_sink = Some(redacting_sink(sink));
         self
     }
 

@@ -483,7 +483,7 @@ impl IpythonTool {
 
     #[must_use]
     pub fn with_output_sink(mut self, sink: crate::bash::OutputSink) -> Self {
-        self.output_sink = Some(sink);
+        self.output_sink = Some(crate::bash::redacting_sink(sink));
         self
     }
 

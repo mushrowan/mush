@@ -18,6 +18,7 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["time", "net", "io-util"] }
 tokio-util.workspace = true
 rustix.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

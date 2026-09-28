@@ -5,6 +5,7 @@ pub mod display;
 pub mod exec_context;
 pub mod hooks;
 pub mod ipc;
+pub mod redact;
 pub mod response_cache;
 pub mod tool;
 pub mod tool_grouping;

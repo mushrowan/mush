@@ -145,6 +145,7 @@ atty = "0.2"
 
 # parallelism
 rayon = "1.12"
+regex = "1.13"
 
 # fast non-crypto hash for internal maps
 rustc-hash = "2.1"
