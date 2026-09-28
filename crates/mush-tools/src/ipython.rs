@@ -102,7 +102,11 @@ pub struct MushHost {
 impl MushHost {
     pub fn new(cwd: Arc<Path>) -> Self {
         Self {
-            edit: Arc::new(crate::edit::EditTool::new(cwd.clone()).without_read_ledger()),
+            edit: crate::redaction_guard::RedactionMarkerGuard::wrap(
+                Arc::new(crate::edit::EditTool::new(cwd.clone()).without_read_ledger()),
+                crate::redaction_guard::GuardedTool::Edit,
+                cwd.clone(),
+            ),
             jobs: crate::kernel_jobs::KernelJobs::default(),
             web_search: std::sync::RwLock::new(None),
             cwd,
@@ -316,6 +320,10 @@ impl HostRequestHandler for MushHost {
                     "path": payload.get("path").cloned().unwrap_or(Value::Null),
                     "oldText": payload.get("old").cloned().unwrap_or(Value::Null),
                     "newText": payload.get("new").cloned().unwrap_or(Value::Null),
+                    crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY: payload
+                        .get(crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY)
+                        .cloned()
+                        .unwrap_or(Value::Bool(false)),
                 });
                 let result = self.edit.execute(args).await;
                 let text = extract_text(&result);
@@ -1537,6 +1545,40 @@ mod tests {
             extract_text(&result).contains("HostError"),
             "{}",
             extract_text(&result)
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_kernel_edit_that_adds_a_redaction_marker_is_refused_unless_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.env");
+        std::fs::write(&path, "TOKEN=abc\n").unwrap();
+        let tool = tool(dir.path());
+        let shown = path.display().to_string();
+
+        let refused = tool
+            .execute(json!({
+                "code": format!("await edit({shown:?}, 'abc', '[REDACTED]')")
+            }))
+            .await;
+        assert!(refused.outcome.is_error());
+        assert!(
+            extract_text(&refused).contains("allow_redaction_marker"),
+            "{}",
+            extract_text(&refused)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TOKEN=abc\n");
+
+        let allowed = tool
+            .execute(json!({
+                "code": format!("await edit({shown:?}, 'abc', '[REDACTED]', allow_redaction_marker=True)")
+            }))
+            .await;
+        assert!(allowed.outcome.is_success(), "{}", extract_text(&allowed));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "TOKEN=[REDACTED]\n"
         );
         tool.shutdown().await;
     }

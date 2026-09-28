@@ -760,12 +760,14 @@ refine = _Refine()
 agent_observe = _AgentObserve()
 
 
-async def edit(path: str, old_str: str | None = None, new_str: str | None = None, *, old: str | None = None, new: str | None = None) -> str:
+async def edit(path: str, old_str: str | None = None, new_str: str | None = None, *, old: str | None = None, new: str | None = None, allow_redaction_marker: bool = False) -> str:
     old = old_str if old is None else old
     new = new_str if new is None else new
     if old is None or new is None:
         raise TypeError("edit() needs old_str and new_str")
     payload = {"path": os.path.abspath(os.path.expanduser(os.fspath(path))), "old": old, "new": new}
+    if allow_redaction_marker:
+        payload["allow_redaction_marker"] = True
     if _current_origin.get() is not None:
         payload["origin"] = _current_origin.get()
     reply = await host_request("edit", payload)

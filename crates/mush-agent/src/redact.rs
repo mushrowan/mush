@@ -7,6 +7,7 @@ use regex::{Captures, Regex};
 use crate::tool::ToolResult;
 
 pub const MARKER: &str = "[REDACTED]";
+pub const MARKER_PREFIX: &str = "[REDACTED";
 const MIN_SECRET_LEN: usize = 8;
 
 #[derive(Debug, Clone)]
@@ -90,6 +91,11 @@ static NON_SECRET_KEY: LazyLock<Regex> = LazyLock::new(|| {
         r"(?i)(public|sort|cache|primary|foreign|partition|lookup|map|hash|group|index|session|idempotency|dedupe?|cursor|shortcut|hot)[_.-]?key$",
     )
 });
+
+#[must_use]
+pub fn marker_count(text: &str) -> usize {
+    text.matches(MARKER_PREFIX).count()
+}
 
 pub fn is_secret_name(name: &str) -> bool {
     SECRET_NAME.is_match(name)

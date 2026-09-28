@@ -18,6 +18,7 @@ pub mod notify_user;
 pub mod orphans;
 pub mod read;
 pub mod read_ledger;
+pub mod redaction_guard;
 pub mod repo_map;
 pub mod skills;
 pub mod util;
@@ -160,31 +161,54 @@ pub fn builtin_tools_with_options(
     ];
 
     if use_patch {
-        let apply: SharedTool = Arc::new(apply_patch::ApplyPatchTool::new(cwd));
-        tools.push(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            apply,
-            forbidden_chars,
-            apply_patch_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
+        tools.push(apply_patch_tool(cwd, forbidden_chars));
     } else {
-        let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
-        tools.push(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            write,
-            forbidden_chars.clone(),
-            write_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
-        let edit: SharedTool = Arc::new(edit::EditTool::new(cwd));
-        tools.push(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            edit,
-            forbidden_chars,
-            edit_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
+        tools.push(write_tool(cwd.clone(), forbidden_chars.clone()));
+        tools.push(edit_tool(cwd, forbidden_chars));
     }
 
     ToolRegistry::from_shared(tools)
+}
+
+fn apply_patch_tool(
+    cwd: Arc<Path>,
+    forbidden_chars: forbidden_chars::ForbiddenChars,
+) -> SharedTool {
+    let apply: SharedTool = Arc::new(apply_patch::ApplyPatchTool::new(cwd.clone()));
+    forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
+        redaction_guard::RedactionMarkerGuard::wrap(
+            apply,
+            redaction_guard::GuardedTool::ApplyPatch,
+            cwd,
+        ),
+        forbidden_chars,
+        apply_patch_content_extractor(),
+        forbidden_chars::BypassVisibility::Advertised,
+    )
+}
+
+fn write_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -> SharedTool {
+    let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
+    forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
+        redaction_guard::RedactionMarkerGuard::wrap(
+            write,
+            redaction_guard::GuardedTool::Write,
+            cwd,
+        ),
+        forbidden_chars,
+        write_content_extractor(),
+        forbidden_chars::BypassVisibility::Advertised,
+    )
+}
+
+fn edit_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -> SharedTool {
+    let edit: SharedTool = Arc::new(edit::EditTool::new(cwd.clone()));
+    forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
+        redaction_guard::RedactionMarkerGuard::wrap(edit, redaction_guard::GuardedTool::Edit, cwd),
+        forbidden_chars,
+        edit_content_extractor(),
+        forbidden_chars::BypassVisibility::Advertised,
+    )
 }
 
 fn bash_content_extractor() -> forbidden_chars::ContentExtractor {
@@ -260,28 +284,10 @@ pub fn align_for_model(
     registry.remove("batch");
 
     if model.uses_patch_tool() {
-        let apply: SharedTool = Arc::new(apply_patch::ApplyPatchTool::new(cwd));
-        registry.register_shared(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            apply,
-            forbidden_chars,
-            apply_patch_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
+        registry.register_shared(apply_patch_tool(cwd, forbidden_chars));
     } else {
-        let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
-        registry.register_shared(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            write,
-            forbidden_chars.clone(),
-            write_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
-        let edit: SharedTool = Arc::new(edit::EditTool::new(cwd));
-        registry.register_shared(forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            edit,
-            forbidden_chars,
-            edit_content_extractor(),
-            forbidden_chars::BypassVisibility::Advertised,
-        ));
+        registry.register_shared(write_tool(cwd.clone(), forbidden_chars.clone()));
+        registry.register_shared(edit_tool(cwd, forbidden_chars));
     }
 
     if !model.supports_native_parallel_calls() {

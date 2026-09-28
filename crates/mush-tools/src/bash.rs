@@ -229,6 +229,8 @@ pub type OutputSink = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 type LineSink = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
+// TODO: lines are redacted one at a time, so a multi-line secret such as a PEM body
+// still streams to the screen live
 #[must_use]
 pub fn redacting_sink(sink: OutputSink) -> OutputSink {
     std::sync::Arc::new(move |exec_id: &str, line: &str| {
