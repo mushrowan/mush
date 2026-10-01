@@ -89,7 +89,9 @@ fn compaction_replay_and_repeated_compaction_preserve_exact_event_receipts() {
         panic!()
     };
     assert_eq!(summary.receipts, original_event.receipts);
-    conversation.apply_compaction(compact.summary, compact.summarised_count, compact.messages);
+    conversation
+        .apply_compaction(compact.summary, compact.summarised_count, &compact.messages)
+        .unwrap();
     assert_eq!(conversation.display_history()[0], original);
     let Message::Event(summary) = &conversation.context()[0] else {
         panic!()
@@ -101,7 +103,9 @@ fn compaction_replay_and_repeated_compaction_preserve_exact_event_receipts() {
         "another summary",
         Some(1),
     );
-    conversation.apply_compaction(compact.summary, compact.summarised_count, compact.messages);
+    conversation
+        .apply_compaction(compact.summary, compact.summarised_count, &compact.messages)
+        .unwrap();
     let Message::Event(summary) = &conversation.context()[0] else {
         panic!()
     };
@@ -188,7 +192,9 @@ fn compaction_cycles_keep_full_audit_and_bounded_model_receipt_references() {
         let context = state.context();
         let compact =
             mush_session::compact::compact_with_summary(context, "bounded summary", Some(1));
-        state.apply_compaction(compact.summary, compact.summarised_count, compact.messages);
+        state
+            .apply_compaction(compact.summary, compact.summarised_count, &compact.messages)
+            .unwrap();
         let Message::Event(summary) = &state.context()[0] else {
             panic!()
         };
@@ -358,4 +364,104 @@ fn reviewer_empty_summary_receipts_fit_a_finite_context_window() {
         tokens <= 65536,
         "receipt metadata alone exceeds a finite context window and cannot be compacted"
     );
+}
+
+fn said(text: &str) -> Message {
+    Message::User(
+        UserMessage::builder()
+            .content(UserContent::Text(text.into()))
+            .timestamp_ms(Timestamp::from_ms(30))
+            .build(),
+    )
+}
+
+fn compacted_conversation() -> Result<ConversationState, Box<dyn std::error::Error>> {
+    let mut conversation = ConversationState::from_messages(vec![event()]);
+    for text in ["a", "b", "c", "d", "e", "f"] {
+        conversation.append_message(said(text));
+    }
+    let compact =
+        mush_session::compact::compact_with_summary(conversation.context(), "earlier", Some(3));
+    conversation.apply_compaction(compact.summary, compact.summarised_count, &compact.messages)?;
+    Ok(conversation)
+}
+
+fn reloaded(
+    conversation: ConversationState,
+) -> Result<ConversationState, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let store = SessionStore::new(dir.path().join("sessions"));
+    let mut session = Session::new("fixture", "/tmp");
+    session.conversation = conversation;
+    store.save(&session)?;
+    Ok(store.load(&session.meta.id)?.conversation)
+}
+
+#[test]
+fn a_compaction_that_finishes_after_an_undo_is_discarded_and_history_survives() {
+    let mut conversation = ConversationState::from_messages(vec![event()]);
+    for text in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        conversation.append_message(said(text));
+    }
+    let compact =
+        mush_session::compact::compact_with_summary(conversation.context(), "earlier", Some(2));
+    let entries = conversation.entries().len();
+    let rewound = conversation.entries()[3].id.clone();
+    conversation.branch(&rewound);
+    let before = conversation.context();
+
+    let applied =
+        conversation.apply_compaction(compact.summary, compact.summarised_count, &compact.messages);
+
+    assert!(applied.is_err());
+    assert_eq!(conversation.entries().len(), entries);
+    assert_eq!(conversation.context(), before);
+    assert_eq!(reloaded(conversation).unwrap().context(), before);
+}
+
+#[test]
+fn a_compaction_still_applies_when_messages_arrived_while_it_ran() {
+    let mut conversation = ConversationState::from_messages(vec![event()]);
+    for text in ["a", "b", "c", "d", "e"] {
+        conversation.append_message(said(text));
+    }
+    let compact =
+        mush_session::compact::compact_with_summary(conversation.context(), "earlier", Some(2));
+    conversation.append_message(said("late"));
+
+    conversation
+        .apply_compaction(compact.summary, compact.summarised_count, &compact.messages)
+        .unwrap();
+
+    let context = conversation.context();
+    assert_eq!(context[1..], [said("d"), said("e"), said("late")]);
+    assert_eq!(reloaded(conversation).unwrap().context(), context);
+}
+
+#[test]
+fn forking_and_cloning_a_compacted_conversation_keeps_it_loadable() {
+    let conversation = compacted_conversation().unwrap();
+    let context = conversation.context();
+    assert!(matches!(&context[0], Message::Event(e) if e.kind == EventKind::Summary));
+
+    let cloned = conversation.cloned_branch();
+    assert_eq!(cloned.context(), context);
+    assert_eq!(reloaded(cloned).unwrap().context(), context);
+
+    let before_kept = conversation.forked_before(1).unwrap();
+    assert_eq!(
+        before_kept.context(),
+        [event(), said("a"), said("b"), said("c")]
+    );
+    assert_eq!(reloaded(before_kept).unwrap().context().len(), 4);
+
+    for position in 2..context.len() {
+        let forked = conversation.forked_before(position).unwrap();
+        assert_eq!(forked.context(), context[..position], "{position}");
+        assert_eq!(
+            reloaded(forked).unwrap().context(),
+            context[..position],
+            "{position}"
+        );
+    }
 }

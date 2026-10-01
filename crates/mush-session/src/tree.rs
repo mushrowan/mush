@@ -351,6 +351,10 @@ impl SessionTree {
     }
 
     fn push(&mut self, entry: SessionEntry) {
+        self.push_shared(Arc::new(entry));
+    }
+
+    fn push_shared(&mut self, entry: Arc<SessionEntry>) {
         let index = Arc::make_mut(&mut self.index);
         let parent = entry
             .parent_id
@@ -362,7 +366,90 @@ impl SessionTree {
         index.positions.insert(entry.id.clone(), self.entries.len());
         index.parents.push(parent);
         index.child_counts.push(0);
-        self.entries.push(Arc::new(entry));
+        self.entries.push(entry);
+    }
+
+    #[must_use]
+    pub fn carried_to(&self, leaf: Option<&EntryId>) -> Self {
+        let mut carried = vec![false; self.entries.len()];
+        let mut pending = vec![leaf];
+        while let Some(id) = pending.pop() {
+            for entry in self.branch_ending_at(id) {
+                let position = self.index.positions[&entry.id];
+                if std::mem::replace(&mut carried[position], true) {
+                    continue;
+                }
+                if let EntryKind::BranchSummary { from_id, .. } = &entry.kind {
+                    pending.push(Some(from_id));
+                }
+            }
+        }
+        let mut tree = Self::new();
+        for (entry, carried) in self.entries.iter().zip(carried) {
+            if carried {
+                tree.push_shared(Arc::clone(entry));
+            }
+        }
+        tree.leaf_id = leaf
+            .filter(|leaf| tree.index.positions.contains_key(*leaf))
+            .cloned();
+        tree
+    }
+
+    #[must_use]
+    pub fn forked_before(&self, context_index: usize) -> Option<Self> {
+        let context = self.context_entries();
+        let entry = context.get(context_index)?;
+        let mut tree = self.carried_to(entry.parent_id.as_ref());
+        if let Some(compaction) = context.first()
+            && !tree.index.positions.contains_key(&compaction.id)
+            && let EntryKind::Compaction {
+                summary,
+                first_kept_id,
+                ..
+            } = &compaction.kind
+            && let Some(kept) = tree
+                .context_entries()
+                .iter()
+                .position(|entry| entry.id == *first_kept_id)
+            && kept > 0
+            && tree.compact_at_leaf(summary.clone(), kept).is_some()
+            && let Some(copy) = tree.entries.last_mut()
+        {
+            Arc::make_mut(copy).timestamp = compaction.timestamp;
+        }
+        Some(tree)
+    }
+
+    pub fn compact_matching(
+        &mut self,
+        summary: String,
+        summarised_count: usize,
+        kept: &[Message],
+    ) -> Option<EntryId> {
+        let first = kept.first()?;
+        let context = self.build_context();
+        let matches_at = |start: usize| {
+            start > 0
+                && context
+                    .get(start..start + kept.len())
+                    .is_some_and(|window| window == kept)
+        };
+        let start = if matches_at(summarised_count) {
+            summarised_count
+        } else {
+            let candidates: Vec<_> = context
+                .iter()
+                .enumerate()
+                .filter(|(start, message)| *message == first && matches_at(*start))
+                .map(|(start, _)| start)
+                .collect();
+            let [start] = candidates[..] else {
+                return None;
+            };
+            start
+        };
+        self.compact_at_leaf(summary, start)
     }
 
     pub fn append_message(&mut self, message: Message) -> EntryId {

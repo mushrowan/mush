@@ -193,12 +193,16 @@ impl SessionRuntime {
                     Message::User(user) => user.text(),
                     _ => String::new(),
                 };
-                let prefix = messages[..position].to_vec();
+                let Some(forked) = self.conversation.forked_before(position) else {
+                    return vec![SessionEvent::Failed(String::from(
+                        "that message is no longer in the conversation",
+                    ))];
+                };
                 self.save_now();
                 self.snapshot_kernel(&self.session_id.clone()).await;
                 let id = SessionId::new();
                 let lease = self.next_lease(&id);
-                self.replace_session(id, ConversationState::from_messages(prefix), None, lease);
+                self.replace_session(id, forked, None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
                     reason: Replaced::Forked,
@@ -211,12 +215,12 @@ impl SessionRuntime {
                 events
             }
             SessionCommand::Clone => {
-                let branch = self.conversation.context();
+                let branch = self.conversation.cloned_branch();
                 self.save_now();
                 self.snapshot_kernel(&self.session_id.clone()).await;
                 let id = SessionId::new();
                 let lease = self.next_lease(&id);
-                self.replace_session(id, ConversationState::from_messages(branch), None, lease);
+                self.replace_session(id, branch, None, lease);
                 let mut events = self.session_changed_events();
                 events.push(SessionEvent::TranscriptReplaced {
                     reason: Replaced::Cloned,
@@ -259,14 +263,19 @@ impl SessionRuntime {
                 self.navigate_tree(&entry_id, summary)
             }
             SessionCommand::Undo => {
-                let parent = self
-                    .conversation
-                    .user_messages_in_branch()
-                    .last()
-                    .map(|entry| entry.parent_id.clone());
-                match parent {
+                let branch = self.conversation.tree().current_branch();
+                let undone = branch.iter().rev().find_map(|entry| match &entry.kind {
+                    mush_session::EntryKind::Compaction { .. } => {
+                        Some((entry.parent_id.clone(), "undid compaction"))
+                    }
+                    mush_session::EntryKind::Message {
+                        message: Message::User(_),
+                    } => Some((entry.parent_id.clone(), "undid last turn")),
+                    _ => None,
+                });
+                match undone {
                     None => vec![SessionEvent::Failed("nothing to undo".into())],
-                    Some(parent) => {
+                    Some((parent, status)) => {
                         match parent {
                             Some(parent) => {
                                 self.conversation.branch(&parent);
@@ -279,7 +288,7 @@ impl SessionRuntime {
                                 messages: self.conversation.context(),
                                 editor_text: None,
                             },
-                            SessionEvent::Status("undid last turn".into()),
+                            SessionEvent::Status(status.into()),
                         ]
                     }
                 }
@@ -768,6 +777,29 @@ mod tests {
 
         let nothing = runtime.handle(SessionCommand::Undo).await;
         assert!(matches!(nothing.as_slice(), [SessionEvent::Failed(_)]));
+    }
+
+    #[tokio::test]
+    async fn undo_after_a_compaction_takes_back_only_the_compaction() {
+        let mut runtime = runtime(vec![user("a"), user("b"), user("c"), user("d"), user("e")]);
+        let before = runtime.conversation.context();
+        let compact =
+            mush_session::compact::compact_with_summary(before.clone(), "earlier", Some(2));
+        runtime
+            .conversation
+            .apply_compaction(compact.summary, compact.summarised_count, &compact.messages)
+            .unwrap();
+
+        let undone = runtime.handle(SessionCommand::Undo).await;
+        assert_eq!(runtime.conversation.context(), before);
+        assert!(
+            undone
+                .iter()
+                .any(|event| matches!(event, SessionEvent::Status(s) if s == "undid compaction"))
+        );
+
+        runtime.handle(SessionCommand::Undo).await;
+        assert_eq!(runtime.conversation.context(), before[..4]);
     }
 
     #[tokio::test]

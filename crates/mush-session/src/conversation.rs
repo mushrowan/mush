@@ -3,6 +3,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::tree::{EntryId, SessionEntry, SessionTree, TreeNode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("compaction discarded, the conversation changed while it ran")]
+pub struct StaleCompaction;
+
 #[derive(Debug, Clone, Default)]
 pub struct ConversationState {
     tree: SessionTree,
@@ -111,14 +115,29 @@ impl ConversationState {
         &mut self,
         summary: String,
         summarised_count: usize,
-        messages: Vec<Message>,
-    ) {
-        if summary.is_empty()
-            || summarised_count == 0
-            || self.compact_at_leaf(summary, summarised_count).is_none()
-        {
-            self.replace_messages(messages);
+        messages: &[Message],
+    ) -> Result<Option<EntryId>, StaleCompaction> {
+        if summary.is_empty() || summarised_count == 0 {
+            return Ok(None);
         }
+        self.tree
+            .compact_matching(
+                summary,
+                summarised_count,
+                messages.get(1..).unwrap_or_default(),
+            )
+            .map(Some)
+            .ok_or(StaleCompaction)
+    }
+
+    #[must_use]
+    pub fn forked_before(&self, context_index: usize) -> Option<Self> {
+        self.tree.forked_before(context_index).map(Self::from_tree)
+    }
+
+    #[must_use]
+    pub fn cloned_branch(&self) -> Self {
+        Self::from_tree(self.tree.carried_to(self.tree.leaf_id()))
     }
 
     pub fn reset_leaf(&mut self) {

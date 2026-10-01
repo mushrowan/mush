@@ -1555,11 +1555,19 @@ impl InProcessConnection {
     fn finish_compaction(&mut self, result: CompactionTaskResult) -> ClientEvent {
         match result {
             CompactionTaskResult::Applied(applied) => {
-                self.runtime.apply_compaction(
-                    applied.summary.clone(),
-                    applied.summarised_count,
-                    applied.messages.clone(),
-                );
+                if self
+                    .runtime
+                    .apply_compaction(
+                        applied.summary.clone(),
+                        applied.summarised_count,
+                        &applied.messages,
+                    )
+                    .is_none()
+                {
+                    return ClientEvent::Session(SessionEvent::Failed(String::from(
+                        "compaction discarded, the conversation changed while it ran",
+                    )));
+                }
                 if let Some(commands) = &self.host_commands {
                     commands.record_context(ContextUsage {
                         tokens: None,
@@ -2462,9 +2470,11 @@ mod tests {
         prompt(&mut connection, "one").await;
         prompt(&mut connection, "two").await;
         let context = connection.runtime.conversation.context();
-        connection
-            .runtime
-            .apply_compaction("earlier work".into(), 3, context[3..].to_vec());
+        connection.runtime.apply_compaction(
+            "earlier work".into(),
+            3,
+            &[vec![user("earlier work")], context[3..].to_vec()].concat(),
+        );
         prompt(&mut connection, "three").await;
 
         let asked = requests.lock().unwrap();

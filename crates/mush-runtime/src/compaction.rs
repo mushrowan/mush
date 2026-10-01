@@ -230,13 +230,14 @@ impl SessionRuntime {
         &mut self,
         summary: String,
         summarised_count: usize,
-        messages: Vec<Message>,
-    ) -> usize {
+        messages: &[Message],
+    ) -> Option<usize> {
         self.conversation
-            .apply_compaction(summary, summarised_count, messages);
+            .apply_compaction(summary, summarised_count, messages)
+            .ok()?;
         self.harness_digest_pending = true;
         self.refresh_context_tokens();
-        self.conversation.context_len()
+        Some(self.conversation.context_len())
     }
 }
 

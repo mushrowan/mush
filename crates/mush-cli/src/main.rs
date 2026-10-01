@@ -904,11 +904,23 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 before_count,
                 compaction,
             } => {
-                session.conversation.apply_compaction(
-                    compaction.summary,
-                    compaction.summarised_count,
-                    compaction.messages,
-                );
+                if session
+                    .conversation
+                    .apply_compaction(
+                        compaction.summary,
+                        compaction.summarised_count,
+                        &compaction.messages,
+                    )
+                    .is_err()
+                {
+                    eprintln!(
+                        "{}",
+                        Style::Yellow.stderr(format_args!(
+                            "compaction discarded, the conversation changed while it ran"
+                        ))
+                    );
+                    continue;
+                }
                 let after_count = session.conversation.context_len();
                 session.meta.message_count = after_count;
                 if !cli.no_session {

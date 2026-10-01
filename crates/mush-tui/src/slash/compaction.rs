@@ -26,11 +26,15 @@ pub fn apply_applied_compaction(
     runtime: &mut SessionRuntime,
     result: AppliedCompaction,
 ) {
-    let after_count = runtime.apply_compaction(
+    let Some(after_count) = runtime.apply_compaction(
         result.summary.clone(),
         result.summarised_count,
-        result.messages.clone(),
-    );
+        &result.messages,
+    ) else {
+        app.compacting = false;
+        app.push_system_message("compaction discarded, the conversation changed while it ran");
+        return;
+    };
     show_applied_compaction(app, &result, after_count);
 }
 

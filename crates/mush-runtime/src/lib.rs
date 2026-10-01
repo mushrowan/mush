@@ -90,13 +90,15 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
             Applied::Appended
         }
         AgentEvent::ContextCompacted { compaction, .. } => {
-            conversation.apply_compaction(
+            match conversation.apply_compaction(
                 compaction.summary.clone(),
                 compaction.summarised_count,
-                compaction.messages.clone(),
-            );
-            Applied::Compacted {
-                after_count: conversation.context_len(),
+                &compaction.messages,
+            ) {
+                Ok(_) => Applied::Compacted {
+                    after_count: conversation.context_len(),
+                },
+                Err(_) => Applied::Nothing,
             }
         }
         _ => Applied::Nothing,
