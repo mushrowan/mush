@@ -10,6 +10,7 @@ pub use pkce::{PkceChallenge, generate_pkce};
 pub use store::{
     CredentialStore, OAuthCredentials, ProviderAccounts, load_credentials, save_credentials,
 };
+use store::{lock_store, lock_store_async};
 
 use crate::types::AccountLabel;
 
@@ -141,56 +142,85 @@ pub async fn get_oauth_token(
     provider_id: &str,
     account: Option<&AccountLabel>,
 ) -> Result<Option<String>, OAuthError> {
-    let provider = match get_provider(provider_id) {
-        Some(p) => p,
-        None => return Ok(None),
-    };
-
-    let mut store = load_credentials()?;
-    let Some((label, creds)) = store.get(provider_id, account) else {
+    let Some(provider) = get_provider(provider_id) else {
         return Ok(None);
     };
-    let label = label.clone();
-
+    let store = load_credentials()?;
+    let Some((_, creds)) = store.get(provider_id, account) else {
+        return Ok(None);
+    };
     if !creds.is_expired() {
         return Ok(Some(provider.api_key(creds)));
     }
-
-    let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
-    if refreshed.account_id.is_none() {
-        refreshed.account_id = creds.account_id.clone();
-    }
-    let token = provider.api_key(&refreshed);
-    store.insert(provider_id, label, refreshed);
-    save_credentials(&store)?;
-
-    Ok(Some(token))
+    refresh_stored(provider.as_ref(), account, Stale::Expired).await
 }
 
 pub async fn force_refresh_oauth_token(
     provider_id: &str,
     account: Option<&AccountLabel>,
+    rejected_token: &str,
 ) -> Result<Option<String>, OAuthError> {
-    let provider = match get_provider(provider_id) {
-        Some(p) => p,
-        None => return Ok(None),
+    let Some(provider) = get_provider(provider_id) else {
+        return Ok(None);
     };
+    refresh_stored(provider.as_ref(), account, Stale::Rejected(rejected_token)).await
+}
+
+enum Stale<'a> {
+    Expired,
+    Rejected(&'a str),
+}
+
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn refresh_flight(provider_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    static FLIGHTS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    FLIGHTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(provider_id.to_string())
+        .or_default()
+        .clone()
+}
+
+async fn refresh_stored(
+    provider: &dyn OAuthProvider,
+    account: Option<&AccountLabel>,
+    stale: Stale<'_>,
+) -> Result<Option<String>, OAuthError> {
+    let provider_id = provider.id();
+    let flight = refresh_flight(provider_id);
+    let _flight = flight.lock().await;
+    let _lock = lock_store_async().await?;
 
     let mut store = load_credentials()?;
     let Some((label, creds)) = store.get(provider_id, account) else {
         return Ok(None);
     };
-    let label = label.clone();
-
-    let mut refreshed = provider.refresh_token(&creds.refresh_token).await?;
-    if refreshed.account_id.is_none() {
-        refreshed.account_id = creds.account_id.clone();
+    let still_stale = match stale {
+        Stale::Expired => creds.is_expired(),
+        Stale::Rejected(token) => provider.api_key(creds) == token,
+    };
+    if !still_stale {
+        return Ok(Some(provider.api_key(creds)));
     }
+    let label = label.clone();
+    let creds = creds.clone();
 
+    let mut refreshed = tokio::time::timeout(
+        REFRESH_TIMEOUT,
+        provider.refresh_token(&creds.refresh_token),
+    )
+    .await
+    .map_err(|_| OAuthError::TokenRefresh("timed out waiting for the token endpoint".into()))??;
+    if refreshed.account_id.is_none() {
+        refreshed.account_id = creds.account_id;
+    }
     let token = provider.api_key(&refreshed);
     store.insert(provider_id, label, refreshed);
     save_credentials(&store)?;
-
     Ok(Some(token))
 }
 
@@ -199,6 +229,7 @@ pub fn save_login(
     account: Option<AccountLabel>,
     creds: OAuthCredentials,
 ) -> Result<AccountLabel, OAuthError> {
+    let _lock = lock_store()?;
     let mut store = load_credentials()?;
     let label = account
         .or_else(|| {
@@ -216,6 +247,7 @@ pub fn remove_credentials(
     provider_id: &str,
     account: Option<&AccountLabel>,
 ) -> Result<Option<AccountLabel>, OAuthError> {
+    let _lock = lock_store()?;
     let mut store = load_credentials()?;
     let removed = store.remove(provider_id, account);
     if removed.is_some() {
@@ -225,6 +257,7 @@ pub fn remove_credentials(
 }
 
 pub fn set_default_account(provider_id: &str, account: &AccountLabel) -> Result<bool, OAuthError> {
+    let _lock = lock_store()?;
     let mut store = load_credentials()?;
     let changed = store.set_default(provider_id, account);
     if changed {
@@ -241,8 +274,9 @@ pub async fn get_anthropic_oauth_token(
 
 pub async fn force_refresh_anthropic_oauth_token(
     account: Option<&AccountLabel>,
+    rejected_token: &str,
 ) -> Result<Option<String>, OAuthError> {
-    force_refresh_oauth_token("anthropic", account).await
+    force_refresh_oauth_token("anthropic", account, rejected_token).await
 }
 
 pub async fn get_openai_codex_oauth_token(
@@ -280,6 +314,156 @@ mod tests {
         let provider = provider.unwrap();
         assert_eq!(provider.id(), "openrouter");
         assert!(provider.name().to_lowercase().contains("openrouter"));
+    }
+
+    struct CountingProvider {
+        refreshes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl OAuthProvider for CountingProvider {
+        fn id(&self) -> &str {
+            "counting"
+        }
+
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
+            unreachable!()
+        }
+
+        fn begin_browser_login(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+        > {
+            unreachable!()
+        }
+
+        fn exchange_code(
+            &self,
+            _code: &str,
+            _pkce: &PkceChallenge,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
+        > {
+            unreachable!()
+        }
+
+        fn refresh_token(
+            &self,
+            refresh_token: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
+        > {
+            let generation = self
+                .refreshes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            let spent = refresh_token.to_string();
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok(OAuthCredentials {
+                    access_token: format!("access-{generation}"),
+                    refresh_token: format!("{spent}+"),
+                    expires_at: u64::MAX,
+                    account_id: None,
+                })
+            })
+        }
+    }
+
+    static CONFIG_DIR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct ConfigDir {
+        _dir: tempfile::TempDir,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for ConfigDir {
+        fn drop(&mut self) {
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var("MUSH_CONFIG_DIR", value),
+                    None => std::env::remove_var("MUSH_CONFIG_DIR"),
+                }
+            }
+        }
+    }
+
+    async fn config_with_expired_login() -> ConfigDir {
+        let lock = CONFIG_DIR_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("MUSH_CONFIG_DIR");
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+        save_login(
+            "counting",
+            None,
+            OAuthCredentials {
+                access_token: "access-0".into(),
+                refresh_token: "refresh".into(),
+                expires_at: 0,
+                account_id: Some("acct".into()),
+            },
+        )
+        .unwrap();
+        ConfigDir {
+            _dir: dir,
+            _lock: lock,
+            saved,
+        }
+    }
+
+    fn counting() -> CountingProvider {
+        CountingProvider {
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_lookups_spend_the_refresh_token_once() {
+        let _config = config_with_expired_login().await;
+        let provider = counting();
+
+        let (a, b, c) = tokio::join!(
+            refresh_stored(&provider, None, Stale::Expired),
+            refresh_stored(&provider, None, Stale::Expired),
+            refresh_stored(&provider, None, Stale::Expired),
+        );
+
+        assert_eq!(
+            provider.refreshes.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        for token in [a, b, c] {
+            assert_eq!(token.unwrap().as_deref(), Some("access-1"));
+        }
+        let store = load_credentials().unwrap();
+        let (_, creds) = store.get("counting", None).unwrap();
+        assert_eq!(creds.refresh_token, "refresh+");
+        assert_eq!(creds.account_id.as_deref(), Some("acct"));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_a_peer_already_replaced_is_not_refreshed_again() {
+        let _config = config_with_expired_login().await;
+        let provider = counting();
+
+        let first = refresh_stored(&provider, None, Stale::Rejected("access-0"))
+            .await
+            .unwrap();
+        let second = refresh_stored(&provider, None, Stale::Rejected("access-0"))
+            .await
+            .unwrap();
+
+        assert_eq!(first.as_deref(), Some("access-1"));
+        assert_eq!(second.as_deref(), Some("access-1"));
+        assert_eq!(
+            provider.refreshes.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]

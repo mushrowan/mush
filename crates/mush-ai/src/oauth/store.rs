@@ -172,6 +172,35 @@ fn credentials_path() -> PathBuf {
     }
 }
 
+pub struct StoreLock {
+    _file: std::fs::File,
+}
+
+pub fn lock_store() -> Result<StoreLock, OAuthError> {
+    lock_store_at(&credentials_path())
+}
+
+fn lock_store_at(path: &std::path::Path) -> Result<StoreLock, OAuthError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut lock_name = path.file_name().unwrap_or_default().to_os_string();
+    lock_name.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_file_name(lock_name))?;
+    file.lock()?;
+    Ok(StoreLock { _file: file })
+}
+
+pub async fn lock_store_async() -> Result<StoreLock, OAuthError> {
+    tokio::task::spawn_blocking(lock_store)
+        .await
+        .map_err(|e| OAuthError::Io(std::io::Error::other(e)))?
+}
+
 pub fn load_credentials() -> Result<CredentialStore, OAuthError> {
     load_credentials_from(&credentials_path())
 }
@@ -237,6 +266,22 @@ mod tests {
             dbg.contains("account-abc"),
             "account_id missing from debug: {dbg}"
         );
+    }
+
+    #[test]
+    fn the_store_lock_is_exclusive_across_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oauth.json");
+        let held = lock_store_at(&path).unwrap();
+        let mut lock_name = path.file_name().unwrap().to_os_string();
+        lock_name.push(".lock");
+        let other = std::fs::File::open(path.with_file_name(lock_name)).unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        assert!(other.try_lock().is_ok());
     }
 
     #[test]
