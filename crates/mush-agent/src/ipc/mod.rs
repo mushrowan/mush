@@ -5,7 +5,7 @@ pub mod listener;
 #[cfg(test)]
 mod listener_tests;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +70,17 @@ pub fn runtime_dir() -> PathBuf {
         let user = rustix::process::geteuid().as_raw();
         format!("/tmp/mush-{user}")
     });
-    PathBuf::from(base).join("mush")
+    resolve_existing_prefix(&PathBuf::from(base)).join("mush")
+}
+
+fn resolve_existing_prefix(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(real) = std::fs::canonicalize(ancestor) {
+            let rest = path.strip_prefix(ancestor).unwrap_or(Path::new(""));
+            return real.join(rest);
+        }
+    }
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -82,6 +92,22 @@ mod tests {
         let path = socket_path("abc123");
         assert!(path.to_str().unwrap().contains("abc123.sock"));
         assert!(path.to_str().unwrap().contains("mush"));
+    }
+
+    #[test]
+    fn existing_prefix_resolves_symlinks_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let resolved = resolve_existing_prefix(&link.join("missing/child"));
+
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&real).unwrap().join("missing/child")
+        );
     }
 
     #[test]
