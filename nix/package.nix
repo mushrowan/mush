@@ -69,10 +69,10 @@ in {
     // {
       inherit cargoArtifacts;
       doCheck = false;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [pkgs.makeWrapper];
-      postFixup = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.makeWrapper];
+      postFixup = ''
         wrapProgram $out/bin/mush \
-          --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]} \
+          ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "--prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]}"} \
           --set-default MUSH_KERNEL_PYTHON ${kernelPython}/bin/python3
       '';
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";

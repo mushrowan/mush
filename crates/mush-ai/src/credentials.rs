@@ -175,7 +175,7 @@ fn try_init_keyring() -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        match apple_native_keyring_store::Store::new() {
+        match apple_native_keyring_store::keychain::Store::new() {
             Ok(store) => {
                 keyring_core::set_default_store(store);
                 true

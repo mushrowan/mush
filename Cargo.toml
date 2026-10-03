@@ -137,7 +137,7 @@ open = "5"
 # headless / containerised hosts where the os keychain isn't available
 keyring-core = "1"
 linux-keyutils-keyring-store = "1"
-apple-native-keyring-store = "1"
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
 windows-native-keyring-store = "1"
 
 # terminal
