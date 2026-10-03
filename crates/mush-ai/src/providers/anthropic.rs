@@ -200,7 +200,9 @@ impl ApiProvider for AnthropicProvider {
             .api_key
             .clone()
             .or_else(anthropic_api_key)
-            .ok_or_else(|| ProviderError::MissingApiKey(Provider::Anthropic))?;
+            .ok_or_else(|| {
+                crate::auth::missing_key_error(&Provider::Anthropic, options.oauth_account.as_ref())
+            })?;
 
         if api_key.is_oauth_token()
             && let Ok(Some(fresh)) =

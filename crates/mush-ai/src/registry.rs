@@ -18,6 +18,15 @@ pub enum ProviderError {
     #[diagnostic(help("set the appropriate env var or pass an api key in options"))]
     MissingApiKey(crate::types::Provider),
 
+    #[error(
+        "the {provider} login '{account}' has expired and could not be refreshed ({reason}). run /login {provider} {account} to sign in again"
+    )]
+    LoginExpired {
+        provider: String,
+        account: crate::types::AccountLabel,
+        reason: String,
+    },
+
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
 

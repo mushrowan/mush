@@ -6,6 +6,7 @@ use super::cache::{DiscoveryCache, cache_path};
 use super::codex::CodexDiscovery;
 use super::openai::OpenAiDiscovery;
 use super::openrouter::OpenRouterDiscovery;
+use super::zai::ZaiDiscovery;
 use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
 use crate::auth::resolve_auth_from_default_sources;
 use crate::env;
@@ -142,6 +143,18 @@ pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunS
                 codex_auth.account_id,
                 env!("CARGO_PKG_VERSION"),
             );
+            async move { d.fetch().await }
+        })
+        .await,
+    );
+
+    let zai_provider = Provider::Custom("zai".into());
+    let zai_key = resolve_auth_from_default_sources(&zai_provider)
+        .await
+        .api_key;
+    results.push(
+        run_one(zai_provider, zai_key, |_| {
+            let d = ZaiDiscovery::new(client.clone(), "");
             async move { d.fetch().await }
         })
         .await,

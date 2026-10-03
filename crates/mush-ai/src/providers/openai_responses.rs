@@ -28,13 +28,23 @@ impl ApiProvider for OpenaiResponsesProvider {
         context: &LlmContext,
         options: &StreamOptions,
     ) -> Result<EventStream, ProviderError> {
-        let api_key = options
+        let mut api_key = options
             .api_key
             .clone()
             .or_else(|| env_api_key(&model.provider))
-            .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
+            .ok_or_else(|| {
+                crate::auth::missing_key_error(&model.provider, options.oauth_account.as_ref())
+            })?;
 
         let is_codex = is_codex_provider(model);
+        let codex_oauth = is_codex && decode_jwt_payload(api_key.expose()).is_some();
+        if codex_oauth
+            && let Ok(Some(fresh)) =
+                crate::oauth::get_openai_codex_oauth_token(options.oauth_account.as_ref()).await
+            && let Some(fresh) = ApiKey::new(fresh)
+        {
+            api_key = fresh;
+        }
         let body = build_request_body(
             model,
             &context.system_prompt,
@@ -56,6 +66,40 @@ impl ApiProvider for OpenaiResponsesProvider {
             .with_extension(crate::http::WireCallId(call_id))
             .send()
             .await?;
+
+        let response = if response.status().as_u16() == 401 && codex_oauth {
+            tracing::warn!(
+                model = %model.id,
+                "codex returned 401 with oauth token, forcing refresh + single retry"
+            );
+            match crate::oauth::force_refresh_oauth_token(
+                "openai-codex",
+                options.oauth_account.as_ref(),
+                api_key.expose(),
+            )
+            .await
+            {
+                Ok(Some(fresh)) => match ApiKey::new(fresh) {
+                    Some(fresh) => {
+                        self.client
+                            .post(&url)
+                            .headers(build_headers(&fresh, options, is_codex)?)
+                            .json(&body)
+                            .with_extension(crate::http::WireCallId(call_id))
+                            .send()
+                            .await?
+                    }
+                    None => response,
+                },
+                Ok(None) => response,
+                Err(error) => {
+                    tracing::warn!(%error, "codex oauth force refresh failed");
+                    response
+                }
+            }
+        } else {
+            response
+        };
 
         let response =
             super::check_response(response, "openai responses", model.id.as_str(), &url).await?;
@@ -1243,6 +1287,106 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_jwt(subject: &str) -> String {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::json!({ "sub": subject }).to_string());
+        format!("e30.{payload}.sig")
+    }
+
+    async fn serve_once(listener: &tokio::net::TcpListener, status_line: &str) -> Option<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut authorization = None;
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').unwrap_or_default();
+            match name.to_ascii_lowercase().as_str() {
+                "authorization" => authorization = Some(value.trim().to_string()),
+                "content-length" => content_length = value.trim().parse().unwrap(),
+                _ => {}
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).await.unwrap();
+        let mut socket = reader.into_inner();
+        socket
+            .write_all(
+                format!(
+                    "{status_line}\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.shutdown().await.unwrap();
+        authorization
+    }
+
+    #[tokio::test]
+    async fn a_codex_401_retries_with_the_token_a_peer_already_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("MUSH_CONFIG_DIR");
+        unsafe { std::env::set_var("MUSH_CONFIG_DIR", dir.path()) };
+        let stale = fake_jwt("stale");
+        let fresh = fake_jwt("fresh");
+        let login = |token: &str| crate::oauth::OAuthCredentials {
+            access_token: token.to_string(),
+            refresh_token: "refresh".into(),
+            expires_at: u64::MAX,
+            account_id: Some("acct".into()),
+        };
+        crate::oauth::save_login("openai-codex", None, login(&stale)).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let peer_fresh = login(&fresh);
+        let server = tokio::spawn(async move {
+            serve_once(&listener, "HTTP/1.1 401 Unauthorized").await;
+            crate::oauth::save_login("openai-codex", None, peer_fresh).unwrap();
+            serve_once(&listener, "HTTP/1.1 200 OK").await
+        });
+
+        let model = Model::builder()
+            .id("gpt-5.5".into())
+            .name("GPT-5.5".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai-codex".into()))
+            .base_url(base_url.as_str().into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .build();
+        let options = StreamOptions {
+            api_key: ApiKey::new(stale.clone()),
+            ..Default::default()
+        };
+        let provider = OpenaiResponsesProvider {
+            client: crate::http::client(),
+        };
+        let context = LlmContext {
+            system_prompt: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+        };
+        let result = provider.stream(&model, &context, &options).await;
+        let retried_with = server.await.unwrap();
+
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("MUSH_CONFIG_DIR", value),
+                None => std::env::remove_var("MUSH_CONFIG_DIR"),
+            }
+        }
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(retried_with, Some(format!("Bearer {fresh}")));
+    }
 
     #[test]
     fn failed_response_preserves_nested_quota_code() {

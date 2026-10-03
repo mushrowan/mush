@@ -93,6 +93,27 @@ fn env_api_key(provider: &Provider) -> Option<ApiKey> {
 }
 
 #[must_use]
+pub fn missing_key_error(
+    provider: &Provider,
+    account: Option<&AccountLabel>,
+) -> crate::registry::ProviderError {
+    let failure = oauth_provider_id(provider).and_then(|oauth_id| {
+        Some((
+            oauth_id,
+            crate::oauth::last_refresh_failure(oauth_id, account)?,
+        ))
+    });
+    match failure {
+        Some((oauth_id, failure)) => crate::registry::ProviderError::LoginExpired {
+            provider: oauth_id.to_string(),
+            account: failure.account,
+            reason: failure.reason,
+        },
+        None => crate::registry::ProviderError::MissingApiKey(provider.clone()),
+    }
+}
+
+#[must_use]
 pub fn oauth_provider_id(provider: &Provider) -> Option<&'static str> {
     match provider {
         Provider::Anthropic => Some("anthropic"),

@@ -209,12 +209,26 @@ async fn refresh_stored(
     let label = label.clone();
     let creds = creds.clone();
 
-    let mut refreshed = tokio::time::timeout(
+    let refreshed = tokio::time::timeout(
         REFRESH_TIMEOUT,
         provider.refresh_token(&creds.refresh_token),
     )
     .await
-    .map_err(|_| OAuthError::TokenRefresh("timed out waiting for the token endpoint".into()))??;
+    .unwrap_or_else(|_| {
+        Err(OAuthError::TokenRefresh(
+            "timed out waiting for the token endpoint".into(),
+        ))
+    });
+    let mut refreshed = match refreshed {
+        Ok(refreshed) => {
+            record_refresh_failure(provider_id, &label, None);
+            refreshed
+        }
+        Err(error) => {
+            record_refresh_failure(provider_id, &label, Some(refresh_failure_reason(&error)));
+            return Err(error);
+        }
+    };
     if refreshed.account_id.is_none() {
         refreshed.account_id = creds.account_id;
     }
@@ -222,6 +236,71 @@ async fn refresh_stored(
     store.insert(provider_id, label, refreshed);
     save_credentials(&store)?;
     Ok(Some(token))
+}
+
+type FailureKey = (String, AccountLabel);
+
+fn refresh_failures() -> &'static std::sync::Mutex<std::collections::HashMap<FailureKey, String>> {
+    static FAILURES: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<FailureKey, String>>,
+    > = std::sync::LazyLock::new(Default::default);
+    &FAILURES
+}
+
+fn record_refresh_failure(provider_id: &str, label: &AccountLabel, reason: Option<String>) {
+    let mut failures = refresh_failures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (provider_id.to_string(), label.clone());
+    match reason {
+        Some(reason) => {
+            failures.insert(key, reason);
+        }
+        None => {
+            failures.remove(&key);
+        }
+    }
+}
+
+fn refresh_failure_reason(error: &OAuthError) -> String {
+    let OAuthError::TokenRefresh(body) = error else {
+        return error.to_string();
+    };
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error_description")
+                .or_else(|| value.get("error"))
+                .and_then(|reason| reason.as_str())
+                .map(str::to_lowercase)
+        })
+        .unwrap_or_else(|| body.clone())
+}
+
+pub struct RefreshFailure {
+    pub account: AccountLabel,
+    pub reason: String,
+}
+
+pub fn last_refresh_failure(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Option<RefreshFailure> {
+    let store = load_credentials().ok()?;
+    let (label, creds) = store.get(provider_id, account)?;
+    if !creds.is_expired() {
+        return None;
+    }
+    let reason = refresh_failures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(provider_id.to_string(), label.clone()))?
+        .clone();
+    Some(RefreshFailure {
+        account: label.clone(),
+        reason,
+    })
 }
 
 pub fn save_login(
@@ -464,6 +543,85 @@ mod tests {
             provider.refreshes.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    struct RejectingProvider;
+
+    impl OAuthProvider for RejectingProvider {
+        fn id(&self) -> &str {
+            "counting"
+        }
+
+        fn name(&self) -> &str {
+            "rejecting"
+        }
+
+        fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError> {
+            unreachable!()
+        }
+
+        fn begin_browser_login(
+            &self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
+        > {
+            unreachable!()
+        }
+
+        fn exchange_code(
+            &self,
+            _code: &str,
+            _pkce: &PkceChallenge,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
+        > {
+            unreachable!()
+        }
+
+        fn refresh_token(
+            &self,
+            _refresh_token: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Err(OAuthError::TokenRefresh(
+                    r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#
+                        .into(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_is_remembered_until_one_succeeds() {
+        let _config = config_with_expired_login().await;
+
+        assert!(
+            refresh_stored(&RejectingProvider, None, Stale::Expired)
+                .await
+                .is_err()
+        );
+        let failure = last_refresh_failure("counting", None).expect("failure recorded");
+        assert_eq!(failure.account, AccountLabel::default_label());
+        assert_eq!(failure.reason, "refresh token expired");
+
+        refresh_stored(&counting(), None, Stale::Expired)
+            .await
+            .unwrap();
+        assert!(last_refresh_failure("counting", None).is_none());
+    }
+
+    #[test]
+    fn an_expired_login_error_names_the_login_command() {
+        let error = crate::registry::ProviderError::LoginExpired {
+            provider: "anthropic".into(),
+            account: AccountLabel::parse("work").unwrap(),
+            reason: "refresh token expired".into(),
+        };
+        let message = error.to_string();
+        assert!(message.contains("/login anthropic work"), "{message}");
+        assert!(message.contains("refresh token expired"), "{message}");
     }
 
     #[tokio::test]

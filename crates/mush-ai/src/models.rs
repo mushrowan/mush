@@ -477,19 +477,13 @@ pub fn zai_models() -> Vec<Model> {
             1_000_000,
             vec![Low, High, Xhigh],
         ),
-        model(
-            "glm-5.2",
-            "GLM-5.2",
-            text(),
-            1_000_000,
-            vec![Off, High, Xhigh],
-        ),
+        model("glm-5.2", "GLM-5.2", text(), 1_000_000, vec![High, Xhigh]),
         model(
             "glm-5.2-highspeed",
             "GLM-5.2 Highspeed",
             text(),
             1_000_000,
-            vec![Off, High, Xhigh],
+            vec![High, Xhigh],
         ),
         model(
             "glm-5-turbo",

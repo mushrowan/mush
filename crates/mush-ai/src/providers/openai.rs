@@ -26,7 +26,9 @@ impl ApiProvider for OpenaiCompletionsProvider {
             .api_key
             .clone()
             .or_else(|| env_api_key(&model.provider))
-            .ok_or_else(|| ProviderError::MissingApiKey(model.provider.clone()))?;
+            .ok_or_else(|| {
+                crate::auth::missing_key_error(&model.provider, options.oauth_account.as_ref())
+            })?;
         let api_key_str = api_key.expose();
         let body = build_request_body(
             model,
@@ -1277,7 +1279,7 @@ mod tests {
         assert!(body.get("temperature").is_none());
         assert!(body.get("tool_stream").is_none());
 
-        let off = zai_body("glm-5.2", ThinkingLevel::Off, &[]);
+        let off = zai_body("glm-4.7", ThinkingLevel::Off, &[]);
         assert_eq!(off["thinking"], serde_json::json!({"type": "disabled"}));
         assert!(off.get("reasoning_effort").is_none());
         assert!(off["temperature"].is_number());

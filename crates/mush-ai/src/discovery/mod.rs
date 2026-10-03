@@ -5,6 +5,7 @@ pub mod merge;
 pub mod openai;
 pub mod openrouter;
 pub mod orchestrate;
+pub mod zai;
 
 pub use cache::{DiscoveredEntry, DiscoveryCache, ProviderCache, cache_path};
 pub use merge::{
