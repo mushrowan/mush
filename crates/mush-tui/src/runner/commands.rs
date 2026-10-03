@@ -441,6 +441,17 @@ pub(super) async fn handle_slash_action(
                 refresh_models_after_login(session, tui_config).await;
             }
         }
+        SlashAction::LoginApiKey { provider, key } => {
+            let pane = &mut *session;
+            let message = match super::input::run_validation_and_save(&provider, key.expose()).await
+            {
+                super::input::SaveOutcome::Saved(toast) => toast,
+                super::input::SaveOutcome::Failed(reason) => {
+                    format!("{provider} login failed: {reason}")
+                }
+            };
+            pane.app.push_system_message(message);
+        }
         SlashAction::Login { provider, account } => {
             let pane = &mut *session;
             slash::handle_login_start(

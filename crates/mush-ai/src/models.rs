@@ -20,6 +20,7 @@ static BUILTIN_MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
     models.extend(openrouter_models());
     models.extend(openai_models());
     models.extend(openai_codex_models());
+    models.extend(zai_models());
     models
 });
 
@@ -426,6 +427,81 @@ pub fn openai_codex_models() -> Vec<Model> {
     ]
 }
 
+pub const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+
+#[must_use]
+pub fn zai_models() -> Vec<Model> {
+    use crate::types::ThinkingLevel::{High, Low, Off, Xhigh};
+
+    let model =
+        |id: &str,
+         name: &str,
+         input: Vec<InputModality>,
+         context_window: u64,
+         supported_thinking_levels: Vec<crate::types::ThinkingLevel>| Model {
+            id: id.into(),
+            name: format!("{name} (GLM Coding Plan)"),
+            api: Api::OpenaiCompletions,
+            provider: Provider::Custom("zai".into()),
+            base_url: ZAI_CODING_PLAN_BASE_URL.into(),
+            reasoning: true,
+            input,
+            cost: ModelCost::default(),
+            context_window: TokenCount::new(context_window),
+            effective_context_window: None,
+            max_output_tokens: TokenCount::new(131_072),
+            supports_adaptive_thinking: false,
+            supported_thinking_levels,
+            default_thinking_level: None,
+        };
+    let text = || vec![InputModality::Text];
+    vec![
+        model(
+            "glm-5.3",
+            "GLM-5.3",
+            text(),
+            1_000_000,
+            vec![Low, High, Xhigh],
+        ),
+        model(
+            "glm-5.3-highspeed",
+            "GLM-5.3 Highspeed",
+            text(),
+            1_000_000,
+            vec![Low, High, Xhigh],
+        ),
+        model(
+            "glm-5.3-flash",
+            "GLM-5.3-Flash",
+            vec![InputModality::Text, InputModality::Image],
+            1_000_000,
+            vec![Low, High, Xhigh],
+        ),
+        model(
+            "glm-5.2",
+            "GLM-5.2",
+            text(),
+            1_000_000,
+            vec![Off, High, Xhigh],
+        ),
+        model(
+            "glm-5.2-highspeed",
+            "GLM-5.2 Highspeed",
+            text(),
+            1_000_000,
+            vec![Off, High, Xhigh],
+        ),
+        model(
+            "glm-5-turbo",
+            "GLM-5-Turbo",
+            text(),
+            200_000,
+            vec![Off, High],
+        ),
+        model("glm-4.7", "GLM-4.7", text(), 204_800, vec![Off, High]),
+    ]
+}
+
 #[must_use]
 pub fn all_models() -> Vec<Model> {
     BUILTIN_MODELS.clone()
@@ -674,6 +750,24 @@ mod tests {
             models
                 .iter()
                 .all(|m| m.provider == Provider::Custom("openai-codex".into()))
+        );
+    }
+
+    #[test]
+    fn zai_models_target_the_coding_plan_endpoint() {
+        let models = zai_models();
+        assert!(!models.is_empty());
+        assert!(models.iter().all(|m| m.api == Api::OpenaiCompletions
+            && m.provider == Provider::Custom("zai".into())
+            && m.base_url.as_str() == ZAI_CODING_PLAN_BASE_URL));
+        assert!(all_models().iter().any(|m| m.id.as_str() == "glm-5.3"));
+        let glm53 = models
+            .iter()
+            .find(|m| m.id.as_str() == "glm-5.3")
+            .expect("glm-5.3 in the zai catalogue");
+        assert_eq!(
+            glm53.clamp_thinking(&crate::types::ThinkingLevel::Off),
+            crate::types::ThinkingLevel::Low
         );
     }
 

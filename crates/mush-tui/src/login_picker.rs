@@ -134,6 +134,21 @@ impl LoginPickerState {
         true
     }
 
+    pub fn arm_entry_for(&mut self, entry_id: &str) -> bool {
+        self.filter.clear();
+        let Some(index) = self.entries.iter().position(|e| e.id == entry_id) else {
+            return false;
+        };
+        self.selected = index;
+        if !self.arm_entry() {
+            return false;
+        }
+        self.toast = Some(format!(
+            "paste {entry_id} api key, enter saves, esc cancels"
+        ));
+        true
+    }
+
     pub fn cancel_entry(&mut self) {
         self.entry = None;
         self.toast = None;
@@ -327,6 +342,21 @@ mod tests {
             picker.toast.as_deref().unwrap().contains("config.toml"),
             "toast should mention config.toml so the user knows where to look"
         );
+    }
+
+    #[test]
+    fn arm_entry_for_jumps_straight_to_the_named_key_prompt() {
+        let mut picker = LoginPickerState::new(vec![
+            oauth_entry("anthropic-pro-max", "Anthropic", None),
+            api_key_entry("zai", "Z.AI", None),
+        ]);
+        picker.filter = "anth".into();
+        assert!(picker.arm_entry_for("zai"));
+        assert!(picker.filter.is_empty());
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.entry.as_ref().unwrap().entry_id, "zai");
+        assert!(!picker.arm_entry_for("anthropic-pro-max"));
+        assert!(!picker.arm_entry_for("nope"));
     }
 
     #[test]

@@ -347,7 +347,7 @@ pub async fn handle(
                 .await;
             None
         }
-        SlashAction::Login { .. } => None,
+        SlashAction::Login { .. } | SlashAction::LoginApiKey { .. } => None,
         SlashAction::LoginComplete { code: _ } => None,
         SlashAction::Card => {
             if let Some(card) = &tui_config.agent_card {
@@ -597,7 +597,8 @@ fn help_text() -> String {
     help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
     help.push_str("  /settings      - open runtime settings overlay (j/k, space toggles)\n");
     help.push_str("  /settings show - print current settings state\n");
-    help.push_str("  /login [p]     - oauth + api-key login picker (or pass id to skip)\n");
+    help.push_str("  /login [p] [key] - oauth + api-key login picker (or pass id to skip, plus a key to save it)
+\n");
     help.push_str("  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n");
     help.push_str("  /card          - show agent capability card\n");
     help.push_str("  /debug         - dump internal state (for bug reports)\n");
@@ -930,6 +931,9 @@ pub(crate) async fn handle_login_start(
             .any(|p| p.id == provider_id)
         {
             open_login_picker_overlay(app, tui_config);
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.arm_entry_for(&provider_id);
+            }
             return;
         }
         let available = oauth::list_providers()

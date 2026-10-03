@@ -78,13 +78,19 @@ struct RequestBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<RequestTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tool_stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     stream_options: StreamOpts,
 }
 
@@ -166,6 +172,10 @@ fn build_request_body(
         );
     }
 
+    if is_zai(model) {
+        return zai_request_body(model, all_messages, converted_tools, options);
+    }
+
     let reasoning_effort = super::requested_effort(options)
         .as_ref()
         .and_then(|effort| super::openai_reasoning_effort(model, effort));
@@ -188,14 +198,76 @@ fn build_request_body(
         messages: all_messages,
         stream: true,
         max_completion_tokens: Some(super::effective_max_output_tokens(model, options)),
+        max_tokens: None,
         temperature: if reasoning_effort.is_none() {
             options.temperature.map(|t| t.value())
         } else {
             None
         },
         tools: converted_tools,
+        tool_stream: None,
         reasoning_effort: reasoning_effort.or(off_effort),
         reasoning,
+        thinking: None,
+        stream_options: StreamOpts {
+            include_usage: true,
+        },
+    }
+}
+
+fn is_zai(model: &Model) -> bool {
+    matches!(&model.provider, Provider::Custom(name) if name == "zai")
+        || ["api.z.ai", "open.bigmodel.cn"]
+            .iter()
+            .any(|host| model.base_url.as_str().contains(host))
+}
+
+fn zai_request_body(
+    model: &Model,
+    messages: Vec<serde_json::Value>,
+    tools: Option<Vec<RequestTool>>,
+    options: &StreamOptions,
+) -> RequestBody {
+    let level = model.clamp_thinking(
+        &super::requested_effort(options).map_or(ThinkingLevel::Off, |effort| {
+            ThinkingLevel::from_effort_str(effort.name())
+        }),
+    );
+    let thinking_on = model.reasoning && level != ThinkingLevel::Off;
+    let thinking = model.reasoning.then(|| {
+        if thinking_on {
+            serde_json::json!({ "type": "enabled", "clear_thinking": false })
+        } else {
+            serde_json::json!({ "type": "disabled" })
+        }
+    });
+    let effort_levels = model
+        .supported_thinking_levels
+        .iter()
+        .filter(|level| **level != ThinkingLevel::Off)
+        .count();
+    let reasoning_effort = (thinking_on && effort_levels > 1)
+        .then(|| match level {
+            ThinkingLevel::Xhigh => Some("max".to_string()),
+            other => other.effort_name().map(str::to_string),
+        })
+        .flatten();
+    RequestBody {
+        model: model.id.to_string(),
+        messages,
+        stream: true,
+        max_completion_tokens: None,
+        max_tokens: Some(super::effective_max_output_tokens(model, options)),
+        temperature: if thinking_on {
+            None
+        } else {
+            options.temperature.map(|t| t.value())
+        },
+        tool_stream: tools.is_some().then_some(true),
+        tools,
+        reasoning_effort,
+        reasoning: None,
+        thinking,
         stream_options: StreamOpts {
             include_usage: true,
         },
@@ -1016,9 +1088,17 @@ fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
         "stop" => (StopReason::Stop, None),
         "length" => (StopReason::Length, None),
         "tool_calls" | "function_call" => (StopReason::ToolUse, None),
-        "content_filter" => (
+        "content_filter" | "sensitive" => (
             StopReason::Error,
             Some("the provider's content filter stopped the response".into()),
+        ),
+        "network_error" => (
+            StopReason::Error,
+            Some("the provider hit a network error mid-response, retry".into()),
+        ),
+        "model_context_window_exceeded" => (
+            StopReason::Error,
+            Some("the response filled the model's context window. compact and retry".into()),
         ),
         _ => (StopReason::Stop, None),
     }
@@ -1159,6 +1239,92 @@ mod tests {
         };
         let body = build_request_body(&grok, &None, &[], &[], &off);
         assert!(body.reasoning_effort.is_none() && body.reasoning.is_none());
+    }
+
+    fn zai_model(id: &str) -> Model {
+        crate::models::zai_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == id)
+            .unwrap()
+    }
+
+    fn zai_body(id: &str, thinking: ThinkingLevel, tools: &[ToolDefinition]) -> serde_json::Value {
+        let options = StreamOptions {
+            thinking: Some(thinking),
+            temperature: Some(Temperature::new(0.5)),
+            ..Default::default()
+        };
+        serde_json::to_value(build_request_body(
+            &zai_model(id),
+            &None,
+            &[],
+            tools,
+            &options,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn zai_sends_its_own_thinking_switch_and_output_limit() {
+        let body = zai_body("glm-5.2", ThinkingLevel::High, &[]);
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({"type": "enabled", "clear_thinking": false})
+        );
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body["max_tokens"].is_u64());
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("tool_stream").is_none());
+
+        let off = zai_body("glm-5.2", ThinkingLevel::Off, &[]);
+        assert_eq!(off["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(off.get("reasoning_effort").is_none());
+        assert!(off["temperature"].is_number());
+    }
+
+    #[test]
+    fn zai_effort_maps_xhigh_to_max_and_toggle_models_get_no_effort() {
+        assert_eq!(
+            zai_body("glm-5.3", ThinkingLevel::Xhigh, &[])["reasoning_effort"],
+            "max"
+        );
+        assert_eq!(
+            zai_body("glm-5.3", ThinkingLevel::Medium, &[])["reasoning_effort"],
+            "high"
+        );
+        let always_on = zai_body("glm-5.3", ThinkingLevel::Off, &[]);
+        assert_eq!(always_on["thinking"]["type"], "enabled");
+        assert_eq!(always_on["reasoning_effort"], "low");
+
+        let toggle = zai_body("glm-4.7", ThinkingLevel::High, &[]);
+        assert_eq!(toggle["thinking"]["type"], "enabled");
+        assert!(toggle.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn zai_streams_tool_call_arguments_when_tools_are_offered() {
+        let tool = ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let body = zai_body("glm-5.3", ThinkingLevel::High, &[tool]);
+        assert_eq!(body["tool_stream"], true);
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn zai_finish_reasons_surface_as_errors() {
+        for reason in [
+            "network_error",
+            "sensitive",
+            "model_context_window_exceeded",
+        ] {
+            let (stop, message) = map_stop_reason(reason);
+            assert_eq!(stop, StopReason::Error, "{reason}");
+            assert!(message.is_some(), "{reason}");
+        }
     }
 
     #[test]

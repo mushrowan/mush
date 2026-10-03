@@ -42,7 +42,7 @@ pub enum SlashParseError {
     McpUsage,
     #[error("usage: /login-complete <code>")]
     LoginCodeUsage,
-    #[error("usage: /login [provider] [account]")]
+    #[error("usage: /login [provider] [account | api key]")]
     LoginUsage,
     #[error(transparent)]
     AccountLabel(#[from] mush_ai::types::AccountLabelError),
@@ -164,6 +164,10 @@ pub enum SlashAction {
     Login {
         provider: Option<String>,
         account: Option<mush_ai::types::AccountLabel>,
+    },
+    LoginApiKey {
+        provider: String,
+        key: mush_ai::types::ApiKey,
     },
     Account {
         label: Option<mush_ai::types::AccountLabel>,
@@ -882,14 +886,29 @@ fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
 fn parse_login(args: &str) -> Result<SlashAction, SlashParseError> {
     let mut words = args.split_whitespace();
     let provider = words.next().map(str::to_string);
-    let account = words
-        .next()
-        .map(mush_ai::types::AccountLabel::parse)
-        .transpose()?;
+    let second = words.next();
     if words.next().is_some() {
         return Err(SlashParseError::LoginUsage);
     }
+    if let (Some(provider), Some(key)) = (&provider, second)
+        && is_api_key_only_login(provider)
+    {
+        let key = mush_ai::types::ApiKey::new(key).ok_or(SlashParseError::LoginUsage)?;
+        return Ok(SlashAction::LoginApiKey {
+            provider: provider.clone(),
+            key,
+        });
+    }
+    let account = second
+        .map(mush_ai::types::AccountLabel::parse)
+        .transpose()?;
     Ok(SlashAction::Login { provider, account })
+}
+
+fn is_api_key_only_login(provider: &str) -> bool {
+    mush_ai::oauth::get_provider(provider).is_none()
+        && mush_ai::login::get_provider(provider)
+            .is_some_and(|p| matches!(p.method, mush_ai::login::LoginMethod::ApiKey { .. }))
 }
 
 #[cfg(test)]
@@ -1168,6 +1187,26 @@ mod tests {
             parse("/login anthropic work extra"),
             Err(SlashParseError::LoginUsage)
         ));
+    }
+
+    #[test]
+    fn parse_login_takes_a_key_for_api_key_only_providers() {
+        assert_eq!(
+            parse("/login zai Abc.DEF-123").unwrap(),
+            SlashAction::LoginApiKey {
+                provider: "zai".into(),
+                key: mush_ai::types::ApiKey::new("Abc.DEF-123").unwrap(),
+            }
+        );
+        assert_eq!(
+            parse("/login openrouter work").unwrap(),
+            SlashAction::Login {
+                provider: Some("openrouter".into()),
+                account: Some(mush_ai::types::AccountLabel::parse("work").unwrap()),
+            }
+        );
+        let error = parse("/login zai Secret-Key extra").unwrap_err();
+        assert!(!error.to_string().contains("Secret-Key"));
     }
 
     #[test]

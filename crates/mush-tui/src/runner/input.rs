@@ -265,12 +265,12 @@ async fn validate_and_save_api_key(app: &mut App, entry_id: &str, provider_name:
     }
 }
 
-enum SaveOutcome {
+pub(super) enum SaveOutcome {
     Saved(String),
     Failed(String),
 }
 
-async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
+pub(super) async fn run_validation_and_save(entry_id: &str, key: &str) -> SaveOutcome {
     use mush_ai::login::{LoginMethod, ValidationError, get_provider, validate_api_key};
 
     let Some(provider) = get_provider(entry_id) else {

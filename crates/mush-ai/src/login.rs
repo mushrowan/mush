@@ -98,6 +98,15 @@ pub fn list_providers() -> Vec<LoginProvider> {
                 config_key: "openrouter".into(),
             },
         },
+        LoginProvider {
+            id: "zai".into(),
+            name: "Z.AI (GLM Coding Plan)".into(),
+            method: LoginMethod::ApiKey {
+                storage_key: "zai".into(),
+                env_var: "ZAI_API_KEY".into(),
+                config_key: "zai".into(),
+            },
+        },
     ]
 }
 
@@ -341,6 +350,7 @@ mod tests {
                 "openai-api",
                 "openrouter-web",
                 "openrouter",
+                "zai",
             ]
         );
     }
