@@ -64,7 +64,7 @@ fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<serde_json:
 
 #[test]
 fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let config = dir.path().join("config/mush");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
@@ -185,7 +185,7 @@ fn json_mode_needs_a_prompt() {
 
 #[test]
 fn a_resumed_print_run_keeps_the_sessions_thinking_level() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let config = dir.path().join("config/mush");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(

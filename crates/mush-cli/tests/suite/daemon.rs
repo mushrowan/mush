@@ -16,7 +16,7 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let socket = dir.path().join("mush").join("daemon.sock");
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
         command.env_clear();
@@ -613,7 +613,7 @@ async fn doctor_reports_a_live_worker_and_clears_a_dead_one() {
 
 #[tokio::test]
 async fn doctor_leaves_the_socket_of_a_daemon_it_cannot_understand() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let socket = dir.path().join("mush").join("daemon.sock");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
@@ -714,7 +714,7 @@ fn cli_in(dir: &Path) -> std::process::Command {
 
 #[tokio::test]
 async fn shutdown_without_a_daemon_reports_and_kills_running_workers() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let (exit, worker) = start_unsupervised_worker(dir.path());
 
     let refused = cli_in(dir.path()).arg("shutdown").output().unwrap();
@@ -734,7 +734,7 @@ async fn shutdown_without_a_daemon_reports_and_kills_running_workers() {
 
 #[tokio::test]
 async fn stop_without_a_daemon_stops_the_matching_worker() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let (exit, worker) = start_unsupervised_worker(dir.path());
 
     let stopped = cli_in(dir.path())

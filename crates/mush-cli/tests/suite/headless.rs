@@ -38,7 +38,7 @@ fn wait(child: &mut std::process::Child) -> std::io::Result<std::process::ExitSt
 #[test]
 fn signals_checkpoint_and_cancel_during_startup() {
     for (signal, code) in [("-TERM", 143), ("-INT", 130), ("-HUP", 129)] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let config = dir.path().join("config/mush");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(
@@ -86,7 +86,7 @@ command = ["sh", "-c", "touch ready; exec sleep 8"]
 
 #[test]
 fn explicit_prompt_checkpoints_before_setup_error_with_stdin_open() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("status.json");
     let mut child = command(dir.path())
         .args([
@@ -127,7 +127,7 @@ fn explicit_prompt_checkpoints_before_setup_error_with_stdin_open() {
 
 #[test]
 fn status_file_resume_does_not_read_stdin_or_append_empty_prompt() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
     let session = mush_session::Session::new("nonexistent-headless-test-model", "/tmp");
     store.save(&session).unwrap();
@@ -146,7 +146,7 @@ fn status_file_resume_does_not_read_stdin_or_append_empty_prompt() {
 
 #[test]
 fn subcommands_do_not_read_stdin() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     for subcommand in ["models", "list"] {
         let mut child = command(dir.path()).arg(subcommand).spawn().unwrap();
         assert!(wait(&mut child).unwrap().success());
@@ -155,7 +155,7 @@ fn subcommands_do_not_read_stdin() {
 
 #[test]
 fn no_session_still_reports_setup_failure() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let path = dir.path().join("status.json");
     let mut child = command(dir.path())
         .args([
@@ -177,7 +177,7 @@ fn no_session_still_reports_setup_failure() {
 #[test]
 fn resume_appends_to_saved_context_without_rewriting_the_prefix() {
     use mush_ai::types::*;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let store = mush_session::SessionStore::new(dir.path().join("data/sessions"));
     let mut session = mush_session::Session::new(
         "nonexistent-headless-test-model",
@@ -258,7 +258,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let config = dir.path().join("config/mush");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
@@ -409,7 +409,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
     use mush_ai::types::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let config = dir.path().join("config/mush");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
