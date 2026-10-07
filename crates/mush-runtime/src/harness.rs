@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::nonpoison::Mutex;
 
 use mush_ai::types::SessionId;
 use mush_session::harness::{self, Edit, Entry, Kind, Scope, State};
@@ -38,7 +38,7 @@ impl HarnessStore {
 
     #[must_use]
     pub fn merged(&self) -> State {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         State::merged(
             &State::load(&self.global, Scope::Global),
             &State::load(&self.local, Scope::Local),
@@ -48,7 +48,7 @@ impl HarnessStore {
     #[must_use]
     pub fn read(&self, global: bool) -> State {
         if global {
-            let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+            let _guard = self.lock.lock();
             State::load(&self.global, Scope::Global)
         } else {
             self.merged()
@@ -85,7 +85,7 @@ impl HarnessStore {
         global: bool,
         event: mush_session::harness::RefinementEvent,
     ) -> Result<mush_session::harness::RefinementEvent, String> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         let scope = if global { Scope::Global } else { Scope::Local };
         self.write(scope, |state| {
             state.refinements.push(event.clone());
@@ -95,7 +95,7 @@ impl HarnessStore {
 
     #[must_use]
     pub fn find(&self, kind: Kind, id: &str, global: bool) -> Option<(Scope, Entry)> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         self.locate(kind, id, global)
     }
 
@@ -110,13 +110,13 @@ impl HarnessStore {
     }
 
     pub fn create(&self, global: bool, edit: &Edit) -> Result<Entry, String> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         let scope = if global { Scope::Global } else { Scope::Local };
         self.write(scope, |state| state.upsert(edit, scope, "agent"))
     }
 
     pub fn update(&self, id: &str, global: bool, edit: &Edit) -> Result<Entry, String> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         let (scope, existing) = self
             .locate(edit.kind, id, global)
             .ok_or_else(|| format!("{id} not found"))?;
@@ -126,7 +126,7 @@ impl HarnessStore {
     }
 
     pub fn delete(&self, kind: Kind, id: &str, global: bool) -> Result<Entry, String> {
-        let _guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.lock.lock();
         let (scope, existing) = self
             .locate(kind, id, global)
             .ok_or_else(|| format!("{id} not found"))?;

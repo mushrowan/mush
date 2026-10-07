@@ -1,3 +1,5 @@
+#![feature(sync_nonpoison, nonpoison_mutex)]
+
 pub mod autonomous;
 pub mod commands;
 pub mod compaction;

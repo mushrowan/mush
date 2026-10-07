@@ -268,55 +268,38 @@ impl ContextUsage {
 
 #[derive(Default)]
 pub struct HostCommands {
-    queue: std::sync::Mutex<VecDeque<ClientCommand>>,
-    context: std::sync::Mutex<ContextUsage>,
+    queue: std::sync::nonpoison::Mutex<VecDeque<ClientCommand>>,
+    context: std::sync::nonpoison::Mutex<ContextUsage>,
 }
 
 impl HostCommands {
     pub fn record_context(&self, usage: ContextUsage) {
-        *self
-            .context
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = usage;
+        *self.context.lock() = usage;
     }
 
     #[must_use]
     pub fn context_usage(&self) -> ContextUsage {
-        *self
-            .context
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.context.lock()
     }
 
     #[must_use]
     pub fn compaction_queued(&self) -> bool {
         self.queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|command| matches!(command, ClientCommand::Compact { .. }))
     }
 
     pub fn push(&self, command: ClientCommand) {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(command);
+        self.queue.lock().push_back(command);
     }
 
     fn drain(&self) -> Vec<ClientCommand> {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect()
+        self.queue.lock().drain(..).collect()
     }
 
     pub fn replace_refine(&self, request: mush_session::refine::RefineRequest) {
-        let mut queue = self
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queue = self.queue.lock();
         queue.retain(|command| !matches!(command, ClientCommand::Refine(_)));
         queue.push_back(ClientCommand::Refine(request));
     }
@@ -325,17 +308,13 @@ impl HostCommands {
     pub fn pending_refine(&self) -> bool {
         self.queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .any(|command| matches!(command, ClientCommand::Refine(_)))
     }
 
     #[must_use]
     pub fn pending(&self) -> usize {
-        self.queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
+        self.queue.lock().len()
     }
 }
 

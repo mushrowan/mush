@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
+use std::sync::nonpoison::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelSelection(Arc<Mutex<Selection>>);
@@ -22,49 +23,45 @@ impl ModelSelection {
         })))
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Selection> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     pub fn set_current(&self, id: String) {
-        self.lock().current = id;
+        self.0.lock().current = id;
     }
 
     #[must_use]
     pub fn current(&self) -> String {
-        self.lock().current.clone()
+        self.0.lock().current.clone()
     }
 
     pub fn set_thinking(&self, level: mush_ai::types::ThinkingLevel) {
-        self.lock().thinking = Some(level);
+        self.0.lock().thinking = Some(level);
     }
 
     #[must_use]
     pub fn thinking(&self) -> Option<mush_ai::types::ThinkingLevel> {
-        self.lock().thinking.clone()
+        self.0.lock().thinking.clone()
     }
 
     pub fn set_subagent(&self, id: Option<String>) {
-        self.lock().subagent = id;
+        self.0.lock().subagent = id;
     }
 
     #[must_use]
     pub fn subagent(&self) -> Option<String> {
-        self.lock().subagent.clone()
+        self.0.lock().subagent.clone()
     }
 
     pub fn set_accounts(&self, accounts: mush_ai::types::SessionAccounts) {
-        self.lock().accounts = accounts;
+        self.0.lock().accounts = accounts;
     }
 
     #[must_use]
     pub fn accounts(&self) -> mush_ai::types::SessionAccounts {
-        self.lock().accounts.clone()
+        self.0.lock().accounts.clone()
     }
 
     #[must_use]
     pub fn for_child(&self, requested: Option<&str>) -> Option<String> {
-        let selection = self.lock();
+        let selection = self.0.lock();
         requested
             .map(str::to_string)
             .or_else(|| selection.subagent.clone())

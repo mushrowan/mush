@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::nonpoison::Mutex;
 
 use mush_ai::types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -205,25 +205,12 @@ impl Scheduler {
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<Vec<Job>>(&bytes).ok())
             .unwrap_or_default();
-        *self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
-        *self.lock() = jobs;
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Job>> {
-        self.jobs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.path.lock() = path;
+        *self.jobs.lock() = jobs;
     }
 
     fn persist(&self, jobs: &[Job]) {
-        let path = self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let path = self.path.lock().clone();
         let Some(path) = path else {
             return;
         };
@@ -237,12 +224,13 @@ impl Scheduler {
 
     #[must_use]
     pub fn jobs(&self) -> Vec<Job> {
-        self.lock().clone()
+        self.jobs.lock().clone()
     }
 
     #[must_use]
     pub fn heartbeat(&self) -> Option<Job> {
-        self.lock()
+        self.jobs
+            .lock()
             .iter()
             .find(|job| {
                 job.source == JobSource::Heartbeat
@@ -254,7 +242,7 @@ impl Scheduler {
     pub fn apply(&self, command: ScheduleCommand) -> Result<Vec<Job>, String> {
         let now = Timestamp::now();
         let now_ms = now.as_ms();
-        let mut jobs = self.lock();
+        let mut jobs = self.jobs.lock();
         match command {
             ScheduleCommand::List => return Ok(jobs.clone()),
             ScheduleCommand::Heartbeat {
@@ -422,7 +410,7 @@ impl Scheduler {
     }
 
     pub fn take_due(&self, now_ms: u64) -> Vec<Job> {
-        let mut jobs = self.lock();
+        let mut jobs = self.jobs.lock();
         let mut due = Vec::new();
         for job in jobs.iter_mut() {
             let Some(at) = job.next_at() else {

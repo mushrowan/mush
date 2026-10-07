@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::nonpoison::Mutex;
 
 pub const MAX_NOTE_CHARS: usize = 4_000;
 pub const MAX_NOTES_CHARS: usize = 24_000;
@@ -27,22 +28,13 @@ impl Notes {
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .unwrap_or_default();
-        *self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
-        *self
-            .memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = memory;
+        *self.path.lock() = path;
+        *self.memory.lock() = memory;
     }
 
     #[must_use]
     pub fn read(&self) -> String {
-        self.memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.memory.lock().clone()
     }
 
     pub fn append(&self, text: &str) -> Result<String, String> {
@@ -53,10 +45,7 @@ impl Notes {
         if text.chars().count() > MAX_NOTE_CHARS {
             return Err(format!("a note is at most {MAX_NOTE_CHARS} characters"));
         }
-        let mut memory = self
-            .memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut memory = self.memory.lock();
         if memory.chars().count() + text.chars().count() > MAX_NOTES_CHARS {
             return Err(format!(
                 "the notes are full ({MAX_NOTES_CHARS} characters); clear or condense them first"
@@ -75,10 +64,7 @@ impl Notes {
     }
 
     pub fn replace(&self, text: &str) {
-        let mut memory = self
-            .memory
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut memory = self.memory.lock();
         *memory = text.trim().to_string();
         if !memory.is_empty() {
             memory.push('\n');
@@ -89,11 +75,7 @@ impl Notes {
     }
 
     fn persist(&self, text: &str) {
-        let path = self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let path = self.path.lock().clone();
         let Some(path) = path else {
             return;
         };

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::nonpoison::Mutex;
 
 use mush_ai::types::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -152,28 +152,15 @@ impl GoalStore {
             .as_ref()
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice::<Goal>(&bytes).ok());
-        *self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
-        let mut inner = self.lock();
+        *self.path.lock() = path;
+        let mut inner = self.inner.lock();
         inner.goal = goal;
         inner.due = None;
         inner.budget_notice_sent = false;
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     fn persist(&self, goal: Option<&Goal>) {
-        let path = self
-            .path
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let path = self.path.lock().clone();
         let Some(path) = path else {
             return;
         };
@@ -194,12 +181,12 @@ impl GoalStore {
 
     #[must_use]
     pub fn get(&self) -> Option<Goal> {
-        self.lock().goal.clone()
+        self.inner.lock().goal.clone()
     }
 
     pub fn apply(&self, command: GoalCommand) -> Result<Option<Goal>, String> {
         let now = Timestamp::now();
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         match command {
             GoalCommand::Create {
                 objective,
@@ -290,7 +277,7 @@ impl GoalStore {
     }
 
     pub fn record_usage(&self, tokens: u64) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         let Some(goal) = inner.goal.as_mut() else {
             return;
         };
@@ -318,7 +305,7 @@ impl GoalStore {
         objective: String,
         token_budget: Option<u64>,
     ) -> Result<Option<Goal>, String> {
-        let status = self.lock().goal.as_ref().map(|goal| goal.status);
+        let status = self.inner.lock().goal.as_ref().map(|goal| goal.status);
         match status {
             Some(GoalStatus::Active) => {
                 Err("cannot create a new goal because this thread already \
@@ -343,7 +330,7 @@ impl GoalStore {
     }
 
     pub fn take_turn_notice(&self) -> Option<String> {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         let prompt = match inner.due? {
             Continuation::Continue => return None,
             Continuation::BudgetLimit => {
@@ -357,7 +344,7 @@ impl GoalStore {
     }
 
     pub fn turn_ended(&self) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         let Some(goal) = inner.goal.as_mut() else {
             return;
         };
@@ -384,7 +371,7 @@ impl GoalStore {
     }
 
     pub fn turn_failed(&self, error: &str) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         inner.due = None;
         let Some(goal) = inner.goal.as_mut() else {
             return;
@@ -400,7 +387,7 @@ impl GoalStore {
     }
 
     pub fn take_due_prompt(&self) -> Option<String> {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         let due = inner.due.take()?;
         let goal = inner.goal.as_mut()?;
         let prompt = match due {
@@ -639,7 +626,7 @@ mod tests {
         store.take_due_prompt();
         store.record_usage(400);
         store.apply(GoalCommand::Pause).unwrap();
-        store.lock().goal.as_mut().unwrap().tokens_used = 500;
+        store.inner.lock().goal.as_mut().unwrap().tokens_used = 500;
 
         let resumed = store.apply(GoalCommand::Resume).unwrap().unwrap();
         assert_eq!(resumed.status, GoalStatus::BudgetLimited);

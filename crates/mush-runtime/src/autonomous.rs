@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::nonpoison::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -200,15 +200,9 @@ impl Autonomous {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     #[must_use]
     pub fn status(&self) -> AutonomousStatus {
-        let inner = self.lock();
+        let inner = self.inner.lock();
         AutonomousStatus {
             enabled: inner.enabled,
             limits: inner.limits,
@@ -226,12 +220,12 @@ impl Autonomous {
 
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.lock().enabled
+        self.inner.lock().enabled
     }
 
     pub fn apply(&self, command: AutonomousCommand) -> AutonomousStatus {
         {
-            let mut inner = self.lock();
+            let mut inner = self.inner.lock();
             match command {
                 AutonomousCommand::On {
                     limits,
@@ -259,21 +253,21 @@ impl Autonomous {
     }
 
     pub fn record_usage(&self, tokens: u64) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         if inner.enabled {
             inner.tokens += tokens;
         }
     }
 
     pub fn record_assistant_turn(&self) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         if inner.enabled {
             inner.turns += 1;
         }
     }
 
     pub fn turn_ended(&self) {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         if inner.enabled {
             inner.due = true;
         }
@@ -281,7 +275,7 @@ impl Autonomous {
 
     #[must_use]
     pub fn due(&self) -> bool {
-        let inner = self.lock();
+        let inner = self.inner.lock();
         inner.enabled && inner.due
     }
 
@@ -316,12 +310,12 @@ impl Autonomous {
 
     #[must_use]
     pub fn gate_commands(&self) -> Vec<String> {
-        self.lock().gates.commands.clone()
+        self.inner.lock().gates.commands.clone()
     }
 
     #[must_use]
     pub fn gate_timeout(&self) -> Duration {
-        Duration::from_millis(self.lock().gates.timeout_ms)
+        Duration::from_millis(self.inner.lock().gates.timeout_ms)
     }
 
     #[must_use]
@@ -331,7 +325,7 @@ impl Autonomous {
 
     #[must_use]
     pub fn skip_gate(&self, command: &str, snapshot: Option<&str>) -> bool {
-        let inner = self.lock();
+        let inner = self.inner.lock();
         inner.last_failure.as_ref().is_some_and(|failure| {
             failure.command == command
                 && snapshot.is_some()
@@ -340,7 +334,7 @@ impl Autonomous {
     }
 
     pub fn keep_alive_due(&self) -> bool {
-        let inner = self.lock();
+        let inner = self.inner.lock();
         inner.enabled
             && inner.due
             && inner.keep_alive_ms > 0
@@ -350,7 +344,7 @@ impl Autonomous {
     }
 
     pub fn keep_alive(&self) -> Decision {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         if !inner.enabled || !inner.due {
             return Decision::Idle;
         }
@@ -373,7 +367,7 @@ impl Autonomous {
     }
 
     pub fn decide(&self, gate_results: Vec<GateRun>) -> Decision {
-        let mut inner = self.lock();
+        let mut inner = self.inner.lock();
         if !inner.enabled || !inner.due {
             return Decision::Idle;
         }
