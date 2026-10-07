@@ -69,6 +69,20 @@ pub(crate) fn filter_line<'a>(filter: &'a str, theme: &Theme) -> Line<'a> {
     ])
 }
 
+pub(crate) fn key_hints<'a>(hints: &[(&'a str, &'a str)], theme: &Theme) -> Line<'a> {
+    Line::from(
+        hints
+            .iter()
+            .flat_map(|&(key, label)| {
+                [
+                    Span::styled(key, theme.selection_marker),
+                    Span::styled(label, theme.dim),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();

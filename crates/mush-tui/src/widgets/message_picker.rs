@@ -2,7 +2,9 @@ use crate::message_picker::{
     MessagePickerKind, MessagePickerPurpose, MessagePickerState, filtered_items,
 };
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame, truncate_chars};
+use crate::widgets::popup_layout::{
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, truncate_chars,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -18,14 +20,11 @@ pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
     let filter_line = filter_line(&picker.filter, theme);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    let hint = Line::from(vec![
-        Span::styled("↑↓", theme.selection_marker),
-        Span::styled(" navigate  ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(format!(" {} before it  ", picker.purpose.verb()), theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    let verb = format!(" {} before it  ", picker.purpose.verb());
+    let hint = key_hints(
+        &[("↑↓", " navigate  "), ("enter", &verb), ("esc", " close")],
+        theme,
+    );
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let items = filtered_items(picker);

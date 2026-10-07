@@ -1,6 +1,6 @@
 use crate::login_picker::{LoginPickerState, filtered_entries};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame};
+use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, key_hints, render_popup_frame};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -16,14 +16,14 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
     let prompt_line = filter_line(&picker.filter, theme);
     frame.render_widget(prompt_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    let hint = Line::from(vec![
-        Span::styled("ctrl+j/k", theme.selection_marker),
-        Span::styled(" nav · ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(" login/logout · ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    let hint = key_hints(
+        &[
+            ("ctrl+j/k", " nav · "),
+            ("enter", " login/logout · "),
+            ("esc", " close"),
+        ],
+        theme,
+    );
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let toast_rows = u16::from(picker.toast.is_some());

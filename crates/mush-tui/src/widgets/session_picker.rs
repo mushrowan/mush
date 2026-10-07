@@ -1,7 +1,9 @@
 use crate::path_utils::shorten_path;
 use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame, truncate_chars};
+use crate::widgets::popup_layout::{
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, truncate_chars,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -25,8 +27,8 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
     let scope_label = match picker.scope {
-        SessionScope::ThisDir => "all dirs",
-        SessionScope::AllDirs => "this dir",
+        SessionScope::ThisDir => " all dirs  ",
+        SessionScope::AllDirs => " this dir  ",
     };
     let hint = if let Some(meta) = &picker.confirm_delete {
         Line::from(vec![
@@ -42,18 +44,16 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     } else if let Some(toast) = &picker.toast {
         Line::styled(toast.as_str(), theme.dim)
     } else {
-        Line::from(vec![
-            Span::styled("tab", theme.selection_marker),
-            Span::styled(format!(" {scope_label}  "), theme.dim),
-            Span::styled("↑↓", theme.selection_marker),
-            Span::styled(" navigate  ", theme.dim),
-            Span::styled("enter", theme.selection_marker),
-            Span::styled(" resume  ", theme.dim),
-            Span::styled("ctrl+d", theme.selection_marker),
-            Span::styled(" delete  ", theme.dim),
-            Span::styled("esc", theme.selection_marker),
-            Span::styled(" close", theme.dim),
-        ])
+        key_hints(
+            &[
+                ("tab", scope_label),
+                ("↑↓", " navigate  "),
+                ("enter", " resume  "),
+                ("ctrl+d", " delete  "),
+                ("esc", " close"),
+            ],
+            theme,
+        )
     };
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 

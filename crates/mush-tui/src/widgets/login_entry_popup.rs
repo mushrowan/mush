@@ -1,5 +1,6 @@
 use crate::login_picker::{EntryPrompt, LoginPickerState};
 use crate::theme::Theme;
+use crate::widgets::popup_layout::key_hints;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -57,12 +58,7 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         let hint = if validating {
             Line::from(Span::styled("esc cancel", theme.dim))
         } else {
-            Line::from(vec![
-                Span::styled("enter", theme.selection_marker),
-                Span::styled(" save · ", theme.dim),
-                Span::styled("esc", theme.selection_marker),
-                Span::styled(" cancel", theme.dim),
-            ])
+            key_hints(&[("enter", " save · "), ("esc", " cancel")], theme)
         };
         frame.render_widget(hint, Rect::new(inner.x, hint_y, inner.width, 1));
     }

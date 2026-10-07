@@ -6,7 +6,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app_state::CompactionRecoveryState;
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, render_popup_frame};
+use crate::widgets::popup_layout::{PopupSize, key_hints, render_popup_frame};
 
 pub fn render(frame: &mut Frame, state: &CompactionRecoveryState, theme: &Theme) {
     let inner = render_popup_frame(
@@ -37,14 +37,14 @@ pub fn render(frame: &mut Frame, state: &CompactionRecoveryState, theme: &Theme)
     );
 
     let hint_y = inner.y + reason_height;
-    let hint = Line::from(vec![
-        Span::styled("↑↓/jk", theme.selection_marker),
-        Span::styled(" choose  ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(" select  ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" cancel", theme.dim),
-    ]);
+    let hint = key_hints(
+        &[
+            ("↑↓/jk", " choose  "),
+            ("enter", " select  "),
+            ("esc", " cancel"),
+        ],
+        theme,
+    );
     frame.render_widget(hint, Rect::new(inner.x, hint_y, inner.width, 1));
 
     let options_y = hint_y + 1;

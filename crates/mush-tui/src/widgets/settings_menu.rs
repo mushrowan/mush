@@ -6,7 +6,7 @@ use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::settings::{MenuItemKind, ScopedSettings, SettingsMenuState};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, render_popup_frame};
+use crate::widgets::popup_layout::{PopupSize, key_hints, render_popup_frame};
 
 pub fn render(
     frame: &mut Frame,
@@ -32,14 +32,14 @@ pub fn render(
         return;
     }
 
-    let hint = Line::from(vec![
-        Span::styled("↑↓/jk", theme.selection_marker),
-        Span::styled(" nav  ", theme.dim),
-        Span::styled("space/enter", theme.selection_marker),
-        Span::styled(" toggle  ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    let hint = key_hints(
+        &[
+            ("↑↓/jk", " nav  "),
+            ("space/enter", " toggle  "),
+            ("esc", " close"),
+        ],
+        theme,
+    );
     frame.render_widget(hint, Rect::new(inner.x, inner.y, inner.width, 1));
 
     if inner.height > 2 {

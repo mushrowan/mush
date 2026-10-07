@@ -1,6 +1,6 @@
 use crate::model_picker::{ModelPickerState, ModelPickerTab, filtered_models};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame};
+use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, key_hints, render_popup_frame};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -19,18 +19,16 @@ pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
     let filter_line = filter_line(&picker.filter, theme);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
-    let hint = Line::from(vec![
-        Span::styled("tab", theme.selection_marker),
-        Span::styled(" switch · ", theme.dim),
-        Span::styled("ctrl+j/k", theme.selection_marker),
-        Span::styled(" nav · ", theme.dim),
-        Span::styled("ctrl+f", theme.selection_marker),
-        Span::styled(" ★ · ", theme.dim),
-        Span::styled("enter", theme.selection_marker),
-        Span::styled(" pick · ", theme.dim),
-        Span::styled("esc", theme.selection_marker),
-        Span::styled(" close", theme.dim),
-    ]);
+    let hint = key_hints(
+        &[
+            ("tab", " switch · "),
+            ("ctrl+j/k", " nav · "),
+            ("ctrl+f", " ★ · "),
+            ("enter", " pick · "),
+            ("esc", " close"),
+        ],
+        theme,
+    );
     frame.render_widget(hint, Rect::new(inner.x, inner.y + 2, inner.width, 1));
 
     let toast_rows = u16::from(picker.toast.is_some());
