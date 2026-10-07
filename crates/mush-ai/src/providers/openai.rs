@@ -845,83 +845,98 @@ impl OpenAiCompletionsProcessor {
         if let Some(text) = choice.delta.content
             && !text.is_empty()
         {
-            match &mut self.current {
-                Some(OpenBlock::Text(buf)) => {
-                    buf.push_str(&text);
-                    let idx = output.content.len().saturating_sub(1);
-                    if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
-                        tc.text.push_str(&text);
-                    }
-                    events.push(StreamEvent::TextDelta {
-                        content_index: idx,
-                        delta: text,
-                    });
-                }
-                _ => {
-                    finish_block_events(&mut self.current, output, &mut events);
-                    let content_index = output.content.len();
-                    self.current = Some(OpenBlock::Text(text.clone()));
-                    output.content.push(AssistantContentPart::Text(TextContent {
-                        text: text.clone(),
-                    }));
-                    events.push(StreamEvent::TextStart { content_index });
-                    events.push(StreamEvent::TextDelta {
-                        content_index,
-                        delta: text,
-                    });
-                }
-            }
+            self.push_text(text, output, &mut events);
         }
 
         if let Some(tool_calls) = choice.delta.tool_calls {
             finish_block_events(&mut self.current, output, &mut events);
             for tc in tool_calls {
-                let openai_idx = tc.index.unwrap_or(0);
-                let block_pos = match self
-                    .tool_blocks
-                    .iter()
-                    .position(|b| b.openai_index == openai_idx)
-                {
-                    Some(pos) => pos,
-                    None => {
-                        let id = tc.id.clone().unwrap_or_default();
-                        let name = tc
-                            .function
-                            .as_ref()
-                            .and_then(|f| f.name.clone())
-                            .unwrap_or_default();
-                        let content_index = output.content.len();
-                        output
-                            .content
-                            .push(AssistantContentPart::ToolCall(ToolCall {
-                                id: ToolCallId::from(id),
-                                name: ToolName::from(name),
-                                arguments: serde_json::Value::Object(Default::default()),
-                            }));
-                        events.push(StreamEvent::ToolCallStart { content_index });
-                        self.tool_blocks.push(ToolBlock {
-                            openai_index: openai_idx,
-                            content_index,
-                            args_buf: String::new(),
-                        });
-                        self.tool_blocks.len() - 1
-                    }
-                };
-
-                if let Some(func) = tc.function
-                    && let Some(args) = func.arguments
-                {
-                    self.tool_blocks[block_pos].args_buf.push_str(&args);
-                    let content_index = self.tool_blocks[block_pos].content_index;
-                    events.push(StreamEvent::ToolCallDelta {
-                        content_index,
-                        delta: args,
-                    });
-                }
+                self.push_tool_call(tc, output, &mut events);
             }
         }
 
         events
+    }
+
+    fn push_text(
+        &mut self,
+        text: String,
+        output: &mut AssistantMessage,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        if let Some(OpenBlock::Text(buf)) = &mut self.current {
+            buf.push_str(&text);
+            let idx = output.content.len().saturating_sub(1);
+            if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
+                tc.text.push_str(&text);
+            }
+            events.push(StreamEvent::TextDelta {
+                content_index: idx,
+                delta: text,
+            });
+            return;
+        }
+        finish_block_events(&mut self.current, output, events);
+        let content_index = output.content.len();
+        self.current = Some(OpenBlock::Text(text.clone()));
+        output.content.push(AssistantContentPart::Text(TextContent {
+            text: text.clone(),
+        }));
+        events.push(StreamEvent::TextStart { content_index });
+        events.push(StreamEvent::TextDelta {
+            content_index,
+            delta: text,
+        });
+    }
+
+    fn push_tool_call(
+        &mut self,
+        tc: ChunkToolCall,
+        output: &mut AssistantMessage,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        let openai_idx = tc.index.unwrap_or(0);
+        let block_pos = match self
+            .tool_blocks
+            .iter()
+            .position(|b| b.openai_index == openai_idx)
+        {
+            Some(pos) => pos,
+            None => {
+                let id = tc.id.clone().unwrap_or_default();
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_default();
+                let content_index = output.content.len();
+                output
+                    .content
+                    .push(AssistantContentPart::ToolCall(ToolCall {
+                        id: ToolCallId::from(id),
+                        name: ToolName::from(name),
+                        arguments: serde_json::Value::Object(Default::default()),
+                    }));
+                events.push(StreamEvent::ToolCallStart { content_index });
+                self.tool_blocks.push(ToolBlock {
+                    openai_index: openai_idx,
+                    content_index,
+                    args_buf: String::new(),
+                });
+                self.tool_blocks.len() - 1
+            }
+        };
+
+        if let Some(func) = tc.function
+            && let Some(args) = func.arguments
+        {
+            let block = &mut self.tool_blocks[block_pos];
+            block.args_buf.push_str(&args);
+            events.push(StreamEvent::ToolCallDelta {
+                content_index: block.content_index,
+                delta: args,
+            });
+        }
     }
 
     fn push_reasoning(
