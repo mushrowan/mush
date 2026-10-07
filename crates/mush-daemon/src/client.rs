@@ -19,8 +19,8 @@ use crate::protocol::{
 const FRAME_BUFFER: usize = 256;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-pub const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-pub const RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
 fn timeout_for(command: &ClientCommand) -> Duration {
@@ -87,7 +87,12 @@ impl DaemonConnection {
     }
 
     pub async fn connect_within(path: &Path, timeout: Duration) -> Result<Self, ConnectError> {
-        let (link, state, worker_build, cursor) = dial(path, timeout).await?;
+        let Dialled {
+            link,
+            state,
+            build,
+            cursor,
+        } = dial(path, timeout).await?;
         let mut connection = Self {
             path: path.to_path_buf(),
             client: mush_ai::types::SessionId::new().to_string(),
@@ -95,7 +100,7 @@ impl DaemonConnection {
             link,
             buffered: VecDeque::new(),
             state,
-            worker_build,
+            worker_build: build,
             next_id: 1,
             next_command: 1,
             acked: None,
@@ -133,10 +138,10 @@ impl DaemonConnection {
         let deadline = tokio::time::Instant::now() + RECONNECT_TIMEOUT;
         let mut backoff = Duration::from_millis(50);
         loop {
-            if let Ok((link, state, worker_build, _)) = dial(&self.path, CONNECT_TIMEOUT).await {
-                self.link = link;
-                self.state = state;
-                self.worker_build = worker_build;
+            if let Ok(dialled) = dial(&self.path, CONNECT_TIMEOUT).await {
+                self.link = dialled.link;
+                self.state = dialled.state;
+                self.worker_build = dialled.build;
                 let from = Some(self.cursor.clone());
                 if self.attach(from).await.is_ok() {
                     tracing::info!(cursor = self.cursor.sequence, "reattached to the worker");
@@ -194,6 +199,25 @@ impl DaemonConnection {
                 None
             }
         }
+    }
+
+    fn absorb_unrequested(&mut self, frame: Result<Frame, CodecError>) {
+        match frame {
+            Ok(frame) => {
+                if let Some((id, _)) = self.absorb(frame) {
+                    tracing::warn!(id, "dropping a response nobody waited for");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "dropping a malformed frame"),
+        }
+    }
+
+    async fn request_next(
+        &mut self,
+        request: impl FnOnce(RequestId) -> Request,
+    ) -> Result<Reply, ConnectionError> {
+        let id = self.next_request_id();
+        self.request(request(id)).await
     }
 
     async fn request(&mut self, request: Request) -> Result<Reply, ConnectionError> {
@@ -271,10 +295,14 @@ impl DaemonConnection {
     }
 }
 
-async fn dial(
-    path: &Path,
-    timeout: Duration,
-) -> Result<(Link, ConnectionState, String, Cursor), ConnectError> {
+struct Dialled {
+    link: Link,
+    state: ConnectionState,
+    build: String,
+    cursor: Cursor,
+}
+
+async fn dial(path: &Path, timeout: Duration) -> Result<Dialled, ConnectError> {
     let stream = tokio::time::timeout(timeout, UnixStream::connect(path))
         .await
         .map_err(|_| ConnectError::TimedOut(timeout))??;
@@ -288,17 +316,21 @@ async fn dial(
     let hello = tokio::time::timeout(timeout, link.frames.recv())
         .await
         .map_err(|_| ConnectError::TimedOut(timeout))?;
-    let (state, build, cursor) = match hello {
+    match hello {
         Some(Ok(Frame::Hello {
             state,
             build,
             cursor,
-        })) => (state, build, cursor),
-        Some(Ok(_)) => return Err(ConnectError::BadHello),
-        Some(Err(error)) => return Err(ConnectError::Codec(error)),
-        None => return Err(ConnectError::NoHello),
-    };
-    Ok((link, state, build, cursor))
+        })) => Ok(Dialled {
+            link,
+            state,
+            build,
+            cursor,
+        }),
+        Some(Ok(_)) => Err(ConnectError::BadHello),
+        Some(Err(error)) => Err(ConnectError::Codec(error)),
+        None => Err(ConnectError::NoHello),
+    }
 }
 
 async fn read_frames(
@@ -360,23 +392,14 @@ impl AgentConnection for DaemonConnection {
             if self.closed {
                 return None;
             }
-            let frame = match self.link.frames.recv().await {
-                Some(Ok(frame)) => frame,
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "dropping a malformed frame");
+            let Some(frame) = self.link.frames.recv().await else {
+                if self.reconnect().await {
                     continue;
                 }
-                None => {
-                    if self.reconnect().await {
-                        continue;
-                    }
-                    self.closed = true;
-                    return None;
-                }
+                self.closed = true;
+                return None;
             };
-            if let Some((id, _)) = self.absorb(frame) {
-                tracing::warn!(id, "dropping a response nobody waited for");
-            }
+            self.absorb_unrequested(frame);
         }
     }
 
@@ -388,16 +411,8 @@ impl AgentConnection for DaemonConnection {
             if self.closed {
                 return None;
             }
-            let frame = match self.link.frames.try_recv().ok()? {
-                Ok(frame) => frame,
-                Err(error) => {
-                    tracing::warn!(%error, "dropping a malformed frame");
-                    continue;
-                }
-            };
-            if let Some((id, _)) = self.absorb(frame) {
-                tracing::warn!(id, "dropping a response nobody waited for");
-            }
+            let frame = self.link.frames.try_recv().ok()?;
+            self.absorb_unrequested(frame);
         }
     }
 
@@ -410,28 +425,28 @@ impl AgentConnection for DaemonConnection {
     }
 
     async fn transcript(&mut self) -> Vec<Message> {
-        let id = self.next_request_id();
-        match self.request(Request::Transcript { id }).await {
+        match self.request_next(|id| Request::Transcript { id }).await {
             Ok(Reply::Transcript { messages }) => messages,
             _ => Vec::new(),
         }
     }
 
     async fn history(&mut self) -> Vec<Message> {
-        let id = self.next_request_id();
-        match self.request(Request::History { id, limit: None }).await {
+        match self
+            .request_next(|id| Request::History { id, limit: None })
+            .await
+        {
             Ok(Reply::History { messages, .. }) => messages,
             _ => Vec::new(),
         }
     }
 
     async fn recent_history(&mut self, limit: usize) -> mush_session::tree::RecentHistory {
-        let id = self.next_request_id();
-        let request = Request::History {
+        let request = |id| Request::History {
             id,
             limit: Some(limit),
         };
-        match self.request(request).await {
+        match self.request_next(request).await {
             Ok(Reply::History {
                 messages,
                 recent: Some(recent),
@@ -464,28 +479,25 @@ impl AgentConnection for DaemonConnection {
     }
 
     async fn tree_summary(&mut self) -> Vec<TreeSummaryRow> {
-        let id = self.next_request_id();
-        match self.request(Request::TreeSummary { id }).await {
+        match self.request_next(|id| Request::TreeSummary { id }).await {
             Ok(Reply::TreeSummary { rows }) => rows,
             _ => Vec::new(),
         }
     }
 
     async fn navigation_impact(&mut self, entry_id: &mush_session::tree::EntryId) -> usize {
-        let id = self.next_request_id();
-        let request = Request::NavigationImpact {
+        let request = |id| Request::NavigationImpact {
             id,
             entry_id: entry_id.clone(),
         };
-        match self.request(request).await {
+        match self.request_next(request).await {
             Ok(Reply::NavigationImpact { abandons }) => abandons,
             _ => 0,
         }
     }
 
     async fn system_prompt(&mut self) -> Option<String> {
-        let id = self.next_request_id();
-        match self.request(Request::SystemPrompt { id }).await {
+        match self.request_next(|id| Request::SystemPrompt { id }).await {
             Ok(Reply::SystemPrompt { prompt }) => prompt,
             _ => None,
         }

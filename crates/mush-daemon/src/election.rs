@@ -8,8 +8,7 @@ use tokio_util::sync::CancellationToken;
 const CHECK: Duration = Duration::from_secs(2);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[must_use]
-pub fn launch_lease_path(socket: &Path) -> PathBuf {
+fn launch_lease_path(socket: &Path) -> PathBuf {
     socket.with_extension("launch")
 }
 
