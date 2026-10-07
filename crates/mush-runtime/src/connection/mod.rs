@@ -255,6 +255,7 @@ pub struct InProcessConnection {
     family_member: Option<(Arc<Family>, ChildId)>,
     turn_error: Option<String>,
     known_children: HashMap<ChildId, ChildSummary>,
+    known_family_revision: Option<u64>,
     goal: Option<Arc<GoalStore>>,
     known_goal: Option<Goal>,
     scheduler: Option<Arc<Scheduler>>,
@@ -334,6 +335,7 @@ impl InProcessConnection {
             family_member: None,
             turn_error: None,
             known_children: HashMap::new(),
+            known_family_revision: None,
             goal: None,
             known_goal: None,
             scheduler: None,
@@ -480,6 +482,7 @@ impl InProcessConnection {
             self.known_jobs = scheduler.jobs();
         }
         self.known_children.clear();
+        self.known_family_revision = None;
     }
 
     pub fn set_scheduler(&mut self, scheduler: Option<Arc<Scheduler>>) {
@@ -586,6 +589,10 @@ impl InProcessConnection {
         if let Some(note) = family.take_root_note() {
             return Some(ClientEvent::ProgressNote(note));
         }
+        let revision = family.revision();
+        if self.known_family_revision == Some(revision) {
+            return None;
+        }
         for child in family.all() {
             let changed = self
                 .known_children
@@ -596,11 +603,13 @@ impl InProcessConnection {
                 return Some(ClientEvent::ChildUpdated(Box::new(child)));
             }
         }
+        self.known_family_revision = Some(revision);
         None
     }
 
     pub fn set_family(&mut self, family: Option<Arc<Family>>) {
         self.family = family;
+        self.known_family_revision = None;
     }
 
     fn root_family(&self) -> Option<&Arc<Family>> {

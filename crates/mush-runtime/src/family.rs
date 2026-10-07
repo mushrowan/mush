@@ -433,6 +433,7 @@ pub struct Family {
     // or pairs one session's path with another's children
     persisting: Mutex<()>,
     persist_scheduled: std::sync::atomic::AtomicBool,
+    revision: std::sync::atomic::AtomicU64,
     max_depth: std::sync::atomic::AtomicU32,
     waking: tokio::sync::Mutex<()>,
 }
@@ -502,6 +503,7 @@ impl Family {
             registry_path: Mutex::new(registry_path),
             persisting: Mutex::new(()),
             persist_scheduled: std::sync::atomic::AtomicBool::new(false),
+            revision: std::sync::atomic::AtomicU64::new(0),
             max_depth: std::sync::atomic::AtomicU32::new(max_depth),
             waking: tokio::sync::Mutex::new(()),
         })
@@ -549,6 +551,7 @@ impl Family {
             inner.root_session_id = session_id;
             inner.children = children;
         }
+        self.bump_revision();
         *self
             .registry_path
             .lock()
@@ -561,7 +564,18 @@ impl Family {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn bump_revision(&self) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
     fn persist(&self) {
+        self.bump_revision();
         let _persisting = self
             .persisting
             .lock()
@@ -592,6 +606,7 @@ impl Family {
 
     fn persist_soon(&self) {
         use std::sync::atomic::Ordering;
+        self.bump_revision();
         if self.persist_scheduled.swap(true, Ordering::AcqRel) {
             return;
         }

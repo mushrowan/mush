@@ -1708,6 +1708,56 @@ async fn an_errored_turn_fails_the_goal_and_stops_autonomous_mode() {
 }
 
 #[tokio::test]
+async fn a_child_change_after_the_family_went_quiet_is_still_reported() {
+    let (mut connection, _requests) = connection();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("subagents.json");
+    std::fs::write(
+        &path,
+        serde_json::json!({"children": [{
+            "id": "sub-1", "name": "left", "parent": null, "depth": 1,
+            "session_id": "s", "model_id": "m", "status": "idle",
+            "spawned_at": 0, "updated_at": 0, "turns": 1,
+            "usage": mush_ai::types::Usage::default(),
+            "cost": mush_ai::types::Cost::default(),
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let family = crate::family::Family::new(
+        crate::family::Identity::root("root"),
+        "root".into(),
+        2,
+        None,
+        Some(path),
+    );
+    connection.set_family(Some(Arc::clone(&family)));
+
+    let updated = |event: Option<ClientEvent>| match event {
+        Some(ClientEvent::ChildUpdated(child)) => Some(*child),
+        _ => None,
+    };
+    assert_eq!(
+        updated(connection.try_next_event()).map(|child| child.id),
+        Some("sub-1".into())
+    );
+    assert!(updated(connection.try_next_event()).is_none());
+
+    let child = crate::family::Identity {
+        id: Some("sub-1".into()),
+        name: "left".into(),
+        depth: 1,
+    };
+    family.progress_note(&child, "halfway").unwrap();
+
+    assert_eq!(
+        updated(connection.try_next_event()).and_then(|child| child.progress_note),
+        Some("halfway".into())
+    );
+    assert!(updated(connection.try_next_event()).is_none());
+}
+
+#[tokio::test]
 async fn setting_the_max_depth_reaches_the_family_and_the_system_prompt() {
     let (mut connection, _requests) = connection();
     let family = crate::family::Family::new(
