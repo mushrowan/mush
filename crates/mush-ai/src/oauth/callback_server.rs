@@ -97,9 +97,7 @@ impl CallbackServer {
                         && params.state.as_deref() != Some(expected)
                     {
                         let body = render_error_body("oauth state mismatch");
-                        let response = build_html_response("400 Bad Request", &body);
-                        let _ = stream.write_all(&response).await;
-                        let _ = stream.shutdown().await;
+                        let _ = respond(&mut stream, "400 Bad Request", &body).await;
                         return Err(OAuthError::TokenExchange(
                             "oauth state mismatch, please retry login".into(),
                         ));
@@ -107,9 +105,7 @@ impl CallbackServer {
                     return Ok((params, ResponseWriter { stream }));
                 }
                 Some(RequestOutcome::NotFound) | None => {
-                    let response = build_html_response("404 Not Found", "not found");
-                    let _ = stream.write_all(&response).await;
-                    let _ = stream.shutdown().await;
+                    let _ = respond(&mut stream, "404 Not Found", "not found").await;
                 }
             }
         }
@@ -122,17 +118,18 @@ pub struct ResponseWriter {
 
 impl ResponseWriter {
     pub async fn write_success(mut self) -> io::Result<()> {
-        let response = build_html_response("200 OK", SUCCESS_BODY);
-        self.stream.write_all(&response).await?;
-        self.stream.shutdown().await
+        respond(&mut self.stream, "200 OK", SUCCESS_BODY).await
     }
 
     pub async fn write_error(mut self, message: &str) -> io::Result<()> {
         let body = render_error_body(message);
-        let response = build_html_response("500 Internal Server Error", &body);
-        self.stream.write_all(&response).await?;
-        self.stream.shutdown().await
+        respond(&mut self.stream, "500 Internal Server Error", &body).await
     }
+}
+
+async fn respond(stream: &mut TcpStream, status: &str, body: &str) -> io::Result<()> {
+    stream.write_all(&build_html_response(status, body)).await?;
+    stream.shutdown().await
 }
 
 fn parse_request_line(line: &str) -> Option<(&str, &str)> {
