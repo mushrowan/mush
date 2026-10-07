@@ -65,7 +65,7 @@ pub fn parse_openrouter_models(body: &str) -> Result<Vec<DiscoveredModel>, Disco
         .data
         .into_iter()
         .map(|raw| {
-            let entry: OpenRouterModelEntry = serde_json::from_value(raw.clone())
+            let entry = OpenRouterModelEntry::deserialize(&raw)
                 .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
             Ok(DiscoveredModel {
                 model: entry_to_model(entry),

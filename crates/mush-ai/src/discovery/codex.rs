@@ -101,7 +101,7 @@ pub fn parse_codex_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryE
         .models
         .into_iter()
         .map(|raw| {
-            let entry: CodexModelEntry = serde_json::from_value(raw.clone())
+            let entry = CodexModelEntry::deserialize(&raw)
                 .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
             Ok(DiscoveredModel {
                 model: entry_to_model(entry),
@@ -249,7 +249,7 @@ pub struct ReasoningLevelPreset {
 #[must_use]
 pub fn extras(raw: Option<&serde_json::Value>) -> Option<CodexModelExtras> {
     let raw = raw?;
-    let parsed: CodexExtrasWire = serde_json::from_value(raw.clone()).ok()?;
+    let parsed = CodexExtrasWire::deserialize(raw).ok()?;
     Some(CodexModelExtras {
         description: parsed.description.filter(|s| !s.is_empty()),
         default_reasoning_level: parsed.default_reasoning_level.filter(|s| !s.is_empty()),

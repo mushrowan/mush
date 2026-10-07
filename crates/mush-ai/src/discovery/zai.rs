@@ -59,7 +59,7 @@ pub fn parse_models_dev(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryErr
         })?;
     let mut discovered = Vec::new();
     for (id, raw) in models {
-        let entry: Entry = match serde_json::from_value(raw.clone()) {
+        let entry = match Entry::deserialize(&raw) {
             Ok(entry) => entry,
             Err(error) => {
                 tracing::warn!(%id, %error, "skipping unreadable models.dev glm entry");

@@ -70,7 +70,7 @@ pub fn parse_openai_models(body: &str) -> Result<Vec<DiscoveredModel>, Discovery
                 .unwrap_or(false)
         })
         .map(|raw| {
-            let entry: OpenAiModelEntry = serde_json::from_value(raw.clone())
+            let entry = OpenAiModelEntry::deserialize(&raw)
                 .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
             Ok(DiscoveredModel {
                 model: entry_to_model(entry),

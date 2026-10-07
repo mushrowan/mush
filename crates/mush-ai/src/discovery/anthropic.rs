@@ -74,7 +74,7 @@ pub fn parse_anthropic_models(body: &str) -> Result<Vec<DiscoveredModel>, Discov
         .data
         .into_iter()
         .map(|raw| {
-            let entry: AnthropicModelEntry = serde_json::from_value(raw.clone())
+            let entry = AnthropicModelEntry::deserialize(&raw)
                 .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
             Ok(DiscoveredModel {
                 model: entry_to_model(entry),
