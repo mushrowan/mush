@@ -137,13 +137,14 @@ const MAX_CAPTURE_BYTES: usize = 128 * 1024;
 
 pub fn run_sse_stream(
     response: reqwest::Response,
-    model_id: ModelId,
-    provider_name: Provider,
-    api: Api,
+    model: &Model,
     call_id: u64,
     mut processor: impl SseProcessor,
 ) -> EventStream {
     let label = processor.label();
+    let model_id = model.id.clone();
+    let provider_name = model.provider.clone();
+    let api = model.api;
     let request_id = response
         .headers()
         .get("request-id")

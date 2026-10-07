@@ -85,9 +85,7 @@ impl ApiProvider for OpenaiResponsesProvider {
 
         Ok(super::sse::run_sse_stream(
             response,
-            model.id.clone(),
-            model.provider.clone(),
-            model.api,
+            model,
             call_id,
             OpenAiResponsesProcessor::default(),
         ))

@@ -271,17 +271,13 @@ impl ApiProvider for AnthropicProvider {
         let response =
             super::check_response(response, "anthropic", model.id.as_str(), &url).await?;
 
-        let sse_stream = parse_sse_stream(
+        Ok(parse_sse_stream(
             response,
-            model.id.clone(),
-            model.provider.clone(),
-            model.api,
+            model,
             call_id,
             is_oauth,
             context.tools.clone(),
-        );
-
-        Ok(sse_stream)
+        ))
     }
 }
 
@@ -1498,9 +1494,7 @@ impl super::sse::SseProcessor for AnthropicProcessor {
 
 fn parse_sse_stream(
     response: reqwest::Response,
-    model_id: ModelId,
-    provider_name: Provider,
-    api: Api,
+    model: &Model,
     call_id: u64,
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
@@ -1510,7 +1504,7 @@ fn parse_sse_stream(
         is_oauth,
         tools,
     };
-    super::sse::run_sse_stream(response, model_id, provider_name, api, call_id, processor)
+    super::sse::run_sse_stream(response, model, call_id, processor)
 }
 
 fn process_sse_event(
@@ -3438,9 +3432,7 @@ mod tests {
             .unwrap();
         let mut stream = parse_sse_stream(
             reqwest::Response::from(http_resp),
-            "claude-sonnet-4-20250514".into(),
-            Provider::Anthropic,
-            Api::AnthropicMessages,
+            &test_model(),
             0,
             true,
             vec![],
