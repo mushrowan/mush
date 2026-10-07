@@ -100,10 +100,9 @@ impl RepoMapWatcher {
                     if !path.is_dir() {
                         continue;
                     }
-                    let dirs = discover_watch_dirs(path);
-                    if dirs.is_empty() {
-                        continue;
-                    }
+                    let dirs = discover_watch_dirs(&root_for_cb)
+                        .into_iter()
+                        .filter(|dir| dir.starts_with(path));
                     if let Ok(mut slot) = watcher_for_cb.lock()
                         && let Some(w) = slot.as_mut()
                     {
@@ -266,7 +265,7 @@ mod tests {
 
     #[test]
     fn watcher_ignores_gitignored_directories() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         setup_test_repo(dir.path());
         fs::write(dir.path().join(".ignore"), "target/\n").unwrap();
 
@@ -338,6 +337,43 @@ mod tests {
         assert!(
             text.contains("goodbye"),
             "map should update after file change: {text}"
+        );
+    }
+
+    #[test]
+    fn an_ignored_directory_created_after_start_is_not_watched() {
+        let dir = tempdir().unwrap();
+        setup_test_repo(dir.path());
+        fs::write(dir.path().join(".ignore"), "target/\n").unwrap();
+
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
+        wait_ready(&watcher, Duration::from_secs(10));
+
+        fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
+        fs::write(
+            dir.path().join("target/debug/build_script.rs"),
+            "pub fn junk_symbol_xyz() -> u32 { 42 }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("src/utils.rs"),
+            "pub fn goodbye() -> &'static str { \"bye\" }\n",
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut text = map_text(&watcher);
+        while !text.contains("goodbye") && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            text = map_text(&watcher);
+        }
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
+        let text = map_text(&watcher);
+        assert!(text.contains("goodbye"), "{text}");
+        assert!(
+            !text.contains("junk_symbol_xyz"),
+            "a directory created under an ignored path should not be watched: {text}"
         );
     }
 }
