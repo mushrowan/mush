@@ -1,5 +1,8 @@
 use std::process::{Command, ExitCode};
 
+use mush_ai::Provider;
+use mush_ai::discovery::{self, DiscoveryOutcome};
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -38,37 +41,32 @@ fn discovery_probe() -> ExitCode {
     };
 
     runtime.block_on(async {
-        let summary = mush_ai::discovery::refresh_and_save(mush_ai::http::client()).await;
+        let summary = discovery::refresh_and_save(mush_ai::http::client()).await;
         println!("{}", summary.one_line());
 
         for result in &summary.results {
             match &result.outcome {
-                mush_ai::discovery::DiscoveryOutcome::Success { models, .. } => {
+                DiscoveryOutcome::Success { models, .. } => {
                     println!("  {}: {models} models", result.provider);
                 }
-                mush_ai::discovery::DiscoveryOutcome::Skipped => {
-                    println!("  {}: skipped", result.provider);
-                }
-                mush_ai::discovery::DiscoveryOutcome::Failed(error) => {
+                DiscoveryOutcome::Skipped => println!("  {}: skipped", result.provider),
+                DiscoveryOutcome::Failed(error) => {
                     println!("  {}: error: {error}", result.provider);
                 }
             }
         }
 
-        let merged = mush_ai::discovery::merged_catalogue();
-        let openai = merged
-            .iter()
-            .filter(|entry| entry.model.provider == mush_ai::Provider::Custom("openai".into()))
-            .count();
-        let codex = merged
-            .iter()
-            .filter(|entry| {
-                entry.model.provider == mush_ai::Provider::Custom("openai-codex".into())
-            })
-            .count();
+        let merged = discovery::merged_catalogue();
+        let count = |name: &str| {
+            let provider = Provider::Custom(name.into());
+            merged
+                .iter()
+                .filter(|entry| entry.model.provider == provider)
+                .count()
+        };
 
-        println!("merged openai models: {openai}");
-        println!("merged codex models: {codex}");
+        println!("merged openai models: {}", count("openai"));
+        println!("merged codex models: {}", count("openai-codex"));
         ExitCode::SUCCESS
     })
 }
