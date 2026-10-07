@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::testing::tempdir().unwrap();
         let inbox_dir = dir.path().join("inbox");
         let (mut connection, _) = echo_connection();
         connection.runtime.saver = Some(Arc::new(|_| {}));

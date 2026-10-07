@@ -308,6 +308,15 @@ pub fn stalled_connection() -> (InProcessConnection, Arc<tokio::sync::Notify>) {
 static DIRS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
+pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    if cfg!(target_os = "macos") {
+        tempfile::tempdir_in("/private/tmp")
+    } else {
+        tempfile::tempdir()
+    }
+}
+
+#[cfg(test)]
 pub struct IsolatedDirs {
     pub data: tempfile::TempDir,
     pub config: tempfile::TempDir,
