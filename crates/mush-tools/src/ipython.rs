@@ -1166,12 +1166,20 @@ mod tests {
 
     const STUBBORN: &str = "import time\nwhile True:\n    try:\n        time.sleep(0.05)\n    except KeyboardInterrupt:\n        pass";
 
-    async fn leave_a_stubborn_cell_running(tool: &Arc<IpythonTool>) {
+    async fn leave_a_stubborn_cell_running(tool: &Arc<IpythonTool>, dir: &Path) {
+        let started = dir.join("stubborn-started");
+        let code = format!(
+            "import pathlib\npathlib.Path({:?}).touch()\n{STUBBORN}",
+            started.display().to_string()
+        );
         let stubborn = {
             let tool = tool.clone();
-            tokio::spawn(async move { tool.execute(json!({ "code": STUBBORN })).await })
+            tokio::spawn(async move { tool.execute(json!({ "code": code })).await })
         };
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !started.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         stubborn.abort();
         let _ = stubborn.await;
     }
@@ -1182,7 +1190,7 @@ mod tests {
         let mut tool = tool(dir.path());
         tool.kernel_config_mut().busy_wait = std::time::Duration::from_millis(400);
         let tool = Arc::new(tool);
-        leave_a_stubborn_cell_running(&tool).await;
+        leave_a_stubborn_cell_running(&tool, dir.path()).await;
 
         let result = tool.execute(json!({ "code": "1 + 1" })).await;
 
@@ -1207,7 +1215,7 @@ mod tests {
                 Box::pin(async { BusyKernelChoice::Kill })
             })
         }));
-        leave_a_stubborn_cell_running(&tool).await;
+        leave_a_stubborn_cell_running(&tool, dir.path()).await;
 
         let result = tool.execute(json!({ "code": "1 + 1" })).await;
 
