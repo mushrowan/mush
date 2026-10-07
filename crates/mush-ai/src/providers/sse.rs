@@ -1,3 +1,7 @@
+use crate::registry::EventStream;
+use crate::stream::StreamEvent;
+use crate::types::*;
+
 #[derive(Debug, Clone)]
 pub struct SseRawEvent {
     pub event: Option<String>,
@@ -41,25 +45,16 @@ pub fn safe_preview_bytes(bytes: &[u8], max_chars: usize) -> String {
     safe_preview_text(&text, max_chars)
 }
 
+#[derive(Default)]
 pub struct SseParser {
     chunk_buf: Vec<u8>,
     line_buf: String,
     event_name: Option<String>,
 }
 
-impl Default for SseParser {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SseParser {
     pub fn new() -> Self {
-        Self {
-            chunk_buf: Vec::new(),
-            line_buf: String::new(),
-            event_name: None,
-        }
+        Self::default()
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SseRawEvent> {
@@ -110,10 +105,6 @@ impl SseParser {
         &self.chunk_buf
     }
 }
-
-use crate::registry::EventStream;
-use crate::stream::StreamEvent;
-use crate::types::*;
 
 pub enum ProcessResult {
     Events(Vec<StreamEvent>),
