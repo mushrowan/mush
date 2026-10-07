@@ -600,11 +600,12 @@ impl InProcessConnection {
                 .is_none_or(|known| *known != child);
             if changed {
                 self.known_children.insert(child.id.clone(), child.clone());
-                return Some(ClientEvent::ChildUpdated(Box::new(child)));
+                self.queued
+                    .push_back(ClientEvent::ChildUpdated(Box::new(child)));
             }
         }
         self.known_family_revision = Some(revision);
-        None
+        self.queued.pop_front()
     }
 
     pub fn set_family(&mut self, family: Option<Arc<Family>>) {
