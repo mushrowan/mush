@@ -1505,10 +1505,10 @@ exit 64
 
     #[tokio::test]
     async fn no_output_foreground_killed_early() {
-        let cwd = std::env::current_dir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
         let start = std::time::Instant::now();
         let result =
-            run_command_with_no_output_timeout(&cwd, "sleep 300", 300, None, false, 2).await;
+            run_command_with_no_output_timeout(cwd.path(), "sleep 300", 300, None, false, 2).await;
         let elapsed = start.elapsed();
         assert!(result.outcome.is_error());
         let text = extract_text(&result);
