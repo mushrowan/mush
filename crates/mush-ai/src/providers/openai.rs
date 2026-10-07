@@ -742,7 +742,11 @@ struct PromptTokenDetails {
     cached_tokens: u64,
 }
 
-use super::StreamBlock;
+#[derive(Debug)]
+enum OpenBlock {
+    Text(String),
+    Thinking(String),
+}
 
 #[derive(Debug)]
 struct ToolBlock {
@@ -753,7 +757,7 @@ struct ToolBlock {
 
 #[derive(Default)]
 struct OpenAiCompletionsProcessor {
-    current: Option<StreamBlock>,
+    current: Option<OpenBlock>,
     tool_blocks: Vec<ToolBlock>,
     reasoning_details: ReasoningDetails,
 }
@@ -860,7 +864,7 @@ impl OpenAiCompletionsProcessor {
             && !text.is_empty()
         {
             match &mut self.current {
-                Some(StreamBlock::Text { text: buf }) => {
+                Some(OpenBlock::Text(buf)) => {
                     buf.push_str(&text);
                     let idx = output.content.len().saturating_sub(1);
                     if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(idx) {
@@ -874,7 +878,7 @@ impl OpenAiCompletionsProcessor {
                 _ => {
                     finish_block_events(&mut self.current, output, &mut events);
                     let content_index = output.content.len();
-                    self.current = Some(StreamBlock::Text { text: text.clone() });
+                    self.current = Some(OpenBlock::Text(text.clone()));
                     output.content.push(AssistantContentPart::Text(TextContent {
                         text: text.clone(),
                     }));
@@ -888,12 +892,7 @@ impl OpenAiCompletionsProcessor {
         }
 
         if let Some(tool_calls) = choice.delta.tool_calls {
-            if matches!(
-                self.current,
-                Some(StreamBlock::Text { .. } | StreamBlock::Thinking { .. })
-            ) {
-                finish_block_events(&mut self.current, output, &mut events);
-            }
+            finish_block_events(&mut self.current, output, &mut events);
             for tc in tool_calls {
                 let openai_idx = tc.index.unwrap_or(0);
                 let block_pos = match self
@@ -950,7 +949,7 @@ impl OpenAiCompletionsProcessor {
         output: &mut AssistantMessage,
         events: &mut Vec<StreamEvent>,
     ) {
-        if let Some(StreamBlock::Thinking { text, .. }) = &mut self.current {
+        if let Some(OpenBlock::Thinking(text)) = &mut self.current {
             text.push_str(&reasoning);
             let idx = output.content.len().saturating_sub(1);
             if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(idx)
@@ -980,10 +979,7 @@ impl OpenAiCompletionsProcessor {
     ) -> usize {
         finish_block_events(&mut self.current, output, events);
         let content_index = output.content.len();
-        self.current = Some(StreamBlock::Thinking {
-            text: thinking.clone(),
-            signature: None,
-        });
+        self.current = Some(OpenBlock::Thinking(thinking.clone()));
         output
             .content
             .push(AssistantContentPart::Thinking(ThinkingContent::Thinking {
@@ -1010,7 +1006,7 @@ impl OpenAiCompletionsProcessor {
         };
         let content_index = match (self.reasoning_details.content_index, &self.current) {
             (Some(idx), _) => idx,
-            (None, Some(StreamBlock::Thinking { .. })) => output.content.len().saturating_sub(1),
+            (None, Some(OpenBlock::Thinking(_))) => output.content.len().saturating_sub(1),
             (None, _) => self.start_thinking(String::new(), None, output, events),
         };
         self.reasoning_details.content_index = Some(content_index);
@@ -1023,42 +1019,24 @@ impl OpenAiCompletionsProcessor {
 }
 
 fn finish_block_events(
-    current: &mut Option<StreamBlock>,
-    output: &mut AssistantMessage,
+    current: &mut Option<OpenBlock>,
+    output: &AssistantMessage,
     events: &mut Vec<StreamEvent>,
-) -> Option<usize> {
-    let block = current.take()?;
+) {
+    let Some(block) = current.take() else {
+        return;
+    };
     let content_index = output.content.len().saturating_sub(1);
-    match block {
-        StreamBlock::Text { text } => {
-            events.push(StreamEvent::TextEnd {
-                content_index,
-                text,
-            });
-        }
-        StreamBlock::Thinking { text, .. } => {
-            events.push(StreamEvent::ThinkingEnd {
-                content_index,
-                thinking: text,
-            });
-        }
-        StreamBlock::ToolCall { id, name, args_buf } => {
-            let arguments = serde_json::from_str(&args_buf)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
-            if let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(content_index)
-            {
-                tc.arguments = arguments.clone();
-            }
-            events.push(StreamEvent::ToolCallEnd {
-                content_index,
-                id,
-                name,
-                arguments,
-            });
-        }
-        StreamBlock::ServerSideTranscript => {}
-    }
-    Some(content_index)
+    events.push(match block {
+        OpenBlock::Text(text) => StreamEvent::TextEnd {
+            content_index,
+            text,
+        },
+        OpenBlock::Thinking(thinking) => StreamEvent::ThinkingEnd {
+            content_index,
+            thinking,
+        },
+    });
 }
 
 fn finish_tool_blocks_silent(tool_blocks: &mut Vec<ToolBlock>, output: &mut AssistantMessage) {
@@ -1582,7 +1560,7 @@ mod tests {
             usage: None,
         };
         state.process_chunk(chunk, &mut output);
-        assert!(matches!(state.current, Some(StreamBlock::Thinking { .. })));
+        assert!(matches!(state.current, Some(OpenBlock::Thinking(_))));
 
         let chunk = ChunkResponse {
             id: None,
@@ -1636,7 +1614,7 @@ mod tests {
 
         let events = state.process_chunk(chunk, &mut output);
 
-        assert!(matches!(state.current, Some(StreamBlock::Thinking { .. })));
+        assert!(matches!(state.current, Some(OpenBlock::Thinking(_))));
         assert!(events.iter().any(|event| {
             matches!(
                 event,
