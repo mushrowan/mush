@@ -126,11 +126,13 @@ impl RepoMapShared {
     }
 
     async fn wait_until_ready(&self, timeout: Duration) -> Result<(), RepoMapEnsureError> {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now().checked_add(timeout);
         loop {
             match self.ensure_ready() {
                 Ok(()) => return Ok(()),
-                Err(RepoMapEnsureError::Building) if tokio::time::Instant::now() < deadline => {
+                Err(RepoMapEnsureError::Building)
+                    if deadline.is_none_or(|deadline| tokio::time::Instant::now() < deadline) =>
+                {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(error) => return Err(error),
@@ -339,6 +341,15 @@ mod tests {
             crate::util::extract_text(&result).contains("no parseable files"),
             "{result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_wait_too_large_for_a_clock_still_answers() {
+        let tool = make_tool(sample_map());
+        let result = tool
+            .execute(serde_json::json!({"wait_timeout": u64::MAX}))
+            .await;
+        assert!(result.outcome.is_success(), "{result:?}");
     }
 
     #[tokio::test]

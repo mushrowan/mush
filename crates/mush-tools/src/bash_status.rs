@@ -109,7 +109,8 @@ impl AgentTool for BashStatusTool {
             return format_job_result(&mut state);
         }
 
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(args.timeout);
+        let deadline =
+            tokio::time::Instant::now().checked_add(tokio::time::Duration::from_secs(args.timeout));
         let poll_interval = tokio::time::Duration::from_millis(500);
 
         loop {
@@ -121,7 +122,7 @@ impl AgentTool for BashStatusTool {
             }
             drop(state);
 
-            if tokio::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 let mut state = handle.write().await;
                 return format_running_status(
                     &mut state,
@@ -624,6 +625,30 @@ mod tests {
             !marker.exists(),
             "background child should have been killed before it touched the marker"
         );
+    }
+
+    #[tokio::test]
+    async fn a_poll_timeout_too_large_for_a_clock_still_answers() {
+        let registry = make_registry();
+        registry
+            .insert(crate::background::JobState {
+                id: "bg_0".into(),
+                command: "true".into(),
+                status: JobStatus::Done { exit_code: 0 },
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_consumed_bytes: 0,
+                stderr_consumed_bytes: 0,
+                started: std::time::Instant::now(),
+                finished: None,
+                cwd: std::sync::Arc::from(std::path::Path::new(".")),
+            })
+            .await;
+
+        let result = BashStatusTool::new(registry)
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": u64::MAX}))
+            .await;
+        assert!(result.outcome.is_success(), "{result:?}");
     }
 
     #[tokio::test]
