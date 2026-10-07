@@ -24,16 +24,19 @@ pub fn cache_ttl_secs(
 }
 
 #[must_use]
-pub fn cache_warning_tiers(provider: &Provider, retention: Option<&CacheRetention>) -> Vec<u16> {
+pub fn cache_warning_tiers(
+    provider: &Provider,
+    retention: Option<&CacheRetention>,
+) -> &'static [u16] {
     match provider {
         Provider::Anthropic => match retention.copied().unwrap_or(CacheRetention::Short) {
-            CacheRetention::None => Vec::new(),
-            CacheRetention::Short => vec![240],
-            CacheRetention::Long => vec![240, 3540],
+            CacheRetention::None => &[],
+            CacheRetention::Short => &[240],
+            CacheRetention::Long => &[240, 3540],
         },
-        Provider::Custom(name) if name == "openai" || name == "openai-codex" => vec![300, 3540],
-        Provider::OpenRouter => vec![240, 3540],
-        _ => vec![240],
+        Provider::Custom(name) if name == "openai" || name == "openai-codex" => &[300, 3540],
+        Provider::OpenRouter => &[240, 3540],
+        _ => &[240],
     }
 }
 
@@ -45,7 +48,7 @@ pub fn cache_warning_display(
 ) -> Option<String> {
     let elapsed = elapsed_secs?;
     let active = cache_warning_tiers(provider, retention)
-        .into_iter()
+        .iter()
         .filter_map(|tier| tier.checked_sub(elapsed.min(u16::MAX as u64) as u16))
         .filter(|remaining| *remaining > 0)
         .map(format_duration)

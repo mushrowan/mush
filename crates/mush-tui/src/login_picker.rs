@@ -43,6 +43,17 @@ pub struct EntryPrompt {
     pub error_message: Option<String>,
 }
 
+impl EntryPrompt {
+    fn new(entry_id: &str, provider_name: &str, error_message: Option<String>) -> Self {
+        Self {
+            entry_id: entry_id.to_string(),
+            provider_name: provider_name.to_string(),
+            buffer: String::new(),
+            error_message,
+        }
+    }
+}
+
 impl LoginPickerState {
     #[must_use]
     pub fn new(entries: Vec<LoginEntry>) -> Self {
@@ -124,12 +135,7 @@ impl LoginPickerState {
         if !matches!(entry.method, LoginMethod::ApiKey { .. }) {
             return false;
         }
-        self.entry = Some(EntryPrompt {
-            entry_id: entry.id.clone(),
-            provider_name: entry.name.clone(),
-            buffer: String::new(),
-            error_message: None,
-        });
+        self.entry = Some(EntryPrompt::new(&entry.id, &entry.name, None));
         self.toast = None;
         true
     }
@@ -155,12 +161,7 @@ impl LoginPickerState {
     }
 
     pub fn begin_validation(&mut self, entry_id: &str, provider_name: &str) {
-        self.entry = Some(EntryPrompt {
-            entry_id: entry_id.to_string(),
-            provider_name: provider_name.to_string(),
-            buffer: String::new(),
-            error_message: None,
-        });
+        self.entry = Some(EntryPrompt::new(entry_id, provider_name, None));
         self.validating = Some(entry_id.to_string());
         self.toast = None;
     }
@@ -178,12 +179,11 @@ impl LoginPickerState {
         reason: impl Into<String>,
     ) {
         self.validating = None;
-        self.entry = Some(EntryPrompt {
-            entry_id: entry_id.to_string(),
-            provider_name: provider_name.to_string(),
-            buffer: String::new(),
-            error_message: Some(reason.into()),
-        });
+        self.entry = Some(EntryPrompt::new(
+            entry_id,
+            provider_name,
+            Some(reason.into()),
+        ));
         self.toast = None;
     }
 

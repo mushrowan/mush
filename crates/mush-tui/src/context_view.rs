@@ -140,18 +140,8 @@ pub fn format_context(root: &AgentNode, stats: &crate::prompt_cache::TokenStats)
         .map(|cell| cell.chars().count())
         .max()
         .unwrap_or(0);
-    let token_width = token_cells
-        .iter()
-        .map(String::len)
-        .chain(std::iter::once("tokens".len()))
-        .max()
-        .unwrap_or(0);
-    let cost_width = cost_cells
-        .iter()
-        .map(String::len)
-        .chain(std::iter::once("cost".len()))
-        .max()
-        .unwrap_or(0);
+    let token_width = column_width("tokens", &token_cells);
+    let cost_width = column_width("cost", &cost_cells);
 
     let mut lines = Vec::new();
     if let Some(model) = &root.model_id {
@@ -207,6 +197,10 @@ pub fn format_context(root: &AgentNode, stats: &crate::prompt_cache::TokenStats)
         ));
     }
     lines.join("\n")
+}
+
+fn column_width(header: &str, cells: &[String]) -> usize {
+    cells.iter().map(String::len).fold(header.len(), usize::max)
 }
 
 fn context_cell(context: Option<(TokenCount, TokenCount)>) -> String {
