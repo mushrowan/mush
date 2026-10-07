@@ -42,52 +42,14 @@ pub fn handle_agent_event(
             tool_call_id,
             tool_name,
             result,
-        } => {
-            if !app.turn_shows_tool_call(tool_call_id) {
-                let args = app
-                    .announced_tool_call(tool_call_id)
-                    .map(|tc| tc.arguments.clone())
-                    .unwrap_or_default();
-                show_tool_start(app, tool_call_id, tool_name.as_str(), &args);
-            }
-            let output_text = result.content.iter().find_map(|p| match p {
-                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            });
-
-            if tool_name.as_str().eq_ignore_ascii_case("batch") {
-                app.end_batch_tool(tool_call_id, result.outcome, output_text);
-            } else {
-                let image_data = result.content.iter().find_map(|p| match p {
-                    ToolResultContentPart::Image(img) => {
-                        use base64::Engine;
-                        base64::engine::general_purpose::STANDARD
-                            .decode(&img.data)
-                            .ok()
-                    }
-                    _ => None,
-                });
-                if let Some(ref data) = image_data
-                    && let Some(picker) = image_picker
-                    && let Ok(dyn_image) = image::load_from_memory(data)
-                {
-                    let msg_idx = app.messages.len().saturating_sub(1);
-                    let tc_idx = app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
-                    let proto = picker.new_resize_protocol(dyn_image);
-                    image_protos.insert((msg_idx, tc_idx), proto);
-                }
-                app.end_tool(
-                    tool_call_id,
-                    tool_name.as_str(),
-                    result.outcome,
-                    output_text,
-                    image_data,
-                );
-                if let Some(details) = &result.details {
-                    app.set_tool_details(tool_call_id, details);
-                }
-            }
-        }
+        } => show_tool_end(
+            app,
+            image_protos,
+            image_picker.as_ref(),
+            tool_call_id,
+            tool_name.as_str(),
+            result,
+        ),
         AgentEvent::PartialDiscarded { error } => {
             app.start_streaming();
             app.status = Some(format!("provider error, retrying: {error}").into());
@@ -115,19 +77,7 @@ pub fn handle_agent_event(
         AgentEvent::ContextCompacted {
             before_count,
             compaction,
-        } => {
-            let tokens_after = mush_session::compact::estimate_tokens(&compaction.messages);
-            app.stats
-                .reset_live_state(TokenCount::new(tokens_after as u64));
-            let after_count = match applied {
-                mush_runtime::Applied::Compacted { after_count } => after_count,
-                _ => compaction.messages.len(),
-            };
-            app.push_system_message(format!(
-                "━ compacted: {before_count} → {after_count} messages ━"
-            ));
-            app.status = Some(format!("compacted: {before_count} → {after_count} messages").into());
-        }
+        } => show_compaction(app, *before_count, compaction, applied),
         AgentEvent::MaxTurnsReached { max_turns } => {
             app.stream.active = false;
             app.push_system_message(format!("hit max turns limit ({max_turns})"));
@@ -158,6 +108,82 @@ fn show_tool_start(
         let summary = summarise_tool_args(tool_name, args);
         app.start_tool(tool_call_id, tool_name, &summary);
     }
+}
+
+fn show_tool_end(
+    app: &mut App,
+    image_protos: &mut std::collections::HashMap<
+        (usize, usize),
+        ratatui_image::protocol::StatefulProtocol,
+    >,
+    image_picker: Option<&ratatui_image::picker::Picker>,
+    tool_call_id: &ToolCallId,
+    tool_name: &str,
+    result: &mush_agent::ToolResult,
+) {
+    if !app.turn_shows_tool_call(tool_call_id) {
+        let args = app
+            .announced_tool_call(tool_call_id)
+            .map(|tc| tc.arguments.clone())
+            .unwrap_or_default();
+        show_tool_start(app, tool_call_id, tool_name, &args);
+    }
+    let output_text = result.content.iter().find_map(|p| match p {
+        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
+        _ => None,
+    });
+
+    if tool_name.eq_ignore_ascii_case("batch") {
+        app.end_batch_tool(tool_call_id, result.outcome, output_text);
+        return;
+    }
+    let image_data = result.content.iter().find_map(|p| match p {
+        ToolResultContentPart::Image(img) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(&img.data)
+                .ok()
+        }
+        _ => None,
+    });
+    if let Some(ref data) = image_data
+        && let Some(picker) = image_picker
+        && let Ok(dyn_image) = image::load_from_memory(data)
+    {
+        let msg_idx = app.messages.len().saturating_sub(1);
+        let tc_idx = app.messages.last().map(|m| m.tool_calls.len()).unwrap_or(0);
+        let proto = picker.new_resize_protocol(dyn_image);
+        image_protos.insert((msg_idx, tc_idx), proto);
+    }
+    app.end_tool(
+        tool_call_id,
+        tool_name,
+        result.outcome,
+        output_text,
+        image_data,
+    );
+    if let Some(details) = &result.details {
+        app.set_tool_details(tool_call_id, details);
+    }
+}
+
+fn show_compaction(
+    app: &mut App,
+    before_count: usize,
+    compaction: &mush_agent::ContextCompaction,
+    applied: mush_runtime::Applied,
+) {
+    let tokens_after = mush_session::compact::estimate_tokens(&compaction.messages);
+    app.stats
+        .reset_live_state(TokenCount::new(tokens_after as u64));
+    let after_count = match applied {
+        mush_runtime::Applied::Compacted { after_count } => after_count,
+        _ => compaction.messages.len(),
+    };
+    app.push_system_message(format!(
+        "━ compacted: {before_count} → {after_count} messages ━"
+    ));
+    app.status = Some(format!("compacted: {before_count} → {after_count} messages").into());
 }
 
 fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, debug_cache: bool) {
