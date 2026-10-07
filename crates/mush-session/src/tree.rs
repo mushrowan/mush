@@ -734,32 +734,43 @@ impl SessionTree {
     }
 
     fn context_entries(&self) -> Vec<&SessionEntry> {
-        let branch = self.current_branch();
-        let mut entries: Vec<&SessionEntry> = Vec::with_capacity(branch.len());
+        let leaf = self
+            .leaf_id
+            .as_ref()
+            .and_then(|id| self.index.positions.get(id).copied());
+        let mut ancestors = std::iter::successors(leaf, |&position| self.index.parents[position])
+            .take(self.entries.len())
+            .map(|position| &*self.entries[position]);
+        let mut since_compaction = Vec::new();
+        let compaction = ancestors.by_ref().find(|entry| {
+            let found = matches!(entry.kind, EntryKind::Compaction { .. });
+            if !found {
+                since_compaction.push(*entry);
+            }
+            found
+        });
+        let mut entries: Vec<&SessionEntry> = Vec::with_capacity(since_compaction.len() + 1);
 
-        let compaction_idx = branch
-            .iter()
-            .rposition(|e| matches!(e.kind, EntryKind::Compaction { .. }));
-
-        let start = if let Some(idx) = compaction_idx {
-            entries.push(branch[idx]);
-            if let EntryKind::Compaction { first_kept_id, .. } = &branch[idx].kind
-                && let Some(kept_pos) = branch.iter().position(|e| e.id == *first_kept_id)
-            {
-                for &entry in &branch[kept_pos..idx] {
-                    if matches!(entry.kind, EntryKind::Message { .. })
-                        || is_applied_refinement(entry)
-                    {
-                        entries.push(entry);
+        if let Some(compaction) = compaction {
+            entries.push(compaction);
+            if let EntryKind::Compaction { first_kept_id, .. } = &compaction.kind {
+                let mut kept = Vec::new();
+                if ancestors.any(|entry| {
+                    kept.push(entry);
+                    entry.id == *first_kept_id
+                }) {
+                    for &entry in kept.iter().rev() {
+                        if matches!(entry.kind, EntryKind::Message { .. })
+                            || is_applied_refinement(entry)
+                        {
+                            entries.push(entry);
+                        }
                     }
                 }
             }
-            idx + 1
-        } else {
-            0
-        };
+        }
 
-        for &entry in &branch[start..] {
+        for &entry in since_compaction.iter().rev() {
             if matches!(
                 entry.kind,
                 EntryKind::Message { .. } | EntryKind::BranchSummary { .. }
