@@ -66,7 +66,7 @@ impl PythonSkill {
     }
 }
 
-fn resolve_config_dir() -> Option<PathBuf> {
+pub(crate) fn resolve_config_dir() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg).join("mush"));
     }
@@ -115,18 +115,9 @@ fn find_agents_md_inner(
     home: Option<&Path>,
     config_dir: Option<&Path>,
 ) -> Vec<AgentsMd> {
-    let mut results = Vec::new();
-
-    let mut dir = Some(cwd.to_path_buf());
-    while let Some(d) = dir {
-        results.extend(read_context_file(&d));
-
-        if home.is_some_and(|h| d == h) {
-            break;
-        }
-
-        dir = d.parent().map(|p| p.to_path_buf());
-    }
+    let mut results: Vec<AgentsMd> = ancestors_to_home(cwd, home)
+        .filter_map(read_context_file)
+        .collect();
 
     if let Some(cd) = config_dir {
         let mush_agents = cd.join("AGENTS.md");
@@ -227,20 +218,13 @@ pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> Pr
     )
 }
 
-fn ancestor_dirs_to_home(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let mut current = Some(cwd.to_path_buf());
-
-    while let Some(dir) = current {
-        dirs.push(dir.clone());
-        if home.is_some_and(|home| dir == home) {
-            break;
-        }
-        current = dir.parent().map(Path::to_path_buf);
-    }
-
-    dirs.reverse();
-    dirs
+fn ancestors_to_home<'a>(cwd: &'a Path, home: Option<&'a Path>) -> impl Iterator<Item = &'a Path> {
+    let mut reached_home = false;
+    cwd.ancestors().take_while(move |dir| {
+        let take = !reached_home;
+        reached_home = home == Some(*dir);
+        take
+    })
 }
 
 fn discover_project_context_inner(
@@ -278,7 +262,7 @@ fn discover_project_context_inner(
     }
 
     if !options.no_skills {
-        for dir in ancestor_dirs_to_home(cwd, home).iter().rev() {
+        for dir in ancestors_to_home(cwd, home) {
             set.add(scan_skills_root(
                 &dir.join(".mush/skills"),
                 SkillSource::Project,

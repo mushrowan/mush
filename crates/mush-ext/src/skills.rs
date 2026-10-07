@@ -27,22 +27,20 @@ impl SkillLoader {
             return Some(cached.clone());
         }
 
-        let skill = self.find(name)?.clone();
-        let content = read_skill_file(&skill.path)?;
+        let content = std::fs::read_to_string(&self.find(name)?.path).ok()?;
         self.cache.insert(name.to_string(), content.clone());
         Some(content)
     }
 
     pub fn load_with_context(&mut self, name: &str) -> Option<SkillContent> {
-        let skill = self.find(name)?.clone();
         let content = self.load(name)?;
-        let skill_dir = skill.path.parent().map(|p| p.to_path_buf());
+        let skill = self.find(name)?;
 
         Some(SkillContent {
             name: skill.name.clone(),
             description: skill.description.clone(),
             content,
-            skill_dir,
+            skill_dir: skill.path.parent().map(Path::to_path_buf),
         })
     }
 
@@ -64,10 +62,6 @@ pub struct SkillContent {
     pub description: String,
     pub content: String,
     pub skill_dir: Option<PathBuf>,
-}
-
-fn read_skill_file(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
 }
 
 #[cfg(test)]

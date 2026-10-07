@@ -9,7 +9,7 @@ pub struct PromptTemplate {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateSource {
     User,
     Project,
@@ -72,15 +72,9 @@ fn parse_frontmatter(text: &str) -> (Option<String>, String) {
 pub fn discover_templates(cwd: &Path) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
 
-    if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
+    if let Some(config_dir) = crate::loader::resolve_config_dir() {
         load_templates_from(
-            &PathBuf::from(config).join("mush/prompts"),
-            TemplateSource::User,
-            &mut templates,
-        );
-    } else if let Some(home) = std::env::var_os("HOME") {
-        load_templates_from(
-            &PathBuf::from(home).join(".config/mush/prompts"),
+            &config_dir.join("prompts"),
             TemplateSource::User,
             &mut templates,
         );
@@ -99,7 +93,7 @@ fn load_templates_from(dir: &Path, source: TemplateSource, templates: &mut Vec<P
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md")
-            && let Some(tmpl) = parse_template(&path, source.clone())
+            && let Some(tmpl) = parse_template(&path, source)
         {
             templates.push(tmpl);
         }

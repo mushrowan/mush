@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -16,7 +17,7 @@ pub struct RuleIndex {
     rules: Vec<Rule>,
     globset: GlobSet,
     glob_to_rule: Vec<usize>,
-    lang_to_rules: std::collections::HashMap<String, Vec<usize>>,
+    lang_to_rules: HashMap<String, Vec<usize>>,
     injected: Mutex<Vec<bool>>,
 }
 
@@ -24,8 +25,7 @@ impl RuleIndex {
     pub fn new(rules: Vec<Rule>) -> Self {
         let mut builder = GlobSetBuilder::new();
         let mut glob_to_rule = Vec::new();
-        let mut lang_to_rules: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut lang_to_rules: HashMap<String, Vec<usize>> = HashMap::new();
 
         for (rule_idx, rule) in rules.iter().enumerate() {
             for pattern in &rule.globs {
@@ -42,11 +42,7 @@ impl RuleIndex {
             }
         }
 
-        let globset = builder.build().unwrap_or_else(|_| {
-            GlobSetBuilder::new()
-                .build()
-                .unwrap_or_else(|_| unreachable!("empty globset always builds"))
-        });
+        let globset = builder.build().unwrap_or_else(|_| GlobSet::empty());
         let injected = Mutex::new(vec![false; rules.len()]);
 
         Self {
@@ -61,41 +57,29 @@ impl RuleIndex {
     pub fn match_file(&self, path: &Path) -> Vec<&Rule> {
         let mut injected = self.injected.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Vec::new();
-        let mut seen = Vec::new();
-
         let mut try_rule = |rule_idx: usize| {
-            if !injected[rule_idx] && !seen.contains(&rule_idx) {
-                seen.push(rule_idx);
+            if !std::mem::replace(&mut injected[rule_idx], true) {
                 result.push(&self.rules[rule_idx]);
-                injected[rule_idx] = true;
             }
         };
 
-        let glob_matches: Vec<usize> = self
+        let glob_matches = self
             .globset
             .matches(path)
             .into_iter()
-            .map(|glob_idx| self.glob_to_rule[glob_idx])
-            .collect();
+            .map(|glob_idx| self.glob_to_rule[glob_idx]);
 
         let language_matches = mush_treesitter::Language::detect(path)
-            .map(|lang| lang.name().to_lowercase())
-            .and_then(|lang_name| self.lang_to_rules.get(&lang_name).cloned())
-            .unwrap_or_default();
+            .and_then(|lang| self.lang_to_rules.get(&lang.name().to_lowercase()))
+            .map_or(&[][..], Vec::as_slice);
 
         if language_matches.is_empty() {
-            for rule_idx in glob_matches {
-                try_rule(rule_idx);
-            }
+            glob_matches.for_each(&mut try_rule);
         } else {
-            for rule_idx in language_matches {
-                try_rule(rule_idx);
-            }
-            for rule_idx in glob_matches {
-                if !self.rules[rule_idx].languages.is_empty() {
-                    try_rule(rule_idx);
-                }
-            }
+            language_matches.iter().copied().for_each(&mut try_rule);
+            glob_matches
+                .filter(|&rule_idx| !self.rules[rule_idx].languages.is_empty())
+                .for_each(&mut try_rule);
         }
 
         result
@@ -128,23 +112,18 @@ fn parse_bracket_list(val: &str) -> Option<Vec<String>> {
 }
 
 fn parse_globs(frontmatter: &str) -> Option<Vec<String>> {
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("globs:") {
-            return parse_bracket_list(val);
-        }
-    }
-    None
+    parse_list_field(frontmatter, "globs:")
 }
 
 fn parse_languages(frontmatter: &str) -> Option<Vec<String>> {
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("languages:") {
-            return parse_bracket_list(val);
-        }
-    }
-    None
+    parse_list_field(frontmatter, "languages:")
+}
+
+fn parse_list_field(frontmatter: &str, key: &str) -> Option<Vec<String>> {
+    frontmatter
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(key))
+        .and_then(parse_bracket_list)
 }
 
 pub fn discover_rules(cwd: &Path) -> Vec<Rule> {
