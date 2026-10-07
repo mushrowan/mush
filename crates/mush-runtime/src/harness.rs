@@ -86,7 +86,7 @@ impl HarnessStore {
         event: mush_session::harness::RefinementEvent,
     ) -> Result<mush_session::harness::RefinementEvent, String> {
         let _guard = self.lock.lock();
-        let scope = if global { Scope::Global } else { Scope::Local };
+        let scope = scope_for(global);
         self.write(scope, |state| {
             state.refinements.push(event.clone());
             Ok(event)
@@ -111,7 +111,7 @@ impl HarnessStore {
 
     pub fn create(&self, global: bool, edit: &Edit) -> Result<Entry, String> {
         let _guard = self.lock.lock();
-        let scope = if global { Scope::Global } else { Scope::Local };
+        let scope = scope_for(global);
         self.write(scope, |state| state.upsert(edit, scope, "agent"))
     }
 
@@ -146,6 +146,10 @@ impl HarnessStore {
             .map_err(|error| format!("could not save the harness state: {error}"))?;
         Ok(outcome)
     }
+}
+
+fn scope_for(global: bool) -> Scope {
+    if global { Scope::Global } else { Scope::Local }
 }
 
 fn route(id: &str, global: bool) -> (String, Option<Scope>) {

@@ -269,6 +269,14 @@ pub struct InProcessConnection {
 
 pub type SystemPromptBuilder = Arc<dyn Fn() -> String + Send + Sync>;
 
+fn status_event(text: impl Into<String>) -> ClientEvent {
+    ClientEvent::Session(SessionEvent::Status(text.into()))
+}
+
+fn failed_event(text: impl Into<String>) -> ClientEvent {
+    ClientEvent::Session(SessionEvent::Failed(text.into()))
+}
+
 fn take_finished<T>(slot: &mut Option<JoinHandle<T>>) -> Option<Result<T, JoinError>> {
     let result = slot
         .as_mut()
@@ -361,10 +369,7 @@ impl InProcessConnection {
                         );
                         self.runtime.save_now_and_settle();
                     }
-                    self.queued
-                        .push_back(ClientEvent::Session(SessionEvent::Status(
-                            error.to_string(),
-                        )));
+                    self.queued.push_back(status_event(error.to_string()));
                 }
             }
         }
@@ -775,10 +780,9 @@ impl InProcessConnection {
 
     fn report_inbox_disabled(&mut self, error: &std::io::Error) {
         tracing::warn!(%error, "orchestrator inbox disabled");
-        self.queued
-            .push_back(ClientEvent::Session(SessionEvent::Status(format!(
-                "orchestrator inbox disabled: {error}. restart to reconnect"
-            ))));
+        self.queued.push_back(status_event(format!(
+            "orchestrator inbox disabled: {error}. restart to reconnect"
+        )));
     }
 
     pub async fn poll_inbox(&mut self) -> bool {
@@ -907,9 +911,7 @@ impl InProcessConnection {
             let tree = self.runtime.conversation.tree();
             let Some(target) = tree.by_id(&entry_id) else {
                 self.queued
-                    .push_back(ClientEvent::Session(SessionEvent::Failed(
-                        "that message is no longer in the tree".into(),
-                    )));
+                    .push_back(failed_event("that message is no longer in the tree"));
                 return;
             };
             tree.abandoned_by_moving_to(crate::commands::navigation_leaf(tree, target).as_ref())
@@ -942,9 +944,7 @@ impl InProcessConnection {
         });
         self.branch_summary = Some((entry_id, task));
         self.queued
-            .push_back(ClientEvent::Session(SessionEvent::Status(
-                "summarising the branch you're leaving…".into(),
-            )));
+            .push_back(status_event("summarising the branch you're leaving…"));
     }
 
     fn try_poll_branch_summary(&mut self) -> Option<ClientEvent> {
@@ -1032,7 +1032,7 @@ impl InProcessConnection {
     fn try_poll_kernel_restore(&mut self) -> Option<ClientEvent> {
         let status = self.runtime.settle_kernel_restore()?;
         self.runtime.save_now_and_settle();
-        Some(ClientEvent::Session(SessionEvent::Status(status)))
+        Some(status_event(status))
     }
 
     async fn submit_kernel_notices(&mut self) {
@@ -1500,8 +1500,7 @@ impl AgentConnection for InProcessConnection {
                     .push_back(ClientEvent::Session(SessionEvent::Accounts(
                         self.runtime.accounts.clone(),
                     )));
-                self.queued
-                    .push_back(ClientEvent::Session(SessionEvent::Status(status)));
+                self.queued.push_back(status_event(status));
             }
             ClientCommand::SetPaused(pause) => {
                 if self.runtime.paused != pause {

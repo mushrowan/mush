@@ -1,8 +1,9 @@
 use mush_ai::types::Message;
 use mush_session::compact::CompactionFocus;
 
-use super::{ClientEvent, ConnectionError, ContextUsage, InProcessConnection, take_finished};
-use crate::commands::SessionEvent;
+use super::{
+    ClientEvent, ConnectionError, ContextUsage, InProcessConnection, failed_event, take_finished,
+};
 use crate::compaction::CompactionTaskResult;
 
 pub(super) struct FailedCompaction {
@@ -80,9 +81,9 @@ impl InProcessConnection {
                     )
                     .is_none()
                 {
-                    return ClientEvent::Session(SessionEvent::Failed(String::from(
+                    return failed_event(
                         "compaction discarded, the conversation changed while it ran",
-                    )));
+                    );
                 }
                 if let Some(commands) = &self.host_commands {
                     commands.record_context(ContextUsage {

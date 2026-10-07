@@ -1,7 +1,7 @@
 use super::{
-    ClientEvent, ConnectionError, InProcessConnection, take_finished, take_finished_keyed,
+    ClientEvent, ConnectionError, InProcessConnection, failed_event, status_event, take_finished,
+    take_finished_keyed,
 };
-use crate::commands::SessionEvent;
 
 impl InProcessConnection {
     pub(super) async fn start_refine(
@@ -35,12 +35,11 @@ impl InProcessConnection {
             request,
             thinking,
         )));
-        self.queued
-            .push_back(ClientEvent::Session(SessionEvent::Status(if rollback {
-                "rolling the harness back…".into()
-            } else {
-                "refining the harness…".into()
-            })));
+        self.queued.push_back(status_event(if rollback {
+            "rolling the harness back…"
+        } else {
+            "refining the harness…"
+        }));
         Ok(())
     }
 
@@ -122,9 +121,9 @@ impl InProcessConnection {
         self.host_commands
             .get_or_insert_with(Default::default)
             .replace_refine(request);
-        Some(ClientEvent::Session(SessionEvent::Status(
-            "auto-refine review approved, refining after this turn…".into(),
-        )))
+        Some(status_event(
+            "auto-refine review approved, refining after this turn…",
+        ))
     }
 
     pub(super) fn try_poll_refine(&mut self) -> Option<ClientEvent> {
@@ -147,7 +146,7 @@ impl InProcessConnection {
                 self.runtime.save_now_and_settle();
                 ClientEvent::Refined(Box::new(result))
             }
-            Err(error) => ClientEvent::Session(SessionEvent::Failed(format!("refine: {error}"))),
+            Err(error) => failed_event(format!("refine: {error}")),
         })
     }
 }
