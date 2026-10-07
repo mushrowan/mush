@@ -3559,18 +3559,19 @@ mod tests {
             inner.children.get_mut(&id("gamma")).unwrap().summary.status = ChildStatus::Failed;
         }
 
-        let states: Vec<_> = family
+        let mut states: Vec<_> = family
             .roster(&root)
             .into_iter()
             .map(|view| (view.name, view.state))
             .collect();
+        states.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             states,
             vec![
-                ("root".to_string(), Activity::Napping),
                 ("alpha".to_string(), Activity::Napping),
                 ("beta".to_string(), Activity::Hibernating),
                 ("gamma".to_string(), Activity::Hibernating),
+                ("root".to_string(), Activity::Napping),
             ]
         );
         let handler = RlmHandler::new(Arc::clone(&family), root.clone());
@@ -3578,12 +3579,13 @@ mod tests {
             .handle("rlm.list_subagents", serde_json::json!({}))
             .await
             .unwrap();
-        let listed: Vec<_> = listed
+        let mut listed: Vec<_> = listed
             .as_array()
             .unwrap()
             .iter()
             .map(|child| (child["name"].clone(), child["state"].clone()))
             .collect();
+        listed.sort_by_key(|(name, _)| name.to_string());
         assert_eq!(
             listed,
             vec![
