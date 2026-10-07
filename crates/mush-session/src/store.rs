@@ -453,14 +453,42 @@ fn cap_entry(entry: &mut crate::tree::SessionEntry) -> bool {
 }
 
 pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
-    #[derive(serde::Deserialize)]
-    struct MetaEnvelope {
-        meta: SessionMeta,
+    struct MetaFirst<'a>(&'a mut Option<SessionMeta>);
+
+    impl<'de> serde::de::Visitor<'de> for MetaFirst<'_> {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a session object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "meta" {
+                    *self.0 = Some(map.next_value()?);
+                    return Ok(());
+                }
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+            Ok(())
+        }
     }
 
-    let json = std::fs::read_to_string(path)?;
-    let envelope: MetaEnvelope = serde_json::from_str(&json)?;
-    Ok(envelope.meta)
+    let file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut meta = None;
+    // stopping at meta leaves the rest of the object unread, which serde_json
+    // reports as an error, so a found meta wins over the parse result
+    let parsed = serde::Deserializer::deserialize_map(
+        &mut serde_json::Deserializer::from_reader(file),
+        MetaFirst(&mut meta),
+    );
+    match (meta, parsed) {
+        (Some(meta), _) => Ok(meta),
+        (None, Err(error)) => Err(error.into()),
+        (None, Ok(())) => {
+            Err(<serde_json::Error as serde::de::Error>::missing_field("meta").into())
+        }
+    }
 }
 
 pub fn data_dir() -> PathBuf {
@@ -895,6 +923,43 @@ mod tests {
         assert!(report.ignored.iter().any(|ignored| {
             ignored.path.ends_with("empty.json") && ignored.reason.contains("zero-byte")
         }));
+    }
+
+    #[test]
+    fn listing_reads_meta_wherever_it_sits_and_stops_once_found() {
+        let (dir, store) = temp_store();
+        let session = Session::new("model-a", "/tmp");
+        let meta = serde_json::to_string(&session.meta).unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        mush_ai::private_io::write_atomic(
+            &sessions_dir.join("first.json"),
+            format!(r#"{{"meta": {meta}, "tree": {{"entries": [not json"#),
+        )
+        .unwrap();
+        mush_ai::private_io::write_atomic(
+            &sessions_dir.join("last.json"),
+            format!(r#"{{"tree": {{"entries": [1, {{"a": "b"}}]}}, "meta": {meta}}}"#),
+        )
+        .unwrap();
+        mush_ai::private_io::write_atomic(&sessions_dir.join("none.json"), r#"{"tree": {}}"#)
+            .unwrap();
+
+        let report = store.list_report().unwrap();
+
+        assert_eq!(report.sessions.len(), 2);
+        assert!(
+            report
+                .sessions
+                .iter()
+                .all(|listed| listed.id == session.meta.id)
+        );
+        assert_eq!(report.ignored.len(), 1);
+        assert!(report.ignored[0].path.ends_with("none.json"));
+        assert!(
+            report.ignored[0].reason.contains("meta"),
+            "{}",
+            report.ignored[0].reason
+        );
     }
 
     #[test]
