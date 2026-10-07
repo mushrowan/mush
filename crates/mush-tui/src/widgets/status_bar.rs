@@ -70,6 +70,11 @@ impl StatusSpansBuilder {
         }
     }
 
+    fn push_section(&mut self, span: Span<'static>) {
+        self.section_break();
+        self.push_inline(span);
+    }
+
     fn push_inline(&mut self, span: Span<'static>) {
         self.spans.push(span);
         self.has_content = true;
@@ -95,14 +100,27 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     #[cfg(test)]
     LEFT_SPANS_CALLS.with(|c| c.set(c.get() + 1));
 
-    let dim = app.theme.dim;
-
-    let normalized = app.thinking_level.normalize_visible();
-    let thinking_label = normalized.effort_name().unwrap_or("off");
-
     let mut b = StatusSpansBuilder::new(&app.theme);
-    let mut cache_timer_text = None;
+    push_model_sections(&mut b, app);
+    if app.interaction.show_token_counters {
+        push_token_counters(&mut b, app);
+    }
+    let cache_timer_text = push_context_section(&mut b, app);
+    if app.interaction.show_cost && app.stats.total_cost > Dollars::ZERO {
+        b.push_inline(Span::styled(
+            format!(" {}", app.stats.total_cost),
+            app.theme.dim,
+        ));
+    }
+    push_oauth_usage(&mut b, app, width);
+    push_activity_sections(&mut b, app);
+    LeftStatus {
+        spans: b.into_spans(),
+        cache_timer_text,
+    }
+}
 
+fn push_model_sections(b: &mut StatusSpansBuilder, app: &App) {
     if app.interaction.status_bar.show_pane_indicator
         && let Some((pane_idx, pane_count)) = app.pane_info
     {
@@ -120,11 +138,12 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     if app.interaction.status_bar.show_thinking {
-        b.section_break();
-        b.push_inline(Span::styled(
+        let normalized = app.thinking_level.normalize_visible();
+        let thinking_label = normalized.effort_name().unwrap_or("off");
+        b.push_section(Span::styled(
             format!("thinking: {thinking_label}"),
             if app.thinking_level == ThinkingLevel::Off {
-                dim
+                app.theme.dim
             } else {
                 app.theme.status_model
             },
@@ -132,111 +151,123 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     if app.paused.is_some() {
-        b.section_break();
-        b.push_inline(Span::styled("paused", app.theme.tool_error));
+        b.push_section(Span::styled("paused", app.theme.tool_error));
     }
 
     if let Some(subagent) = &app.subagent_model_id {
-        b.section_break();
-        b.push_inline(Span::styled(
+        b.push_section(Span::styled(
             format!("sub: {}", subagent.abbreviated()),
             app.theme.status_model,
         ));
     }
+}
 
-    if app.interaction.show_token_counters {
-        for (marker, tokens) in [
-            ("↑", app.stats.input_tokens),
-            ("↓", app.stats.output_tokens),
-            ("R", app.stats.cache_read_tokens),
-            ("W", app.stats.cache_write_tokens),
-        ] {
-            if tokens > TokenCount::ZERO {
-                b.push_inline(Span::styled(
-                    format!(" {marker}{}", format_tokens(tokens)),
-                    dim,
-                ));
-            }
-        }
-    }
-
-    if app.interaction.status_bar.show_context && app.stats.context_tokens > TokenCount::ZERO {
-        let ctx = format_tokens(app.stats.context_tokens);
-        let window = format_tokens(app.stats.context_window);
-        let pct = app
-            .stats
-            .context_tokens
-            .percent_of(app.stats.context_window) as u64;
-
-        let cache_remaining = app.cache.remaining_secs();
-        let cache_tiers = cache_warning_display_for_app(app);
-        let ctx_style = if pct > 75 {
-            app.theme.context_danger
-        } else if app.cache.ttl_secs == 0 {
-            dim
-        } else {
-            match cache_remaining {
-                Some(r) if r > crate::app::CACHE_WARN_SECS => app.theme.context_ok,
-                Some(r) if r > 0 => app.theme.context_warn,
-                Some(0) => app.theme.context_cold,
-                _ => dim,
-            }
-        };
-
-        let CacheSuffix {
-            display: cache_suffix,
-            ticking,
-        } = cache_suffix_for_app(app, cache_tiers, cache_remaining);
-        cache_timer_text = ticking;
-
-        b.section_break();
-        b.push_inline(Span::styled(
-            format!("{ctx}/{window}{cache_suffix}"),
-            ctx_style,
-        ));
-    }
-
-    if app.interaction.show_cost && app.stats.total_cost > Dollars::ZERO {
-        b.push_inline(Span::styled(format!(" {}", app.stats.total_cost), dim));
-    }
-
-    if app.interaction.status_bar.show_oauth_usage
-        && app.oauth_usage_provider.as_deref() == Some("anthropic")
-        && app.model_id.as_str().contains("claude")
-        && let Some(ref usage) = app.oauth_usage
-    {
-        let bar_w = usage_bar_width(width);
-        let windows = [
-            (
-                "5h",
-                &usage.five_hour,
-                mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR,
-            ),
-            (
-                "7d",
-                &usage.seven_day,
-                mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY,
-            ),
-        ];
-        for (label, window, length) in windows {
-            let Some(w) = window else { continue };
-            let pace = w.pace(length);
-            b.section_break();
-            b.push_inline(Span::styled(format!("{label} "), dim));
-            b.extend_inline(super::usage_bar::render_usage_bar_width(
-                w.utilization,
-                pace,
-                bar_w,
+fn push_token_counters(b: &mut StatusSpansBuilder, app: &App) {
+    for (marker, tokens) in [
+        ("↑", app.stats.input_tokens),
+        ("↓", app.stats.output_tokens),
+        ("R", app.stats.cache_read_tokens),
+        ("W", app.stats.cache_write_tokens),
+    ] {
+        if tokens > TokenCount::ZERO {
+            b.push_inline(Span::styled(
+                format!(" {marker}{}", format_tokens(tokens)),
+                app.theme.dim,
             ));
-            b.push_inline(Span::styled(format!(" {}%", w.utilization as u32), dim));
         }
     }
+}
 
+fn push_context_section(b: &mut StatusSpansBuilder, app: &App) -> Option<String> {
+    if !app.interaction.status_bar.show_context || app.stats.context_tokens == TokenCount::ZERO {
+        return None;
+    }
+    let ctx = format_tokens(app.stats.context_tokens);
+    let window = format_tokens(app.stats.context_window);
+    let pct = app
+        .stats
+        .context_tokens
+        .percent_of(app.stats.context_window) as u64;
+
+    let cache_remaining = app.cache.remaining_secs();
+    let cache_tiers = cache_warning_display_for_app(app);
+    let ctx_style = if pct > 75 {
+        app.theme.context_danger
+    } else if app.cache.ttl_secs == 0 {
+        app.theme.dim
+    } else {
+        match cache_remaining {
+            Some(r) if r > crate::app::CACHE_WARN_SECS => app.theme.context_ok,
+            Some(r) if r > 0 => app.theme.context_warn,
+            Some(0) => app.theme.context_cold,
+            _ => app.theme.dim,
+        }
+    };
+
+    let CacheSuffix { display, ticking } = cache_suffix_for_app(app, cache_tiers, cache_remaining);
+    b.push_section(Span::styled(format!("{ctx}/{window}{display}"), ctx_style));
+    ticking
+}
+
+fn push_oauth_usage(b: &mut StatusSpansBuilder, app: &App, width: u16) {
+    if !app.interaction.status_bar.show_oauth_usage
+        || app.oauth_usage_provider.as_deref() != Some("anthropic")
+        || !app.model_id.as_str().contains("claude")
+    {
+        return;
+    }
+    let Some(usage) = &app.oauth_usage else {
+        return;
+    };
+    let dim = app.theme.dim;
+    let bar_w = usage_bar_width(width);
+    let windows = [
+        (
+            "5h",
+            &usage.five_hour,
+            mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR,
+        ),
+        (
+            "7d",
+            &usage.seven_day,
+            mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY,
+        ),
+    ];
+    for (label, window, length) in windows {
+        let Some(w) = window else { continue };
+        let pace = w.pace(length);
+        b.push_section(Span::styled(format!("{label} "), dim));
+        b.extend_inline(super::usage_bar::render_usage_bar_width(
+            w.utilization,
+            pace,
+            bar_w,
+        ));
+        b.push_inline(Span::styled(format!(" {}%", w.utilization as u32), dim));
+    }
+}
+
+fn goal_label(goal: &mush_runtime::Goal) -> Option<String> {
+    Some(match goal.status {
+        mush_runtime::GoalStatus::Active => format!(
+            "goal #{} · {}",
+            goal.continuations,
+            crate::turn_activity::format_elapsed(std::time::Duration::from_secs(
+                goal.elapsed_secs()
+            ))
+        ),
+        mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
+        mush_runtime::GoalStatus::BudgetLimited => "goal over budget".to_string(),
+        mush_runtime::GoalStatus::Failed => "goal failed".to_string(),
+        mush_runtime::GoalStatus::Complete => return None,
+    })
+}
+
+fn push_activity_sections(b: &mut StatusSpansBuilder, app: &App) {
+    let dim = app.theme.dim;
     if app.interaction.status_bar.show_status_messages
         && let Some(label) = app.activity_label()
     {
-        b.section_break();
-        b.push_inline(Span::styled(
+        b.push_section(Span::styled(
             format!(
                 "{} ",
                 crate::widgets::working_icon::working_icon(app.shimmer_phase())
@@ -254,47 +285,28 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     if app.interaction.status_bar.show_background_alerts
         && let Some(ref alert) = app.background_alert
     {
-        b.section_break();
-        b.push_inline(Span::styled(alert.clone(), app.theme.alert));
+        b.push_section(Span::styled(alert.clone(), app.theme.alert));
     }
 
-    if let Some(goal) = &app.goal
-        && goal.status != mush_runtime::GoalStatus::Complete
-    {
-        b.section_break();
-        let label = match goal.status {
-            mush_runtime::GoalStatus::Active => format!(
-                "goal #{} · {}",
-                goal.continuations,
-                crate::turn_activity::format_elapsed(std::time::Duration::from_secs(
-                    goal.elapsed_secs()
-                ))
-            ),
-            mush_runtime::GoalStatus::Paused => "goal paused".to_string(),
-            mush_runtime::GoalStatus::BudgetLimited => "goal over budget".to_string(),
-            mush_runtime::GoalStatus::Failed => "goal failed".to_string(),
-            mush_runtime::GoalStatus::Complete => String::new(),
-        };
-        b.push_inline(Span::styled(label, app.theme.status_model));
+    if let Some(label) = app.goal.as_ref().and_then(goal_label) {
+        b.push_section(Span::styled(label, app.theme.status_model));
     }
 
     if let Some(status) = &app.autonomous
         && status.enabled
     {
-        b.section_break();
-        b.push_inline(Span::styled(
+        b.push_section(Span::styled(
             format!("auto #{}", status.continuations),
             app.theme.status_model,
         ));
     }
 
     if let Some(heartbeat) = app.heartbeat() {
-        b.section_break();
         let label = match heartbeat.status {
             mush_runtime::JobStatus::Paused => "heartbeat paused".to_string(),
             _ => format!("heartbeat {}", heartbeat.expression),
         };
-        b.push_inline(Span::styled(label, dim));
+        b.push_section(Span::styled(label, dim));
     }
     let scheduled = app
         .jobs
@@ -305,15 +317,13 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         })
         .count();
     if scheduled > 0 {
-        b.section_break();
-        b.push_inline(Span::styled(format!("{scheduled} scheduled"), dim));
+        b.push_section(Span::styled(format!("{scheduled} scheduled"), dim));
     }
 
     if !app.children.is_empty() {
         let running = app.running_children();
         let total = app.children.len();
-        b.section_break();
-        b.push_inline(Span::styled(
+        b.push_section(Span::styled(
             format!("{running}/{total} agents"),
             if running > 0 {
                 app.theme.status_model
@@ -321,11 +331,6 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
                 dim
             },
         ));
-    }
-
-    LeftStatus {
-        spans: b.into_spans(),
-        cache_timer_text,
     }
 }
 
