@@ -20,6 +20,7 @@ fn serve_one_reply(listener: TcpListener) -> std::thread::JoinHandle<serde_json:
                 Err(error) => panic!("fixture accept: {error}"),
             }
         };
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

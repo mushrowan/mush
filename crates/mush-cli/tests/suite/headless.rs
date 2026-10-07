@@ -363,6 +363,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
         std::thread::sleep(Duration::from_millis(20));
     };
     let received = connection.map(|mut socket| {
+        socket.set_nonblocking(false).unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let mut bytes = Vec::new();
         let start = loop {
@@ -468,6 +469,7 @@ fn restarted_requests_keep_prefix(with_event: bool, with_control: bool) {
                 }
                 Err(error) => panic!("fixture accept: {error}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
