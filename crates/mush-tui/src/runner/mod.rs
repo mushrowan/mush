@@ -93,19 +93,7 @@ async fn run_tui_with(
     exit: ExitPolicy,
     startup_discovery: Option<std::sync::mpsc::Receiver<DiscoveryUpdate>>,
 ) -> io::Result<mush_ai::types::SessionId> {
-    let env = crate::terminal_policy::TtyEnvironment::detect();
-    if !env.is_tty() {
-        let reason = env.broken_reason().unwrap_or("unknown");
-        return Err(io::Error::new(
-            io::ErrorKind::NotConnected,
-            format!(
-                "mush TUI requires an interactive terminal: {reason}. \
-                 try `mush -p \"your prompt\"` for one-shot use, or run mush \
-                 directly in a terminal (not piped, not inside CI)"
-            ),
-        ));
-    }
-
+    require_tty()?;
     restore_terminal_state();
     let mut startup_phases = vec![diag::StartupPhase::new(
         "after_preflight_restore",
@@ -149,12 +137,7 @@ async fn run_tui_with(
         runtime.session.app.push_system_message(notice);
     }
     for command in std::mem::take(&mut tui_config.startup_commands) {
-        match runtime.session.connection.send(command).await {
-            Ok(events) => {
-                looping::apply_command_events(&mut runtime.session, &mut tui_config, events).await;
-            }
-            Err(error) => runtime.session.app.push_system_message(error.to_string()),
-        }
+        commands::send_command(&mut runtime.session, &mut tui_config, command).await;
     }
 
     draw_panes(
@@ -179,44 +162,22 @@ async fn run_tui_with(
     }
     let mut last_draw = std::time::Instant::now();
     let mut last_animation = std::time::Instant::now();
-    let mut loop_iteration = 0u64;
-    let mut draw_count = 1u64;
-    let stall_watchdog = diag::StallWatchdog::from_env();
+    let mut progress = LoopProgress {
+        watchdog: diag::StallWatchdog::from_env(),
+        iteration: 0,
+        draws: 1,
+    };
 
     'ui: loop {
-        loop_iteration = loop_iteration.wrapping_add(1);
-        report_loop_progress(
-            &stall_watchdog,
+        progress.iteration = progress.iteration.wrapping_add(1);
+        progress.report(
             &runtime,
-            loop_iteration,
-            draw_count,
             "start_pending_streams",
             "before start_pending_streams",
         );
-        {
-            let thinking_level = runtime.session.app.thinking_level.clone();
-            let connection = &mut runtime.session.connection;
-            if connection.state().thinking_level != thinking_level {
-                let _ = connection
-                    .send(mush_runtime::ClientCommand::SetThinking(thinking_level))
-                    .await;
-            }
-            if let Some(prompt) = runtime.pending_prompt.take() {
-                let _ = connection
-                    .send(mush_runtime::ClientCommand::QueuePrompt {
-                        text: prompt,
-                        images: Vec::new(),
-                    })
-                    .await;
-            }
-            connection.tick().await;
-        }
-
-        report_loop_progress(
-            &stall_watchdog,
+        start_pending_streams(&mut runtime).await;
+        progress.report(
             &runtime,
-            loop_iteration,
-            draw_count,
             "waiting_for_event",
             "parked before select/input handling",
         );
@@ -229,11 +190,8 @@ async fn run_tui_with(
             last_draw,
         )
         .await?;
-        report_loop_progress(
-            &stall_watchdog,
+        progress.report(
             &runtime,
-            loop_iteration,
-            draw_count,
             "post_loop_iteration",
             format!("action={action:?}"),
         );
@@ -263,21 +221,14 @@ async fn run_tui_with(
             }
             trace_draw_reasons(action, discovery_updated, maintenance_tick);
             runtime.poll_usage();
-            report_loop_progress(
-                &stall_watchdog,
-                &runtime,
-                loop_iteration,
-                draw_count,
-                "draw",
-                "before draw_panes",
-            );
+            progress.report(&runtime, "draw", "before draw_panes");
             draw_panes(
                 &mut terminal,
                 &mut screen,
                 &mut runtime.session,
                 &tui_config.settings,
             )?;
-            draw_count = draw_count.wrapping_add(1);
+            progress.draws = progress.draws.wrapping_add(1);
             last_draw = std::time::Instant::now();
         }
     }
@@ -299,24 +250,60 @@ async fn run_tui_with(
     Ok(runtime.session.connection.state().session_id)
 }
 
-fn report_loop_progress(
-    watchdog: &diag::StallWatchdog,
-    runtime: &RunnerRuntime,
-    loop_iteration: u64,
-    draw_count: u64,
-    phase: &'static str,
-    detail: impl Into<String>,
-) {
-    watchdog.progress(
-        phase,
-        detail,
-        diag::LoopSnapshot {
-            loop_iteration,
-            draw_count,
-            active_streams: runtime.session.connection.state().active_turns,
-            active_tools: runtime.active_tool_labels(),
-        },
-    );
+fn require_tty() -> io::Result<()> {
+    let env = crate::terminal_policy::TtyEnvironment::detect();
+    if env.is_tty() {
+        return Ok(());
+    }
+    let reason = env.broken_reason().unwrap_or("unknown");
+    Err(io::Error::new(
+        io::ErrorKind::NotConnected,
+        format!(
+            "mush TUI requires an interactive terminal: {reason}. \
+             try `mush -p \"your prompt\"` for one-shot use, or run mush \
+             directly in a terminal (not piped, not inside CI)"
+        ),
+    ))
+}
+
+async fn start_pending_streams(runtime: &mut RunnerRuntime) {
+    let thinking_level = runtime.session.app.thinking_level.clone();
+    let connection = &mut runtime.session.connection;
+    if connection.state().thinking_level != thinking_level {
+        let _ = connection
+            .send(mush_runtime::ClientCommand::SetThinking(thinking_level))
+            .await;
+    }
+    if let Some(prompt) = runtime.pending_prompt.take() {
+        let _ = connection
+            .send(mush_runtime::ClientCommand::QueuePrompt {
+                text: prompt,
+                images: Vec::new(),
+            })
+            .await;
+    }
+    connection.tick().await;
+}
+
+struct LoopProgress {
+    watchdog: diag::StallWatchdog,
+    iteration: u64,
+    draws: u64,
+}
+
+impl LoopProgress {
+    fn report(&self, runtime: &RunnerRuntime, phase: &'static str, detail: impl Into<String>) {
+        self.watchdog.progress(
+            phase,
+            detail,
+            diag::LoopSnapshot {
+                loop_iteration: self.iteration,
+                draw_count: self.draws,
+                active_streams: runtime.session.connection.state().active_turns,
+                active_tools: runtime.active_tool_labels(),
+            },
+        );
+    }
 }
 
 fn trace_draw_reasons(action: LoopAction, discovery_updated: bool, maintenance_tick: bool) {
