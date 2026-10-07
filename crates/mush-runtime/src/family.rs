@@ -1380,7 +1380,7 @@ impl Family {
             if let Some(control) = control {
                 let _ = control.send(ClientCommand::SetPaused(pause.cloned()));
             }
-            self.update(&id, |child| child.paused = pause.cloned());
+            self.update_then(&id, |child| child.paused = pause.cloned(), |_| {});
             if let Some(summary) = self
                 .lock()
                 .children
