@@ -218,27 +218,7 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
             .keymap
             .matches_in(KeyScope::ModelPicker, Action::Confirm, key) =>
         {
-            let id = app.selected_model_id()?;
-            let picker = app.interaction.model_picker.as_ref();
-            let show_all = picker.map(|p| p.show_all).unwrap_or(false);
-            let subagent = picker
-                .is_some_and(|p| p.purpose == crate::model_picker::ModelPickerPurpose::Subagent);
-            app.close_model_picker();
-            if subagent {
-                let unset = id == crate::model_picker::INHERIT_ID;
-                return Some(AppEvent::SlashCommand {
-                    action: crate::slash::SlashAction::SubagentModel {
-                        model_id: (!unset).then_some(id),
-                        unset,
-                    },
-                });
-            }
-            Some(AppEvent::SlashCommand {
-                action: crate::slash::SlashAction::Model {
-                    model_id: Some(id),
-                    show_all,
-                },
-            })
+            confirm_model_pick(app)
         }
         _ if app
             .keymap
@@ -304,6 +284,28 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
         }
         _ => None,
     }
+}
+
+fn confirm_model_pick(app: &mut App) -> Option<AppEvent> {
+    let id = app.selected_model_id()?;
+    let picker = app.interaction.model_picker.as_ref();
+    let show_all = picker.map(|p| p.show_all).unwrap_or(false);
+    let subagent =
+        picker.is_some_and(|p| p.purpose == crate::model_picker::ModelPickerPurpose::Subagent);
+    app.close_model_picker();
+    let action = if subagent {
+        let unset = id == crate::model_picker::INHERIT_ID;
+        crate::slash::SlashAction::SubagentModel {
+            model_id: (!unset).then_some(id),
+            unset,
+        }
+    } else {
+        crate::slash::SlashAction::Model {
+            model_id: Some(id),
+            show_all,
+        }
+    };
+    Some(AppEvent::SlashCommand { action })
 }
 
 fn toggle_overlay_favourite(app: &mut App) -> Option<AppEvent> {
@@ -386,29 +388,16 @@ pub(crate) fn reload_model_completions(app: &mut App) {
 }
 
 pub(super) fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
-    if app
-        .interaction
-        .login_picker
-        .as_ref()
-        .is_some_and(|p| p.validating.is_some())
-    {
-        return None;
-    }
-    if app
-        .interaction
-        .login_picker
-        .as_ref()
-        .is_some_and(|p| p.confirm_logout.is_some())
-    {
-        return handle_login_picker_logout_confirm_key(app, key);
-    }
-    if app
-        .interaction
-        .login_picker
-        .as_ref()
-        .is_some_and(|p| p.entry.is_some())
-    {
-        return handle_login_picker_entry_key(app, key);
+    if let Some(picker) = &app.interaction.login_picker {
+        if picker.validating.is_some() {
+            return None;
+        }
+        if picker.confirm_logout.is_some() {
+            return handle_login_picker_logout_confirm_key(app, key);
+        }
+        if picker.entry.is_some() {
+            return handle_login_picker_entry_key(app, key);
+        }
     }
 
     match (key.modifiers, key.code) {
@@ -418,39 +407,7 @@ pub(super) fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
             app.close_login_picker();
             None
         }
-        _ if app.keymap.matches(Action::Confirm, key) => {
-            let (id, method, logged_in) = {
-                let picker = app.interaction.login_picker.as_ref()?;
-                let visible = crate::login_picker::filtered_entries(picker);
-                let entry = visible.get(picker.selected)?;
-                (entry.id.clone(), entry.method.clone(), entry.logged_in())
-            };
-            if logged_in {
-                if let Some(picker) = app.interaction.login_picker.as_mut() {
-                    picker.arm_logout();
-                }
-                return None;
-            }
-            match method {
-                mush_ai::login::LoginMethod::OAuth { oauth_provider_id } => {
-                    app.close_login_picker();
-                    Some(AppEvent::SlashCommand {
-                        action: crate::slash::SlashAction::Login {
-                            provider: Some(oauth_provider_id),
-                            account: None,
-                        },
-                    })
-                }
-                mush_ai::login::LoginMethod::ApiKey { .. } => {
-                    if let Some(picker) = app.interaction.login_picker.as_mut() {
-                        picker.arm_entry();
-                        picker.toast =
-                            Some(format!("paste {id} api key, enter saves, esc cancels"));
-                    }
-                    None
-                }
-            }
-        }
+        _ if app.keymap.matches(Action::Confirm, key) => confirm_login_pick(app),
         _ if app.keymap.matches(Action::PreviousItem, key) => {
             if let Some(picker) = app.interaction.login_picker.as_mut() {
                 picker.select_previous();
@@ -476,6 +433,39 @@ pub(super) fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
             None
         }
         _ => None,
+    }
+}
+
+fn confirm_login_pick(app: &mut App) -> Option<AppEvent> {
+    let (id, method, logged_in) = {
+        let picker = app.interaction.login_picker.as_ref()?;
+        let visible = crate::login_picker::filtered_entries(picker);
+        let entry = visible.get(picker.selected)?;
+        (entry.id.clone(), entry.method.clone(), entry.logged_in())
+    };
+    if logged_in {
+        if let Some(picker) = app.interaction.login_picker.as_mut() {
+            picker.arm_logout();
+        }
+        return None;
+    }
+    match method {
+        mush_ai::login::LoginMethod::OAuth { oauth_provider_id } => {
+            app.close_login_picker();
+            Some(AppEvent::SlashCommand {
+                action: crate::slash::SlashAction::Login {
+                    provider: Some(oauth_provider_id),
+                    account: None,
+                },
+            })
+        }
+        mush_ai::login::LoginMethod::ApiKey { .. } => {
+            if let Some(picker) = app.interaction.login_picker.as_mut() {
+                picker.arm_entry();
+                picker.toast = Some(format!("paste {id} api key, enter saves, esc cancels"));
+            }
+            None
+        }
     }
 }
 
