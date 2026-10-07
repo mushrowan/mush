@@ -29,7 +29,6 @@ impl ApiProvider for OpenaiCompletionsProvider {
             .ok_or_else(|| {
                 crate::auth::missing_key_error(&model.provider, options.oauth_account.as_ref())
             })?;
-        let api_key_str = api_key.expose();
         let body = build_request_body(
             model,
             &context.system_prompt,
@@ -40,9 +39,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let mut auth = HeaderValue::from_str(&format!("Bearer {api_key_str}"))?;
-        auth.set_sensitive(true);
-        headers.insert(AUTHORIZATION, auth);
+        headers.insert(AUTHORIZATION, super::bearer_header(api_key.expose())?);
 
         let base_url = &model.base_url;
         let url = format!("{base_url}/chat/completions");
@@ -50,14 +47,7 @@ impl ApiProvider for OpenaiCompletionsProvider {
 
         tracing::debug!(model = %model.id, %url, "sending openai completions request");
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .with_extension(crate::http::WireCallId(call_id))
-            .send()
-            .await?;
+        let response = super::post_json(&self.client, &url, headers, &body, call_id).await?;
 
         let response =
             super::check_response(response, "openai completions", model.id.as_str(), &url).await?;
@@ -402,6 +392,13 @@ impl OpenaiVisitor<'_> {
 
 const MAX_TOOL_CALL_ID_CHARS: usize = 40;
 
+fn image_url_part(img: &ImageContent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image_url",
+        "image_url": { "url": super::image_data_url(img) },
+    })
+}
+
 impl super::MessageVisitor for OpenaiVisitor<'_> {
     fn on_user(&mut self, user: &UserMessage) {
         self.flush_images();
@@ -416,12 +413,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
                             "type": "text",
                             "text": t.text,
                         })),
-                        UserContentPart::Image(img) => Some(serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!("data:{};base64,{}", img.mime_type, img.data),
-                            }
-                        })),
+                        UserContentPart::Image(img) => Some(image_url_part(img)),
                     })
                     .collect();
                 serde_json::Value::Array(blocks)
@@ -554,12 +546,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
         if has_images && self.model.input.contains(&InputModality::Image) {
             self.pending_images
                 .extend(tr.content.iter().filter_map(|part| match part {
-                    ToolResultContentPart::Image(img) => Some(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": format!("data:{};base64,{}", img.mime_type, img.data),
-                        }
-                    })),
+                    ToolResultContentPart::Image(img) => Some(image_url_part(img)),
                     ToolResultContentPart::Text(_) => None,
                 }));
         }

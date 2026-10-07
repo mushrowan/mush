@@ -58,14 +58,7 @@ impl ApiProvider for OpenaiResponsesProvider {
         let headers = build_headers(&api_key, options, is_codex)?;
         let call_id = crate::wire_log::next_call_id();
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers)
-            .json(&body)
-            .with_extension(crate::http::WireCallId(call_id))
-            .send()
-            .await?;
+        let response = super::post_json(&self.client, &url, headers, &body, call_id).await?;
 
         let response = if response.status().as_u16() == 401 && codex_oauth {
             tracing::warn!(
@@ -81,13 +74,8 @@ impl ApiProvider for OpenaiResponsesProvider {
             {
                 Ok(Some(fresh)) => match ApiKey::new(fresh) {
                     Some(fresh) => {
-                        self.client
-                            .post(&url)
-                            .headers(build_headers(&fresh, options, is_codex)?)
-                            .json(&body)
-                            .with_extension(crate::http::WireCallId(call_id))
-                            .send()
-                            .await?
+                        let headers = build_headers(&fresh, options, is_codex)?;
+                        super::post_json(&self.client, &url, headers, &body, call_id).await?
                     }
                     None => response,
                 },
@@ -403,14 +391,7 @@ impl MessageVisitor for OpenaiResponsesVisitor<'_> {
                         UserContentPart::Image(img)
                             if self.model.input.contains(&InputModality::Image) =>
                         {
-                            content.push(serde_json::json!({
-                                "type": "input_image",
-                                "detail": "auto",
-                                "image_url": format!(
-                                    "data:{};base64,{}",
-                                    img.mime_type, img.data
-                                ),
-                            }));
+                            content.push(input_image(img));
                         }
                         UserContentPart::Image(_) => {}
                     }
@@ -484,14 +465,7 @@ impl MessageVisitor for OpenaiResponsesVisitor<'_> {
             })];
             for part in &tr.content {
                 if let ToolResultContentPart::Image(img) = part {
-                    content.push(serde_json::json!({
-                        "type": "input_image",
-                        "detail": "auto",
-                        "image_url": format!(
-                            "data:{};base64,{}",
-                            img.mime_type, img.data
-                        ),
-                    }));
+                    content.push(input_image(img));
                 }
             }
             self.out.push(serde_json::json!({
@@ -500,6 +474,14 @@ impl MessageVisitor for OpenaiResponsesVisitor<'_> {
             }));
         }
     }
+}
+
+fn input_image(img: &ImageContent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "input_image",
+        "detail": "auto",
+        "image_url": super::image_data_url(img),
+    })
 }
 
 fn normalized_call_id(id: &str) -> &str {
@@ -565,12 +547,9 @@ fn build_headers(
     options: &StreamOptions,
     is_codex: bool,
 ) -> Result<HeaderMap, ProviderError> {
-    let key = api_key.expose();
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
-    auth.set_sensitive(true);
-    headers.insert(AUTHORIZATION, auth);
+    headers.insert(AUTHORIZATION, super::bearer_header(api_key.expose())?);
 
     if is_codex {
         let account_id = options

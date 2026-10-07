@@ -237,84 +237,12 @@ impl ApiProvider for AnthropicProvider {
             url
         };
         let call_id = crate::wire_log::next_call_id();
-
-        if let Ok(body_json) = serde_json::to_string(&body) {
-            let system_json = body
-                .system
-                .as_ref()
-                .and_then(|s| serde_json::to_string(s).ok())
-                .unwrap_or_default();
-            let tools_json = body
-                .tools
-                .as_ref()
-                .and_then(|t| serde_json::to_string(t).ok())
-                .unwrap_or_default();
-            let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
-            let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
-                &system_json,
-                &tools_json,
-                &messages_json,
-            );
-            tracing::info!(
-                system = fp.system,
-                tools = fp.tools,
-                messages_prefix = fp.messages_prefix,
-                last_user = fp.last_user,
-                messages_tail = fp.messages_tail,
-                "anthropic request fingerprint"
-            );
-            let header_pairs: Vec<(String, String)> = headers
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.as_str().to_string(),
-                        value.to_str().unwrap_or("<non-utf8>").to_string(),
-                    )
-                })
-                .collect();
-            let header_refs: Vec<(&str, &str)> = header_pairs
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            let session = options
-                .session_id
-                .as_ref()
-                .map(|id| id.as_str().to_string());
-            let snapshot = crate::request_snapshot::dump(
-                "anthropic",
-                session.as_deref(),
-                &fp,
-                &body_json,
-                &header_refs,
-            );
-            let ttl_secs =
-                anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth)
-                    .map_or(0, |cc| {
-                        if cc.ttl.as_deref() == Some("1h") {
-                            3600
-                        } else {
-                            300
-                        }
-                    });
-            crate::request_snapshot::record_request(
-                session.as_deref().unwrap_or(""),
-                fp,
-                crate::request_snapshot::body_uses_context_management(&body_json),
-                ttl_secs,
-                snapshot,
-            );
-        }
+        record_request_snapshot(&body, &headers, model, options, is_oauth);
 
         tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&body)
-            .with_extension(crate::http::WireCallId(call_id))
-            .send()
-            .await?;
+        let response =
+            super::post_json(&self.client, &url, headers.clone(), &body, call_id).await?;
 
         let response = if response.status().as_u16() == 401 && is_oauth {
             tracing::warn!(
@@ -329,19 +257,11 @@ impl ApiProvider for AnthropicProvider {
             {
                 Ok(Some(fresh)) => {
                     if let Some(fresh_key) = ApiKey::new(fresh) {
-                        let key = fresh_key.expose();
-                        if let Ok(mut hv) = HeaderValue::from_str(&format!("Bearer {key}")) {
-                            hv.set_sensitive(true);
-                            headers.insert("authorization", hv);
+                        if let Ok(auth) = super::bearer_header(fresh_key.expose()) {
+                            headers.insert("authorization", auth);
                         }
                         headers.insert("x-stainless-retry-count", HeaderValue::from_static("1"));
-                        self.client
-                            .post(&url)
-                            .headers(headers)
-                            .json(&body)
-                            .with_extension(crate::http::WireCallId(call_id))
-                            .send()
-                            .await?
+                        super::post_json(&self.client, &url, headers, &body, call_id).await?
                     } else {
                         response
                     }
@@ -374,6 +294,68 @@ impl ApiProvider for AnthropicProvider {
 
         Ok(sse_stream)
     }
+}
+
+fn record_request_snapshot(
+    body: &RequestBody,
+    headers: &HeaderMap,
+    model: &Model,
+    options: &StreamOptions,
+    is_oauth: bool,
+) {
+    let Ok(body_json) = serde_json::to_string(body) else {
+        return;
+    };
+    let system_json = body
+        .system
+        .as_ref()
+        .and_then(|s| serde_json::to_string(s).ok())
+        .unwrap_or_default();
+    let tools_json = body
+        .tools
+        .as_ref()
+        .and_then(|t| serde_json::to_string(t).ok())
+        .unwrap_or_default();
+    let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
+    let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
+        &system_json,
+        &tools_json,
+        &messages_json,
+    );
+    tracing::info!(
+        system = fp.system,
+        tools = fp.tools,
+        messages_prefix = fp.messages_prefix,
+        last_user = fp.last_user,
+        messages_tail = fp.messages_tail,
+        "anthropic request fingerprint"
+    );
+    let session = options.session_id.as_ref().map(|id| id.as_str());
+    let snapshot = crate::request_snapshot::dump(
+        "anthropic",
+        session,
+        &fp,
+        &body_json,
+        &crate::http::header_pairs(headers),
+    );
+    let ttl_secs =
+        anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth).map_or(
+            0,
+            |cc| {
+                if cc.ttl.as_deref() == Some("1h") {
+                    3600
+                } else {
+                    300
+                }
+            },
+        );
+    crate::request_snapshot::record_request(
+        session.unwrap_or(""),
+        fp,
+        crate::request_snapshot::body_uses_context_management(&body_json),
+        ttl_secs,
+        snapshot,
+    );
 }
 
 #[derive(Serialize)]
@@ -706,10 +688,7 @@ fn build_request_headers(
         {
             headers.insert("x-claude-code-session-id", hv);
         }
-        let key = api_key.expose();
-        let mut auth = HeaderValue::from_str(&format!("Bearer {key}"))?;
-        auth.set_sensitive(true);
-        headers.insert("authorization", auth);
+        headers.insert("authorization", super::bearer_header(api_key.expose())?);
     } else {
         let key = api_key.expose();
         if !model.supports_adaptive_thinking {
@@ -1043,14 +1022,7 @@ impl MessageVisitor for AnthropicVisitor {
                             "type": "text",
                             "text": t.text,
                         })),
-                        UserContentPart::Image(img) => Some(serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": img.mime_type,
-                                "data": img.data,
-                            }
-                        })),
+                        UserContentPart::Image(img) => Some(image_block(img)),
                     })
                     .collect();
                 serde_json::Value::Array(blocks)
@@ -1140,31 +1112,10 @@ impl MessageVisitor for AnthropicVisitor {
     }
 
     fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
-        let content_blocks: serde_json::Value = if self.is_oauth {
+        let content_blocks = if self.is_oauth {
             claude_code_tool_result_content(tr, is_old_turn, self.trimming)
         } else {
-            serde_json::Value::Array(
-                tr.content
-                    .iter()
-                    .map(|part| match part {
-                        ToolResultContentPart::Text(t) => {
-                            let text = maybe_trim_tool_output(&t.text, is_old_turn, self.trimming);
-                            serde_json::json!({
-                                "type": "text",
-                                "text": text,
-                            })
-                        }
-                        ToolResultContentPart::Image(img) => serde_json::json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": img.mime_type,
-                                "data": img.data,
-                            }
-                        }),
-                    })
-                    .collect(),
-            )
+            tool_result_blocks(&tr.content, is_old_turn, self.trimming)
         };
 
         let content = serde_json::json!([{
@@ -1190,29 +1141,36 @@ fn claude_code_tool_result_content(
         [ToolResultContentPart::Text(text)] => {
             serde_json::Value::String(maybe_trim_tool_output(&text.text, is_old_turn, trimming))
         }
-        parts => serde_json::Value::Array(
-            parts
-                .iter()
-                .map(|part| match part {
-                    ToolResultContentPart::Text(t) => {
-                        let text = maybe_trim_tool_output(&t.text, is_old_turn, trimming);
-                        serde_json::json!({
-                            "type": "text",
-                            "text": text,
-                        })
-                    }
-                    ToolResultContentPart::Image(img) => serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": img.mime_type,
-                            "data": img.data,
-                        }
-                    }),
-                })
-                .collect(),
-        ),
+        parts => tool_result_blocks(parts, is_old_turn, trimming),
     }
+}
+
+fn tool_result_blocks(
+    parts: &[ToolResultContentPart],
+    is_old_turn: bool,
+    trimming: ToolResultTrimming,
+) -> serde_json::Value {
+    parts
+        .iter()
+        .map(|part| match part {
+            ToolResultContentPart::Text(t) => serde_json::json!({
+                "type": "text",
+                "text": maybe_trim_tool_output(&t.text, is_old_turn, trimming),
+            }),
+            ToolResultContentPart::Image(img) => image_block(img),
+        })
+        .collect()
+}
+
+fn image_block(img: &ImageContent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": img.mime_type,
+            "data": img.data,
+        }
+    })
 }
 
 fn anthropic_tool_id(id: &str) -> String {

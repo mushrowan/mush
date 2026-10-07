@@ -17,22 +17,10 @@ pub fn client() -> HttpClient {
     wrap(reqwest::Client::new())
 }
 
-fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+pub(crate) fn header_pairs(headers: &reqwest::header::HeaderMap) -> Vec<(&str, &str)> {
     headers
         .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_string(),
-                value.to_str().unwrap_or("<non-utf8>").to_string(),
-            )
-        })
-        .collect()
-}
-
-fn header_refs(pairs: &[(String, String)]) -> Vec<(&str, &str)> {
-    pairs
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(name, value)| (name.as_str(), value.to_str().unwrap_or("<non-utf8>")))
         .collect()
 }
 
@@ -61,28 +49,23 @@ impl Middleware for WireMiddleware {
             .get::<WireCallId>()
             .map_or_else(crate::wire_log::next_call_id, |c| c.0);
 
-        let method = req.method().as_str().to_string();
-        let url = req.url().to_string();
-        let req_pairs = header_pairs(req.headers());
         let req_body = req
             .body()
             .and_then(reqwest::Body::as_bytes)
-            .map(|b| String::from_utf8_lossy(b).into_owned());
+            .map(String::from_utf8_lossy);
         crate::wire_log::log_request(
             call_id,
-            &method,
-            &url,
-            &header_refs(&req_pairs),
+            req.method().as_str(),
+            req.url().as_str(),
+            &header_pairs(req.headers()),
             req_body.as_deref(),
         );
 
         let resp = next.run(req, extensions).await?;
 
         let status = resp.status().as_u16();
-        let resp_pairs = header_pairs(resp.headers());
-
         if is_event_stream(resp.headers()) {
-            crate::wire_log::log_response(call_id, status, &header_refs(&resp_pairs), None);
+            crate::wire_log::log_response(call_id, status, &header_pairs(resp.headers()), None);
             return Ok(resp);
         }
 
@@ -90,7 +73,7 @@ impl Middleware for WireMiddleware {
         let headers = resp.headers().clone();
         let bytes = resp.bytes().await?;
         let text = String::from_utf8_lossy(&bytes);
-        crate::wire_log::log_response(call_id, status, &header_refs(&resp_pairs), Some(&text));
+        crate::wire_log::log_response(call_id, status, &header_pairs(&headers), Some(&text));
 
         let mut builder = http::Response::builder().status(status).version(version);
         if let Some(h) = builder.headers_mut() {

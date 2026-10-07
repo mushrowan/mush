@@ -8,9 +8,9 @@ use std::borrow::Cow;
 
 use crate::registry::ApiRegistry;
 use crate::types::{
-    AssistantContentPart, AssistantMessage, EffortLevel, Message, Model, StreamOptions,
-    TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage, ToolResultTrimming, TurnPivot,
-    UserMessage, find_recent_boundary,
+    AssistantContentPart, AssistantMessage, EffortLevel, ImageContent, Message, Model,
+    StreamOptions, TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage,
+    ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
 };
 
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
@@ -234,6 +234,34 @@ pub(crate) async fn check_response(
     }
 
     Ok(response)
+}
+
+pub(crate) fn bearer_header(
+    key: &str,
+) -> Result<reqwest::header::HeaderValue, reqwest::header::InvalidHeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+pub(crate) async fn post_json(
+    client: &crate::http::HttpClient,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    body: &impl serde::Serialize,
+    call_id: u64,
+) -> Result<reqwest::Response, crate::registry::ProviderError> {
+    Ok(client
+        .post(url)
+        .headers(headers)
+        .json(body)
+        .with_extension(crate::http::WireCallId(call_id))
+        .send()
+        .await?)
+}
+
+pub(crate) fn image_data_url(img: &ImageContent) -> String {
+    format!("data:{};base64,{}", img.mime_type, img.data)
 }
 
 pub fn register_builtins(registry: &mut ApiRegistry, client: crate::http::HttpClient) {
