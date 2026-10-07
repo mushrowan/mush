@@ -23,7 +23,8 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
         let prefix = if is_selected { "▸ " } else { "  " };
 
         let name_text = format!("/{}", cmd.name);
-        let pad = 16usize.saturating_sub(name_text.len() + prefix.len());
+        let pad = 16usize
+            .saturating_sub(Span::raw(prefix).width() + Span::raw(name_text.as_str()).width());
 
         lines.push(Line::from(vec![
             Span::styled(prefix, name_style),
@@ -94,6 +95,35 @@ mod tests {
         assert!(
             selected_row.contains('▸'),
             "selected row should show ▸, got: {selected_row:?}"
+        );
+    }
+
+    #[test]
+    fn descriptions_line_up_under_the_selection_marker() {
+        let menu = SlashMenuState::for_commands(vec![
+            SlashCommand {
+                name: "help".into(),
+                description: "show help".into(),
+            },
+            SlashCommand {
+                name: "model".into(),
+                description: "open model picker".into(),
+            },
+        ]);
+        let content = buffer_to_string(&render_menu(&menu, 60, 6));
+        let column = |needle: &str| {
+            content
+                .lines()
+                .find_map(|line| {
+                    let byte = line.find(needle)?;
+                    Some(line[..byte].chars().count())
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            column("show help"),
+            column("open model picker"),
+            "{content}"
         );
     }
 }
