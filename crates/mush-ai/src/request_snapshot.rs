@@ -280,20 +280,72 @@ pub fn dump(
     body_json: &str,
     headers: &[(&str, &str)],
 ) -> Option<PathBuf> {
-    dump_in(
-        &snapshot_dir(),
-        provider,
-        session,
-        fingerprint,
-        body_json,
-        headers,
-    )
+    let dir = snapshot_dir();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return dump_in(&dir, provider, session, fingerprint, body_json, headers);
+    };
+    let snapshot = Snapshot::new(&dir, provider, session);
+    let path = snapshot.path.clone();
+    let provider = provider.to_string();
+    let fingerprint = *fingerprint;
+    let body_json = body_json.to_string();
+    let headers = redacted_headers(headers);
+    // a multi-megabyte body takes long enough to redact and sync that it would delay the request
+    runtime.spawn_blocking(move || {
+        snapshot.write(&dir, &provider, &fingerprint, &body_json, headers);
+    });
+    Some(path)
 }
 
 fn session_tag(session: Option<&str>) -> String {
     match session {
         Some(id) if !id.is_empty() => id.chars().take(8).collect(),
         _ => "nosession".to_string(),
+    }
+}
+
+struct Snapshot {
+    scope: String,
+    path: PathBuf,
+    ts_ms: u128,
+}
+
+impl Snapshot {
+    fn new(dir: &Path, provider: &str, session: Option<&str>) -> Self {
+        let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let ts_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let scope = format!("{provider}-{}", session_tag(session));
+        let path = dir.join(format!("{scope}-{ts_ms:013}-{seq:04}.json"));
+        Self { scope, path, ts_ms }
+    }
+
+    fn write(
+        &self,
+        dir: &Path,
+        provider: &str,
+        fingerprint: &RequestFingerprint,
+        body_json: &str,
+        headers: serde_json::Value,
+    ) -> Option<()> {
+        std::fs::create_dir_all(dir).ok()?;
+
+        let envelope = serde_json::json!({
+            "_snapshot": {
+                "provider": provider,
+                "timestamp_ms": self.ts_ms,
+                "fingerprint": fingerprint,
+                "headers": headers,
+            },
+            "body": redact_body(body_json, redact_secret_text)
+        });
+
+        let json = serde_json::to_string_pretty(&envelope).ok()?;
+        crate::private_io::write_private(&self.path, json).ok()?;
+        prune_old_snapshots(dir, &self.scope);
+        Some(())
     }
 }
 
@@ -305,37 +357,15 @@ pub fn dump_in(
     body_json: &str,
     headers: &[(&str, &str)],
 ) -> Option<PathBuf> {
-    std::fs::create_dir_all(dir).ok()?;
-
-    let seq = SNAPSHOT_SEQ.fetch_add(1, Ordering::Relaxed);
-    let ts_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let scope = format!("{provider}-{}", session_tag(session));
-    let filename = format!("{scope}-{ts_ms:013}-{seq:04}.json");
-    let path = dir.join(&filename);
-
-    let envelope = serde_json::json!({
-        "_snapshot": {
-            "provider": provider,
-            "timestamp_ms": ts_ms,
-            "fingerprint": fingerprint,
-            "headers": redacted_headers(headers),
-        },
-        "body": redact_body(body_json, redact_secret_text)
-    });
-
-    match serde_json::to_string_pretty(&envelope) {
-        Ok(json) => {
-            if crate::private_io::write_private(&path, json).is_err() {
-                return None;
-            }
-            prune_old_snapshots(dir, &scope);
-            Some(path)
-        }
-        Err(_) => None,
-    }
+    let snapshot = Snapshot::new(dir, provider, session);
+    snapshot.write(
+        dir,
+        provider,
+        fingerprint,
+        body_json,
+        redacted_headers(headers),
+    )?;
+    Some(snapshot.path)
 }
 
 #[must_use]
