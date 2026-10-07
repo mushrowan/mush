@@ -255,19 +255,12 @@ impl Hub {
         }
     }
 
-    fn broadcast(&mut self, frame: &Frame) {
-        let keys: Vec<ClientKey> = self.clients.keys().copied().collect();
-        for key in keys {
-            self.send(key, frame.clone());
-        }
-    }
-
-    fn broadcast_except(&mut self, skip: ClientKey, frame: &Frame) {
+    fn broadcast(&mut self, skip: Option<ClientKey>, frame: &Frame) {
         let keys: Vec<ClientKey> = self
             .clients
             .keys()
             .copied()
-            .filter(|key| *key != skip)
+            .filter(|key| Some(*key) != skip)
             .collect();
         for key in keys {
             self.send(key, frame.clone());
@@ -399,6 +392,24 @@ struct Worker {
 }
 
 impl Worker {
+    fn publish(
+        &mut self,
+        event: ClientEvent,
+        state: Option<ConnectionState>,
+        skip: Option<ClientKey>,
+    ) {
+        self.log.record(&event);
+        let sequence = self.hub.record(event.clone());
+        self.hub.broadcast(
+            skip,
+            &Frame::Event {
+                event,
+                state,
+                sequence,
+            },
+        );
+    }
+
     async fn shut_down(&mut self, connection: &mut InProcessConnection) {
         self.shutting_down = true;
         let _ = connection.send(ClientCommand::Shutdown).await;
@@ -426,13 +437,11 @@ impl Worker {
                 },
                 event = connection.next_event() => {
                     let Some(event) = event else {
-                        self.hub.broadcast(&Frame::Closed);
+                        self.hub.broadcast(None, &Frame::Closed);
                         return Ok(());
                     };
-                    self.log.record(&event);
-                    let sequence = self.hub.record(event.clone());
                     let state = self.hub.state_delta(connection);
-                    self.hub.broadcast(&Frame::Event { event, state, sequence });
+                    self.publish(event, state, None);
                 }
                 () = self.shutdown.cancelled(), if !self.shutting_down => {
                     self.shut_down(connection).await;
@@ -492,16 +501,7 @@ impl Worker {
         let state = self.hub.state_delta(connection);
         if let Ok(Reply::Events { events }) = &result {
             for event in events {
-                self.log.record(event);
-                let sequence = self.hub.record(event.clone());
-                self.hub.broadcast_except(
-                    key,
-                    &Frame::Event {
-                        event: event.clone(),
-                        state: state.clone(),
-                        sequence,
-                    },
-                );
+                self.publish(event.clone(), state.clone(), Some(key));
             }
         }
         self.hub.send(key, Frame::Response { id, result, state });
@@ -530,16 +530,7 @@ impl Worker {
         let echo = echo(&command, &connection.state());
         let result = connection.send(command).await;
         if let (Ok(_), Some(event)) = (&result, echo) {
-            self.log.record(&event);
-            let sequence = self.hub.record(event.clone());
-            self.hub.broadcast_except(
-                sender,
-                &Frame::Event {
-                    event,
-                    state: None,
-                    sequence,
-                },
-            );
+            self.publish(event, None, Some(sender));
         }
         self.journal.record(key, result.clone());
         result.map(|events| Reply::Events { events })
@@ -786,9 +777,9 @@ mod tests {
     #[tokio::test]
     async fn a_client_that_fills_its_buffer_is_dropped() {
         let (mut hub, key, _outgoing, _received) = hub_with_one_slot();
-        hub.broadcast(&Frame::Closed);
+        hub.broadcast(None, &Frame::Closed);
         assert_eq!(hub.clients.len(), 1);
-        hub.broadcast(&Frame::Closed);
+        hub.broadcast(None, &Frame::Closed);
         assert!(hub.clients.is_empty(), "the stalled client should be gone");
         hub.send(key, Frame::Closed);
     }
