@@ -195,6 +195,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn tempdir() -> std::io::Result<tempfile::TempDir> {
+        if cfg!(target_os = "macos") {
+            tempfile::tempdir_in("/private/tmp")
+        } else {
+            tempfile::tempdir()
+        }
+    }
+
     fn setup_test_repo(dir: &Path) {
         let src = dir.join("src");
         fs::create_dir_all(&src).unwrap();
@@ -301,7 +309,7 @@ mod tests {
 
     #[test]
     fn watcher_detects_file_changes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         setup_test_repo(dir.path());
 
         let watcher = RepoMapWatcher::start(dir.path()).unwrap();
@@ -321,9 +329,12 @@ mod tests {
         )
         .unwrap();
 
-        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
-
-        let text = map_text(&watcher);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut text = map_text(&watcher);
+        while !text.contains("goodbye") && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            text = map_text(&watcher);
+        }
         assert!(
             text.contains("goodbye"),
             "map should update after file change: {text}"
