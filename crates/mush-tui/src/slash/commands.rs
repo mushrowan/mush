@@ -16,59 +16,16 @@ pub async fn handle(
 ) -> Option<String> {
     let state = connection.state();
     match action {
-        SlashAction::Subagents { .. } => None,
         SlashAction::Help => {
-            app.push_system_message(help_text());
+            app.push_system_message(HELP_TEXT);
             None
         }
         SlashAction::Keys => {
-            let mut keys = String::from("keyboard shortcuts:\n\n");
-            keys.push_str("general:\n");
-            let panel_keys = app
-                .keymap
-                .binding(crate::keybinds::Action::ToggleSubagents)
-                .map(|binding| {
-                    binding
-                        .0
-                        .iter()
-                        .map(|key| key.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" / ")
-                })
-                .unwrap_or_else(|| "unbound".into());
-            keys.push_str(&format!("  {panel_keys} - toggle subagent status panel\n"));
-            keys.push_str("  enter          - send message\n");
-            keys.push_str("  alt/shift+enter - insert newline\n");
-            keys.push_str("  ctrl+c         - quit / abort stream\n");
-            keys.push_str("  tab            - autocomplete / command menu / expand @template\n");
-            keys.push_str("  ctrl+j/k       - navigate menus\n");
-            keys.push_str("  ctrl+v         - paste image from clipboard\n");
-            keys.push_str("  ctrl+d         - delete char\n");
-            keys.push_str("  alt+k          - edit queued steering message\n");
-            keys.push_str("\nmode switches:\n");
-            keys.push_str("  ctrl+f         - search\n");
-            keys.push_str("  ctrl+t         - cycle thinking level\n");
-            keys.push_str("  ctrl+o         - focus the log / back to the composer\n");
-            keys.push_str("  ctrl+r         - cycle detail: overview, details, all output\n");
-            keys.push_str("\nediting:\n");
-            keys.push_str("  ctrl+a         - select all\n");
-            keys.push_str("  home           - start of line\n");
-            keys.push_str("  ctrl+e / end   - end of line\n");
-            keys.push_str("  ctrl+w         - delete word backward\n");
-            keys.push_str("  alt+d          - delete word forward\n");
-            keys.push_str("  ctrl+u         - delete to start\n");
-            keys.push_str("  ctrl+k         - delete to end\n");
-            keys.push_str("  alt+b / alt+←  - word left\n");
-            keys.push_str("  alt+f / alt+→  - word right\n");
-            keys.push_str("\nmodel picker:\n");
-            keys.push_str("  ctrl+f         - toggle favourite on highlighted model\n");
-            keys.push_str("  ctrl+d         - delete highlighted stale model (with confirm)\n");
-            keys.push_str("  alt+d          - delete every stale model (with confirm)\n");
-            keys.push_str("  y / n          - confirm / cancel a delete prompt");
-            app.push_system_message(keys);
+            app.push_system_message(keys_text(app));
             None
         }
-        SlashAction::New { .. }
+        SlashAction::Subagents { .. }
+        | SlashAction::New { .. }
         | SlashAction::Fork { index: Some(_) }
         | SlashAction::Clone
         | SlashAction::Clear
@@ -76,9 +33,24 @@ pub async fn handle(
         | SlashAction::Resume { .. }
         | SlashAction::Branch { index: Some(_) }
         | SlashAction::NavigateTree { .. }
-        | SlashAction::Name { title: Some(_) } => None,
-        SlashAction::Reload => None,
-        SlashAction::RefreshModels => None,
+        | SlashAction::Name { title: Some(_) }
+        | SlashAction::Reload
+        | SlashAction::RefreshModels
+        | SlashAction::Side { .. }
+        | SlashAction::SystemPrompt
+        | SlashAction::Goal(_)
+        | SlashAction::Heartbeat(_)
+        | SlashAction::Schedule(_)
+        | SlashAction::Autonomous(_)
+        | SlashAction::Credits
+        | SlashAction::Endpoints { .. }
+        | SlashAction::Login { .. }
+        | SlashAction::LoginApiKey { .. }
+        | SlashAction::LoginComplete { .. }
+        | SlashAction::Compact { .. }
+        | SlashAction::Refine(_)
+        | SlashAction::Export { .. }
+        | SlashAction::Mcp(_) => None,
         SlashAction::Tree => {
             let items = crate::message_picker::tree_items(&connection.tree_summary().await);
             open_message_picker(
@@ -172,12 +144,6 @@ pub async fn handle(
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
             None
         }
-        SlashAction::Side { .. }
-        | SlashAction::SystemPrompt
-        | SlashAction::Goal(_)
-        | SlashAction::Heartbeat(_)
-        | SlashAction::Schedule(_)
-        | SlashAction::Autonomous(_) => None,
         SlashAction::SessionInfo => {
             let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
             let path = store.session_path(&tui_config.session_id);
@@ -240,8 +206,6 @@ pub async fn handle(
             }
             None
         }
-        SlashAction::Credits => None,
-        SlashAction::Endpoints { .. } => None,
         SlashAction::Logs { count } => {
             if let Some(ref buf) = tui_config.log_buffer {
                 let entries = buf(*count);
@@ -347,8 +311,6 @@ pub async fn handle(
                 .await;
             None
         }
-        SlashAction::Login { .. } | SlashAction::LoginApiKey { .. } => None,
-        SlashAction::LoginComplete { code: _ } => None,
         SlashAction::Card => {
             if let Some(card) = &tui_config.agent_card {
                 app.push_system_message(format!("agent card:\n```json\n{}\n```", card.to_json()));
@@ -375,7 +337,6 @@ pub async fn handle(
             }
             try_template(app, name, args)
         }
-        _ => None,
     }
 }
 
@@ -461,8 +422,6 @@ fn handle_compaction_model(app: &mut App, tui_config: &mut TuiConfig, model_id: 
 }
 
 fn build_debug_dump(app: &App, session_id: &str) -> String {
-    use std::fmt::Write as _;
-
     let mut out = String::from("```\nmush debug state\n");
     let _ = writeln!(out, "cwd: {}", app.cwd);
     let _ = writeln!(
@@ -558,54 +517,93 @@ fn build_debug_dump(app: &App, session_id: &str) -> String {
     out
 }
 
-fn help_text() -> String {
-    let mut help = String::from("available commands:\n");
-    help.push_str("  /help          - show this message\n");
-    help.push_str("  /keys          - show keyboard shortcuts\n");
-    help.push_str("  /subagents     - show or register session supervisors\n");
-    help.push_str("  /skill:<name> [args] - send a skill's instructions as your prompt\n");
-    help.push_str("  /new           - save session, start fresh\n");
-    help.push_str(
-        "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
-    );
-    help.push_str("  /sessions      - browse and resume sessions\n");
-    help.push_str("  /resume [id]   - resume session (most recent in cwd if no id)\n");
-    help.push_str("  /reload        - rebuild AGENTS.md and templates without restart\n");
-    help.push_str("  /refresh-models - refresh discovered model catalogue\n");
-    help.push_str("  /branch [n]    - branch from nth user message, or pick one\n");
-    help.push_str("  /tree          - browse the conversation tree and jump to a message\n");
-    help.push_str(
-        "  /refine [--global] [instructions] - refine the continual harness, rollback <id> undoes one\n",
-    );
-    help.push_str(
-        "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
-    );
-    help.push_str("  /export [file] - save conversation as markdown\n");
-    help.push_str("  /undo          - revert last turn\n");
-    help.push_str("  /search [text] - search conversation (or ctrl+f)\n");
-    help.push_str("  /cost          - show session cost\n");
-    help.push_str("  /context       - tokens, cost and context for this agent and its children\n");
-    help.push_str("  /name [title]  - show or set the session title\n");
-    help.push_str("  /session       - show the session id, file and message counts\n");
-    help.push_str(
-        "  /rlm-max-depth [n [--global]] - show or set how deep subagents may nest in this chat\n",
-    );
-    help.push_str("  /btw <q>       - ask a side question without adding it to the session\n");
-    help.push_str("  /skills        - list loaded skills, their sources and any warnings\n");
-    help.push_str("  /credits       - show openrouter credit balance\n");
-    help.push_str("  /endpoints [id] - list openrouter providers + cache support for a model\n");
-    help.push_str("  /logs [n]      - show last n log entries (default 50)\n");
-    help.push_str("  /settings      - open runtime settings overlay (j/k, space toggles)\n");
-    help.push_str("  /settings show - print current settings state\n");
-    help.push_str("  /login [p] [key] - oauth + api-key login picker (or pass id to skip, plus a key to save it)
-\n");
-    help.push_str("  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n");
-    help.push_str("  /card          - show agent capability card\n");
-    help.push_str("  /debug         - dump internal state (for bug reports)\n");
-    help.push_str("  /quit          - exit mush\n");
-    help.push_str("\ntip: type a prompt template name (e.g. /review file.rs) to expand it");
-    help
+const KEYS_TEXT: &str = concat!(
+    "  enter          - send message\n",
+    "  alt/shift+enter - insert newline\n",
+    "  ctrl+c         - quit / abort stream\n",
+    "  tab            - autocomplete / command menu / expand @template\n",
+    "  ctrl+j/k       - navigate menus\n",
+    "  ctrl+v         - paste image from clipboard\n",
+    "  ctrl+d         - delete char\n",
+    "  alt+k          - edit queued steering message\n",
+    "\nmode switches:\n",
+    "  ctrl+f         - search\n",
+    "  ctrl+t         - cycle thinking level\n",
+    "  ctrl+o         - focus the log / back to the composer\n",
+    "  ctrl+r         - cycle detail: overview, details, all output\n",
+    "\nediting:\n",
+    "  ctrl+a         - select all\n",
+    "  home           - start of line\n",
+    "  ctrl+e / end   - end of line\n",
+    "  ctrl+w         - delete word backward\n",
+    "  alt+d          - delete word forward\n",
+    "  ctrl+u         - delete to start\n",
+    "  ctrl+k         - delete to end\n",
+    "  alt+b / alt+←  - word left\n",
+    "  alt+f / alt+→  - word right\n",
+    "\nmodel picker:\n",
+    "  ctrl+f         - toggle favourite on highlighted model\n",
+    "  ctrl+d         - delete highlighted stale model (with confirm)\n",
+    "  alt+d          - delete every stale model (with confirm)\n",
+    "  y / n          - confirm / cancel a delete prompt",
+);
+
+fn keys_text(app: &App) -> String {
+    let panel_keys = app
+        .keymap
+        .binding(crate::keybinds::Action::ToggleSubagents)
+        .map(|binding| {
+            binding
+                .0
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .unwrap_or_else(|| "unbound".into());
+    format!(
+        "keyboard shortcuts:\n\ngeneral:\n  {panel_keys} - toggle subagent status panel\n{KEYS_TEXT}"
+    )
 }
+
+const HELP_TEXT: &str = concat!(
+    "available commands:\n",
+    "  /help          - show this message\n",
+    "  /keys          - show keyboard shortcuts\n",
+    "  /subagents     - show or register session supervisors\n",
+    "  /skill:<name> [args] - send a skill's instructions as your prompt\n",
+    "  /new           - save session, start fresh\n",
+    "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
+    "  /sessions      - browse and resume sessions\n",
+    "  /resume [id]   - resume session (most recent in cwd if no id)\n",
+    "  /reload        - rebuild AGENTS.md and templates without restart\n",
+    "  /refresh-models - refresh discovered model catalogue\n",
+    "  /branch [n]    - branch from nth user message, or pick one\n",
+    "  /tree          - browse the conversation tree and jump to a message\n",
+    "  /refine [--global] [instructions] - refine the continual harness, rollback <id> undoes one\n",
+    "  /compact [--context-budget <n>] [instructions] - summarise old messages, optionally focused\n",
+    "  /export [file] - save conversation as markdown\n",
+    "  /undo          - revert last turn\n",
+    "  /search [text] - search conversation (or ctrl+f)\n",
+    "  /cost          - show session cost\n",
+    "  /context       - tokens, cost and context for this agent and its children\n",
+    "  /name [title]  - show or set the session title\n",
+    "  /session       - show the session id, file and message counts\n",
+    "  /rlm-max-depth [n [--global]] - show or set how deep subagents may nest in this chat\n",
+    "  /btw <q>       - ask a side question without adding it to the session\n",
+    "  /skills        - list loaded skills, their sources and any warnings\n",
+    "  /credits       - show openrouter credit balance\n",
+    "  /endpoints [id] - list openrouter providers + cache support for a model\n",
+    "  /logs [n]      - show last n log entries (default 50)\n",
+    "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
+    "  /settings show - print current settings state\n",
+    "  /login [p] [key] - oauth + api-key login picker (or pass id to skip, plus a key to save it)\n\n",
+    "  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n",
+    "  /card          - show agent capability card\n",
+    "  /debug         - dump internal state (for bug reports)\n",
+    "  /quit          - exit mush\n",
+    "\ntip: type a prompt template name (e.g. /review file.rs) to expand it",
+);
 
 fn handle_model_switch(app: &mut App, tui_config: &mut TuiConfig, args: &str) -> bool {
     let raw = args.trim();
@@ -687,12 +685,13 @@ pub(crate) fn show_cost(app: &mut App) {
                 )
             },
         );
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "\nsubagents: {} across {} turn{}, {tokens}tok, {cost}",
             app.children.len(),
             turns,
             if turns == 1 { "" } else { "s" }
-        ));
+        );
     }
     app.push_system_message(text);
 }
@@ -714,10 +713,10 @@ pub(crate) fn format_agents(children: &[mush_runtime::ChildSummary]) -> String {
             child.cost.total()
         );
         if let Some(note) = &child.progress_note {
-            line.push_str(&format!("\n  note: {note}"));
+            let _ = write!(line, "\n  note: {note}");
         }
         if let Some(error) = &child.error {
-            line.push_str(&format!("\n  error: {error}"));
+            let _ = write!(line, "\n  error: {error}");
         }
         if let Some(answer) = &child.answer {
             let preview: String = answer
@@ -727,7 +726,7 @@ pub(crate) fn format_agents(children: &[mush_runtime::ChildSummary]) -> String {
                 .chars()
                 .take(120)
                 .collect();
-            line.push_str(&format!("\n  last: {preview}"));
+            let _ = write!(line, "\n  last: {preview}");
         }
         lines.push(line);
     }
@@ -837,17 +836,14 @@ fn parse_bool(s: &str) -> Option<bool> {
 }
 
 fn apply_beta_toggle(betas: &mut mush_ai::types::AnthropicBetas, field: &str, value: bool) -> bool {
-    match field {
-        "context_1m" => betas.context_1m = value,
-        "effort" => betas.effort = value,
-        "context_management" => betas.context_management = value,
-        "thinking_token_count" => betas.thinking_token_count = value,
-        "thinking_updates" => betas.thinking_updates = value,
-        "advisor" => betas.advisor = value,
-        "advanced_tool_use" => betas.advanced_tool_use = value,
-        "fallback_credit" => betas.fallback_credit = value,
-        _ => return false,
-    }
+    let Some(flag) = crate::settings::MenuItemKind::all()
+        .iter()
+        .find(|item| item.label() == field)
+        .and_then(|item| item.beta_mut(betas))
+    else {
+        return false;
+    };
+    *flag = value;
     true
 }
 
@@ -1076,11 +1072,7 @@ fn try_template(app: &mut App, name: &str, args: &str) -> Option<String> {
         );
         return None;
     };
-    let arg_list: Vec<&str> = if args.is_empty() {
-        vec![]
-    } else {
-        args.split_whitespace().collect()
-    };
+    let arg_list: Vec<&str> = args.split_whitespace().collect();
     let expanded = mush_ext::substitute_args(&tmpl.content, &arg_list);
     app.push_user_message(expanded.clone());
     Some(expanded)
@@ -1126,26 +1118,20 @@ fn try_skill(app: &mut App, skills: &[mush_ext::Skill], name: &str, args: &str) 
 }
 
 pub fn expand_template(prompt: &str) -> String {
-    if !prompt.starts_with('/') {
+    let Some(command) = prompt.strip_prefix('/') else {
         return prompt.to_string();
-    }
+    };
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let templates = mush_ext::discover_templates(&cwd);
 
-    let parts: Vec<&str> = prompt[1..].splitn(2, ' ').collect();
-    let name = parts[0];
-    let args_str = parts.get(1).unwrap_or(&"");
-
-    if let Some(tmpl) = mush_ext::find_template(&templates, name) {
-        let args: Vec<&str> = if args_str.is_empty() {
-            vec![]
-        } else {
-            args_str.split_whitespace().collect()
-        };
-        mush_ext::substitute_args(&tmpl.content, &args)
-    } else {
-        prompt.to_string()
+    let (name, args) = command.split_once(' ').unwrap_or((command, ""));
+    match mush_ext::find_template(&templates, name) {
+        Some(tmpl) => {
+            let args: Vec<&str> = args.split_whitespace().collect();
+            mush_ext::substitute_args(&tmpl.content, &args)
+        }
+        None => prompt.to_string(),
     }
 }
 
@@ -1164,16 +1150,13 @@ pub fn handle_export(app: &mut App, history: &[Message], args: &str) {
     for msg in history {
         match msg {
             Message::Event(event) => {
-                md.push_str(&format!("## non-human event\n\n{}\n\n", event.audit_text()))
+                let _ = write!(md, "## non-human event\n\n{}\n\n", event.audit_text());
             }
             Message::User(u) => {
-                let text = u.text();
-                md.push_str(&format!("## you\n\n{text}\n\n"));
+                let _ = write!(md, "## you\n\n{}\n\n", u.text());
             }
             Message::Assistant(a) => {
-                let model = a.model.as_ref();
-                let text = a.text();
-                md.push_str(&format!("## {model}\n\n{text}\n\n"));
+                let _ = write!(md, "## {}\n\n{}\n\n", a.model.as_ref(), a.text());
             }
             Message::ToolResult(tr) => {
                 let output: String = tr
@@ -1183,14 +1166,14 @@ pub fn handle_export(app: &mut App, history: &[Message], args: &str) {
                         ToolResultContentPart::Text(t) => Some(t.text.as_str()),
                         _ => None,
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect();
                 let preview = truncate_with_ellipsis(&output, 200);
-                md.push_str(&format!(
+                let _ = write!(
+                    md,
                     "**{}** `{}`\n\n```\n{preview}\n```\n\n",
                     if tr.outcome.is_error() { "✗" } else { "✓" },
                     tr.tool_name,
-                ));
+                );
             }
         }
     }
@@ -1266,8 +1249,7 @@ mod tests {
 
     #[test]
     fn every_help_command_parses_as_a_builtin() {
-        let help = help_text();
-        let names: Vec<&str> = help
+        let names: Vec<&str> = HELP_TEXT
             .lines()
             .filter_map(|line| line.trim_start().strip_prefix('/'))
             .filter_map(|rest| rest.split([' ', '<', '[']).next())

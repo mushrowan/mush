@@ -40,15 +40,7 @@ impl SettingsScope {
             _ => None,
         }
     }
-}
 
-#[derive(Debug, Clone, Default)]
-pub struct ScopedSettings {
-    pub scope: SettingsScope,
-    pub anthropic_betas: AnthropicBetas,
-}
-
-impl SettingsScope {
     #[must_use]
     pub fn cycle_next(self) -> Self {
         match self {
@@ -58,6 +50,12 @@ impl SettingsScope {
             Self::Disabled => Self::Session,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScopedSettings {
+    pub scope: SettingsScope,
+    pub anthropic_betas: AnthropicBetas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,72 +122,34 @@ impl MenuItemKind {
     }
 
     pub fn activate(self, settings: &mut ScopedSettings) -> String {
-        match self {
-            Self::Scope => {
-                settings.scope = settings.scope.cycle_next();
-                settings.scope.as_str().to_string()
-            }
-            Self::ContextOneM => {
-                settings.anthropic_betas.context_1m = !settings.anthropic_betas.context_1m;
-                bool_str(settings.anthropic_betas.context_1m).to_string()
-            }
-            Self::Effort => {
-                settings.anthropic_betas.effort = !settings.anthropic_betas.effort;
-                bool_str(settings.anthropic_betas.effort).to_string()
-            }
-            Self::ContextManagement => {
-                settings.anthropic_betas.context_management =
-                    !settings.anthropic_betas.context_management;
-                bool_str(settings.anthropic_betas.context_management).to_string()
-            }
-            Self::Advisor => {
-                settings.anthropic_betas.advisor = !settings.anthropic_betas.advisor;
-                bool_str(settings.anthropic_betas.advisor).to_string()
-            }
-            Self::AdvancedToolUse => {
-                settings.anthropic_betas.advanced_tool_use =
-                    !settings.anthropic_betas.advanced_tool_use;
-                bool_str(settings.anthropic_betas.advanced_tool_use).to_string()
-            }
-            Self::ThinkingTokenCount => {
-                settings.anthropic_betas.thinking_token_count =
-                    !settings.anthropic_betas.thinking_token_count;
-                bool_str(settings.anthropic_betas.thinking_token_count).to_string()
-            }
-            Self::ThinkingUpdates => {
-                settings.anthropic_betas.thinking_updates =
-                    !settings.anthropic_betas.thinking_updates;
-                bool_str(settings.anthropic_betas.thinking_updates).to_string()
-            }
-            Self::FallbackCredit => {
-                settings.anthropic_betas.fallback_credit =
-                    !settings.anthropic_betas.fallback_credit;
-                bool_str(settings.anthropic_betas.fallback_credit).to_string()
-            }
+        match self.beta_mut(&mut settings.anthropic_betas) {
+            Some(flag) => *flag = !*flag,
+            None => settings.scope = settings.scope.cycle_next(),
         }
+        self.value(settings)
     }
 
     #[must_use]
     pub fn value(self, settings: &ScopedSettings) -> String {
-        match self {
-            Self::Scope => settings.scope.as_str().to_string(),
-            Self::ContextOneM => bool_str(settings.anthropic_betas.context_1m).to_string(),
-            Self::Effort => bool_str(settings.anthropic_betas.effort).to_string(),
-            Self::ContextManagement => {
-                bool_str(settings.anthropic_betas.context_management).to_string()
-            }
-            Self::ThinkingTokenCount => {
-                bool_str(settings.anthropic_betas.thinking_token_count).to_string()
-            }
-            Self::ThinkingUpdates => {
-                bool_str(settings.anthropic_betas.thinking_updates).to_string()
-            }
-            Self::Advisor => bool_str(settings.anthropic_betas.advisor).to_string(),
-            Self::AdvancedToolUse => {
-                bool_str(settings.anthropic_betas.advanced_tool_use).to_string()
-            }
-            Self::FallbackCredit => bool_str(settings.anthropic_betas.fallback_credit).to_string(),
+        let mut betas = settings.anthropic_betas.clone();
+        match self.beta_mut(&mut betas) {
+            Some(flag) => bool_str(*flag).to_string(),
+            None => settings.scope.as_str().to_string(),
         }
+    }
+
+    pub(crate) fn beta_mut(self, betas: &mut AnthropicBetas) -> Option<&mut bool> {
+        Some(match self {
+            Self::Scope => return None,
+            Self::ContextOneM => &mut betas.context_1m,
+            Self::Effort => &mut betas.effort,
+            Self::ContextManagement => &mut betas.context_management,
+            Self::ThinkingTokenCount => &mut betas.thinking_token_count,
+            Self::ThinkingUpdates => &mut betas.thinking_updates,
+            Self::Advisor => &mut betas.advisor,
+            Self::AdvancedToolUse => &mut betas.advanced_tool_use,
+            Self::FallbackCredit => &mut betas.fallback_credit,
+        })
     }
 }
 
@@ -266,15 +226,15 @@ pub fn persist(
 }
 
 fn write_settings_file(path: &std::path::Path, settings: &ScopedSettings) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
     let persisted = toml::Table::try_from(PersistedSettings::from(settings))
         .map_err(|e| format!("serialise settings: {e}"))?;
     merge_settings_file(path, persisted)
 }
 
 fn merge_settings_file(path: &std::path::Path, entries: toml::Table) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
     let mut table = match std::fs::read_to_string(path) {
         Ok(body) => body
             .parse::<toml::Table>()
@@ -296,9 +256,6 @@ pub fn save_global_rlm_max_depth(max_depth: u32) -> Result<std::path::PathBuf, S
 }
 
 fn save_rlm_max_depth_to(path: &std::path::Path, max_depth: u32) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
     let mut entries = toml::Table::new();
     entries.insert(
         "rlm_max_depth".into(),
