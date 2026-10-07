@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use chrono::{Datelike, TimeZone, Timelike};
+use chrono::{Datelike, TimeZone};
+
+const LONGEST_LEAP_DAY_WAIT_DAYS: u64 = 8 * 366;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cron {
@@ -32,31 +34,32 @@ impl Cron {
 
     #[must_use]
     pub fn next_after(&self, after_ms: u64) -> Option<u64> {
-        let start = chrono::Local
+        let after = chrono::Local
             .timestamp_millis_opt(i64::try_from(after_ms).ok()?)
-            .single()?
-            .with_second(0)?
-            .with_nanosecond(0)?
-            + chrono::Duration::minutes(1);
-        let mut candidate = start;
-        let deadline = start + chrono::Duration::days(366);
-        while candidate <= deadline {
-            if self.matches(candidate) {
-                return u64::try_from(candidate.timestamp_millis()).ok();
-            }
-            candidate += chrono::Duration::minutes(1);
-        }
-        None
+            .single()?;
+        let first = after.date_naive();
+        first
+            .iter_days()
+            .take_while(|day| *day <= first + chrono::Days::new(LONGEST_LEAP_DAY_WAIT_DAYS))
+            .filter(|day| self.day_matches(*day))
+            .find_map(|day| {
+                self.hour.iter().find_map(|&hour| {
+                    self.minute.iter().find_map(|&minute| {
+                        day.and_hms_opt(hour, minute, 0)
+                            .and_then(|time| chrono::Local.from_local_datetime(&time).earliest())
+                            .filter(|at| *at > after)
+                    })
+                })
+            })
+            .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
     }
 
-    fn matches(&self, at: chrono::DateTime<chrono::Local>) -> bool {
-        let weekday = at.weekday().num_days_from_sunday();
+    fn day_matches(&self, day: chrono::NaiveDate) -> bool {
+        let weekday = day.weekday().num_days_from_sunday();
         let weekday_matches =
             self.day_of_week.contains(&weekday) || (weekday == 0 && self.day_of_week.contains(&7));
-        self.minute.contains(&at.minute())
-            && self.hour.contains(&at.hour())
-            && self.day_of_month.contains(&at.day())
-            && self.month.contains(&at.month())
+        self.day_of_month.contains(&day.day())
+            && self.month.contains(&day.month())
             && weekday_matches
     }
 }
@@ -174,6 +177,31 @@ mod tests {
                 local("2026-08-13 11:00:00"),
                 local("2026-08-13 11:30:00"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_leap_day_schedule_waits_for_the_next_leap_year() {
+        let cron = Cron::parse("0 9 29 2 *").unwrap();
+        let first = cron.next_after(local("2026-08-13 00:00:00"));
+        assert_eq!(first, Some(local("2028-02-29 09:00:00")));
+        assert_eq!(
+            cron.next_after(first.unwrap()),
+            Some(local("2032-02-29 09:00:00"))
+        );
+        assert_eq!(
+            cron.next_after(local("2096-03-01 00:00:00")),
+            Some(local("2104-02-29 09:00:00"))
+        );
+    }
+
+    #[test]
+    fn a_date_that_never_exists_never_comes_round() {
+        assert_eq!(
+            Cron::parse("0 9 31 4 *")
+                .unwrap()
+                .next_after(local("2026-08-13 00:00:00")),
+            None
         );
     }
 
