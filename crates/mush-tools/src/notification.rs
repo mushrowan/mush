@@ -104,10 +104,11 @@ mod tests {
         command.arg(&pid_file);
         let result = deliver(command, Duration::from_millis(200)).await;
         assert!(matches!(result, Err(DeliveryError::Timeout)));
-        let pid = std::fs::read_to_string(pid_file).unwrap();
-        #[cfg(target_os = "linux")]
-        assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
-        #[cfg(not(target_os = "linux"))]
-        assert!(!pid.trim().is_empty());
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
     }
 }
