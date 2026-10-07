@@ -1,34 +1,13 @@
 use crate::model_picker::{ModelPickerState, ModelPickerTab, filtered_models};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, centred_popup};
+use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
-    let popup = centred_popup(
-        frame.area(),
-        PopupSize {
-            width_pct: 80,
-            height_pct: 60,
-            width_min: 40,
-            width_max: 100,
-            height_min: 10,
-            height_max: 30,
-        },
-    );
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(" models ")
-        .borders(Borders::ALL)
-        .border_style(theme.search_border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = render_popup_frame(frame, PICKER_SIZE, " models ", theme);
 
     if inner.height < 5 {
         return;
@@ -37,17 +16,7 @@ pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
     let tab_line = build_tab_header(picker, theme);
     frame.render_widget(tab_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
-    let filter_line = Line::from(vec![
-        Span::styled("filter: ", theme.dim),
-        Span::styled(
-            if picker.filter.is_empty() {
-                "…"
-            } else {
-                &picker.filter
-            },
-            Style::default(),
-        ),
-    ]);
+    let filter_line = filter_line(&picker.filter, theme);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
     let hint = Line::from(vec![
@@ -110,11 +79,7 @@ fn render_model_list(frame: &mut Frame, picker: &ModelPickerState, list_area: Re
         return;
     }
 
-    let scroll = if picker.selected >= visible {
-        picker.selected - visible + 1
-    } else {
-        0
-    };
+    let scroll = (picker.selected + 1).saturating_sub(visible);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, model) in models.iter().enumerate().skip(scroll).take(visible) {

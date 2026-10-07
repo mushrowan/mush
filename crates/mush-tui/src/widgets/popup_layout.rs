@@ -1,4 +1,12 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Padding};
+
+use crate::theme::Theme;
+
+const MENU_MAX_ROWS: usize = 12;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PopupSize {
@@ -21,6 +29,76 @@ pub fn centred_popup(area: Rect, size: PopupSize) -> Rect {
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect::new(x, y, width, height)
+}
+
+pub(crate) const PICKER_SIZE: PopupSize = PopupSize {
+    width_pct: 80,
+    height_pct: 60,
+    width_min: 40,
+    width_max: 100,
+    height_min: 10,
+    height_max: 30,
+};
+
+pub(crate) fn render_popup_frame<'a>(
+    frame: &mut Frame,
+    size: PopupSize,
+    title: impl Into<Line<'a>>,
+    theme: &Theme,
+) -> Rect {
+    let popup = centred_popup(frame.area(), size);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(theme.search_border)
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    inner
+}
+
+pub(crate) fn filter_line<'a>(filter: &'a str, theme: &Theme) -> Line<'a> {
+    Line::from(vec![
+        Span::styled("filter: ", theme.dim),
+        Span::styled(
+            if filter.is_empty() { "…" } else { filter },
+            Style::default(),
+        ),
+    ])
+}
+
+pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(max.saturating_sub(1).max(1)).collect();
+    format!("{kept}…")
+}
+
+pub(crate) fn render_menu_frame(
+    frame: &mut Frame,
+    rows: usize,
+    input_area: Rect,
+    theme: &Theme,
+) -> Rect {
+    let height = u16::try_from(MENU_MAX_ROWS.min(rows) + 2).unwrap_or(u16::MAX);
+    let popup = Rect::new(
+        input_area.x,
+        input_area.y.saturating_sub(height),
+        input_area.width.min(80),
+        height,
+    );
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.input_border)
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    inner
 }
 
 #[cfg(test)]

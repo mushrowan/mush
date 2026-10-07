@@ -2,51 +2,20 @@ use crate::message_picker::{
     MessagePickerKind, MessagePickerPurpose, MessagePickerState, filtered_items,
 };
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, centred_popup};
+use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame, truncate_chars};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
-    let popup = centred_popup(
-        frame.area(),
-        PopupSize {
-            width_pct: 80,
-            height_pct: 60,
-            width_min: 40,
-            width_max: 100,
-            height_min: 10,
-            height_max: 30,
-        },
-    );
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(picker.purpose.title())
-        .borders(Borders::ALL)
-        .border_style(theme.search_border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = render_popup_frame(frame, PICKER_SIZE, picker.purpose.title(), theme);
 
     if inner.height < 4 {
         return;
     }
 
-    let filter_line = Line::from(vec![
-        Span::styled("filter: ", theme.dim),
-        Span::styled(
-            if picker.filter.is_empty() {
-                "…"
-            } else {
-                &picker.filter
-            },
-            Style::default(),
-        ),
-    ]);
+    let filter_line = filter_line(&picker.filter, theme);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
     let hint = Line::from(vec![
@@ -95,16 +64,7 @@ pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
         let max_text = (list_area.width as usize).saturating_sub(
             prefix.len() + number.len() + indent.len() + tag.len() + fork.chars().count(),
         );
-        let text = if item.text.chars().count() > max_text {
-            let t: String = item
-                .text
-                .chars()
-                .take(max_text.saturating_sub(1).max(1))
-                .collect();
-            format!("{t}…")
-        } else {
-            item.text.clone()
-        };
+        let text = truncate_chars(&item.text, max_text);
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
             Span::styled(number, theme.dim),

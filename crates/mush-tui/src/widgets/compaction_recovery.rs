@@ -2,15 +2,15 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::app_state::CompactionRecoveryState;
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, centred_popup};
+use crate::widgets::popup_layout::{PopupSize, render_popup_frame};
 
 pub fn render(frame: &mut Frame, state: &CompactionRecoveryState, theme: &Theme) {
-    let popup = centred_popup(
-        frame.area(),
+    let inner = render_popup_frame(
+        frame,
         PopupSize {
             width_pct: 80,
             height_pct: 55,
@@ -19,17 +19,9 @@ pub fn render(frame: &mut Frame, state: &CompactionRecoveryState, theme: &Theme)
             height_min: 11,
             height_max: 18,
         },
+        " compaction failed ",
+        theme,
     );
-
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(" compaction failed ")
-        .borders(Borders::ALL)
-        .border_style(theme.search_border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
 
     if inner.height < 5 || inner.width < 20 {
         return;

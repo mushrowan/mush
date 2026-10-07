@@ -1,40 +1,15 @@
 use crate::app_state::AtPickerState;
 use crate::theme::Theme;
+use crate::widgets::popup_layout::render_menu_frame;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding};
-
-const MAX_VISIBLE: usize = 12;
-
-#[must_use]
-pub fn height(picker: &AtPickerState) -> u16 {
-    u16::try_from(MAX_VISIBLE.min(picker.matches.len()) + 2).unwrap_or(u16::MAX)
-}
 
 pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme: &Theme) {
-    let height = height(picker);
-    let width = input_area.width.min(80);
-    let x = input_area.x;
-    let y = input_area.y.saturating_sub(height);
-
-    let popup = Rect::new(x, y, width, height);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme.input_border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
+    let inner = render_menu_frame(frame, picker.matches.len(), input_area, theme);
     let visible = inner.height as usize;
-    let scroll = if picker.selected >= visible {
-        picker.selected - visible + 1
-    } else {
-        0
-    };
+    let scroll = (picker.selected + 1).saturating_sub(visible);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, template) in picker.matches.iter().enumerate().skip(scroll).take(visible) {

@@ -1,58 +1,27 @@
 use crate::path_utils::shorten_path;
 use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PopupSize, centred_popup};
+use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, render_popup_frame, truncate_chars};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding};
 
 pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
-    let popup = centred_popup(
-        frame.area(),
-        PopupSize {
-            width_pct: 80,
-            height_pct: 60,
-            width_min: 40,
-            width_max: 100,
-            height_min: 10,
-            height_max: 30,
-        },
-    );
-
-    frame.render_widget(Clear, popup);
-
     let title = match (picker.scope, picker.loading) {
-        (SessionScope::ThisDir, false) => " sessions (this dir) ".to_string(),
-        (SessionScope::AllDirs, false) => " sessions (all) ".to_string(),
-        (SessionScope::ThisDir, true) => " sessions (this dir) · loading… ".to_string(),
-        (SessionScope::AllDirs, true) => " sessions (all) · loading… ".to_string(),
+        (SessionScope::ThisDir, false) => " sessions (this dir) ",
+        (SessionScope::AllDirs, false) => " sessions (all) ",
+        (SessionScope::ThisDir, true) => " sessions (this dir) · loading… ",
+        (SessionScope::AllDirs, true) => " sessions (all) · loading… ",
     };
 
-    let block = Block::default()
-        .title(title.as_str())
-        .borders(Borders::ALL)
-        .border_style(theme.search_border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
+    let inner = render_popup_frame(frame, PICKER_SIZE, title, theme);
 
     if inner.height < 4 {
         return;
     }
 
-    let filter_line = Line::from(vec![
-        Span::styled("filter: ", theme.dim),
-        Span::styled(
-            if picker.filter.is_empty() {
-                "…"
-            } else {
-                &picker.filter
-            },
-            Style::default(),
-        ),
-    ]);
+    let filter_line = filter_line(&picker.filter, theme);
     frame.render_widget(filter_line, Rect::new(inner.x, inner.y, inner.width, 1));
 
     let scope_label = match picker.scope {
@@ -94,11 +63,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     let show_cwd = picker.scope == SessionScope::AllDirs;
 
     let visible = list_area.height as usize;
-    let scroll = if picker.selected >= visible {
-        picker.selected - visible + 1
-    } else {
-        0
-    };
+    let scroll = (picker.selected + 1).saturating_sub(visible);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, meta) in sessions.iter().enumerate().skip(scroll).take(visible) {
@@ -127,15 +92,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         let meta_width = live_label.len() + meta_right.len() + 1;
 
         let max_title = (list_area.width as usize).saturating_sub(prefix.len() + meta_width);
-        let title_display = if title.chars().count() > max_title {
-            let t: String = title
-                .chars()
-                .take(max_title.saturating_sub(1).max(1))
-                .collect();
-            format!("{t}…")
-        } else {
-            title.to_string()
-        };
+        let title_display = truncate_chars(title, max_title);
 
         let padding = (list_area.width as usize)
             .saturating_sub(
