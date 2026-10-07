@@ -1093,6 +1093,43 @@ async fn an_empty_worker_stops_when_its_last_client_detaches() {
 }
 
 #[tokio::test]
+async fn an_empty_worker_leaves_no_session_behind() {
+    let daemon = Daemon::start();
+    let SupervisorReply::Worker { descriptor, .. } =
+        daemon.request(daemon.open_saved(OpenTarget::New)).await
+    else {
+        panic!("expected a worker")
+    };
+    let saved = daemon
+        .dir
+        .path()
+        .join("data/sessions")
+        .join(format!("{}.json", descriptor.session_id));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !saved.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the live session was never saved"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let client = mush_daemon::DaemonConnection::connect(&descriptor.socket)
+        .await
+        .unwrap();
+
+    drop(client);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while saved.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the empty session was left behind"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_named_worker_stays_after_its_last_client_detaches() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =

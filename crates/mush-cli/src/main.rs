@@ -1817,12 +1817,14 @@ impl SaverThread {
         let thread = std::thread::Builder::new()
             .name("session-saver".into())
             .spawn(move || {
-                let store = SessionStore::new(SessionStore::default_dir());
+                let mut writer =
+                    SnapshotWriter::new(SessionStore::new(SessionStore::default_dir()), cwd);
                 while let Ok(snapshot) = rx.recv() {
                     for snapshot in latest_per_session(snapshot, &rx) {
-                        let _ = store.save(&session_from_snapshot(snapshot, &cwd));
+                        writer.save(snapshot);
                     }
                 }
+                writer.finish();
             })?;
         Ok(Self { tx, thread })
     }
@@ -1855,6 +1857,38 @@ fn latest_per_session(
         }
     }
     latest
+}
+
+struct SnapshotWriter {
+    store: SessionStore,
+    cwd: String,
+    blank: std::collections::HashSet<SessionId>,
+}
+
+impl SnapshotWriter {
+    fn new(store: SessionStore, cwd: String) -> Self {
+        Self {
+            store,
+            cwd,
+            blank: std::collections::HashSet::new(),
+        }
+    }
+
+    fn save(&mut self, snapshot: mush_tui::SessionSnapshot) {
+        let session = session_from_snapshot(snapshot, &self.cwd);
+        if session.conversation.is_empty() && session.meta.title.is_none() {
+            self.blank.insert(session.meta.id.clone());
+        } else {
+            self.blank.remove(&session.meta.id);
+        }
+        let _ = self.store.save(&session);
+    }
+
+    fn finish(self) {
+        for id in &self.blank {
+            let _ = self.store.delete(id);
+        }
+    }
 }
 
 fn fork_session(source: Session, cwd: &str) -> Session {
@@ -2039,6 +2073,52 @@ mod tests {
             .map(|snapshot| snapshot.title.as_deref().unwrap_or_default())
             .collect();
         assert_eq!(titles, vec!["parent two", "child"]);
+    }
+
+    fn blank_snapshot(title: Option<&str>) -> mush_tui::SessionSnapshot {
+        let mut snapshot = snapshot(title);
+        snapshot.primary = mush_session::ConversationState::new();
+        snapshot
+    }
+
+    #[test]
+    fn a_session_that_never_had_a_turn_is_dropped_when_the_saver_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            SnapshotWriter::new(SessionStore::new(dir.path().to_path_buf()), "/tmp".into());
+        let blank = blank_snapshot(None);
+        let id = blank.session_id.clone();
+
+        writer.save(blank);
+        assert!(writer.store.session_path(&id).exists());
+        let store = SessionStore::new(dir.path().to_path_buf());
+        writer.finish();
+
+        assert!(!store.session_path(&id).exists());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_named_or_started_session_outlives_the_saver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer =
+            SnapshotWriter::new(SessionStore::new(dir.path().to_path_buf()), "/tmp".into());
+        let named = blank_snapshot(Some("plans"));
+        let blank_start = blank_snapshot(None);
+        let ids = [named.session_id.clone(), blank_start.session_id.clone()];
+        let mut started = snapshot(None);
+        started.session_id = blank_start.session_id.clone();
+        writer.save(named);
+        writer.save(blank_start);
+        writer.save(started);
+
+        writer.finish();
+
+        let store = SessionStore::new(dir.path().to_path_buf());
+        for id in &ids {
+            assert!(store.session_path(id).exists(), "{id} was dropped");
+        }
+        assert_eq!(store.list().unwrap().len(), 2);
     }
 
     #[test]
