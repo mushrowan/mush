@@ -815,21 +815,17 @@ impl super::sse::SseProcessor for OpenAiResponsesProcessor {
         output: &mut AssistantMessage,
     ) -> super::sse::ProcessResult {
         let data = raw.data.trim();
-        if data == "[DONE]" {
-            return super::sse::ProcessResult::Skip;
-        }
         if !data.starts_with('{') {
             return super::sse::ProcessResult::Skip;
         }
-        let events = process_sse_event(raw.event.as_deref(), data, output, &mut self.active);
-        for event in &events {
-            if matches!(event, StreamEvent::Error { .. }) {
-                return super::sse::ProcessResult::Fatal(
-                    events.into_iter().next().unwrap_or_else(|| unreachable!()),
-                );
-            }
+        let mut events = process_sse_event(raw.event.as_deref(), data, output, &mut self.active);
+        match events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::Error { .. }))
+        {
+            Some(error) => super::sse::ProcessResult::Fatal(events.swap_remove(error)),
+            None => super::sse::ProcessResult::Events(events),
         }
-        super::sse::ProcessResult::Events(events)
     }
 
     fn finish(&mut self, output: &mut AssistantMessage) {
@@ -870,29 +866,8 @@ fn process_sse_event(
 ) -> Vec<StreamEvent> {
     let mut events = Vec::new();
 
-    let event_type = match event_name {
-        Some(name) => name,
-        None => {
-            if let Some(start) = data.find("\"type\"") {
-                let rest = &data[start + 6..];
-                if let Some(colon) = rest.find(':') {
-                    let after = rest[colon + 1..].trim_start();
-                    if let Some(s) = after.strip_prefix('"') {
-                        if let Some(end) = s.find('"') {
-                            &s[..end]
-                        } else {
-                            return events;
-                        }
-                    } else {
-                        return events;
-                    }
-                } else {
-                    return events;
-                }
-            } else {
-                return events;
-            }
-        }
+    let Some(event_type) = event_name.or_else(|| sniff_event_type(data)) else {
+        return events;
     };
 
     match event_type {
@@ -990,11 +965,7 @@ fn process_sse_event(
                 Some("function_call") => {
                     let call_id = item.call_id.as_deref().unwrap_or_default();
                     let item_id = item.id.as_deref().unwrap_or_default();
-                    let id = if item_id.is_empty() {
-                        call_id.to_string()
-                    } else {
-                        format!("{call_id}|{item_id}")
-                    };
+                    let id = joined_call_id(call_id, item_id);
                     let name = item.name.unwrap_or_default();
                     let args_buf = item.arguments.unwrap_or_default();
 
@@ -1067,6 +1038,21 @@ fn process_sse_event(
     }
 
     events
+}
+
+fn sniff_event_type(data: &str) -> Option<&str> {
+    let rest = &data[data.find("\"type\"")? + 6..];
+    let after = rest[rest.find(':')? + 1..].trim_start();
+    let value = after.strip_prefix('"')?;
+    Some(&value[..value.find('"')?])
+}
+
+fn joined_call_id(call_id: &str, item_id: &str) -> String {
+    if item_id.is_empty() {
+        call_id.to_string()
+    } else {
+        format!("{call_id}|{item_id}")
+    }
 }
 
 fn push_thinking(
@@ -1142,11 +1128,7 @@ fn finish_block(
             if let Some(item) = item {
                 if let Some(call_id) = item.get("call_id").and_then(|v| v.as_str()) {
                     let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                    id = if item_id.is_empty() {
-                        call_id.to_string()
-                    } else {
-                        format!("{call_id}|{item_id}")
-                    };
+                    id = joined_call_id(call_id, item_id);
                 }
                 if let Some(item_name) = item.get("name").and_then(|v| v.as_str()) {
                     name = item_name.to_string();
@@ -1189,7 +1171,6 @@ fn map_response_status(status: &str) -> StopReason {
         "completed" => StopReason::Stop,
         "incomplete" => StopReason::Length,
         "failed" | "cancelled" => StopReason::Error,
-        "queued" | "in_progress" => StopReason::Stop,
         _ => StopReason::Stop,
     }
 }
