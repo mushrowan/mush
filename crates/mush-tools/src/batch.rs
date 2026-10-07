@@ -44,38 +44,183 @@ impl BatchTool {
     }
 }
 
-type CallResult = (
-    usize,
-    String,
-    Option<OutputLimit>,
-    Result<ToolResult, String>,
-);
+struct CallOutcome {
+    tool: String,
+    limit: Option<OutputLimit>,
+    result: Result<ToolResult, String>,
+}
 
-async fn run_call(i: usize, call: BatchCall, tools: &ToolRegistry) -> CallResult {
-    if call.tool.eq_ignore_ascii_case("batch") {
-        return (
-            i,
-            call.tool,
-            None,
-            Err("cannot nest batch inside batch".to_string()),
-        );
+impl CallOutcome {
+    fn rejected(tool: String, reason: String) -> Self {
+        Self {
+            tool,
+            limit: None,
+            result: Err(reason),
+        }
     }
 
-    let tool = match tools.get(&call.tool) {
-        Some(tool) => tool,
-        None => {
-            return (
-                i,
-                call.tool.clone(),
-                None,
-                Err(format!("unknown tool: {}", call.tool)),
-            );
+    fn failed(&self) -> bool {
+        match &self.result {
+            Ok(result) => result.outcome.is_error(),
+            Err(_) => true,
         }
+    }
+
+    fn into_section(self, index: usize) -> Section {
+        let result = match self.result {
+            Ok(result) => truncation::apply_for_tool(
+                result,
+                self.limit.unwrap_or(OutputLimit::Head),
+                Some(self.tool.as_str()),
+            ),
+            Err(error) => ToolResult::error(error),
+        };
+        Section::new(index, &self.tool, &result)
+    }
+}
+
+async fn run_call(call: BatchCall, tools: &ToolRegistry) -> CallOutcome {
+    if call.tool.eq_ignore_ascii_case("batch") {
+        return CallOutcome::rejected(call.tool, "cannot nest batch inside batch".to_string());
+    }
+
+    let Some(tool) = tools.get(&call.tool) else {
+        let reason = format!("unknown tool: {}", call.tool);
+        return CallOutcome::rejected(call.tool, reason);
     };
 
     let limit = tool.output_limit();
     let result = tool.call(call.parameters).await;
-    (i, call.tool, Some(limit), Ok(result))
+    CallOutcome {
+        tool: call.tool,
+        limit: Some(limit),
+        result: Ok(result),
+    }
+}
+
+async fn run_sequential(
+    calls: Vec<BatchCall>,
+    batch_id: &str,
+    tools: &ToolRegistry,
+) -> Vec<CallOutcome> {
+    let mut outcomes = Vec::with_capacity(calls.len());
+    let mut aborted = false;
+    for (i, call) in calls.into_iter().enumerate() {
+        if aborted {
+            outcomes.push(CallOutcome::rejected(
+                call.tool,
+                "skipped after earlier failure (sequential=true)".to_string(),
+            ));
+            continue;
+        }
+        let outcome = TOOL_EXEC_ID
+            .scope(
+                exec_context::batch_sub_exec_id(batch_id, i),
+                run_call(call, tools),
+            )
+            .await;
+        aborted = outcome.failed();
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
+async fn run_concurrent(
+    calls: Vec<BatchCall>,
+    batch_id: &str,
+    tools: &ToolRegistry,
+) -> Vec<CallOutcome> {
+    let calls: Vec<(usize, BatchCall)> = calls.into_iter().enumerate().collect();
+    tool_grouping::execute_grouped(
+        calls,
+        |(_, call)| tool_grouping::file_path_key(&call.tool, &call.parameters),
+        move |(i, call)| {
+            let exec_id = exec_context::batch_sub_exec_id(batch_id, i);
+            TOOL_EXEC_ID.scope(exec_id, run_call(call, tools))
+        },
+    )
+    .await
+}
+
+struct Section {
+    header: String,
+    text: String,
+}
+
+impl Section {
+    fn new(index: usize, tool: &str, result: &ToolResult) -> Self {
+        let status = if result.outcome.is_error() {
+            "error"
+        } else {
+            "ok"
+        };
+        let mut text = String::new();
+        for part in &result.content {
+            match part {
+                ToolResultContentPart::Text(part) => text.push_str(&part.text),
+                ToolResultContentPart::Image(_) => text.push_str("[image]"),
+            }
+        }
+        Self {
+            header: format!("--- [{index}] {tool} [{status}] ---\n"),
+            text,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.header.len() + self.text.len() + 2
+    }
+}
+
+fn render_sections(sections: &[Section]) -> String {
+    let total_size: usize = sections.iter().map(Section::len).sum();
+    if total_size <= MAX_TOTAL_OUTPUT {
+        return join_sections(sections, total_size);
+    }
+
+    let saved_path = truncation::save_batch_output(&join_sections(sections, total_size + 256));
+
+    let overhead_per_item = 80;
+    let usable = MAX_TOTAL_OUTPUT.saturating_sub(sections.len() * overhead_per_item + 256);
+    let per_item_budget = usable / sections.len();
+
+    let mut output = String::new();
+    for section in sections {
+        output.push_str(&section.header);
+        if section.text.len() <= per_item_budget {
+            output.push_str(&section.text);
+        } else {
+            let file_ref = extract_file_path(&section.text);
+            let truncated = truncation::truncate_to_budget(&section.text, per_item_budget);
+            output.push_str(truncated);
+            let omitted = section.text.len() - truncated.len();
+            output.push_str(&format!("\n[…truncated, {omitted} bytes omitted"));
+            if let Some(path) = file_ref {
+                output.push_str(&format!(". full output: {path}"));
+            }
+            output.push(']');
+        }
+        output.push_str("\n\n");
+    }
+
+    let path_note = match saved_path {
+        Some(p) => format!("full output: {}", p.display()),
+        None => "full output could not be saved".into(),
+    };
+    output.push_str(&format!(
+        "[batch output exceeded {MAX_TOTAL_OUTPUT} byte budget. {path_note}]\n"
+    ));
+    output
+}
+
+fn join_sections(sections: &[Section], capacity: usize) -> String {
+    let mut output = String::with_capacity(capacity);
+    for section in sections {
+        output.push_str(&section.header);
+        output.push_str(&section.text);
+        output.push_str("\n\n");
+    }
+    output
 }
 
 #[async_trait::async_trait]
@@ -148,142 +293,29 @@ impl AgentTool for BatchTool {
         let total = params.tool_calls.len();
         let batch_id = exec_context::current_exec_id();
 
-        let mut results: Vec<CallResult> = if params.sequential {
-            let mut out = Vec::with_capacity(total);
-            let mut aborted = false;
-            for (i, call) in params.tool_calls.into_iter().enumerate() {
-                if aborted {
-                    out.push((
-                        i,
-                        call.tool,
-                        None,
-                        Err("skipped after earlier failure (sequential=true)".to_string()),
-                    ));
-                    continue;
-                }
-                let result = TOOL_EXEC_ID
-                    .scope(
-                        exec_context::batch_sub_exec_id(&batch_id, i),
-                        run_call(i, call, &self.tools),
-                    )
-                    .await;
-                let is_failure = match &result.3 {
-                    Err(_) => true,
-                    Ok(tr) => tr.outcome.is_error(),
-                };
-                out.push(result);
-                if is_failure {
-                    aborted = true;
-                }
-            }
-            out
+        let outcomes = if params.sequential {
+            run_sequential(params.tool_calls, &batch_id, &self.tools).await
         } else {
-            let calls: Vec<(usize, BatchCall)> =
-                params.tool_calls.into_iter().enumerate().collect();
-            let tools = &self.tools;
-            tool_grouping::execute_grouped(
-                calls,
-                |(_, call)| tool_grouping::file_path_key(&call.tool, &call.parameters),
-                move |(i, call)| {
-                    let exec_id = exec_context::batch_sub_exec_id(&batch_id, i);
-                    TOOL_EXEC_ID.scope(exec_id, async move { run_call(i, call, tools).await })
-                },
-            )
-            .await
+            run_concurrent(params.tool_calls, &batch_id, &self.tools).await
         };
-        results.sort_by_key(|(i, _, _, _)| *i);
 
-        let mut success_count = 0;
         let mut error_count = 0;
-
-        let mut items: Vec<(usize, String, String, String)> = Vec::with_capacity(results.len());
-        for (i, tool_name, limit, result) in &results {
-            let truncated = match result {
-                Ok(result) => {
-                    if result.outcome.is_error() {
-                        error_count += 1;
-                    } else {
-                        success_count += 1;
-                    }
-                    truncation::apply_for_tool(
-                        result.clone(),
-                        limit.unwrap_or(OutputLimit::Head),
-                        Some(tool_name.as_str()),
-                    )
-                }
-                Err(error) => {
+        let sections: Vec<Section> = outcomes
+            .into_iter()
+            .enumerate()
+            .map(|(i, outcome)| {
+                if outcome.failed() {
                     error_count += 1;
-                    ToolResult::error(error.clone())
                 }
-            };
+                outcome.into_section(i)
+            })
+            .collect();
+        let success_count = total - error_count;
 
-            let status = if truncated.outcome.is_error() {
-                "error"
-            } else {
-                "ok"
-            };
-            let header = format!("--- [{i}] {tool_name} [{status}] ---\n");
-            let mut item_text = String::new();
-            for part in &truncated.content {
-                match part {
-                    ToolResultContentPart::Text(text) => item_text.push_str(&text.text),
-                    ToolResultContentPart::Image(_) => item_text.push_str("[image]"),
-                }
-            }
-            items.push((*i, tool_name.clone(), header, item_text));
-        }
-
-        let total_size: usize = items.iter().map(|(_, _, h, t)| h.len() + t.len() + 2).sum();
-
-        let mut output = String::new();
-        if total_size <= MAX_TOTAL_OUTPUT {
-            for (_, _, header, item_text) in &items {
-                output.push_str(header);
-                output.push_str(item_text);
-                output.push_str("\n\n");
-            }
-        } else {
-            let mut full_output = String::with_capacity(total_size + 256);
-            for (_, _, header, item_text) in &items {
-                full_output.push_str(header);
-                full_output.push_str(item_text);
-                full_output.push_str("\n\n");
-            }
-            let saved_path = truncation::save_batch_output(&full_output);
-
-            let overhead_per_item = 80;
-            let usable = MAX_TOTAL_OUTPUT.saturating_sub(items.len() * overhead_per_item + 256);
-            let per_item_budget = usable / items.len();
-
-            for (_, _, header, item_text) in &items {
-                output.push_str(header);
-                if item_text.len() <= per_item_budget {
-                    output.push_str(item_text);
-                } else {
-                    let file_ref = extract_file_path(item_text);
-                    let truncated = truncation::truncate_to_budget(item_text, per_item_budget);
-                    output.push_str(truncated);
-                    let omitted = item_text.len() - truncated.len();
-                    output.push_str(&format!("\n[…truncated, {omitted} bytes omitted"));
-                    if let Some(path) = file_ref {
-                        output.push_str(&format!(". full output: {path}"));
-                    }
-                    output.push(']');
-                }
-                output.push_str("\n\n");
-            }
-
-            let path_note = match saved_path {
-                Some(p) => format!("full output: {}", p.display()),
-                None => "full output could not be saved".into(),
-            };
-            output.push_str(&format!(
-                "[batch output exceeded {MAX_TOTAL_OUTPUT} byte budget. {path_note}]\n"
-            ));
-        }
-
-        let summary = format!("batch: {success_count}/{total} succeeded, {error_count} failed");
-        output.push_str(&summary);
+        let mut output = render_sections(&sections);
+        output.push_str(&format!(
+            "batch: {success_count}/{total} succeeded, {error_count} failed"
+        ));
 
         if error_count > 0 {
             ToolResult::error(output)
