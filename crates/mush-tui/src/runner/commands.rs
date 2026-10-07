@@ -72,16 +72,12 @@ async fn switch_worker(
     true
 }
 
-async fn send_schedule(
+pub(super) async fn send_command(
     session: &mut Session,
     tui_config: &mut TuiConfig,
-    command: mush_runtime::ScheduleCommand,
+    command: mush_runtime::ClientCommand,
 ) -> bool {
-    match session
-        .connection
-        .send(mush_runtime::ClientCommand::Schedule(command))
-        .await
-    {
+    match session.connection.send(command).await {
         Ok(events) => {
             super::looping::apply_command_events(session, tui_config, events).await;
             true
@@ -260,29 +256,20 @@ pub(super) async fn handle_slash_action(
             super::subagents::command(&mut session.app, tui_config, &args).await;
         }
         SlashAction::Compact { focus } => {
-            match session
-                .connection
-                .send(mush_runtime::ClientCommand::Compact { focus, auto: false })
-                .await
-            {
-                Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events).await;
-                    state_changed = true;
-                }
-                Err(error) => session.app.push_system_message(error.to_string()),
-            }
+            state_changed = send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Compact { focus, auto: false },
+            )
+            .await;
         }
         SlashAction::Refine(request) => {
-            match session
-                .connection
-                .send(mush_runtime::ClientCommand::Refine(request))
-                .await
-            {
-                Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events).await;
-                }
-                Err(error) => session.app.push_system_message(error.to_string()),
-            }
+            send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Refine(request),
+            )
+            .await;
         }
         SlashAction::Side { question } => {
             slash::side_question::ask_side_question(&mut session.app, &question);
@@ -320,18 +307,16 @@ pub(super) async fn handle_slash_action(
                 }
                 slash::AutonomousAction::Off => mush_runtime::AutonomousCommand::Off,
             };
-            match session
-                .connection
-                .send(mush_runtime::ClientCommand::Autonomous(command))
-                .await
+            if send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Autonomous(command),
+            )
+            .await
             {
-                Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events).await;
-                    session
-                        .app
-                        .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
-                }
-                Err(error) => session.app.push_system_message(error.to_string()),
+                session
+                    .app
+                    .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
             }
         }
         SlashAction::Heartbeat(action) => {
@@ -359,7 +344,12 @@ pub(super) async fn handle_slash_action(
                 slash::HeartbeatAction::Resume => mush_runtime::ScheduleCommand::HeartbeatResume,
                 slash::HeartbeatAction::Clear => mush_runtime::ScheduleCommand::HeartbeatClear,
             };
-            send_schedule(session, tui_config, command).await;
+            send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Schedule(command),
+            )
+            .await;
             session
                 .app
                 .push_system_message(format_heartbeat(session.app.heartbeat()));
@@ -386,7 +376,13 @@ pub(super) async fn handle_slash_action(
                 slash::ScheduleAction::Resume(id) => mush_runtime::ScheduleCommand::Resume(id),
                 slash::ScheduleAction::Cancel(id) => mush_runtime::ScheduleCommand::Cancel(id),
             };
-            if send_schedule(session, tui_config, command).await {
+            if send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Schedule(command),
+            )
+            .await
+            {
                 session
                     .app
                     .push_system_message(format_jobs(&session.app.jobs));
@@ -415,34 +411,26 @@ pub(super) async fn handle_slash_action(
                 }
                 slash::GoalAction::Fail { error } => mush_runtime::GoalCommand::Fail { error },
             };
-            match session
-                .connection
-                .send(mush_runtime::ClientCommand::Goal(command))
-                .await
-            {
-                Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events).await;
-                }
-                Err(error) => session.app.push_system_message(error.to_string()),
-            }
+            send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Goal(command),
+            )
+            .await;
         }
         SlashAction::Export { path } => {
-            let pane = &mut *session;
             slash::handle_export(
-                &mut pane.app,
-                &pane.connection.history().await,
+                &mut session.app,
+                &session.connection.history().await,
                 path.as_deref().unwrap_or(""),
             );
         }
         SlashAction::LoginComplete { code } => {
-            let pane = &mut *session;
-            let logged_in = complete_login(&mut pane.app, code).await;
-            if logged_in {
-                refresh_models_after_login(session, tui_config).await;
+            if complete_login(&mut session.app, code).await {
+                refresh_models(session, tui_config).await;
             }
         }
         SlashAction::LoginApiKey { provider, key } => {
-            let pane = &mut *session;
             let message = match super::input::run_validation_and_save(&provider, key.expose()).await
             {
                 super::input::SaveOutcome::Saved(toast) => toast,
@@ -450,12 +438,11 @@ pub(super) async fn handle_slash_action(
                     format!("{provider} login failed: {reason}")
                 }
             };
-            pane.app.push_system_message(message);
+            session.app.push_system_message(message);
         }
         SlashAction::Login { provider, account } => {
-            let pane = &mut *session;
             slash::handle_login_start(
-                &mut pane.app,
+                &mut session.app,
                 tui_config,
                 provider.as_deref(),
                 account.clone(),
@@ -605,20 +592,12 @@ pub(super) async fn handle_slash_action(
             apply_reloaded_skills(session, &reloaded.skills.skills);
             let warnings = reloaded.skills.diagnostics.len();
             tui_config.skills = reloaded.skills;
+            let templates = reloaded.templates.len();
+            let skills = tui_config.skills.skills.len();
             session.app.status = Some(crate::app_state::Status::from(format!(
-                "reloaded AGENTS.md, {n} prompt template{s}, {k} skill{ks}{w}",
-                n = reloaded.templates.len(),
-                s = if reloaded.templates.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-                k = tui_config.skills.skills.len(),
-                ks = if tui_config.skills.skills.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
+                "reloaded AGENTS.md, {templates} prompt template{s}, {skills} skill{ks}{w}",
+                s = plural(templates),
+                ks = plural(skills),
                 w = if warnings == 0 {
                     String::new()
                 } else {
@@ -626,34 +605,17 @@ pub(super) async fn handle_slash_action(
                 },
             )));
         }
-        SlashAction::RefreshModels => {
-            let client = tui_config
-                .http_client
-                .clone()
-                .unwrap_or_else(mush_ai::http::client);
-            session.app.status = Some("refreshing models…".into());
-            let summary = mush_ai::discovery::refresh_and_save(client).await;
-            let line = summary.one_line();
-            for pane in std::slice::from_mut(session) {
-                crate::input::reload_model_completions(&mut pane.app);
-            }
-            session
-                .app
-                .push_system_message(format!("model discovery: {line}"));
-            session.app.status = None;
-        }
+        SlashAction::RefreshModels => refresh_models(session, tui_config).await,
         other_action => {
-            let pane = &mut *session;
             if let Some(prompt) = slash::handle(
-                &mut pane.app,
-                pane.connection.as_mut(),
+                &mut session.app,
+                session.connection.as_mut(),
                 tui_config,
                 &other_action,
             )
             .await
             {
-                let app = &mut pane.app;
-                app.start_streaming();
+                session.app.start_streaming();
                 *pending_prompt = Some(prompt);
             }
         }
@@ -662,39 +624,32 @@ pub(super) async fn handle_slash_action(
     state_changed
 }
 
-fn apply_reloaded_templates(session: &mut Session, templates: &[mush_ext::PromptTemplate]) {
-    for pane in std::slice::from_mut(session) {
-        let template_names: std::collections::HashSet<&str> = pane
-            .app
-            .completion
-            .templates
-            .iter()
-            .map(|t| t.name.as_str())
-            .collect();
-        pane.app
-            .completion
-            .completions
-            .retain(|c| !template_names.contains(c.trim_start_matches('/')));
-        pane.app
-            .completion
-            .slash_commands
-            .retain(|c| !template_names.contains(c.name.as_str()));
+fn plural(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
 
-        pane.app.completion.templates.clear();
-        for template in templates {
-            pane.app
-                .completion
-                .completions
-                .push(format!("/{}", template.name));
-            pane.app
-                .completion
-                .slash_commands
-                .push(crate::app::SlashCommand {
-                    name: template.name.clone(),
-                    description: template.description.clone().unwrap_or_default(),
-                });
-            pane.app.completion.templates.push(template.clone());
-        }
+fn apply_reloaded_templates(session: &mut Session, templates: &[mush_ext::PromptTemplate]) {
+    let completion = &mut session.app.completion;
+    let template_names: std::collections::HashSet<&str> = completion
+        .templates
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    completion
+        .completions
+        .retain(|c| !template_names.contains(c.trim_start_matches('/')));
+    completion
+        .slash_commands
+        .retain(|c| !template_names.contains(c.name.as_str()));
+
+    completion.templates.clear();
+    for template in templates {
+        completion.completions.push(format!("/{}", template.name));
+        completion.slash_commands.push(crate::app::SlashCommand {
+            name: template.name.clone(),
+            description: template.description.clone().unwrap_or_default(),
+        });
+        completion.templates.push(template.clone());
     }
 }
 
@@ -806,7 +761,7 @@ fn save_login_credentials(
     }
 }
 
-pub(super) async fn refresh_models_after_login(session: &mut Session, tui_config: &TuiConfig) {
+pub(super) async fn refresh_models(session: &mut Session, tui_config: &TuiConfig) {
     let client = tui_config
         .http_client
         .clone()
@@ -814,9 +769,7 @@ pub(super) async fn refresh_models_after_login(session: &mut Session, tui_config
     session.app.status = Some("refreshing models…".into());
     let summary = mush_ai::discovery::refresh_and_save(client).await;
     let line = summary.one_line();
-    for pane in std::slice::from_mut(session) {
-        crate::input::reload_model_completions(&mut pane.app);
-    }
+    crate::input::reload_model_completions(&mut session.app);
     session
         .app
         .push_system_message(format!("model discovery: {line}"));
@@ -830,55 +783,56 @@ pub(super) struct DrainedLogins {
 }
 
 pub(super) fn drain_finished_browser_logins(session: &mut Session) -> DrainedLogins {
-    let mut drained = DrainedLogins::default();
-    for pane in std::slice::from_mut(session) {
-        let Some(mut pending) = pane.app.pending_browser_login.take() else {
-            continue;
-        };
-        let Some(outcome) = pending.poll() else {
-            pane.app.pending_browser_login = Some(pending);
-            continue;
-        };
-        drained.settled = true;
-        match outcome {
-            Ok(creds) => {
-                drained.saved |= save_login_credentials(
-                    &mut pane.app,
-                    &pending.provider_id,
-                    &pending.provider_name,
-                    pending.account.clone(),
-                    creds,
-                );
-            }
-            Err(reason) => {
-                pane.app.push_system_message(format!(
-                    "{} login failed: {reason}\nrun /login to try again",
-                    pending.provider_name
-                ));
-            }
+    let app = &mut session.app;
+    let Some(mut pending) = app.pending_browser_login.take() else {
+        return DrainedLogins::default();
+    };
+    let Some(outcome) = pending.poll() else {
+        app.pending_browser_login = Some(pending);
+        return DrainedLogins::default();
+    };
+    let saved = match outcome {
+        Ok(creds) => save_login_credentials(
+            app,
+            &pending.provider_id,
+            &pending.provider_name,
+            pending.account.clone(),
+            creds,
+        ),
+        Err(reason) => {
+            app.push_system_message(format!(
+                "{} login failed: {reason}\nrun /login to try again",
+                pending.provider_name
+            ));
+            false
         }
-        pane.app.status = None;
-        if let Some(picker) = pane.app.interaction.login_picker.as_mut() {
-            picker.rebuild_sources();
-        }
+    };
+    app.status = None;
+    if let Some(picker) = app.interaction.login_picker.as_mut() {
+        picker.rebuild_sources();
     }
-    drained
+    DrainedLogins {
+        saved,
+        settled: true,
+    }
 }
 
-async fn handle_credits(pane: &mut crate::session::Session, tui_config: &TuiConfig) {
-    use mush_ai::types::Provider;
-
+async fn openrouter_key(tui_config: &TuiConfig) -> Option<mush_ai::ApiKey> {
     let openrouter_model = mush_ai::types::Model {
-        provider: Provider::OpenRouter,
+        provider: mush_ai::types::Provider::OpenRouter,
         ..tui_config.model.clone()
     };
-    let (key, _) = crate::event_handler::resolve_auth_for_model(
+    crate::event_handler::resolve_auth_for_model(
         &openrouter_model,
         &tui_config.provider_api_keys,
         None,
     )
-    .await;
-    let Some(key) = key else {
+    .await
+    .0
+}
+
+async fn handle_credits(pane: &mut crate::session::Session, tui_config: &TuiConfig) {
+    let Some(key) = openrouter_key(tui_config).await else {
         pane.app
             .push_system_message("/credits: no openrouter api key on file. /login first");
         return;
@@ -905,19 +859,7 @@ async fn handle_endpoints(
     tui_config: &TuiConfig,
     explicit_model_id: Option<&str>,
 ) {
-    use mush_ai::types::Provider;
-
-    let openrouter_model = mush_ai::types::Model {
-        provider: Provider::OpenRouter,
-        ..tui_config.model.clone()
-    };
-    let (key, _) = crate::event_handler::resolve_auth_for_model(
-        &openrouter_model,
-        &tui_config.provider_api_keys,
-        None,
-    )
-    .await;
-    let Some(key) = key else {
+    let Some(key) = openrouter_key(tui_config).await else {
         pane.app
             .push_system_message("/endpoints: no openrouter api key on file. /login first");
         return;

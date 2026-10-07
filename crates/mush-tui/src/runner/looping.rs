@@ -5,7 +5,7 @@ use mush_agent::AgentEvent;
 use crate::event_handler;
 
 use super::TuiConfig;
-use super::commands::{drain_finished_browser_logins, refresh_models_after_login};
+use super::commands::{drain_finished_browser_logins, refresh_models};
 use super::input::{
     InputDeps, LoopAction, handle_idle_terminal_events, handle_streaming_terminal_events,
 };
@@ -437,19 +437,18 @@ async fn drain_browser_logins(
     }
     let drained = drain_finished_browser_logins(session);
     if drained.saved {
-        refresh_models_after_login(session, tui_config).await;
+        refresh_models(session, tui_config).await;
     }
     drained.settled
 }
 
 fn drain_session_picker(session: &mut crate::session::Session) -> bool {
-    let mut changed = false;
-    for pane in std::slice::from_mut(session) {
-        if let Some(picker) = pane.app.interaction.session_picker.as_mut() {
-            changed |= picker.drain_incoming();
-        }
-    }
-    changed
+    session
+        .app
+        .interaction
+        .session_picker
+        .as_mut()
+        .is_some_and(|picker| picker.drain_incoming())
 }
 
 #[allow(clippy::too_many_arguments)]
