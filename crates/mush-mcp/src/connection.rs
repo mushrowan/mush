@@ -5,7 +5,6 @@ use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientRequest, ServerResult, Tool as McpToolDef,
 };
 use rmcp::service::{PeerRequestOptions, RoleClient, RunningService};
-use rmcp::transport::ConfigureCommandExt;
 use tokio::process::Command;
 
 use crate::config::{McpServerConfig, McpServerType, build_http_config};
@@ -76,21 +75,14 @@ impl McpConnection {
                     .split_first()
                     .ok_or_else(|| McpError::Connection("empty command".into()))?;
 
-                let args_owned: Vec<String> = args.to_vec();
-                let env = config.environment.clone();
+                let mut command = Command::new(cmd);
+                command
+                    .args(args)
+                    .envs(&config.environment)
+                    .kill_on_drop(true);
 
-                let transport = rmcp::transport::TokioChildProcess::new(
-                    Command::new(cmd).configure(move |c| {
-                        for arg in &args_owned {
-                            c.arg(arg);
-                        }
-                        for (k, v) in &env {
-                            c.env(k, v);
-                        }
-                        c.kill_on_drop(true);
-                    }),
-                )
-                .map_err(|e| McpError::Connection(e.to_string()))?;
+                let transport = rmcp::transport::TokioChildProcess::new(command)
+                    .map_err(|e| McpError::Connection(e.to_string()))?;
 
                 ().serve(transport)
                     .await
@@ -133,7 +125,7 @@ impl McpConnection {
         args: serde_json::Value,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
         let mut params = CallToolRequestParams::new(name);
-        if let Some(obj) = args.as_object().cloned() {
+        if let serde_json::Value::Object(obj) = args {
             params = params.with_arguments(obj);
         }
 

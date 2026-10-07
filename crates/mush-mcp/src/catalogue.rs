@@ -1,6 +1,12 @@
 use std::sync::Arc;
 
+use rmcp::model::Tool as McpToolDef;
+
 use crate::server::McpServer;
+
+pub(crate) fn full_tool_name(server: &str, tool: &str) -> String {
+    format!("{server}_{tool}")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolInfo {
@@ -32,11 +38,10 @@ impl McpCatalogue {
                 continue;
             }
             for tool in server.tools().await {
-                let tool_name = tool.name.to_string();
                 out.push(McpToolInfo {
                     server: server.name().to_string(),
-                    full_name: format!("{}_{tool_name}", server.name()),
-                    tool_name,
+                    full_name: full_tool_name(server.name(), &tool.name),
+                    tool_name: tool.name.to_string(),
                     description: tool
                         .description
                         .as_deref()
@@ -50,27 +55,21 @@ impl McpCatalogue {
     }
 
     pub async fn resolve(&self, full_name: &str) -> Option<(Arc<McpServer>, String)> {
-        let query = full_name.to_lowercase();
-        for server in &self.servers {
-            for tool in server.tools().await {
-                let tool_name = tool.name.to_string();
-                if format!("{}_{tool_name}", server.name()).to_lowercase() == query {
-                    return Some((Arc::clone(server), tool_name));
-                }
-            }
-        }
-        None
+        let (server, tool) = self.find(full_name).await?;
+        Some((server, tool.name.to_string()))
     }
 
     pub async fn schema(&self, full_name: &str) -> Option<serde_json::Value> {
+        let (_, tool) = self.find(full_name).await?;
+        Some(serde_json::to_value(&tool.input_schema).unwrap_or_else(|_| serde_json::json!({})))
+    }
+
+    async fn find(&self, full_name: &str) -> Option<(Arc<McpServer>, McpToolDef)> {
         let query = full_name.to_lowercase();
         for server in &self.servers {
             for tool in server.tools().await {
-                if format!("{}_{}", server.name(), tool.name).to_lowercase() == query {
-                    return Some(
-                        serde_json::to_value(&tool.input_schema)
-                            .unwrap_or_else(|_| serde_json::json!({})),
-                    );
+                if full_tool_name(server.name(), &tool.name).to_lowercase() == query {
+                    return Some((Arc::clone(server), tool));
                 }
             }
         }
@@ -86,7 +85,6 @@ impl McpCatalogue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::Tool as McpToolDef;
 
     fn tool(name: &'static str, description: &'static str) -> McpToolDef {
         McpToolDef::new(

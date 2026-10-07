@@ -15,7 +15,7 @@ pub struct McpTool {
 impl McpTool {
     pub fn new(definition: McpToolDef, server: Arc<McpServer>) -> Self {
         let tool_name = definition.name.to_string();
-        let full_name = format!("{}_{tool_name}", server.name());
+        let full_name = crate::catalogue::full_tool_name(server.name(), &tool_name);
         Self {
             full_name,
             tool_name,

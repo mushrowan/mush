@@ -32,9 +32,9 @@ impl ServerState {
 pub struct McpServer {
     name: String,
     config: McpServerConfig,
-    connection: Arc<RwLock<Option<Arc<McpConnection>>>>,
-    tools: Arc<RwLock<Vec<McpToolDef>>>,
-    state: Arc<RwLock<ServerState>>,
+    connection: RwLock<Option<Arc<McpConnection>>>,
+    tools: RwLock<Vec<McpToolDef>>,
+    state: RwLock<ServerState>,
 }
 
 impl McpServer {
@@ -42,9 +42,9 @@ impl McpServer {
         let server = Self {
             name: name.to_string(),
             config: config.clone(),
-            connection: Arc::new(RwLock::new(None)),
-            tools: Arc::new(RwLock::new(Vec::new())),
-            state: Arc::new(RwLock::new(ServerState::Disabled)),
+            connection: RwLock::new(None),
+            tools: RwLock::new(Vec::new()),
+            state: RwLock::new(ServerState::Disabled),
         };
         if config.enabled {
             server.dial().await;
@@ -142,9 +142,9 @@ impl McpServer {
                 timeout: 1,
                 environment: std::collections::HashMap::new(),
             },
-            connection: Arc::new(RwLock::new(None)),
-            tools: Arc::new(RwLock::new(tools)),
-            state: Arc::new(RwLock::new(ServerState::Connected { tools: count })),
+            connection: RwLock::new(None),
+            tools: RwLock::new(tools),
+            state: RwLock::new(ServerState::Connected { tools: count }),
         }
     }
 }
