@@ -120,7 +120,7 @@ pub async fn deliver(directory: &Path, message: &Path) -> Result<()> {
 
 pub async fn reopen(manifest: &Manifest, job: &Worker, previous: Option<&Value>) -> Result<()> {
     let dir = manifest.directory.join(&job.name);
-    crate::kill_recorded(&dir).await;
+    crate::process::kill_recorded(&dir).await;
     let Some(previous) = previous else {
         return Ok(());
     };
