@@ -107,7 +107,7 @@ pub fn private_directory(path: &Path) -> io::Result<()> {
     let metadata = path.symlink_metadata()?;
     if !metadata.is_dir()
         || metadata.mode() & 0o077 != 0
-        || metadata.uid() != fs::metadata("/proc/self")?.uid()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || fs::canonicalize(path)? != path
     {
         return Err(io::Error::other(
@@ -125,7 +125,7 @@ pub fn read_private(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || metadata.mode() & 0o077 != 0
-        || metadata.uid() != fs::metadata("/proc/self")?.uid()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.nlink() != 1
         || fs::canonicalize(path)? != path
     {
