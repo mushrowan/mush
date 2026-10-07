@@ -106,12 +106,11 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::ti
         && ms.is_finite()
         && ms >= 0.0
     {
-        return Some(std::time::Duration::from_secs_f64(ms / 1000.0));
+        return Some(seconds_or_forever(ms / 1000.0));
     }
     let raw = header("retry-after")?.trim();
     if let Ok(seconds) = raw.parse::<f64>() {
-        return (seconds.is_finite() && seconds >= 0.0)
-            .then(|| std::time::Duration::from_secs_f64(seconds));
+        return (seconds.is_finite() && seconds >= 0.0).then(|| seconds_or_forever(seconds));
     }
     let at = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
     Some(
@@ -119,6 +118,10 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<std::ti
             .to_std()
             .unwrap_or_default(),
     )
+}
+
+fn seconds_or_forever(seconds: f64) -> std::time::Duration {
+    std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX)
 }
 
 #[must_use]
@@ -459,6 +462,11 @@ mod tests {
             None
         );
         assert_eq!(parse_retry_after(&HeaderMap::new()), None);
+        for (name, value) in [("retry-after", "1e300"), ("retry-after-ms", "1e300")] {
+            let wait = parse_retry_after(&headers(&[(name, value)]));
+            assert_eq!(wait, Some(Duration::MAX), "{name}");
+            assert_eq!(retry_delay(Duration::from_secs(1), wait), None);
+        }
     }
 
     #[test]
