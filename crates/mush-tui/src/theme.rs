@@ -351,51 +351,54 @@ impl Theme {
     }
 
     pub fn from_config(config: &ThemeConfig) -> Self {
-        let mut theme = Self::default();
+        Self::default().with_config(config)
+    }
 
+    #[must_use]
+    fn with_config(mut self, config: &ThemeConfig) -> Self {
         if let Some(preset) = config.preset {
-            apply_palette(&mut theme, &preset.palette());
+            apply_palette(&mut self, &preset.palette());
         }
-        apply_palette(&mut theme, &config.palette);
+        apply_palette(&mut self, &config.palette);
 
         if let Some(c) = config.user.as_deref().and_then(parse_colour) {
-            theme.user_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
+            self.user_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
         }
         if let Some(c) = config.assistant.as_deref().and_then(parse_colour) {
-            theme.assistant_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
+            self.assistant_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
         }
         if let Some(c) = config.system.as_deref().and_then(parse_colour) {
-            theme.system_label = Style::default().fg(c);
+            self.system_label = Style::default().fg(c);
         }
         if let Some(c) = config.thinking.as_deref().and_then(parse_colour) {
-            theme.thinking = Style::default().fg(c);
-            theme.thinking_label = Style::default().fg(c);
+            self.thinking = Style::default().fg(c);
+            self.thinking_label = Style::default().fg(c);
         }
         if let Some(c) = config.code.as_deref().and_then(parse_colour) {
-            theme.code_block = Style::default().fg(c);
-            theme.inline_code = Style::default().fg(c);
+            self.code_block = Style::default().fg(c);
+            self.inline_code = Style::default().fg(c);
         }
         if let Some(c) = config.heading.as_deref().and_then(parse_colour) {
-            theme.heading = Style::default().fg(c).add_modifier(Modifier::BOLD);
-            theme.heading_h3 = Style::default().fg(c).add_modifier(Modifier::BOLD);
+            self.heading = Style::default().fg(c).add_modifier(Modifier::BOLD);
+            self.heading_h3 = Style::default().fg(c).add_modifier(Modifier::BOLD);
         }
         if let Some(c) = config.tool_running.as_deref().and_then(parse_colour) {
-            theme.tool_running = Style::default().fg(c);
+            self.tool_running = Style::default().fg(c);
         }
         if let Some(c) = config.tool_done.as_deref().and_then(parse_colour) {
-            theme.tool_done = Style::default().fg(c);
+            self.tool_done = Style::default().fg(c);
         }
         if let Some(c) = config.tool_error.as_deref().and_then(parse_colour) {
-            theme.tool_error = Style::default().fg(c);
+            self.tool_error = Style::default().fg(c);
         }
         if let Some(c) = config.status.as_deref().and_then(parse_colour) {
-            theme.status_model = Style::default().fg(c);
+            self.status_model = Style::default().fg(c);
         }
         if let Some(c) = config.border.as_deref().and_then(parse_colour) {
-            theme.input_border = Style::default().fg(c);
+            self.input_border = Style::default().fg(c);
         }
 
-        theme
+        self
     }
 }
 
@@ -609,52 +612,7 @@ pub fn auto_theme(config: &ThemeConfig) -> Theme {
     } else {
         Theme::dark()
     };
-
-    let mut theme = base;
-
-    if let Some(preset) = config.preset {
-        apply_palette(&mut theme, &preset.palette());
-    }
-    apply_palette(&mut theme, &config.palette);
-
-    if let Some(c) = config.user.as_deref().and_then(parse_colour) {
-        theme.user_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
-    }
-    if let Some(c) = config.assistant.as_deref().and_then(parse_colour) {
-        theme.assistant_label = Style::default().fg(c).add_modifier(Modifier::BOLD);
-    }
-    if let Some(c) = config.system.as_deref().and_then(parse_colour) {
-        theme.system_label = Style::default().fg(c);
-    }
-    if let Some(c) = config.thinking.as_deref().and_then(parse_colour) {
-        theme.thinking = Style::default().fg(c);
-        theme.thinking_label = Style::default().fg(c);
-    }
-    if let Some(c) = config.code.as_deref().and_then(parse_colour) {
-        theme.code_block = Style::default().fg(c);
-        theme.inline_code = Style::default().fg(c);
-    }
-    if let Some(c) = config.heading.as_deref().and_then(parse_colour) {
-        theme.heading = Style::default().fg(c).add_modifier(Modifier::BOLD);
-        theme.heading_h3 = Style::default().fg(c).add_modifier(Modifier::BOLD);
-    }
-    if let Some(c) = config.tool_running.as_deref().and_then(parse_colour) {
-        theme.tool_running = Style::default().fg(c);
-    }
-    if let Some(c) = config.tool_done.as_deref().and_then(parse_colour) {
-        theme.tool_done = Style::default().fg(c);
-    }
-    if let Some(c) = config.tool_error.as_deref().and_then(parse_colour) {
-        theme.tool_error = Style::default().fg(c);
-    }
-    if let Some(c) = config.status.as_deref().and_then(parse_colour) {
-        theme.status_model = Style::default().fg(c);
-    }
-    if let Some(c) = config.border.as_deref().and_then(parse_colour) {
-        theme.input_border = Style::default().fg(c);
-    }
-
-    theme
+    base.with_config(config)
 }
 
 #[cfg(test)]
