@@ -693,30 +693,6 @@ async fn summarise_and_navigate_skips_the_model_when_nothing_is_left_behind() {
     assert!(requests.lock().unwrap().is_empty());
 }
 
-struct NoteTool;
-
-#[async_trait::async_trait]
-impl mush_agent::AgentTool for NoteTool {
-    fn name(&self) -> &str {
-        "note"
-    }
-    fn label(&self) -> &str {
-        "Note"
-    }
-    fn description(&self) -> &str {
-        "keeps a note"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({ "type": "object", "properties": {} })
-    }
-    async fn execute(&self, _args: serde_json::Value) -> mush_agent::ToolResult {
-        mush_agent::ToolResult::text("noted")
-    }
-    fn output_limit(&self) -> mush_agent::OutputLimit {
-        mush_agent::OutputLimit::Head
-    }
-}
-
 #[tokio::test]
 async fn a_prompt_after_aborting_a_hung_tool_starts_a_new_turn() {
     let (mut connection, requests) = crate::testing::hanging_tool_connection();
@@ -900,7 +876,7 @@ async fn a_steer_sent_during_a_tool_call_reaches_the_next_request() {
     let mut runtime = SessionRuntime::new(ConversationState::new());
     runtime.model_id = model.id.to_string();
     let mut tools = ToolRegistry::new();
-    tools.register_shared(Arc::new(NoteTool));
+    tools.register_shared(Arc::new(crate::testing::NoteTool));
     let mut connection = InProcessConnection::new(
         runtime,
         tools,
@@ -953,7 +929,7 @@ async fn a_compaction_request_shares_the_prefix_of_the_live_turn() {
     let (mut connection, requests) = connection();
     connection.runtime.system_prompt = Some("you are terse".into());
     let mut tools = ToolRegistry::new();
-    tools.register_shared(Arc::new(NoteTool));
+    tools.register_shared(Arc::new(crate::testing::NoteTool));
     let registry = std::mem::replace(&mut connection.registry, ApiRegistry::new());
     connection.set_deps(tools, registry);
     connection.runtime.conversation = ConversationState::from_messages(

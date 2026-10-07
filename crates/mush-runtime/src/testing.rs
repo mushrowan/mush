@@ -86,6 +86,19 @@ pub fn echo_config(model: Model) -> TurnConfig {
     }
 }
 
+fn echo_model_connection(registry: ApiRegistry, tools: ToolRegistry) -> InProcessConnection {
+    let model = echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    InProcessConnection::new(
+        runtime,
+        tools,
+        registry,
+        echo_config(model),
+        mush_agent::AgentInjections::default(),
+    )
+}
+
 #[must_use]
 pub fn echo_connection() -> (InProcessConnection, Requests) {
     let requests: Requests = Arc::new(Mutex::new(Vec::new()));
@@ -94,16 +107,7 @@ pub fn echo_connection() -> (InProcessConnection, Requests) {
         requests: requests.clone(),
         reply: "hi back".into(),
     }));
-    let model = echo_model();
-    let mut runtime = SessionRuntime::new(ConversationState::new());
-    runtime.model_id = model.id.to_string();
-    let connection = InProcessConnection::new(
-        runtime,
-        ToolRegistry::new(),
-        registry,
-        echo_config(model),
-        mush_agent::AgentInjections::default(),
-    );
+    let connection = echo_model_connection(registry, ToolRegistry::new());
     (connection, requests)
 }
 
@@ -223,18 +227,9 @@ pub fn hanging_tool_connection() -> (InProcessConnection, Requests) {
         requests: requests.clone(),
         gate,
     }));
-    let model = echo_model();
-    let mut runtime = SessionRuntime::new(ConversationState::new());
-    runtime.model_id = model.id.to_string();
     let mut tools = ToolRegistry::new();
     tools.register_shared(Arc::new(HangingTool));
-    let connection = InProcessConnection::new(
-        runtime,
-        tools,
-        registry,
-        echo_config(model),
-        mush_agent::AgentInjections::default(),
-    );
+    let connection = echo_model_connection(registry, tools);
     (connection, requests)
 }
 
@@ -247,18 +242,9 @@ pub fn tool_then_text_connection() -> (InProcessConnection, Requests, Arc<tokio:
         requests: requests.clone(),
         gate: gate.clone(),
     }));
-    let model = echo_model();
-    let mut runtime = SessionRuntime::new(ConversationState::new());
-    runtime.model_id = model.id.to_string();
     let mut tools = ToolRegistry::new();
     tools.register_shared(Arc::new(NoteTool));
-    let connection = InProcessConnection::new(
-        runtime,
-        tools,
-        registry,
-        echo_config(model),
-        mush_agent::AgentInjections::default(),
-    );
+    let connection = echo_model_connection(registry, tools);
     (connection, requests, gate)
 }
 
@@ -314,16 +300,7 @@ pub fn stalled_connection() -> (InProcessConnection, Arc<tokio::sync::Notify>) {
     registry.register(Box::new(Stall {
         release: Arc::clone(&release),
     }));
-    let model = echo_model();
-    let mut runtime = SessionRuntime::new(ConversationState::new());
-    runtime.model_id = model.id.to_string();
-    let connection = InProcessConnection::new(
-        runtime,
-        ToolRegistry::new(),
-        registry,
-        echo_config(model),
-        mush_agent::AgentInjections::default(),
-    );
+    let connection = echo_model_connection(registry, ToolRegistry::new());
     (connection, release)
 }
 
