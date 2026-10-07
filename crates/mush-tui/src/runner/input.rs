@@ -478,18 +478,16 @@ pub(super) async fn handle_idle_terminal_events(
 
     let mut changed = false;
     let mut handled = 0;
-    loop {
+    while handled < MAX_TERMINAL_EVENTS_PER_ITERATION
+        && (handled == 0 || event::poll(std::time::Duration::ZERO)?)
+    {
         let event = event::read()?;
         handled += 1;
         cancel_signal_for_event(stream_state, &event);
         changed |= !matches!(&event, Event::Resize(..));
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let app_event = handle_key(&mut session.app, key);
-                let Some(app_event) = app_event else {
-                    if !event::poll(std::time::Duration::ZERO)? {
-                        break;
-                    }
+                let Some(app_event) = handle_key(&mut session.app, key) else {
                     continue;
                 };
 
@@ -560,11 +558,6 @@ pub(super) async fn handle_idle_terminal_events(
                 );
             }
             event => trace_dropped_event(event, "idle"),
-        }
-
-        if handled >= MAX_TERMINAL_EVENTS_PER_ITERATION || !event::poll(std::time::Duration::ZERO)?
-        {
-            break;
         }
     }
 
