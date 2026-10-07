@@ -209,6 +209,35 @@ struct State<'a> {
     stalled: u32,
 }
 
+struct Progress {
+    model: String,
+    session: Option<String>,
+    retries: u32,
+    stalled: u32,
+}
+
+impl Progress {
+    fn state<'a>(
+        &'a self,
+        name: &'a str,
+        state: &'a str,
+        round: u32,
+        detail: &'a str,
+    ) -> State<'a> {
+        State {
+            name,
+            state,
+            model: &self.model,
+            round,
+            session_id: self.session.as_deref(),
+            at: Utc::now(),
+            detail,
+            retries: self.retries,
+            stalled: self.stalled,
+        }
+    }
+}
+
 fn private_file(path: &Path) -> std::io::Result<File> {
     let file = OpenOptions::new()
         .create(true)
@@ -491,13 +520,13 @@ async fn worker(
         .transpose()?
         .unwrap_or(0);
     let latest_status = dir.join(format!("round-{previous_round:03}.json"));
-    let mut session = session_from_status(&latest_status).or_else(|| {
+    let session = session_from_status(&latest_status).or_else(|| {
         previous
             .as_ref()
             .and_then(|v| v["session_id"].as_str())
             .map(str::to_owned)
     });
-    let mut model = previous
+    let model = previous
         .as_ref()
         .and_then(|v| v["model"].as_str())
         .unwrap_or(&manifest.model)
@@ -513,11 +542,23 @@ async fn worker(
             .map(|value| serde_json::from_value(value.clone()).map_err(Into::into))
             .unwrap_or(Ok(0))
     };
-    let mut retries = counter("retries")?;
-    let mut stalled = counter("stalled")?;
+    let mut progress = Progress {
+        model,
+        session,
+        retries: counter("retries")?,
+        stalled: counter("stalled")?,
+    };
     let mut last_round = previous_round;
     let assignment = events::assignment(previous.as_ref(), previous_round);
-    let save = |state: &State<'_>, reason| events::save(&manifest, &job, assignment, state, reason);
+    let save = |progress: &Progress, state: &str, round: u32, detail: &str, reason| {
+        events::save(
+            &manifest,
+            &job,
+            assignment,
+            &progress.state(&job.name, state, round, detail),
+            reason,
+        )
+    };
     if manifest.journalled() && previous_state == Some("running") {
         let process = read_json(&dir.join("process.json"));
         if let Some(tracked) =
@@ -526,17 +567,10 @@ async fn worker(
             signal_tree(&tracked, "-KILL").await;
         }
         save(
-            &State {
-                name: &job.name,
-                state: "error",
-                model: &model,
-                round: previous_round,
-                session_id: session.as_deref(),
-                at: Utc::now(),
-                detail: "supervisor interrupted during worker execution",
-                retries,
-                stalled,
-            },
+            &progress,
+            "error",
+            previous_round,
+            "supervisor interrupted during worker execution",
             Some(TerminalReason::SupervisorError),
         )?;
         return Ok(());
@@ -560,17 +594,10 @@ async fn worker(
             && !*stop.borrow()
         {
             save(
-                &State {
-                    name: &job.name,
-                    state: "waiting",
-                    model: &model,
-                    round,
-                    session_id: session.as_deref(),
-                    at: Utc::now(),
-                    detail: "waiting for coordinator handoff",
-                    retries,
-                    stalled,
-                },
+                &progress,
+                "waiting",
+                round,
+                "waiting for coordinator handoff",
                 None,
             )?;
             sleep_or_stop(2, &mut stop).await;
@@ -579,17 +606,10 @@ async fn worker(
             break;
         }
         save(
-            &State {
-                name: &job.name,
-                state: "queued",
-                model: &model,
-                round,
-                session_id: session.as_deref(),
-                at: Utc::now(),
-                detail: "waiting for an execution slot",
-                retries,
-                stalled,
-            },
+            &progress,
+            "queued",
+            round,
+            "waiting for an execution slot",
             None,
         )?;
         let permit = tokio::select! {
@@ -678,7 +698,7 @@ async fn worker(
             .kill_on_drop(true)
             .process_group(0)
             .arg("--model")
-            .arg(&model)
+            .arg(&progress.model)
             .arg("--max-turns")
             .arg("160");
         let status_enabled =
@@ -686,13 +706,13 @@ async fn worker(
         if status_enabled {
             cmd.arg("--status-file").arg(&headless_status);
         }
-        if status_enabled && let Some(id) = &session {
+        if status_enabled && let Some(id) = &progress.session {
             cmd.arg("--resume").arg(id);
         }
         let session_lease = if let Some(lease) = &manifest.session_lease {
             Some(lease.clone())
         } else if manifest.admission.is_some()
-            && let Some(session) = &session
+            && let Some(session) = &progress.session
         {
             let sessions = dir.join("mush-data/sessions");
             Some(Arc::new(mush_supervisor::admission::session_lock(
@@ -737,20 +757,7 @@ async fn worker(
             cmd.env_remove("MUSH_SESSION_LEASE_FD");
         }
         cmd.arg("-p").arg(prompt);
-        save(
-            &State {
-                name: &job.name,
-                state: "running",
-                model: &model,
-                round,
-                session_id: session.as_deref(),
-                at: Utc::now(),
-                detail: "",
-                retries,
-                stalled,
-            },
-            None,
-        )?;
+        save(&progress, "running", round, "", None)?;
         if manifest.journalled() {
             cmd.env("MUSH_RUN_ID", events::run_id(&manifest)?)
                 .env("MUSH_WORKER_ID", &job.name)
@@ -788,17 +795,10 @@ async fn worker(
             Ok(child) => child,
             Err(error) => {
                 save(
-                    &State {
-                        name: &job.name,
-                        state: "error",
-                        model: &model,
-                        round,
-                        session_id: session.as_deref(),
-                        at: Utc::now(),
-                        detail: &error.to_string(),
-                        retries,
-                        stalled,
-                    },
+                    &progress,
+                    "error",
+                    round,
+                    &error.to_string(),
                     Some(TerminalReason::SpawnFailed),
                 )?;
                 return Err(error.into());
@@ -869,7 +869,7 @@ async fn worker(
         }
         drop(permit);
         if status_enabled {
-            session = session_from_status(&headless_status).or(session);
+            progress.session = session_from_status(&headless_status).or(progress.session.take());
         }
         if *stop.borrow() || Utc::now() >= manifest.until {
             break;
@@ -917,9 +917,9 @@ async fn worker(
             failure = Some(Failure::Other);
         }
         if timed_out {
-            stalled = stalled.saturating_add(1);
+            progress.stalled = progress.stalled.saturating_add(1);
             detail = "worker exceeded its attempt or silence limit".into();
-            failure = Some(if stalled < 2 {
+            failure = Some(if progress.stalled < 2 {
                 Failure::RateLimit
             } else {
                 Failure::Other
@@ -933,21 +933,21 @@ async fn worker(
         {
             Action::Stop
         } else {
-            decide(reported_state, failure, fallback, retries)
+            decide(reported_state, failure, fallback, progress.retries)
         };
         let state = match action {
             Action::Continue => {
-                retries = 0;
+                progress.retries = 0;
                 "idle"
             }
             Action::Fallback => {
                 fallback = true;
-                model.clone_from(&manifest.fallback_model);
-                retries = 0;
+                progress.model.clone_from(&manifest.fallback_model);
+                progress.retries = 0;
                 "switching_provider"
             }
             Action::Retry => {
-                retries += 1;
+                progress.retries += 1;
                 "retrying"
             }
             Action::Stop => {
@@ -974,20 +974,7 @@ async fn worker(
                 events::saved_reason(state).unwrap_or(TerminalReason::Failed)
             }
         });
-        save(
-            &State {
-                name: &job.name,
-                state,
-                model: &model,
-                round,
-                session_id: session.as_deref(),
-                at: Utc::now(),
-                detail: &detail,
-                retries,
-                stalled,
-            },
-            reason,
-        )?;
+        save(&progress, state, round, &detail, reason)?;
         if action == Action::Stop {
             return Ok(());
         }
@@ -998,7 +985,7 @@ async fn worker(
                 } else {
                     60
                 };
-                seconds * u64::from(retries)
+                seconds * u64::from(progress.retries)
             } else {
                 job.pause_seconds
             },
@@ -1013,24 +1000,12 @@ async fn worker(
     } else {
         TerminalReason::RoundLimit
     };
-    save(
-        &State {
-            name: &job.name,
-            state: "stopped",
-            model: &model,
-            round: last_round,
-            session_id: session.as_deref(),
-            at: Utc::now(),
-            detail: match reason {
-                TerminalReason::Deadline => "deadline",
-                TerminalReason::Cancelled => "cancelled",
-                _ => "round limit",
-            },
-            retries,
-            stalled,
-        },
-        Some(reason),
-    )?;
+    let detail = match reason {
+        TerminalReason::Deadline => "deadline",
+        TerminalReason::Cancelled => "cancelled",
+        _ => "round limit",
+    };
+    save(&progress, "stopped", last_round, detail, Some(reason))?;
     Ok(())
 }
 
