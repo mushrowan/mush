@@ -428,7 +428,7 @@ mod tests {
         assert!(!result.outcome.is_success());
         assert!(!target.exists(), "target must not be written");
 
-        let msg = result_text(&result);
+        let msg = util::extract_text(&result);
         let scratch = rejected_path(&msg);
         assert_eq!(std::fs::read_to_string(scratch).unwrap(), content);
         assert!(msg.contains("line 2, column 10"), "{msg}");
@@ -457,7 +457,7 @@ mod tests {
         assert!(!result.outcome.is_success());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "one\ntwo\n");
 
-        let msg = result_text(&result);
+        let msg = util::extract_text(&result);
         let scratch = rejected_path(&msg);
         assert_eq!(std::fs::read_to_string(scratch).unwrap(), "two — with dash");
     }
@@ -469,13 +469,6 @@ mod tests {
                 .expect("saved rejection path")
                 .1,
         )
-    }
-
-    fn result_text(result: &mush_agent::tool::ToolResult) -> String {
-        match &result.content[0] {
-            mush_ai::types::ToolResultContentPart::Text(t) => t.text.clone(),
-            other => panic!("expected text, got {other:?}"),
-        }
     }
 
     #[tokio::test]

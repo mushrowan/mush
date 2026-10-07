@@ -1237,7 +1237,7 @@ mod tests {
                 "patch_text": "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch"
             }),
         ));
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
 
         assert!(text.contains("diff:"), "got: {text}");
         assert!(text.contains("-old"), "got: {text}");
@@ -1262,19 +1262,7 @@ mod tests {
         ));
 
         assert!(result.outcome.is_error());
-        assert!(result_text(&result).contains("read it again"));
+        assert!(crate::util::extract_text(&result).contains("read it again"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "old\n");
-    }
-
-    fn result_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                mush_ai::types::ToolResultContentPart::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

@@ -330,7 +330,7 @@ mod tests {
         let tool = make_tool(sample_map());
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.outcome.is_success());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("crates/mush-ai/src/types.rs:"));
         assert!(text.contains("crates/mush-tools/src/read.rs:"));
     }
@@ -361,7 +361,7 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({"path": "crates/mush-b", "wait_timeout": 10}))
             .await;
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(
             text.contains("crates/mush-b/src/b"),
             "filter should surface mush-b files even when rank ordering \
@@ -380,7 +380,7 @@ mod tests {
             .execute(serde_json::json!({"path": "crates/mush-ai"}))
             .await;
         assert!(result.outcome.is_success());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("crates/mush-ai/src/types.rs:"));
         assert!(text.contains("crates/mush-ai/src/registry.rs:"));
         assert!(!text.contains("crates/mush-tools/src/read.rs:"));
@@ -391,7 +391,7 @@ mod tests {
         let tool = make_tool(RepoMap::default());
         let result = tool.execute(serde_json::json!({"wait_timeout": 0})).await;
         assert!(result.outcome.is_error());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(
             text.contains("repo map build is still running")
                 || text.contains("not available")
@@ -409,7 +409,7 @@ mod tests {
         let shared = RepoMapShared::lazy(dir.path().to_path_buf(), 8192);
         let tool = RepoMapTool::new(shared);
         let result = tool.execute(serde_json::json!({"wait_timeout": 10})).await;
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
 
         assert!(result.outcome.is_success(), "expected ready map: {text}");
         assert!(
@@ -429,7 +429,7 @@ mod tests {
             .execute(serde_json::json!({"path": "nonexistent/dir"}))
             .await;
         assert!(result.outcome.is_success());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("no files match prefix 'nonexistent/dir'"));
         assert!(text.contains("try a shorter prefix"));
     }
@@ -441,7 +441,7 @@ mod tests {
             .execute(serde_json::json!({"summary_only": true}))
             .await;
         assert!(result.outcome.is_success());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("crates/mush-ai/src/types.rs: (2 symbols"));
         assert!(text.contains("crates/mush-tools/src/read.rs: (2 symbols"));
         assert!(!text.contains("var ModelId"));
@@ -453,22 +453,10 @@ mod tests {
         let tool = make_tool(sample_map());
         let result = tool.execute(serde_json::json!({"limit": 1})).await;
         assert!(result.outcome.is_success());
-        let text = result_text(&result);
+        let text = crate::util::extract_text(&result);
         assert!(text.contains("crates/mush-ai/src/types.rs"));
         assert!(!text.contains("crates/mush-ai/src/registry.rs"));
         assert!(text.contains("2 more files omitted"));
         assert!(text.contains("narrow with `path`"));
-    }
-
-    fn result_text(result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                mush_ai::types::ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
     }
 }

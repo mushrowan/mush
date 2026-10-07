@@ -1,29 +1,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use crate::util::{canonical_or_given, lock};
 
 static QUEUES: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
 
 pub async fn with_file_mutation_queue<T, F>(path: &Path, run: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let key = key(path);
-    let lock = QUEUES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .entry(key.clone())
-        .or_default()
-        .clone();
-    let guard = lock.lock().await;
+    let key = canonical_or_given(path);
+    let queue = lock(&QUEUES).entry(key.clone()).or_default().clone();
+    let guard = queue.lock().await;
     let result = run.await;
     drop(guard);
-    let mut queues = QUEUES.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut queues = lock(&QUEUES);
     if queues
         .get(&key)
         .is_some_and(|current| Arc::strong_count(current) == 2)
@@ -108,11 +101,6 @@ mod tests {
 
         with_file_mutation_queue(&path, async {}).await;
 
-        assert!(
-            !QUEUES
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&key(&path))
-        );
+        assert!(!lock(&QUEUES).contains_key(&canonical_or_given(&path)));
     }
 }

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Notify};
 
+use crate::util::lock;
+
 pub type NoticeSink = Arc<dyn Fn(JobNotice) + Send + Sync>;
 
 const NOTICE_COMMAND_CAP: usize = 1000;
@@ -195,30 +197,16 @@ impl Drop for Waiting<'_> {
 
 impl KernelJobs {
     pub fn set_notice_sink(&self, sink: NoticeSink) {
-        *self
-            .inner
-            .notice
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+        *lock(&self.inner.notice) = Some(sink);
     }
 
     pub fn set_orphan_journal(&self, journal: crate::orphans::OrphanJournal) {
-        *self
-            .inner
-            .orphans
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+        *lock(&self.inner.orphans) = Some(journal);
     }
 
     pub fn journal(&self, pid: Option<u32>, active: bool) {
         let Some(pid) = pid else { return };
-        if let Some(journal) = self
-            .inner
-            .orphans
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
+        if let Some(journal) = lock(&self.inner.orphans).as_ref() {
             journal.record(pid, active);
         }
     }
@@ -375,12 +363,7 @@ impl KernelJobs {
         if already_read {
             return;
         }
-        let sink = self
-            .inner
-            .notice
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let sink = lock(&self.inner.notice).clone();
         if let Some(sink) = sink {
             sink(notice);
         }

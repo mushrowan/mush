@@ -1,19 +1,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
+
+use crate::util::{canonical_or_given, lock};
 
 static SHARED: LazyLock<ReadLedger> = LazyLock::new(ReadLedger::default);
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadLedger(Arc<Mutex<HashMap<PathBuf, SystemTime>>>);
-
-impl ReadLedger {
-    #[must_use]
-    pub fn shared() -> Self {
-        SHARED.clone()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleRead {
@@ -30,39 +25,29 @@ impl std::fmt::Display for StaleRead {
     }
 }
 
-fn key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 impl ReadLedger {
+    #[must_use]
+    pub fn shared() -> Self {
+        SHARED.clone()
+    }
+
     pub fn record(&self, path: &Path) {
         let Some(modified) = mtime(path) else {
             return;
         };
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key(path), modified);
+        lock(&self.0).insert(canonical_or_given(path), modified);
     }
 
     pub fn forget(&self, path: &Path) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&key(path));
+        lock(&self.0).remove(&canonical_or_given(path));
     }
 
     pub fn check(&self, path: &Path) -> Result<(), StaleRead> {
-        let recorded = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key(path))
-            .copied();
+        let recorded = lock(&self.0).get(&canonical_or_given(path)).copied();
         match (recorded, mtime(path)) {
             (Some(recorded), Some(current)) if recorded != current => Err(StaleRead {
                 path: path.to_path_buf(),

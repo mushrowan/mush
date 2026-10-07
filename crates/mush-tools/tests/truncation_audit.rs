@@ -1,23 +1,10 @@
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult};
 use mush_agent::truncation::{self, MAX_BYTES, MAX_LINES};
-use mush_ai::types::ToolResultContentPart;
 use mush_tools::read::ReadTool;
-use mush_tools::util;
+use mush_tools::util::{self, extract_text};
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use std::sync::Arc;
-
-fn extract_text(result: &ToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|p| match p {
-            ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
 
 fn make_lines(n: usize) -> String {
     (0..n)

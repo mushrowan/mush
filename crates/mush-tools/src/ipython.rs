@@ -6,7 +6,7 @@ use mush_kernel::{CellOutput, HostError, HostRequestHandler, Kernel, KernelConfi
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::util::extract_text;
+use crate::util::{extract_text, lock, read_lock, write_lock};
 
 const DESCRIPTION: &str = "Execute Python code in a persistent Python REPL. Top-level `await` works. \
 Variables, imports, functions and loaded data persist across calls. The value of a trailing \
@@ -117,11 +117,7 @@ impl MushHost {
     }
 
     pub fn take_sent_messages(&self, origin: &str) -> Vec<SentMessage> {
-        self.sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(origin)
-            .unwrap_or_default()
+        lock(&self.sent).remove(origin).unwrap_or_default()
     }
 
     fn record_sent(&self, origin: Option<&str>, payload: &Value, reply: &Value) {
@@ -135,10 +131,7 @@ impl MushHost {
             Some(receipts) => receipts.clone(),
             None => vec![reply.clone()],
         };
-        let mut sent = self
-            .sent
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sent = lock(&self.sent);
         let entry = sent.entry(origin.to_string()).or_default();
         for receipt in receipts {
             let status = match receipt.get("error") {
@@ -161,39 +154,24 @@ impl MushHost {
     }
 
     pub fn set_web_search(&self, tool: Arc<dyn AgentTool>) {
-        *self
-            .web_search
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tool);
+        *write_lock(&self.web_search) = Some(tool);
     }
 
     pub fn set_extension(&self, extension: Arc<dyn HostRequestHandler>) {
-        *self
-            .extension
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(extension);
+        *write_lock(&self.extension) = Some(extension);
     }
 
     fn extension(&self) -> Option<Arc<dyn HostRequestHandler>> {
-        self.extension
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        read_lock(&self.extension).clone()
     }
 
     pub fn take_diffs(&self, origin: &str) -> Vec<CellDiff> {
-        self.diffs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(origin)
-            .unwrap_or_default()
+        lock(&self.diffs).remove(origin).unwrap_or_default()
     }
 
     fn record_diff(&self, origin: Option<&str>, path: String, diff: String) {
         let Some(origin) = origin else { return };
-        self.diffs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.diffs)
             .entry(origin.to_string())
             .or_default()
             .push(CellDiff { path, diff });
@@ -302,10 +280,7 @@ impl HostRequestHandler for MushHost {
                 Ok(json!({}))
             }
             "websearch" => {
-                let tool = self
-                    .web_search
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                let tool = read_lock(&self.web_search)
                     .clone()
                     .ok_or_else(|| HostError("web search is not available here".into()))?;
                 let result = tool.execute(payload).await;
@@ -445,10 +420,7 @@ impl IpythonTool {
     }
 
     fn schedule_snapshot(&self) {
-        let Some(path) = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let Some(path) = lock(&self.session)
             .as_ref()
             .map(|session| session.state_path.clone())
         else {
@@ -512,12 +484,7 @@ impl IpythonTool {
 
     fn kernel_config(&self) -> KernelConfig {
         let mut config = self.config.clone();
-        if let Some(session) = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
+        if let Some(session) = lock(&self.session).as_ref() {
             config.env.extend(session.env());
         }
         config
@@ -668,11 +635,7 @@ impl IpythonTool {
                 .restore(&path)
                 .await
                 .map_err(|error| error.to_string());
-            *self
-                .repair_notice
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                mush_kernel::restore_notice_text(&outcome);
+            *lock(&self.repair_notice) = mush_kernel::restore_notice_text(&outcome);
             if kernel.protocol_failure().is_some() {
                 tracing::warn!("kernel broke its protocol again while restoring, starting fresh");
                 self.journal_kernel(kernel.pid(), false);
@@ -684,11 +647,7 @@ impl IpythonTool {
     }
 
     fn vision_refusal(&self) -> Option<String> {
-        match &*self
-            .model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-        {
+        match &*lock(&self.model) {
             Some((id, false)) => Some(format!(
                 "\n[image not attached: {id} does not support vision. Tell the user to switch to a \
                  vision-capable model to load images into context.]"
@@ -698,9 +657,7 @@ impl IpythonTool {
     }
 
     fn latest_snapshot(&self) -> Option<std::path::PathBuf> {
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.session)
             .as_ref()
             .map(|session| session.state_path.clone())
             .filter(|path| path.is_file())
@@ -764,18 +721,11 @@ impl mush_kernel::KernelState for IpythonTool {
     fn attach_session(&self, session: mush_kernel::KernelSession) {
         self.snapshot_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
+        *lock(&self.session) = Some(session);
     }
 
     fn set_model(&self, id: &str, accepts_images: bool) {
-        *self
-            .model
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((id.to_string(), accepts_images));
+        *lock(&self.model) = Some((id.to_string(), accepts_images));
     }
 
     fn background_work(&self) -> bool {
@@ -905,12 +855,7 @@ impl AgentTool for IpythonTool {
                 if run.kernel_restarted {
                     text = format!("{KERNEL_RESTART_NOTICE}\n\n{text}");
                 }
-                if let Some(notice) = self
-                    .repair_notice
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take()
-                {
+                if let Some(notice) = lock(&self.repair_notice).take() {
                     text = format!("{notice}\n\n{text}");
                 }
                 if run.output.ok {

@@ -107,5 +107,7 @@ mod tests {
         let pid = std::fs::read_to_string(pid_file).unwrap();
         #[cfg(target_os = "linux")]
         assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(!pid.trim().is_empty());
     }
 }

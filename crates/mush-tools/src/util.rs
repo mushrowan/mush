@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub fn resolve_path(cwd: &Path, path_str: &str) -> PathBuf {
     let p = Path::new(path_str);
@@ -8,6 +9,22 @@ pub fn resolve_path(cwd: &Path, path_str: &str) -> PathBuf {
     } else {
         cwd.join(p)
     }
+}
+
+pub(crate) fn canonical_or_given(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub(crate) fn lock<T: ?Sized>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub(crate) fn read_lock<T: ?Sized>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub(crate) fn write_lock<T: ?Sized>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub fn gitignore_hint(path: &Path) -> Option<String> {
@@ -85,18 +102,15 @@ pub fn inject_note(
     let Some(note) = note else { return result };
 
     use mush_ai::types::{TextContent, ToolResultContentPart};
-    if let Some(first_text) = result
-        .content
-        .iter_mut()
-        .find_map(|p| matches!(p, ToolResultContentPart::Text(_)).then_some(p))
-    {
-        if let ToolResultContentPart::Text(t) = first_text {
-            t.text = format!("{note}\n\n{}", t.text);
-        }
-    } else {
-        result
+    let first_text = result.content.iter_mut().find_map(|part| match part {
+        ToolResultContentPart::Text(text) => Some(text),
+        ToolResultContentPart::Image(_) => None,
+    });
+    match first_text {
+        Some(text) => text.text = format!("{note}\n\n{}", text.text),
+        None => result
             .content
-            .insert(0, ToolResultContentPart::Text(TextContent { text: note }));
+            .insert(0, ToolResultContentPart::Text(TextContent { text: note })),
     }
     result
 }
