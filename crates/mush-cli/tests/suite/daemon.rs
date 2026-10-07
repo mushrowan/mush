@@ -480,9 +480,16 @@ async fn the_cli_lists_and_renames_a_live_agent() {
     assert!(renamed.status.success(), "{renamed:?}");
     assert!(String::from_utf8_lossy(&renamed.stdout).contains("renamed"));
 
-    let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
-    assert!(listed.status.success(), "{listed:?}");
-    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let rows = loop {
+        let listed = daemon.cli().args(["list", "--json"]).output().unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        if rows[0]["name"] == "scout one" || Instant::now() >= deadline {
+            break rows;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(rows[0]["name"], "scout one");
     assert_eq!(rows[0]["id"], descriptor.session_id[..8]);
     assert_eq!(rows[0]["status"], "idle");
