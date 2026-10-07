@@ -751,8 +751,7 @@ async fn poll(
             &mut runtime.session,
             &mut TuiConfig::for_test(),
             vec![event],
-        )
-        .await;
+        );
     }
     Ok(())
 }

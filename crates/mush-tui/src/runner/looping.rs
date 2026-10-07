@@ -248,107 +248,115 @@ pub(super) async fn dispatch_client_event(
                 prompt,
             );
         }
-        event => apply_command_events(&mut runtime.session, tui_config, vec![event]).await,
+        event => apply_command_events(&mut runtime.session, tui_config, vec![event]),
     }
 }
 
-pub(super) async fn apply_command_events(
+pub(super) fn apply_command_events(
     session: &mut crate::session::Session,
     tui_config: &mut super::TuiConfig,
     events: Vec<ClientEvent>,
 ) {
     for event in events {
-        match event {
-            ClientEvent::Session(event) => {
-                super::streams::apply_session_events(session, tui_config, vec![event]);
-            }
-            ClientEvent::TurnStarted => {
-                session.app.active_tools.clear();
-                session.app.promote_queued_messages();
-                session.app.begin_turn();
-                if !session.app.stream.active {
-                    session.app.start_streaming();
-                }
-            }
-            ClientEvent::Compacting => {
-                session.app.compacting = true;
-                session.app.status = Some("compacting\u{2026}".into());
-            }
-            ClientEvent::Compacted(applied) => {
-                let after_count = session.connection.state().context_len;
-                crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
-                super::runtime::promote_queued_inputs(session);
-            }
-            ClientEvent::CompactionFailed {
-                failure,
-                tokens_before,
-                model_id,
-            } => {
-                session
-                    .app
-                    .open_compaction_recovery(failure, tokens_before, model_id);
-            }
-            ClientEvent::ToolsCancelled(_) => {}
-            ClientEvent::MessageInjected(event) => {
-                session.app.push_event_message(&event);
+        apply_command_event(session, tui_config, event);
+    }
+}
+
+fn apply_command_event(
+    session: &mut crate::session::Session,
+    tui_config: &mut super::TuiConfig,
+    event: ClientEvent,
+) {
+    match event {
+        ClientEvent::Session(event) => {
+            super::streams::apply_session_events(session, tui_config, vec![event]);
+        }
+        ClientEvent::TurnStarted => {
+            session.app.active_tools.clear();
+            session.app.promote_queued_messages();
+            session.app.begin_turn();
+            if !session.app.stream.active {
                 session.app.start_streaming();
             }
-            ClientEvent::UserInput {
-                text,
-                images,
-                queued,
-            } => {
-                let images: Vec<Vec<u8>> = images.into_iter().map(|image| image.data).collect();
-                if queued {
-                    session.app.push_queued_message_with_images(text, images);
-                } else {
-                    session.app.push_user_message_with_images(text, images);
-                }
+        }
+        ClientEvent::Compacting => {
+            session.app.compacting = true;
+            session.app.status = Some("compacting\u{2026}".into());
+        }
+        ClientEvent::Compacted(applied) => {
+            let after_count = session.connection.state().context_len;
+            crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
+            super::runtime::promote_queued_inputs(session);
+        }
+        ClientEvent::CompactionFailed {
+            failure,
+            tokens_before,
+            model_id,
+        } => {
+            session
+                .app
+                .open_compaction_recovery(failure, tokens_before, model_id);
+        }
+        ClientEvent::ToolsCancelled(_) => {}
+        ClientEvent::MessageInjected(event) => {
+            session.app.push_event_message(&event);
+            session.app.start_streaming();
+        }
+        ClientEvent::UserInput {
+            text,
+            images,
+            queued,
+        } => {
+            let images: Vec<Vec<u8>> = images.into_iter().map(|image| image.data).collect();
+            if queued {
+                session.app.push_queued_message_with_images(text, images);
+            } else {
+                session.app.push_user_message_with_images(text, images);
             }
-            ClientEvent::SteerRetracted { text } => session.app.retract_queued_message(&text),
-            ClientEvent::ToolOutput { exec_id, line } => {
-                session.app.push_tool_output_by_exec_id(&exec_id, &line);
-            }
-            ClientEvent::BashDone(notice) => {
-                session
-                    .app
-                    .push_bash_done(&notice.done, notice.origin.as_deref());
-            }
-            ClientEvent::KernelBusy => {
-                session.app.interaction.kernel_busy = crate::app_state::KernelBusy::Pending;
-            }
-            ClientEvent::KernelBusyWithdrawn => {
-                super::streams::withdraw_kernel_busy(session);
-            }
-            ClientEvent::SideAnswer { question, answer } => {
-                crate::slash::side_question::show_side_answer(&mut session.app, &question, answer);
-            }
-            ClientEvent::ChildUpdated(child) => session.app.note_child(*child),
-            ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
-            ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
-            ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),
-            ClientEvent::PausedChanged(pause) => {
-                session.app.paused = pause.clone();
-                session.app.push_system_message(match &pause {
-                    Some(pause) => match &pause.reason {
-                        Some(reason) => format!("paused: {reason}"),
-                        None => "paused".to_string(),
-                    },
-                    None => "resumed".to_string(),
-                });
-            }
-            ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
-            ClientEvent::Refined(result) => {
-                session.app.status = None;
-                session
-                    .app
-                    .push_system_message(crate::slash::format_refinement(&result));
-            }
-            ClientEvent::Agent { .. }
-            | ClientEvent::TurnEnded { .. }
-            | ClientEvent::ConfirmRequest { .. } => {
-                tracing::warn!(?event, "stream event returned from a command");
-            }
+        }
+        ClientEvent::SteerRetracted { text } => session.app.retract_queued_message(&text),
+        ClientEvent::ToolOutput { exec_id, line } => {
+            session.app.push_tool_output_by_exec_id(&exec_id, &line);
+        }
+        ClientEvent::BashDone(notice) => {
+            session
+                .app
+                .push_bash_done(&notice.done, notice.origin.as_deref());
+        }
+        ClientEvent::KernelBusy => {
+            session.app.interaction.kernel_busy = crate::app_state::KernelBusy::Pending;
+        }
+        ClientEvent::KernelBusyWithdrawn => {
+            super::streams::withdraw_kernel_busy(session);
+        }
+        ClientEvent::SideAnswer { question, answer } => {
+            crate::slash::side_question::show_side_answer(&mut session.app, &question, answer);
+        }
+        ClientEvent::ChildUpdated(child) => session.app.note_child(*child),
+        ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
+        ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
+        ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),
+        ClientEvent::PausedChanged(pause) => {
+            session.app.paused = pause.clone();
+            session.app.push_system_message(match &pause {
+                Some(pause) => match &pause.reason {
+                    Some(reason) => format!("paused: {reason}"),
+                    None => "paused".to_string(),
+                },
+                None => "resumed".to_string(),
+            });
+        }
+        ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
+        ClientEvent::Refined(result) => {
+            session.app.status = None;
+            session
+                .app
+                .push_system_message(crate::slash::format_refinement(&result));
+        }
+        ClientEvent::Agent { .. }
+        | ClientEvent::TurnEnded { .. }
+        | ClientEvent::ConfirmRequest { .. } => {
+            tracing::warn!(?event, "stream event returned from a command");
         }
     }
 }
@@ -476,8 +484,7 @@ mod tests {
             &mut session,
             &mut config,
             vec![input("hello", false), input("steer", true)],
-        )
-        .await;
+        );
         let shown: Vec<_> = session
             .app
             .messages
@@ -492,8 +499,7 @@ mod tests {
             vec![ClientEvent::SteerRetracted {
                 text: "steer".into(),
             }],
-        )
-        .await;
+        );
         assert_eq!(session.app.messages.len(), 1);
         assert!(!session.app.has_queued_messages());
     }

@@ -81,7 +81,7 @@ pub(super) async fn send_command(
 ) -> bool {
     match session.connection.send(command).await {
         Ok(events) => {
-            super::looping::apply_command_events(session, tui_config, events).await;
+            super::looping::apply_command_events(session, tui_config, events);
             true
         }
         Err(error) => {

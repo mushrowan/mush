@@ -628,8 +628,7 @@ mod tests {
             &mut session,
             &mut config,
             vec![mush_runtime::ClientEvent::BashDone(bash_done("exit 5", 5))],
-        )
-        .await;
+        );
 
         assert_eq!(
             session.app.messages.last().map(|m| m.role.clone()),
@@ -648,8 +647,7 @@ mod tests {
             &mut session,
             &mut config,
             vec![mush_runtime::ClientEvent::KernelBusy],
-        )
-        .await;
+        );
         assert!(poll_kernel_busy_prompt(&mut session, &stream_state));
         assert_eq!(
             session.app.interaction.mode,
@@ -675,16 +673,14 @@ mod tests {
             &mut session,
             &mut config,
             vec![mush_runtime::ClientEvent::KernelBusy],
-        )
-        .await;
+        );
         assert!(poll_kernel_busy_prompt(&mut session, &stream_state));
 
         apply_command_events(
             &mut session,
             &mut config,
             vec![mush_runtime::ClientEvent::KernelBusyWithdrawn],
-        )
-        .await;
+        );
 
         assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
         assert_eq!(
@@ -718,8 +714,7 @@ mod tests {
             &mut session,
             &mut config,
             vec![mush_runtime::ClientEvent::BashDone(notice)],
-        )
-        .await;
+        );
 
         assert_eq!(session.app.messages.len(), before);
         let attached = &session.app.messages.last().unwrap().tool_calls[0].bash_done;
@@ -1104,7 +1099,7 @@ mod tests {
                 line: (*line).to_string(),
             })
             .collect();
-        apply_command_events(session, &mut config, events).await;
+        apply_command_events(session, &mut config, events);
     }
 
     #[tokio::test]

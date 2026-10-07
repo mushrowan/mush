@@ -900,8 +900,7 @@ mod tests {
             &mut pane,
             &mut config,
             vec![mush_runtime::ClientEvent::Compacted(applied)],
-        )
-        .await;
+        );
 
         assert!(!pane.app.compacting);
         assert!(
@@ -960,8 +959,7 @@ mod tests {
                 tokens_before,
                 model_id,
             }],
-        )
-        .await;
+        );
 
         let app = &runtime.session.app;
         assert_eq!(
