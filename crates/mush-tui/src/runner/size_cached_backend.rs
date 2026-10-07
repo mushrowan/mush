@@ -138,31 +138,22 @@ impl<B: Backend> Backend for SizeCachedBackend<B> {
     }
 
     fn size(&self) -> Result<Size, Self::Error> {
-        if self.state.consume_resize_pending() || !self.state.cached_size_is_fresh() {
-            let s = self.inner.size()?;
-            self.state.size.set(Some(s));
-            self.state.window_size.set(None);
-            self.state.mark_probed_now();
-            return Ok(s);
-        }
-        if let Some(s) = self.state.size.get() {
+        let refresh = self.state.consume_resize_pending() || !self.state.cached_size_is_fresh();
+        if !refresh && let Some(s) = self.state.size.get() {
             return Ok(s);
         }
         let s = self.inner.size()?;
         self.state.size.set(Some(s));
+        if refresh {
+            self.state.window_size.set(None);
+        }
         self.state.mark_probed_now();
         Ok(s)
     }
 
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
-        if self.state.consume_resize_pending() || !self.state.cached_size_is_fresh() {
-            let s = self.inner.window_size()?;
-            self.state.window_size.set(Some(s));
-            self.state.size.set(Some(s.columns_rows));
-            self.state.mark_probed_now();
-            return Ok(s);
-        }
-        if let Some(s) = self.state.window_size.get() {
+        let refresh = self.state.consume_resize_pending() || !self.state.cached_size_is_fresh();
+        if !refresh && let Some(s) = self.state.window_size.get() {
             return Ok(s);
         }
         let s = self.inner.window_size()?;

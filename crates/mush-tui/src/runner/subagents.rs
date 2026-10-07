@@ -100,6 +100,12 @@ fn parse(args: &str) -> Result<Option<Edit>, ()> {
             Err(())
         }
     };
+    let root_index = |s: &str| {
+        s.parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .ok_or(())
+    };
     match command {
         "" => Ok(None),
         "add" => path(rest).map(Edit::Add).map(Some),
@@ -107,11 +113,7 @@ fn parse(args: &str) -> Result<Option<Edit>, ()> {
         "clear" if rest.is_empty() => Ok(Some(Edit::Clear)),
         "bind" | "unbind" => {
             let (number, rest) = crate::slash::split_name_and_args(rest);
-            let index = number
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .ok_or(())?;
+            let index = root_index(number)?;
             let (worker, task_id) = crate::slash::split_name_and_args(rest);
             if !mush_supervisor::status::worker_name(worker) {
                 return Err(());
@@ -127,19 +129,11 @@ fn parse(args: &str) -> Result<Option<Edit>, ()> {
         }
         "review" => {
             let (number, rest) = crate::slash::split_name_and_args(rest);
-            let index = number
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .ok_or(())?;
+            let index = root_index(number)?;
             Ok(Some(Edit::Review(index, Some(path(rest)?))))
         }
         "unreview" => {
-            let index = rest
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .ok_or(())?;
+            let index = root_index(rest)?;
             Ok(Some(Edit::Review(index, None)))
         }
         _ => Err(()),

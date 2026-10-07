@@ -221,15 +221,12 @@ async fn reconcile_openrouter_generation(
         return;
     };
 
-    {
-        let pane = &mut *session;
-        pane.app.cache.apply_serving_provider(
-            provider_name,
-            model,
-            &tui_config.options,
-            tui_config.cache_timer,
-        );
-    }
+    session.app.cache.apply_serving_provider(
+        provider_name,
+        model,
+        &tui_config.options,
+        tui_config.cache_timer,
+    );
 }
 
 pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
@@ -247,13 +244,13 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
         }
     }
 
-    let pane = &mut *session;
-    pane.app.finish_streaming(None, None);
-    pane.app.stream.active = false;
-    pane.app.active_tools.clear();
-    pane.app.end_turn();
-    pane.app.status = Some(
-        if pane.app.quit_hint_armed() {
+    let app = &mut session.app;
+    app.finish_streaming(None, None);
+    app.stream.active = false;
+    app.active_tools.clear();
+    app.end_turn();
+    app.status = Some(
+        if app.quit_hint_armed() {
             "aborted, press ctrl+c again to exit"
         } else {
             "aborted"
@@ -261,16 +258,16 @@ pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &
         .into(),
     );
     if restarted {
-        pane.app.promote_queued_messages();
-        pane.app.begin_turn();
-        pane.app.start_streaming();
+        app.promote_queued_messages();
+        app.begin_turn();
+        app.start_streaming();
         return;
     }
-    let restored = pane.app.take_queued_messages();
+    let restored = app.take_queued_messages();
     if !restored.is_empty() {
         let text = restored.join("\n");
-        pane.app.input.text = text.clone();
-        pane.app.input.cursor = text.len();
+        app.input.text = text.clone();
+        app.input.cursor = text.len();
     }
 }
 
@@ -299,31 +296,22 @@ pub(super) async fn submit_streaming_input(
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
+    let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
     if session.connection.state().turn_active {
-        let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
-        if image_bytes.is_empty() {
-            session.app.push_queued_message(text.clone());
-        } else {
-            session
-                .app
-                .push_queued_message_with_images(text.clone(), image_bytes);
-        }
+        session
+            .app
+            .push_queued_message_with_images(text.clone(), image_bytes);
         let _ = session
             .connection
             .send(mush_runtime::ClientCommand::Steer { text, images })
             .await;
     } else {
-        let pane = &mut *session;
-        let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
-        if image_bytes.is_empty() {
-            pane.app.push_user_message(text.clone());
-        } else {
-            pane.app
-                .push_user_message_with_images(text.clone(), image_bytes);
-        }
-        pane.app.active_tools.clear();
-        pane.app.start_streaming();
-        let _ = pane
+        session
+            .app
+            .push_user_message_with_images(text.clone(), image_bytes);
+        session.app.active_tools.clear();
+        session.app.start_streaming();
+        let _ = session
             .connection
             .send(mush_runtime::ClientCommand::QueuePrompt { text, images })
             .await;

@@ -181,10 +181,7 @@ impl RunnerRuntime {
             && let Ok(new_theme) = rx.try_recv()
         {
             tui_config.theme = new_theme;
-            {
-                let pane = &mut self.session;
-                pane.app.theme = tui_config.theme.clone();
-            }
+            self.session.app.theme = tui_config.theme.clone();
         }
     }
 
@@ -201,10 +198,7 @@ impl RunnerRuntime {
         while let Ok(update) = rx.try_recv() {
             match update {
                 DiscoveryUpdate::Refreshed => {
-                    {
-                        let pane = &mut self.session;
-                        crate::input::reload_model_completions(&mut pane.app);
-                    }
+                    crate::input::reload_model_completions(&mut self.session.app);
                     changed = true;
                 }
             }
@@ -217,23 +211,18 @@ impl RunnerRuntime {
     }
 
     pub(super) fn tick_animation_panes(&mut self) -> bool {
-        let mut ticked = false;
-        {
-            let pane = &mut self.session;
-            if pane.app.has_visible_animation() {
-                pane.app.tick_animation();
-                ticked = true;
-            }
+        let app = &mut self.session.app;
+        let ticked = app.has_visible_animation();
+        if ticked {
+            app.tick_animation();
         }
         ticked
     }
 
     pub(super) fn tick_streaming_text_panes(&mut self) {
-        {
-            let pane = &mut self.session;
-            if pane.app.stream.active {
-                pane.app.tick_streaming_text();
-            }
+        let app = &mut self.session.app;
+        if app.stream.active {
+            app.tick_streaming_text();
         }
     }
 
@@ -242,15 +231,16 @@ impl RunnerRuntime {
     }
 
     pub(super) fn active_tool_labels(&self) -> Vec<String> {
-        std::iter::once(&self.session)
-            .flat_map(|pane| {
-                pane.app.active_tools.iter().map(|tool| {
-                    if tool.summary.is_empty() {
-                        tool.name.clone()
-                    } else {
-                        format!("{}: {}", tool.name, tool.summary)
-                    }
-                })
+        self.session
+            .app
+            .active_tools
+            .iter()
+            .map(|tool| {
+                if tool.summary.is_empty() {
+                    tool.name.clone()
+                } else {
+                    format!("{}: {}", tool.name, tool.summary)
+                }
             })
             .collect()
     }
@@ -260,27 +250,23 @@ impl RunnerRuntime {
             return;
         }
 
-        {
-            let pane = &mut self.session;
-            if let Some(remaining) = pane.app.cache.remaining_secs() {
-                if remaining == 0 && !pane.app.cache.expired_sent {
-                    pane.app.cache.expired_sent = true;
-                    crate::notify::send_with_sound(
-                        "cache expired",
-                        "prompt cache has gone cold",
-                        Some(crate::notify::Sound::Attention),
-                    );
-                } else if remaining > 0
-                    && remaining <= crate::app::CACHE_WARN_SECS
-                    && !pane.app.cache.warn_sent
-                {
-                    pane.app.cache.warn_sent = true;
-                    crate::notify::send_with_sound(
-                        "cache expiring soon",
-                        &format!("prompt cache expires in {remaining}s"),
-                        Some(crate::notify::Sound::Attention),
-                    );
-                }
+        let cache = &mut self.session.app.cache;
+        if let Some(remaining) = cache.remaining_secs() {
+            if remaining == 0 && !cache.expired_sent {
+                cache.expired_sent = true;
+                crate::notify::send_with_sound(
+                    "cache expired",
+                    "prompt cache has gone cold",
+                    Some(crate::notify::Sound::Attention),
+                );
+            } else if remaining > 0 && remaining <= crate::app::CACHE_WARN_SECS && !cache.warn_sent
+            {
+                cache.warn_sent = true;
+                crate::notify::send_with_sound(
+                    "cache expiring soon",
+                    &format!("prompt cache expires in {remaining}s"),
+                    Some(crate::notify::Sound::Attention),
+                );
             }
         }
     }
@@ -309,9 +295,8 @@ impl RunnerRuntime {
             return switched;
         };
 
-        let pane = &mut self.session;
-        pane.app.oauth_usage = Some(usage);
-        pane.app.oauth_usage_provider = Some("anthropic".into());
+        self.session.app.oauth_usage = Some(usage);
+        self.session.app.oauth_usage_provider = Some("anthropic".into());
         true
     }
 }
@@ -354,14 +339,9 @@ fn watch_config(
     Option<RecommendedWatcher>,
     Option<mpsc::Receiver<crate::theme::Theme>>,
 ) {
-    if let Some(path) = config_path {
-        match crate::config_watcher::watch_config(path.clone()) {
-            Some((watcher, rx)) => (Some(watcher), Some(rx)),
-            None => (None, None),
-        }
-    } else {
-        (None, None)
-    }
+    config_path
+        .and_then(|path| crate::config_watcher::watch_config(path.clone()))
+        .unzip()
 }
 
 pub(super) async fn reattach(

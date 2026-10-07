@@ -55,12 +55,8 @@ impl Session {
 
     pub async fn queue_input_during_compaction(&mut self, text: String, images: Vec<PendingImage>) {
         let image_bytes: Vec<Vec<u8>> = images.iter().map(|image| image.data.clone()).collect();
-        if image_bytes.is_empty() {
-            self.app.push_queued_message(text.clone());
-        } else {
-            self.app
-                .push_queued_message_with_images(text.clone(), image_bytes);
-        }
+        self.app
+            .push_queued_message_with_images(text.clone(), image_bytes);
         self.app.input.text.clear();
         self.app.input.cursor = 0;
         let _ = self
