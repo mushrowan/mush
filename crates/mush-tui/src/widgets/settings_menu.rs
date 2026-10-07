@@ -65,39 +65,7 @@ pub fn render(
 
     for (i, item) in items.iter().enumerate().skip(scroll_offset).take(visible) {
         let y = items_area.y + (i - scroll_offset) as u16;
-        let selected = i == menu.selected;
-        let value = item.value(settings);
-        let is_on = value == "on";
-        let is_off = value == "off";
-
-        let marker = if selected { "▶ " } else { "  " };
-        let marker_style = if selected {
-            theme.selection_marker
-        } else {
-            theme.dim
-        };
-
-        let label_style = if selected {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-
-        let value_style = if is_on {
-            theme.context_ok
-        } else if is_off {
-            theme.dim
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-
-        let label_padded = format!("{:<width$}", item.label(), width = label_width);
-        let line = Line::from(vec![
-            Span::styled(marker, marker_style),
-            Span::styled(label_padded, label_style),
-            Span::raw("  "),
-            Span::styled(value, value_style),
-        ]);
+        let line = menu_row(*item, i == menu.selected, settings, label_width, theme);
         frame.render_widget(line, Rect::new(items_area.x, y, items_area.width, 1));
     }
 
@@ -111,14 +79,41 @@ pub fn render(
         frame.render_stateful_widget(scrollbar, scrollbar_area, &mut sb_state);
     }
 
-    if inner.height >= 4 {
-        let desc = menu.current().description();
-        let desc_line = Line::from(Span::styled(desc, theme.dim));
-        frame.render_widget(
-            desc_line,
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        );
-    }
+    let desc_line = Line::from(Span::styled(menu.current().description(), theme.dim));
+    frame.render_widget(
+        desc_line,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+fn menu_row(
+    item: MenuItemKind,
+    selected: bool,
+    settings: &ScopedSettings,
+    label_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let value = item.value(settings);
+    let (marker, marker_style, label_style) = if selected {
+        (
+            "▶ ",
+            theme.selection_marker,
+            Style::default().add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("  ", theme.dim, Style::default())
+    };
+    let value_style = match value.as_str() {
+        "on" => theme.context_ok,
+        "off" => theme.dim,
+        _ => Style::default().add_modifier(Modifier::BOLD),
+    };
+    Line::from(vec![
+        Span::styled(marker, marker_style),
+        Span::styled(format!("{:<label_width$}", item.label()), label_style),
+        Span::raw("  "),
+        Span::styled(value, value_style),
+    ])
 }
 
 fn clamp_scroll(selected: usize, current_offset: usize, visible: usize, total: usize) -> usize {
