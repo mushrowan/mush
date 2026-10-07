@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use mush_supervisor::status::{RootStatus, RunState, TaskStatus, safe_text};
+use mush_supervisor::status::{RootStatus, RunState, Snapshot, TaskStatus, safe_text};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -42,21 +42,7 @@ pub fn render(frame: &mut Frame, panel: &SubagentPanel, theme: &Theme, now: Date
         .enumerate()
         .flat_map(|(i, r)| r.tasks.iter().map(move |t| (i, r, t)))
         .collect();
-    let mut notices = Vec::new();
-    if let Some(error) = panel.snapshot.registration_error {
-        notices.push(format!("registration stale / {error}"));
-    }
-    for (index, root) in panel.snapshot.roots.iter().enumerate() {
-        if let Some(error) = root.read_error {
-            notices.push(format!("root {} stale / {error}", index + 1));
-        }
-        if let Some(error) = root.review_error {
-            notices.push(format!("review {} stale / {error}", index + 1));
-        }
-        if let Some(error) = root.supervisor_error {
-            notices.push(format!("supervisor {} stale / {error}", index + 1));
-        }
-    }
+    let notices = stale_notices(&panel.snapshot);
     let mut y = inner.y;
     if !notices.is_empty() {
         frame.render_widget(
@@ -103,17 +89,8 @@ fn render_details(
         .review_updated_at
         .map(|at| at.to_rfc3339())
         .unwrap_or_else(|| "missing".into());
-    let queue = root
-        .source
-        .review_queue
-        .as_ref()
-        .map(|q| safe_text(&q.path.to_string_lossy()))
-        .unwrap_or_else(|| "not registered".into());
-    let older = if task.review_predates_worker() {
-        " / predates worker"
-    } else {
-        ""
-    };
+    let queue = review_queue_label(root);
+    let older = predates_worker_suffix(task);
     let mut lines = vec![
         Line::styled(safe_text(&task.name), theme.picker_title),
         Line::raw(format!(
@@ -239,14 +216,7 @@ fn render_list(
         let style = if index == selected {
             theme.picker_selected
         } else {
-            match task.run {
-                RunState::Failed => theme.tool_error,
-                RunState::Blocked | RunState::GateWaiting | RunState::AwaitingInput => theme.alert,
-                RunState::Running => theme.tool_running,
-                RunState::Finished | RunState::Queued | RunState::Cancelled | RunState::Unknown => {
-                    theme.tool_output
-                }
-            }
+            run_style(theme, task.run)
         };
         let name = crate::text::truncate_with_ellipsis(
             &safe_text(&task.name),
@@ -298,57 +268,16 @@ fn render_list(
         }
     }
     if detail_height > 0 {
-        let (root_index, root, task) = tasks[selected];
-        let review_age = task
-            .review_updated_at
-            .map(|at| format!("{}s", (now - at).num_seconds().max(0)))
-            .unwrap_or_else(|| "unknown age".into());
-        let older = if task.review_predates_worker() {
-            " / predates worker"
-        } else {
-            ""
-        };
-        let queue = root
-            .source
-            .review_queue
-            .as_ref()
-            .map(|q| safe_text(&q.path.to_string_lossy()))
-            .unwrap_or_else(|| "not registered".into());
-        let text = vec![
-            Line::styled(
-                format!(
-                    "{} | worker {} | round {}",
-                    safe_text(&task.name),
-                    task.worker,
-                    task.round
-                ),
-                theme.picker_title,
-            ),
-            Line::raw(format!(
-                "record {} | {} | liveness unverified",
-                safe_text(&task.recorded_state),
-                age(task, now)
-            )),
-            Line::raw(activity(task)),
-            Line::raw(format!(
-                "root {} {}",
-                root_index + 1,
-                safe_text(&root.source.directory.to_string_lossy())
-            )),
-            Line::raw(format!(
-                "{} | {review_age}{older} | {}",
-                task.review.label(),
-                safe_text(&task.review_detail)
-            )),
-            Line::raw(format!("queue {queue}")),
-        ];
         let detail = Rect::new(
             body.x,
             body.bottom().saturating_sub(detail_height + footer_height),
             body.width,
             detail_height,
         );
-        frame.render_widget(Paragraph::new(text).style(theme.tool_output), detail);
+        frame.render_widget(
+            Paragraph::new(selected_summary(theme, now, tasks[selected])).style(theme.tool_output),
+            detail,
+        );
     }
     if footer_height > 0 {
         frame.render_widget(
@@ -361,6 +290,93 @@ fn render_list(
             Rect::new(body.x, body.bottom() - 1, body.width, 1),
         );
     }
+}
+
+fn selected_summary(
+    theme: &Theme,
+    now: DateTime<Utc>,
+    (root_index, root, task): Entry<'_>,
+) -> Vec<Line<'static>> {
+    let review_age = task
+        .review_updated_at
+        .map(|at| format!("{}s", (now - at).num_seconds().max(0)))
+        .unwrap_or_else(|| "unknown age".into());
+    let older = predates_worker_suffix(task);
+    let queue = review_queue_label(root);
+    vec![
+        Line::styled(
+            format!(
+                "{} | worker {} | round {}",
+                safe_text(&task.name),
+                task.worker,
+                task.round
+            ),
+            theme.picker_title,
+        ),
+        Line::raw(format!(
+            "record {} | {} | liveness unverified",
+            safe_text(&task.recorded_state),
+            age(task, now)
+        )),
+        Line::raw(activity(task)),
+        Line::raw(format!(
+            "root {} {}",
+            root_index + 1,
+            safe_text(&root.source.directory.to_string_lossy())
+        )),
+        Line::raw(format!(
+            "{} | {review_age}{older} | {}",
+            task.review.label(),
+            safe_text(&task.review_detail)
+        )),
+        Line::raw(format!("queue {queue}")),
+    ]
+}
+
+fn review_queue_label(root: &RootStatus) -> String {
+    root.source
+        .review_queue
+        .as_ref()
+        .map(|q| safe_text(&q.path.to_string_lossy()))
+        .unwrap_or_else(|| "not registered".into())
+}
+
+fn predates_worker_suffix(task: &TaskStatus) -> &'static str {
+    if task.review_predates_worker() {
+        " / predates worker"
+    } else {
+        ""
+    }
+}
+
+fn run_style(theme: &Theme, run: RunState) -> ratatui::style::Style {
+    match run {
+        RunState::Failed => theme.tool_error,
+        RunState::Blocked | RunState::GateWaiting | RunState::AwaitingInput => theme.alert,
+        RunState::Running => theme.tool_running,
+        RunState::Finished | RunState::Queued | RunState::Cancelled | RunState::Unknown => {
+            theme.tool_output
+        }
+    }
+}
+
+fn stale_notices(snapshot: &Snapshot) -> Vec<String> {
+    let mut notices = Vec::new();
+    if let Some(error) = snapshot.registration_error {
+        notices.push(format!("registration stale / {error}"));
+    }
+    for (index, root) in snapshot.roots.iter().enumerate() {
+        if let Some(error) = root.read_error {
+            notices.push(format!("root {} stale / {error}", index + 1));
+        }
+        if let Some(error) = root.review_error {
+            notices.push(format!("review {} stale / {error}", index + 1));
+        }
+        if let Some(error) = root.supervisor_error {
+            notices.push(format!("supervisor {} stale / {error}", index + 1));
+        }
+    }
+    notices
 }
 
 fn age(task: &TaskStatus, now: DateTime<Utc>) -> String {
