@@ -349,10 +349,7 @@ pub async fn send(session: &str, text: &str) -> Result<()> {
     .await?;
     match response.kind {
         IpcMessageKind::ControlReply(Reply::Accepted { .. }) => {
-            println!(
-                "queued for {}",
-                &target.session[..8.min(target.session.len())]
-            );
+            println!("queued for {}", crate::output::short_id(&target.session));
             Ok(())
         }
         IpcMessageKind::ControlReply(Reply::Error { code }) => Err(eyre!("{code}")),

@@ -1146,19 +1146,18 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             if connection.worker_build() != mush_daemon::build_id() {
                 tui_config.startup_notice = Some(format!(
                     "this worker is from another build of mush. mush stop {} and start again to pick up the new one",
-                    &descriptor.session_id[..8.min(descriptor.session_id.len())]
+                    mush_cli::output::short_id(&descriptor.session_id)
                 ));
             }
             let attached =
                 mush_tui::run_tui_attached(tui_config, Box::new(connection), Some(discovery_rx))
                     .await
                     .map_err(|e| eyre!("TUI error: {e}"))?;
-            let attached = attached.as_str();
             eprintln!(
                 "{}",
                 Style::Dim.stderr(format_args!(
                     "detached, mush --resume {} reattaches",
-                    &attached[..8.min(attached.len())]
+                    mush_cli::output::short_id(attached.as_str())
                 ))
             );
         }

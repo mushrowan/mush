@@ -11,6 +11,11 @@ pub enum Style {
     Cyan,
 }
 
+#[must_use]
+pub fn short_id(id: &str) -> &str {
+    id.char_indices().nth(8).map_or(id, |(end, _)| &id[..end])
+}
+
 pub fn stderr_colour() -> bool {
     anstream::AutoStream::auto(std::io::stderr()).current_choice()
         == anstream::ColorChoice::AlwaysAnsi

@@ -6,7 +6,7 @@ use mush_session::SessionStore;
 use serde::Serialize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::output::Style;
+use crate::output::{Style, short_id};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,10 +65,6 @@ pub struct AgentRow {
 
 const NAME_WIDTH: usize = 32;
 
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 fn cell(text: &str) -> String {
     mush_tui::widgets::top_bar::sanitise_title(&mush_tui::widgets::ansi::strip_ansi(text))
 }
@@ -110,7 +106,7 @@ fn order(left: &AgentRow, right: &AgentRow) -> std::cmp::Ordering {
 fn worker_row(worker: &WorkerDescriptor) -> AgentRow {
     AgentRow {
         name: worker.title.clone().unwrap_or_default(),
-        id: short_id(&worker.session_id),
+        id: short_id(&worker.session_id).to_owned(),
         parent: None,
         status: match (
             &worker.failed,
@@ -139,8 +135,8 @@ fn worker_row(worker: &WorkerDescriptor) -> AgentRow {
 fn child_row(worker: &WorkerDescriptor, child: &ChildDescriptor) -> AgentRow {
     AgentRow {
         name: child.name.clone(),
-        id: short_id(&child.session_id),
-        parent: Some(short_id(&worker.session_id)),
+        id: short_id(&child.session_id).to_owned(),
+        parent: Some(short_id(&worker.session_id).to_owned()),
         status: match (worker.last_heard_from_at, child.paused, child.working) {
             (Some(_), _, _) => AgentStatus::Stale,
             (None, true, _) => AgentStatus::Paused,
@@ -162,7 +158,7 @@ fn child_row(worker: &WorkerDescriptor, child: &ChildDescriptor) -> AgentRow {
 fn saved_row(meta: &SessionMeta) -> AgentRow {
     AgentRow {
         name: meta.title.clone().unwrap_or_default(),
-        id: short_id(meta.id.as_str()),
+        id: short_id(meta.id.as_str()).to_owned(),
         parent: None,
         status: if meta.lifecycle.is_live() {
             AgentStatus::Saved

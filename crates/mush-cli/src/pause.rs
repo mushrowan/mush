@@ -4,11 +4,7 @@ use mush_runtime::{AgentConnection, ClientCommand};
 use mush_session::Pause;
 
 use crate::agents;
-use crate::output::Style;
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
+use crate::output::{Style, short_id};
 
 async fn targets(selector: Option<&str>, all: bool) -> Result<Vec<WorkerDescriptor>> {
     let workers = agents::live().await?;

@@ -6,7 +6,7 @@ use mush_daemon::{SupervisorReply, SupervisorRequest, WorkerDescriptor};
 use serde::Serialize;
 use tokio::io::AsyncBufReadExt;
 
-use crate::output::Style;
+use crate::output::{Style, short_id};
 
 const PROBE: Duration = Duration::from_millis(500);
 
@@ -81,10 +81,6 @@ fn descriptors() -> Vec<(PathBuf, WorkerDescriptor)> {
             Some((path, descriptor))
         })
         .collect()
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
 }
 
 fn remove_if_present(path: &Path) -> bool {

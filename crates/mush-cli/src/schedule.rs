@@ -5,7 +5,7 @@ use mush_runtime::{AgentConnection, ClientCommand, ClientEvent, Job, JobStatus, 
 use serde::Serialize;
 
 use crate::agents;
-use crate::output::Style;
+use crate::output::{Style, short_id};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JobRow {
@@ -19,14 +19,10 @@ pub struct JobRow {
     pub prompt: String,
 }
 
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
 fn agent_label(worker: &WorkerDescriptor) -> String {
     match worker.title.as_deref() {
         Some(title) if !title.is_empty() => format!("{} {}", short_id(&worker.session_id), title),
-        _ => short_id(&worker.session_id),
+        _ => short_id(&worker.session_id).to_owned(),
     }
 }
 
