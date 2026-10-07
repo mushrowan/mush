@@ -990,7 +990,7 @@ fn bash_tool_output_wraps_long_highlighted_lines() {
 #[test]
 fn highlighted_tool_box_wraps_halfwidth_dakuten_by_cells() {
     let line = "abcｶﾞ".repeat(4);
-    let rows = wrap_styled_spans(vec![Span::raw(line)], 15, Style::default());
+    let rows = wrap_styled_spans(vec![Span::raw(line)], 15);
     let rendered: Vec<String> = rows
         .iter()
         .map(|row| row.iter().map(|span| span.content.as_ref()).collect())

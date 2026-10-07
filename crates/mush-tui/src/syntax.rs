@@ -6,8 +6,6 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{self, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-use crate::theme::Theme;
-
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
@@ -40,7 +38,7 @@ pub fn lang_from_path(path: &str) -> Option<&'static str> {
 }
 
 #[must_use]
-pub fn highlight_line(line: &str, lang: &str, ui_theme: &Theme) -> Option<Vec<Span<'static>>> {
+pub fn highlight_line(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
     let ps = &*SYNTAX_SET;
     let syntax = ps.find_syntax_by_token(lang)?;
     let theme = &THEME_SET.themes["base16-ocean.dark"];
@@ -60,7 +58,6 @@ pub fn highlight_line(line: &str, lang: &str, ui_theme: &Theme) -> Option<Vec<Sp
     if spans.is_empty() {
         return None;
     }
-    let _ = ui_theme;
     Some(spans)
 }
 
@@ -104,8 +101,7 @@ mod tests {
 
     #[test]
     fn highlight_line_styles_rust_keywords() {
-        let theme = Theme::dark();
-        let spans = highlight_line("let x = 1;", "rs", &theme).expect("should highlight");
+        let spans = highlight_line("let x = 1;", "rs").expect("should highlight");
         let styles: std::collections::HashSet<_> = spans.iter().map(|s| s.style).collect();
         assert!(
             styles.len() >= 2,
@@ -115,14 +111,12 @@ mod tests {
 
     #[test]
     fn highlight_line_returns_none_for_unknown_lang() {
-        let theme = Theme::dark();
-        assert!(highlight_line("x = 1", "not-a-real-lang", &theme).is_none());
+        assert!(highlight_line("x = 1", "not-a-real-lang").is_none());
     }
 
     #[test]
     fn highlight_line_styles_shell_keywords() {
-        let theme = Theme::dark();
-        let spans = highlight_line("for file in *.rs; do echo $file; done", "sh", &theme)
+        let spans = highlight_line("for file in *.rs; do echo $file; done", "sh")
             .expect("should highlight shell");
         let styles: std::collections::HashSet<_> = spans.iter().map(|s| s.style).collect();
         assert!(

@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span, Text};
 
 use crate::app::{App, ChatDetail, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
 use crate::soft_wrap::{self, Break};
+use crate::theme::Theme;
 use crate::widgets::shimmer::shimmer_spans;
 use std::cell::Ref;
 
@@ -82,7 +83,6 @@ fn reset_content_hash_calls() {
 fn content_hash_call_count() -> usize {
     CONTENT_HASH_CALLS.with(Cell::get)
 }
-use crate::theme::Theme;
 
 pub(crate) fn image_placeholder(index: usize, bytes: &[u8]) -> String {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
@@ -281,33 +281,26 @@ pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
 }
 
 pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let style = MessageStyle::for_app(app);
-    let mut lines = Vec::new();
-    for msg in app.messages.iter().filter(|m| !m.queued) {
-        lines.extend(message_lines(msg, &style, width));
-        lines.push(Line::raw(""));
-    }
-    lines.extend(streaming_lines(app, width));
-    for msg in app.messages.iter().filter(|m| m.queued) {
-        lines.extend(message_lines(msg, &style, width));
-        lines.push(Line::raw(""));
-    }
-    lines
+    lines_around_stream(app, &app.messages, width)
 }
 
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    let style = MessageStyle::for_app(app);
     let live = app.messages.get(app.commit_point()..).unwrap_or_default();
+    lines_around_stream(app, live, width)
+}
+
+fn lines_around_stream(app: &App, messages: &[DisplayMessage], width: u16) -> Vec<Line<'static>> {
+    let style = MessageStyle::for_app(app);
     let mut lines = Vec::new();
-    for msg in live.iter().filter(|m| !m.queued) {
-        lines.extend(message_lines(msg, &style, width));
-        lines.push(Line::raw(""));
-    }
+    let push_messages = |lines: &mut Vec<Line<'static>>, queued: bool| {
+        for msg in messages.iter().filter(|m| m.queued == queued) {
+            lines.extend(message_lines(msg, &style, width));
+            lines.push(Line::raw(""));
+        }
+    };
+    push_messages(&mut lines, false);
     lines.extend(streaming_lines(app, width));
-    for msg in live.iter().filter(|m| m.queued) {
-        lines.extend(message_lines(msg, &style, width));
-        lines.push(Line::raw(""));
-    }
+    push_messages(&mut lines, true);
     lines
 }
 
@@ -694,15 +687,13 @@ fn push_tool_box_lines(
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let calls: Vec<&DisplayToolCall> = msg.tool_calls.iter().collect();
-
-    for group in calls.chunk_by(|a, b| a.batch == b.batch) {
+    for group in msg.tool_calls.chunk_by(|a, b| a.batch == b.batch) {
         render_tool_box_group(group, width, lines, style);
     }
 }
 
 fn render_tool_box_group(
-    tools: &[&DisplayToolCall],
+    tools: &[DisplayToolCall],
     total_width: u16,
     lines: &mut Vec<Line<'static>>,
     style: &MessageStyle<'_>,
@@ -782,7 +773,6 @@ fn render_tool_panel(
                 bg,
                 fallback_style: theme.dim,
                 lang,
-                theme,
             },
             lines,
         );
@@ -796,21 +786,19 @@ fn render_tool_panel(
     if style.detail.shows_thinking()
         && let Some(done) = &tc.bash_done
     {
-        let (label, colour) = bash_done_label(done, theme);
-        push_panel_line(
-            vec![Span::styled(
-                format!(
-                    "{label}{HEADER_SEPARATOR}pid {}",
-                    done.pid
-                        .map_or_else(|| "?".to_string(), |pid| pid.to_string())
-                ),
-                Style::default().fg(colour),
-            )],
-            width,
-            bg,
-            lines,
-        );
+        push_panel_line(vec![bash_done_summary(done, theme)], width, bg, lines);
     }
+}
+
+fn bash_done_summary(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> Span<'static> {
+    let (label, colour) = bash_done_label(done, theme);
+    let pid = done
+        .pid
+        .map_or_else(|| "?".to_string(), |pid| pid.to_string());
+    Span::styled(
+        format!("{label}{HEADER_SEPARATOR}pid {pid}"),
+        Style::default().fg(colour),
+    )
 }
 
 fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (String, Color) {
@@ -936,7 +924,6 @@ fn render_tool_output(
                         bg,
                         fallback_style: base_style,
                         lang,
-                        theme,
                     },
                     lines,
                 );
@@ -981,7 +968,7 @@ fn push_ansi_box_lines(
     lines: &mut Vec<Line<'static>>,
 ) {
     for spans in super::ansi::ansi_lines(text, base_style) {
-        for wrapped in wrap_styled_spans(spans, inner_width, base_style) {
+        for wrapped in wrap_styled_spans(spans, inner_width) {
             push_panel_line(wrapped, inner_width + PANEL_PAD * 2, bg, lines);
         }
     }
@@ -1034,7 +1021,6 @@ struct ToolHighlightCtx<'a> {
     bg: Style,
     fallback_style: Style,
     lang: &'a str,
-    theme: &'a Theme,
 }
 
 fn push_highlighted_box_line(
@@ -1048,20 +1034,16 @@ fn push_highlighted_box_line(
         return;
     }
 
-    let Some(spans) = crate::syntax::highlight_line(text, ctx.lang, ctx.theme) else {
+    let Some(spans) = crate::syntax::highlight_line(text, ctx.lang) else {
         push_box_content_line(text, inner_width, ctx.bg, ctx.fallback_style, lines);
         return;
     };
-    for wrapped in wrap_styled_spans(spans, inner_width, ctx.fallback_style) {
+    for wrapped in wrap_styled_spans(spans, inner_width) {
         push_fitted_box_line(wrapped, inner_width, ctx.bg, ctx.fallback_style, lines);
     }
 }
 
-fn wrap_styled_spans(
-    spans: Vec<Span<'static>>,
-    width: usize,
-    _pad_style: Style,
-) -> Vec<Vec<Span<'static>>> {
+fn wrap_styled_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     if width == 0 {
         return vec![spans];
     }
@@ -1144,7 +1126,6 @@ pub(crate) fn read_min_content_indent(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// otherwise takes individually (clippy::too_many_arguments).
 struct ReadLineCtx<'a> {
     bg: Style,
     gutter_width: usize,
@@ -1180,7 +1161,7 @@ fn push_read_content_line(
 
     let content_spans: Vec<Span<'static>> = ctx
         .lang
-        .and_then(|l| crate::syntax::highlight_line(content, l, ctx.theme))
+        .and_then(|l| crate::syntax::highlight_line(content, l))
         .unwrap_or_else(|| vec![Span::raw(content.to_string())]);
 
     let content_width = spans_cell_width(&content_spans);
@@ -1200,12 +1181,7 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
     INDENT_LINE_CALLS.with(|c| c.set(c.get() + 1));
 
     let line_style = line.style;
-    if content_width == 0 {
-        let mut spans = vec![Span::raw(" ")];
-        spans.extend(line.spans);
-        return vec![Line::from(spans).style(line_style)];
-    }
-    if line_cell_width(&line) <= content_width {
+    if content_width == 0 || line_cell_width(&line) <= content_width {
         let mut spans = vec![Span::raw(" ")];
         spans.extend(line.spans);
         return vec![Line::from(spans).style(line_style)];

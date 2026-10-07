@@ -33,7 +33,7 @@ pub(super) fn render_cell(
     if has_code {
         for (index, raw) in code.lines().enumerate() {
             let gutter = if index == 0 { CODE_GUTTER } else { INDENT };
-            let spans = crate::syntax::highlight_line(raw, "py", theme)
+            let spans = crate::syntax::highlight_line(raw, "py")
                 .unwrap_or_else(|| vec![Span::styled(raw.to_string(), theme.code_block)]);
             push_gutter(lines, gutter, theme.dim, spans, width);
         }
@@ -55,12 +55,10 @@ pub(super) fn render_cell(
     for block in &output.blocks {
         for text_line in block.text.lines() {
             let text = if text_line.is_empty() { " " } else { text_line };
-            let gutter_text = gutter.next(lines);
-            push_gutter(
+            gutter.push(
                 lines,
-                gutter_text,
+                Span::styled(text.to_string(), block.style),
                 theme.dim,
-                vec![Span::styled(text.to_string(), block.style)],
                 width,
             );
         }
@@ -77,12 +75,10 @@ pub(super) fn render_cell(
             _ => None,
         };
         if let Some(placeholder) = placeholder {
-            let gutter_text = gutter.next(lines);
-            push_gutter(
+            gutter.push(
                 lines,
-                gutter_text,
+                Span::styled(placeholder.to_string(), theme.dim),
                 theme.dim,
-                vec![Span::styled(placeholder.to_string(), theme.dim)],
                 width,
             );
         }
@@ -92,34 +88,22 @@ pub(super) fn render_cell(
         && cell.images > 0
     {
         let plural = if cell.images == 1 { "" } else { "s" };
-        let gutter_text = gutter.next(lines);
-        push_gutter(
+        gutter.push(
             lines,
-            gutter_text,
-            theme.dim,
-            vec![Span::styled(
+            Span::styled(
                 format!("{} image{plural} sent to the model", cell.images),
                 theme.dim,
-            )],
+            ),
+            theme.dim,
             width,
         );
     }
 
     if let Some(done) = &tc.bash_done {
-        let (label, colour) = super::bash_done_label(done, theme);
-        let gutter_text = gutter.next(lines);
-        push_gutter(
+        gutter.push(
             lines,
-            gutter_text,
+            super::bash_done_summary(done, theme),
             theme.dim,
-            vec![Span::styled(
-                format!(
-                    "{label}{HEADER_SEPARATOR}pid {}",
-                    done.pid
-                        .map_or_else(|| "?".to_string(), |pid| pid.to_string())
-                ),
-                Style::default().fg(colour),
-            )],
             width,
         );
     }
@@ -376,6 +360,17 @@ impl OutputGutter {
         }
     }
 
+    fn push(
+        &mut self,
+        lines: &mut Vec<Line<'static>>,
+        span: Span<'static>,
+        gutter_style: Style,
+        width: usize,
+    ) {
+        let gutter = self.next(lines);
+        push_gutter(lines, gutter, gutter_style, vec![span], width);
+    }
+
     fn next(&mut self, lines: &mut Vec<Line<'static>>) -> &'static str {
         if self.blank_pending {
             self.blank_pending = false;
@@ -398,10 +393,7 @@ fn push_gutter(
     width: usize,
 ) {
     let available = width.saturating_sub(1 + gutter.chars().count()).max(1);
-    for (index, row) in wrap_styled_spans(spans, available, Style::default())
-        .into_iter()
-        .enumerate()
-    {
+    for (index, row) in wrap_styled_spans(spans, available).into_iter().enumerate() {
         let prefix = if index == 0 {
             Span::styled(gutter, gutter_style)
         } else {

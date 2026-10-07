@@ -151,21 +151,15 @@ pub fn paired_change_spans_with_lang(
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let diff = TextDiff::from_words(removed, added);
     let (removed_intra, added_intra) = compute_intra_byte_ranges(&diff);
-    let removed_spans = build_side_spans(
-        removed,
+    let removed_spans = overlay_intra(
+        syntax_spans(removed, theme.diff_base_removed(), lang),
         &removed_intra,
-        theme.diff_base_removed(),
         theme.diff_removed_intra,
-        lang,
-        theme,
     );
-    let added_spans = build_side_spans(
-        added,
+    let added_spans = overlay_intra(
+        syntax_spans(added, theme.diff_base_added(), lang),
         &added_intra,
-        theme.diff_base_added(),
         theme.diff_added_intra,
-        lang,
-        theme,
     );
     (removed_spans, added_spans)
 }
@@ -197,16 +191,8 @@ fn compute_intra_byte_ranges(
     (removed_intra, added_intra)
 }
 
-fn build_side_spans(
-    text: &str,
-    intra_ranges: &[std::ops::Range<usize>],
-    base: Style,
-    intra_style: Style,
-    lang: Option<&str>,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    let base_spans = lang
-        .and_then(|l| crate::syntax::highlight_line(text, l, theme))
+fn syntax_spans(text: &str, base: Style, lang: Option<&str>) -> Vec<Span<'static>> {
+    lang.and_then(|l| crate::syntax::highlight_line(text, l))
         .map(|syn| {
             syn.into_iter()
                 .map(|s| {
@@ -218,8 +204,7 @@ fn build_side_spans(
                 })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_else(|| vec![Span::styled(text.to_string(), base)]);
-    overlay_intra(base_spans, intra_ranges, intra_style)
+        .unwrap_or_else(|| vec![Span::styled(text.to_string(), base)])
 }
 
 fn overlay_intra(
@@ -332,10 +317,11 @@ fn build_side(
     side: Side,
     lang: Option<&str>,
 ) -> Vec<Span<'static>> {
-    let (own, base) = match side {
-        Side::Removed => (removed, theme.diff_base_removed()),
-        Side::Added => (added, theme.diff_base_added()),
+    let own = match side {
+        Side::Removed => removed,
+        Side::Added => added,
     };
+    let base = side.pad_style(theme);
     let Some(own) = own else {
         return Vec::new();
     };
@@ -348,20 +334,7 @@ fn build_side(
                 Side::Added => added_spans,
             });
         }
-        _ => {
-            let (intra_style, empty_ranges): (Style, Vec<std::ops::Range<usize>>) = match side {
-                Side::Removed => (theme.diff_removed_intra, Vec::new()),
-                Side::Added => (theme.diff_added_intra, Vec::new()),
-            };
-            spans.extend(build_side_spans(
-                own,
-                &empty_ranges,
-                base,
-                intra_style,
-                lang,
-                theme,
-            ));
-        }
+        _ => spans.extend(syntax_spans(own, base, lang)),
     }
     spans
 }
@@ -381,6 +354,14 @@ enum Side {
     Added,
 }
 
+fn is_change(event: &DiffEvent) -> bool {
+    matches!(event, DiffEvent::Removed(_) | DiffEvent::Added(_))
+}
+
+fn runs(events: &[DiffEvent]) -> impl Iterator<Item = &[DiffEvent]> {
+    events.chunk_by(|a, b| is_change(a) && is_change(b))
+}
+
 fn render_inline(
     events: &[DiffEvent],
     inner_width: usize,
@@ -388,16 +369,13 @@ fn render_inline(
     lang: Option<&str>,
 ) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut i = 0;
-    while i < events.len() {
-        match &events[i] {
+    for run in runs(events) {
+        match &run[0] {
             DiffEvent::Context(s) => {
                 rows.push(Line::from(cell(format!("  {s}"), inner_width, theme.dim)));
-                i += 1;
             }
             DiffEvent::Gap => {
                 rows.push(Line::from(cell("  …".into(), inner_width, theme.dim)));
-                i += 1;
             }
             DiffEvent::TruncationFooter(s) => {
                 rows.push(Line::from(cell(
@@ -405,16 +383,9 @@ fn render_inline(
                     inner_width,
                     theme.diff_footer,
                 )));
-                i += 1;
             }
             DiffEvent::Removed(_) | DiffEvent::Added(_) => {
-                let run_start = i;
-                while i < events.len()
-                    && matches!(events[i], DiffEvent::Removed(_) | DiffEvent::Added(_))
-                {
-                    i += 1;
-                }
-                let (removed, added) = split_run(&events[run_start..i]);
+                let (removed, added) = split_run(run);
                 for (idx, removed_text) in removed.iter().enumerate() {
                     let spans = build_side(
                         "- ",
@@ -457,38 +428,28 @@ fn render_side_by_side(
     let sep_style = theme.dim;
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut i = 0;
-    while i < events.len() {
-        match &events[i] {
+    for run in runs(events) {
+        match &run[0] {
             DiffEvent::Context(s) => {
                 let mut spans = cell(format!("  {s}"), left_width, theme.dim);
                 spans.push(Span::styled(" │ ", sep_style));
                 spans.extend(cell(format!("  {s}"), right_width, theme.dim));
                 rows.push(Line::from(spans));
-                i += 1;
             }
             DiffEvent::Gap => {
                 let mut spans = cell("  …".into(), left_width, theme.dim);
                 spans.push(Span::styled(" │ ", sep_style));
                 spans.extend(cell("  …".into(), right_width, theme.dim));
                 rows.push(Line::from(spans));
-                i += 1;
             }
             DiffEvent::TruncationFooter(s) => {
                 let mut spans = cell(format!("  {s}"), left_width, theme.diff_footer);
                 spans.push(Span::styled(" │ ", theme.diff_footer));
                 spans.extend(cell(String::new(), right_width, theme.diff_footer));
                 rows.push(Line::from(spans));
-                i += 1;
             }
             DiffEvent::Removed(_) | DiffEvent::Added(_) => {
-                let run_start = i;
-                while i < events.len()
-                    && matches!(events[i], DiffEvent::Removed(_) | DiffEvent::Added(_))
-                {
-                    i += 1;
-                }
-                let (removed, added) = split_run(&events[run_start..i]);
+                let (removed, added) = split_run(run);
                 let pair_count = removed.len().max(added.len());
                 for row in 0..pair_count {
                     let left_spans = build_side(
