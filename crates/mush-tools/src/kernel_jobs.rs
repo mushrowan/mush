@@ -193,6 +193,66 @@ impl Drop for Waiting<'_> {
     }
 }
 
+impl JobCell {
+    fn new(command: &str, origin: Option<&str>, pid: Option<u32>) -> Self {
+        Self {
+            state: Mutex::new(Job {
+                command: command.to_string(),
+                origin: origin.map(str::to_owned),
+                pid,
+                output: BoundedOutput::default(),
+                end: None,
+                started: Instant::now(),
+                finished: None,
+                read: false,
+                pgid: pid.and_then(|p| i32::try_from(p).ok()),
+            }),
+            done: Notify::new(),
+            waiting: AtomicUsize::new(0),
+        }
+    }
+}
+
+fn job_command(
+    cwd: &Path,
+    command: &str,
+    env: Option<&[(String, String)]>,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("bash");
+    match env {
+        Some(env) => {
+            let path = env
+                .iter()
+                .find(|(key, _)| key == "PATH")
+                .map(|(_, value)| value.into())
+                .unwrap_or_default();
+            cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
+            mush_agent::exec_context::apply_control_environment_with_path(&mut cmd, path);
+        }
+        None => mush_agent::exec_context::apply_control_environment(&mut cmd),
+    }
+    cmd.arg("-c")
+        .arg(crate::bash::command_with_direnv(command))
+        .current_dir(cwd)
+        .stdin(Stdio::null());
+    cmd.envs(QUIET_ENV.iter().copied());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
+async fn pump_output(reader: std::io::PipeReader, cell: Arc<JobCell>) {
+    let mut reader =
+        tokio::fs::File::from_std(std::fs::File::from(std::os::fd::OwnedFd::from(reader)));
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => cell.state.lock().await.output.push(&buf[..n]),
+        }
+    }
+}
+
 impl KernelJobs {
     pub fn set_notice_sink(&self, sink: NoticeSink) {
         *lock(&self.inner.notice) = Some(sink);
@@ -224,121 +284,82 @@ impl KernelJobs {
         let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
         let stderr = writer.try_clone().map_err(|e| format!("pipe: {e}"))?;
 
-        let mut cmd = tokio::process::Command::new("bash");
-        match env {
-            Some(env) => {
-                let path = env
-                    .iter()
-                    .find(|(key, _)| key == "PATH")
-                    .map(|(_, value)| value.into())
-                    .unwrap_or_default();
-                cmd.env_clear().envs(env.iter().map(|(k, v)| (k, v)));
-                mush_agent::exec_context::apply_control_environment_with_path(&mut cmd, path);
-            }
-            None => mush_agent::exec_context::apply_control_environment(&mut cmd),
-        }
-        cmd.arg("-c")
-            .arg(crate::bash::command_with_direnv(command))
-            .current_dir(cwd)
-            .stdin(Stdio::null())
+        let child = job_command(cwd, command, env)
             .stdout(Stdio::from(writer))
-            .stderr(Stdio::from(stderr));
-        cmd.envs(QUIET_ENV.iter().copied());
-        #[cfg(unix)]
-        cmd.process_group(0);
-
-        let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .map_err(|e| format!("failed to spawn: {e}"))?;
         self.inner.live.fetch_add(1, Ordering::SeqCst);
         let pid = child.id();
         self.journal(pid, true);
-        let cell = Arc::new(JobCell {
-            state: Mutex::new(Job {
-                command: command.to_string(),
-                origin: origin.map(str::to_owned),
-                pid,
-                output: BoundedOutput::default(),
-                end: None,
-                started: Instant::now(),
-                finished: None,
-                read: false,
-                pgid: pid.and_then(|p| i32::try_from(p).ok()),
-            }),
-            done: Notify::new(),
-            waiting: AtomicUsize::new(0),
-        });
+        let cell = Arc::new(JobCell::new(command, origin, pid));
         self.inner
             .jobs
             .lock()
             .await
             .insert(id.clone(), cell.clone());
 
-        let reader =
-            tokio::fs::File::from_std(std::fs::File::from(std::os::fd::OwnedFd::from(reader)));
-        let pump = {
-            let cell = cell.clone();
-            tokio::spawn(async move {
-                let mut reader = reader;
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            cell.state.lock().await.output.push(&buf[..n]);
-                        }
-                    }
-                }
-            })
-        };
-
-        let jobs = self.clone();
-        let job_id = id.clone();
-        tokio::spawn(async move {
-            let waited = match timeout {
-                Some(limit) => tokio::time::timeout(limit, child.wait()).await.ok(),
-                None => Some(child.wait().await),
-            };
-            let end = match waited {
-                Some(Ok(status)) => {
-                    let killed = cell.state.lock().await.end == Some(JobEnd::Killed);
-                    if killed {
-                        JobEnd::Killed
-                    } else {
-                        JobEnd::Exited(status.code().unwrap_or(-1))
-                    }
-                }
-                Some(Err(error)) => JobEnd::Failed(error.to_string()),
-                None => {
-                    kill_group(cell.state.lock().await.pgid);
-                    let _ = child.wait().await;
-                    JobEnd::TimedOut
-                }
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
-            let notice = {
-                let mut job = cell.state.lock().await;
-                job.end = Some(end.clone());
-                job.finished = Some(Instant::now());
-                jobs.inner.live.fetch_sub(1, Ordering::SeqCst);
-                if cell.waiting.load(Ordering::SeqCst) > 0 {
-                    job.read = true;
-                }
-                (!job.read).then(|| JobNotice {
-                    done: BashDone {
-                        pid: job.pid,
-                        exit_code: end.exit_code(),
-                        command: capped_command(&job.command),
-                    },
-                    origin: job.origin.clone(),
-                })
-            };
-            cell.done.notify_waiters();
-            jobs.journal(pid, false);
-            if let Some(notice) = notice {
-                jobs.emit_notice(&job_id, notice).await;
-            }
-        });
+        let pump = tokio::spawn(pump_output(reader, cell.clone()));
+        tokio::spawn(
+            self.clone()
+                .supervise(id.clone(), cell, child, timeout, pump),
+        );
 
         Ok((id, pid))
+    }
+
+    async fn supervise(
+        self,
+        job_id: String,
+        cell: Arc<JobCell>,
+        mut child: tokio::process::Child,
+        timeout: Option<Duration>,
+        pump: tokio::task::JoinHandle<()>,
+    ) {
+        let waited = match timeout {
+            Some(limit) => tokio::time::timeout(limit, child.wait()).await.ok(),
+            None => Some(child.wait().await),
+        };
+        let end = match waited {
+            Some(Ok(status)) => {
+                let killed = cell.state.lock().await.end == Some(JobEnd::Killed);
+                if killed {
+                    JobEnd::Killed
+                } else {
+                    JobEnd::Exited(status.code().unwrap_or(-1))
+                }
+            }
+            Some(Err(error)) => JobEnd::Failed(error.to_string()),
+            None => {
+                kill_group(cell.state.lock().await.pgid);
+                let _ = child.wait().await;
+                JobEnd::TimedOut
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(1), pump).await;
+        let (pid, notice) = {
+            let mut job = cell.state.lock().await;
+            job.end = Some(end.clone());
+            job.finished = Some(Instant::now());
+            self.inner.live.fetch_sub(1, Ordering::SeqCst);
+            if cell.waiting.load(Ordering::SeqCst) > 0 {
+                job.read = true;
+            }
+            let notice = (!job.read).then(|| JobNotice {
+                done: BashDone {
+                    pid: job.pid,
+                    exit_code: end.exit_code(),
+                    command: capped_command(&job.command),
+                },
+                origin: job.origin.clone(),
+            });
+            (job.pid, notice)
+        };
+        cell.done.notify_waiters();
+        self.journal(pid, false);
+        if let Some(notice) = notice {
+            self.emit_notice(&job_id, notice).await;
+        }
     }
 
     #[must_use]
