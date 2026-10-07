@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 async fn reviewer_rejects_parent_symlink_and_fifo_and_closes_partial_peers() {
     use std::os::unix::fs::{FileTypeExt, symlink};
     use std::time::Duration;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::ipc::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let real = dir.path().join("real");
     std::fs::create_dir(&real).unwrap();
@@ -63,7 +63,7 @@ fn card() -> Arc<AgentCard> {
 }
 
 fn runtime() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::ipc::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
 }

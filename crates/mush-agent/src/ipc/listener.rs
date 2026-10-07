@@ -428,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_responds_to_get_card() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::ipc::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let sock = dir.path().join("test.sock");
 
@@ -463,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_cleans_up_socket_on_drop() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::ipc::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let sock = dir.path().join("cleanup.sock");
 
@@ -477,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_preserves_existing_regular_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::ipc::tempdir().unwrap();
         let sock = dir.path().join("stale.sock");
 
         std::fs::write(&sock, "stale").unwrap();
