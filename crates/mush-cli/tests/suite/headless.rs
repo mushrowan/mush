@@ -313,13 +313,32 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
             "capture_sha256":"a".repeat(64),"producer_action":"not_rejected","evidence_directory":dir.path().join("capture")
         })).unwrap()),
     };
-    let mut child = Command::new("script").env_clear().envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
-        .env("HOME", dir.path()).env("MUSH_DATA_DIR", dir.path().join("data")).env("MUSH_CONFIG_DIR", &config)
-        .env("XDG_CONFIG_HOME", dir.path().join("config")).env("XDG_RUNTIME_DIR", dir.path())
-        .env("MUSH_ORCHESTRATOR_INBOX", &inbox_path).env("TERM", "xterm-256color")
-        .env("MUSH_FIXTURE_BINARY", env!("CARGO_BIN_EXE_mush")).env("MUSH_FIXTURE_SESSION", session.meta.id.as_str())
-        .current_dir(dir.path()).args(["-q", "-e"]).arg(dir.path().join("terminal.log"))
-        .args(["-c", "stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --resume \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
+    let mut command = Command::new("script");
+    command
+        .env_clear()
+        .envs(std::env::var_os("PATH").map(|path| ("PATH", path)))
+        .env("HOME", dir.path())
+        .env("MUSH_DATA_DIR", dir.path().join("data"))
+        .env("MUSH_CONFIG_DIR", &config)
+        .env("XDG_CONFIG_HOME", dir.path().join("config"))
+        .env("XDG_RUNTIME_DIR", dir.path())
+        .env("MUSH_ORCHESTRATOR_INBOX", &inbox_path)
+        .env("TERM", "xterm-256color")
+        .env("MUSH_FIXTURE_BINARY", env!("CARGO_BIN_EXE_mush"))
+        .env("MUSH_FIXTURE_SESSION", session.meta.id.as_str())
+        .current_dir(dir.path());
+    #[cfg(target_os = "linux")]
+    command
+        .args(["-q", "-e"])
+        .arg(dir.path().join("terminal.log"))
+        .arg("-c");
+    #[cfg(target_os = "macos")]
+    command
+        .arg("-q")
+        .arg(dir.path().join("terminal.log"))
+        .args(["/bin/sh", "-c"]);
+    let mut child = command
+        .args(["stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --resume \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
         .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(8);
     while inbox.consumer(session.meta.id.as_str(), dir.path()).is_ok() {
