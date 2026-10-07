@@ -460,7 +460,17 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::DeleteToStart
         | Action::DeleteWordBackward
         | Action::DeleteWordForward => KeyScope::Edit,
-        _ => KeyScope::Insert,
+        Action::CycleFavourite
+        | Action::CycleFavouriteBackward
+        | Action::CycleThinkingLevel
+        | Action::EditSteering
+        | Action::EnterSearch
+        | Action::ExternalEditor
+        | Action::PasteImage
+        | Action::SelectAll
+        | Action::InsertNewline
+        | Action::SearchNext
+        | Action::SearchPrev => KeyScope::Insert,
     }
 }
 
@@ -891,21 +901,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
 impl Default for KeyMap {
     fn default() -> Self {
         let mut bindings: HashMap<KeyScope, HashMap<Action, Binding>> = HashMap::new();
-        let mut bind = |scope: KeyScope, action: Action, combos: Vec<KeyCombination>| {
-            bindings
-                .entry(scope)
-                .or_default()
-                .insert(action, Binding(combos));
-        };
-
         for (scope, action, combos) in DEFAULT_BINDINGS {
             let combos = combos
                 .iter()
                 .map(|(code, modifiers)| KeyCombination::new(*code, *modifiers))
                 .collect();
-            bind(*scope, *action, combos);
+            bindings
+                .entry(*scope)
+                .or_default()
+                .insert(*action, Binding(combos));
         }
-
         Self { bindings }
     }
 }
@@ -943,23 +948,20 @@ impl<'de> Deserialize<'de> for KeysConfig {
         let raw = HashMap::<String, toml::Value>::deserialize(deserializer)?;
         let mut config = Self::default();
         for (key, value) in raw {
-            match key.as_str() {
-                "subagents" => {
-                    config.subagents = value.try_into().map_err(serde::de::Error::custom)?
-                }
-                "shared" => config.shared = value.try_into().map_err(serde::de::Error::custom)?,
-                "insert" => config.insert = value.try_into().map_err(serde::de::Error::custom)?,
-                "edit" => config.edit = value.try_into().map_err(serde::de::Error::custom)?,
-                "pane" => config.pane = value.try_into().map_err(serde::de::Error::custom)?,
-                "model_picker" => {
-                    config.model_picker = value.try_into().map_err(serde::de::Error::custom)?;
-                }
+            let scope = match key.as_str() {
+                "subagents" => &mut config.subagents,
+                "shared" => &mut config.shared,
+                "insert" => &mut config.insert,
+                "edit" => &mut config.edit,
+                "pane" => &mut config.pane,
+                "model_picker" => &mut config.model_picker,
                 old_key => {
                     return Err(serde::de::Error::custom(format!(
                         "old flat [keys] entry `{old_key}` is no longer supported. move it under a scoped table such as [keys.insert], [keys.edit], [keys.pane], [keys.shared], or [keys.model_picker]"
                     )));
                 }
-            }
+            };
+            *scope = value.try_into().map_err(serde::de::Error::custom)?;
         }
         Ok(config)
     }
@@ -967,31 +969,17 @@ impl<'de> Deserialize<'de> for KeysConfig {
 
 impl KeysConfig {
     pub fn scoped(&self) -> ScopedKeysConfig {
-        let mut scopes = HashMap::new();
-        scopes.insert(
-            KeyScope::Subagents.config_key().to_string(),
-            self.subagents.raw.clone(),
-        );
-        scopes.insert(
-            KeyScope::Shared.config_key().to_string(),
-            self.shared.raw.clone(),
-        );
-        scopes.insert(
-            KeyScope::Insert.config_key().to_string(),
-            self.insert.raw.clone(),
-        );
-        scopes.insert(
-            KeyScope::Edit.config_key().to_string(),
-            self.edit.raw.clone(),
-        );
-        scopes.insert(
-            KeyScope::Session.config_key().to_string(),
-            self.pane.raw.clone(),
-        );
-        scopes.insert(
-            KeyScope::ModelPicker.config_key().to_string(),
-            self.model_picker.raw.clone(),
-        );
+        let scopes = [
+            (KeyScope::Subagents, &self.subagents),
+            (KeyScope::Shared, &self.shared),
+            (KeyScope::Insert, &self.insert),
+            (KeyScope::Edit, &self.edit),
+            (KeyScope::Session, &self.pane),
+            (KeyScope::ModelPicker, &self.model_picker),
+        ]
+        .into_iter()
+        .map(|(scope, config)| (scope.config_key().to_string(), config.raw.clone()))
+        .collect();
         ScopedKeysConfig { scopes }
     }
 }
