@@ -746,55 +746,10 @@ fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
             app.push_system_message(format_settings_view(&tui_config.settings));
         }
         "scope" => {
-            let Some(value) = parts.next() else {
-                app.push_system_message("usage: /settings scope <global|disabled|repo|session>");
-                return;
-            };
-            let Some(scope) = crate::settings::SettingsScope::parse(value) else {
-                app.push_system_message(format!(
-                    "unknown scope {value:?}. expected one of: global, disabled, repo, session"
-                ));
-                return;
-            };
-            tui_config.settings.scope = scope;
-            app.push_system_message(format!("settings scope → {}", scope.as_str()));
+            app.push_system_message(set_settings_scope(tui_config, parts.next()));
         }
         "betas" => {
-            if tui_config.settings.scope == crate::settings::SettingsScope::Disabled {
-                app.push_system_message(
-                    "settings scope is disabled; edit config.toml to change anthropic betas",
-                );
-                return;
-            }
-            let Some(field) = parts.next() else {
-                app.push_system_message(
-                    "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, thinking_updates, advisor, advanced_tool_use, fallback_credit)",
-                );
-                return;
-            };
-            let Some(value) = parts.next() else {
-                app.push_system_message("usage: /settings betas <field> <true|false>");
-                return;
-            };
-            let Some(parsed) = parse_bool(value) else {
-                app.push_system_message(format!("expected true or false, got {value:?}"));
-                return;
-            };
-            let applied =
-                apply_beta_toggle(&mut tui_config.settings.anthropic_betas, field, parsed);
-            if !applied {
-                app.push_system_message(format!("unknown beta field {field:?}"));
-                return;
-            }
-            tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
-
-            let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd)
-            {
-                Ok(Some(path)) => format!(" (saved to {})", path.display()),
-                Ok(None) => " (session scope, not persisted)".to_string(),
-                Err(e) => format!(" (persist failed: {e})"),
-            };
-            app.push_system_message(format!("betas.{field} → {parsed}{persist_note}"));
+            app.push_system_message(set_settings_beta(tui_config, parts.next(), parts.next()));
         }
         "reset" => {
             tui_config.settings.anthropic_betas = mush_ai::types::AnthropicBetas::default();
@@ -807,6 +762,49 @@ fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
             ));
         }
     }
+}
+
+fn set_settings_scope(tui_config: &mut TuiConfig, value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return "usage: /settings scope <global|disabled|repo|session>".into();
+    };
+    let Some(scope) = crate::settings::SettingsScope::parse(value) else {
+        return format!(
+            "unknown scope {value:?}. expected one of: global, disabled, repo, session"
+        );
+    };
+    tui_config.settings.scope = scope;
+    format!("settings scope → {}", scope.as_str())
+}
+
+fn set_settings_beta(
+    tui_config: &mut TuiConfig,
+    field: Option<&str>,
+    value: Option<&str>,
+) -> String {
+    if tui_config.settings.scope == crate::settings::SettingsScope::Disabled {
+        return "settings scope is disabled; edit config.toml to change anthropic betas".into();
+    }
+    let Some(field) = field else {
+        return "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, thinking_updates, advisor, advanced_tool_use, fallback_credit)".into();
+    };
+    let Some(value) = value else {
+        return "usage: /settings betas <field> <true|false>".into();
+    };
+    let Some(parsed) = parse_bool(value) else {
+        return format!("expected true or false, got {value:?}");
+    };
+    if !apply_beta_toggle(&mut tui_config.settings.anthropic_betas, field, parsed) {
+        return format!("unknown beta field {field:?}");
+    }
+    tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+
+    let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
+        Ok(Some(path)) => format!(" (saved to {})", path.display()),
+        Ok(None) => " (session scope, not persisted)".to_string(),
+        Err(e) => format!(" (persist failed: {e})"),
+    };
+    format!("betas.{field} → {parsed}{persist_note}")
 }
 
 fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
