@@ -18,11 +18,9 @@ pub async fn handle(
     match action {
         SlashAction::Help => {
             app.push_system_message(HELP_TEXT);
-            None
         }
         SlashAction::Keys => {
             app.push_system_message(keys_text(app));
-            None
         }
         SlashAction::Subagents { .. }
         | SlashAction::New { .. }
@@ -50,7 +48,7 @@ pub async fn handle(
         | SlashAction::Compact { .. }
         | SlashAction::Refine(_)
         | SlashAction::Export { .. }
-        | SlashAction::Mcp(_) => None,
+        | SlashAction::Mcp(_) => {}
         SlashAction::Tree => {
             let items = crate::message_picker::tree_items(&connection.tree_summary().await);
             open_message_picker(
@@ -58,7 +56,6 @@ pub async fn handle(
                 crate::message_picker::MessagePickerPurpose::Tree,
                 items,
             );
-            None
         }
         SlashAction::Fork { index: None } => {
             let items = crate::message_picker::user_message_items(&connection.transcript().await);
@@ -67,7 +64,6 @@ pub async fn handle(
                 crate::message_picker::MessagePickerPurpose::Fork,
                 items,
             );
-            None
         }
         SlashAction::Branch { index: None } => {
             let items = crate::message_picker::branch_items(&connection.tree_summary().await);
@@ -76,11 +72,9 @@ pub async fn handle(
                 crate::message_picker::MessagePickerPurpose::Branch,
                 items,
             );
-            None
         }
         SlashAction::Sessions => {
             open_sessions_picker(app, tui_config.agent_roster.clone());
-            None
         }
         SlashAction::Model {
             model_id: None,
@@ -93,7 +87,6 @@ pub async fn handle(
             } else {
                 app.open_model_picker_overlay();
             }
-            None
         }
         SlashAction::Model {
             model_id: Some(model_id),
@@ -108,18 +101,15 @@ pub async fn handle(
             } else if !app.open_model_picker_with_search(model_id) {
                 app.push_system_message(format!("unknown model: {model_id}"));
             }
-            None
         }
         SlashAction::Search { query } => {
             app.interaction.mode = crate::app::AppMode::Search;
             app.interaction.search.query = query.clone();
             app.update_search();
-            None
         }
         SlashAction::Cost => {
             app.interaction.show_cost = !app.interaction.show_cost;
             show_cost(app);
-            None
         }
         SlashAction::Context => {
             let title = app.session_title.clone().unwrap_or_else(|| {
@@ -134,34 +124,15 @@ pub async fn handle(
             );
             let text = crate::context_view::format_context(&tree, &app.stats);
             app.push_system_message(text);
-            None
         }
         SlashAction::Agents => {
             app.push_system_message(format_agents(&app.children));
-            None
         }
         SlashAction::Skills => {
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
-            None
         }
         SlashAction::SessionInfo => {
-            let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-            let path = store.session_path(&tui_config.session_id);
-            let saved = if path.exists() {
-                ""
-            } else {
-                " (not saved yet)"
-            };
-            let title = app.session_title.as_deref().unwrap_or("untitled");
-            app.push_system_message(format!(
-                "session: {title}\nid: {}\nfile: {}{saved}\nmessages in context: {}, entries in tree: {}\nmodel: {}",
-                tui_config.session_id,
-                path.display(),
-                state.context_len,
-                state.tree_len,
-                app.model_id,
-            ));
-            None
+            app.push_system_message(session_info(app, tui_config, &state));
         }
         SlashAction::RlmMaxDepth {
             max_depth: None, ..
@@ -170,42 +141,15 @@ pub async fn handle(
                 "rlm max depth: {} ({}, depth {})",
                 state.rlm_max_depth, state.rlm_max_depth_source, state.rlm_depth
             ));
-            None
         }
         SlashAction::RlmMaxDepth {
             max_depth: Some(max_depth),
             global,
-        } => {
-            if let Err(error) = connection
-                .send(mush_runtime::ClientCommand::SetRlmMaxDepth(*max_depth))
-                .await
-            {
-                app.push_system_message(format!("rlm max depth not set: {error}"));
-                return None;
-            }
-            let saved = global.then(|| crate::settings::save_global_rlm_max_depth(*max_depth));
-            match saved {
-                Some(Err(error)) => app.push_system_message(format!(
-                    "rlm max depth set for this chat, but the global default was not saved: \
-                     {error}"
-                )),
-                Some(Ok(_)) => {
-                    app.status = Some(
-                        format!("rlm max depth set: {max_depth} and saved as global default")
-                            .into(),
-                    );
-                }
-                None => app.status = Some(format!("rlm max depth set: {max_depth}").into()),
-            }
-            None
-        }
-        SlashAction::Name { title: None } => {
-            match app.session_title.as_deref() {
-                Some(title) => app.push_system_message(format!("session: {title}")),
-                None => app.push_system_message("session is untitled. /name <title> to set one"),
-            }
-            None
-        }
+        } => set_rlm_max_depth(app, connection, *max_depth, *global).await,
+        SlashAction::Name { title: None } => match app.session_title.as_deref() {
+            Some(title) => app.push_system_message(format!("session: {title}")),
+            None => app.push_system_message("session is untitled. /name <title> to set one"),
+        },
         SlashAction::Logs { count } => {
             if let Some(ref buf) = tui_config.log_buffer {
                 let entries = buf(*count);
@@ -217,7 +161,6 @@ pub async fn handle(
             } else {
                 app.push_system_message("logging not available");
             }
-            None
         }
         SlashAction::Settings { args } => {
             handle_settings(app, tui_config, args);
@@ -226,57 +169,23 @@ pub async fn handle(
                     tui_config.options.clone(),
                 )))
                 .await;
-            None
         }
+        SlashAction::SubagentModel {
+            model_id: None,
+            unset: false,
+        } => app.open_subagent_model_picker(),
         SlashAction::SubagentModel { model_id, unset } => {
-            let chosen = if *unset {
-                None
-            } else if let Some(id) = model_id {
-                Some(id.clone())
-            } else {
-                app.open_subagent_model_picker();
-                return None;
-            };
-            app.subagent_model_id = chosen.as_deref().map(mush_ai::types::ModelId::from);
-            let _ = connection
-                .send(mush_runtime::ClientCommand::SetSubagentModel(
-                    chosen.clone(),
-                ))
-                .await;
-            app.push_system_message(match &chosen {
-                Some(id) => format!("subagents will use {id}"),
-                None => "subagents will use whatever model this session is on".to_string(),
-            });
-            None
+            let chosen = if *unset { None } else { model_id.clone() };
+            set_subagent_model(app, connection, chosen).await;
         }
         SlashAction::Effort { level } => {
             handle_effort(app, tui_config.model.reasoning, level.as_deref());
-            None
         }
-        SlashAction::Account { label } => {
-            match label {
-                None => app.push_system_message(account_report(&tui_config.model, &app.accounts)),
-                Some(label) => match connection
-                    .send(mush_runtime::ClientCommand::SetAccount(Some(label.clone())))
-                    .await
-                {
-                    Ok(events) => {
-                        for event in events {
-                            match event {
-                                mush_runtime::ClientEvent::Session(
-                                    mush_runtime::SessionEvent::Accounts(accounts),
-                                ) => app.accounts = accounts,
-                                mush_runtime::ClientEvent::Session(
-                                    mush_runtime::SessionEvent::Status(status),
-                                ) => app.push_system_message(status),
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(error) => app.push_system_message(error.to_string()),
-                },
-            }
-            None
+        SlashAction::Account { label: None } => {
+            app.push_system_message(account_report(&tui_config.model, &app.accounts));
+        }
+        SlashAction::Account { label: Some(label) } => {
+            switch_account(app, connection, label.clone()).await;
         }
         SlashAction::Pause { reason } => {
             let pause = mush_session::Pause {
@@ -292,7 +201,6 @@ pub async fn handle(
                 Some(reason) => format!("paused: {reason}"),
                 None => "paused, no new turns until /unpause".to_string(),
             });
-            None
         }
         SlashAction::Resumed => {
             app.paused = None;
@@ -300,7 +208,6 @@ pub async fn handle(
                 .send(mush_runtime::ClientCommand::SetPaused(None))
                 .await;
             app.push_system_message("resumed");
-            None
         }
         SlashAction::CompactionModel { model_id } => {
             handle_compaction_model(app, tui_config, model_id.as_deref());
@@ -309,7 +216,6 @@ pub async fn handle(
                     tui_config.compaction_model.clone().map(Box::new),
                 ))
                 .await;
-            None
         }
         SlashAction::Card => {
             if let Some(card) = &tui_config.agent_card {
@@ -317,25 +223,117 @@ pub async fn handle(
             } else {
                 app.push_system_message("no agent card available");
             }
-            None
         }
         SlashAction::Debug => {
             app.push_system_message(build_debug_dump(app, tui_config.session_id.as_str()));
-            None
         }
         SlashAction::Quit => {
             app.should_quit = true;
-            None
         }
         SlashAction::ToggleThinkingExpanded => {
             app.toggle_thinking_expanded();
-            None
         }
         SlashAction::Other { name, args } => {
-            if let Some(skill) = name.strip_prefix("skill:") {
-                return try_skill(app, &tui_config.skills.skills, skill, args);
+            return match name.strip_prefix("skill:") {
+                Some(skill) => try_skill(app, &tui_config.skills.skills, skill, args),
+                None => try_template(app, name, args),
+            };
+        }
+    }
+    None
+}
+
+fn session_info(
+    app: &App,
+    tui_config: &TuiConfig,
+    state: &mush_runtime::ConnectionState,
+) -> String {
+    let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
+    let path = store.session_path(&tui_config.session_id);
+    let saved = if path.exists() {
+        ""
+    } else {
+        " (not saved yet)"
+    };
+    let title = app.session_title.as_deref().unwrap_or("untitled");
+    format!(
+        "session: {title}\nid: {}\nfile: {}{saved}\nmessages in context: {}, entries in tree: {}\nmodel: {}",
+        tui_config.session_id,
+        path.display(),
+        state.context_len,
+        state.tree_len,
+        app.model_id,
+    )
+}
+
+async fn set_rlm_max_depth(
+    app: &mut App,
+    connection: &mut dyn mush_runtime::AgentConnection,
+    max_depth: u32,
+    global: bool,
+) {
+    if let Err(error) = connection
+        .send(mush_runtime::ClientCommand::SetRlmMaxDepth(max_depth))
+        .await
+    {
+        app.push_system_message(format!("rlm max depth not set: {error}"));
+        return;
+    }
+    let saved = global.then(|| crate::settings::save_global_rlm_max_depth(max_depth));
+    match saved {
+        Some(Err(error)) => app.push_system_message(format!(
+            "rlm max depth set for this chat, but the global default was not saved: \
+             {error}"
+        )),
+        Some(Ok(_)) => {
+            app.status =
+                Some(format!("rlm max depth set: {max_depth} and saved as global default").into());
+        }
+        None => app.status = Some(format!("rlm max depth set: {max_depth}").into()),
+    }
+}
+
+async fn set_subagent_model(
+    app: &mut App,
+    connection: &mut dyn mush_runtime::AgentConnection,
+    chosen: Option<String>,
+) {
+    app.subagent_model_id = chosen.as_deref().map(mush_ai::types::ModelId::from);
+    let _ = connection
+        .send(mush_runtime::ClientCommand::SetSubagentModel(
+            chosen.clone(),
+        ))
+        .await;
+    app.push_system_message(match &chosen {
+        Some(id) => format!("subagents will use {id}"),
+        None => "subagents will use whatever model this session is on".to_string(),
+    });
+}
+
+async fn switch_account(
+    app: &mut App,
+    connection: &mut dyn mush_runtime::AgentConnection,
+    label: mush_ai::types::AccountLabel,
+) {
+    let events = match connection
+        .send(mush_runtime::ClientCommand::SetAccount(Some(label)))
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            app.push_system_message(error.to_string());
+            return;
+        }
+    };
+    for event in events {
+        match event {
+            mush_runtime::ClientEvent::Session(mush_runtime::SessionEvent::Accounts(accounts)) => {
+                app.accounts = accounts;
             }
-            try_template(app, name, args)
+            mush_runtime::ClientEvent::Session(mush_runtime::SessionEvent::Status(status)) => {
+                app.push_system_message(status);
+            }
+            _ => {}
         }
     }
 }
