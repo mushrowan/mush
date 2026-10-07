@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding};
 
@@ -67,6 +67,14 @@ pub(crate) fn filter_line<'a>(filter: &'a str, theme: &Theme) -> Line<'a> {
             Style::default(),
         ),
     ])
+}
+
+pub(crate) fn selection_row(is_selected: bool, theme: &Theme) -> (&'static str, Style) {
+    if is_selected {
+        ("▸ ", theme.picker_selected.add_modifier(Modifier::BOLD))
+    } else {
+        ("  ", Style::default())
+    }
 }
 
 pub(crate) fn key_hints<'a>(hints: &[(&'a str, &'a str)], theme: &Theme) -> Line<'a> {

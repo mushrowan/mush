@@ -1,9 +1,8 @@
 use crate::slash_menu::SlashMenuState;
 use crate::theme::Theme;
-use crate::widgets::popup_layout::render_menu_frame;
+use crate::widgets::popup_layout::{render_menu_frame, selection_row};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme: &Theme) {
@@ -15,12 +14,7 @@ pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme:
     for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
         let is_selected = i == menu.selected;
 
-        let name_style = if is_selected {
-            theme.picker_selected.add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let prefix = if is_selected { "▸ " } else { "  " };
+        let (prefix, name_style) = selection_row(is_selected, theme);
 
         let name_text = format!("/{}", cmd.name);
         let pad = 16usize

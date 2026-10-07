@@ -2,11 +2,10 @@ use crate::path_utils::shorten_path;
 use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{
-    PICKER_SIZE, filter_line, key_hints, render_popup_frame, truncate_chars,
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row, truncate_chars,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
@@ -72,12 +71,7 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
         let age = meta.updated_at.age_display();
         let msgs = format!("{}msg", meta.message_count);
 
-        let prefix = if is_selected { "▸ " } else { "  " };
-        let style = if is_selected {
-            theme.picker_selected.add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
+        let (prefix, style) = selection_row(is_selected, theme);
 
         let cwd_display = if show_cwd {
             format!("{}  ", shorten_path(&meta.cwd))

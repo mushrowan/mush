@@ -1,9 +1,10 @@
 use crate::login_picker::{LoginPickerState, filtered_entries};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, key_hints, render_popup_frame};
+use crate::widgets::popup_layout::{
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
@@ -59,12 +60,7 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, entry) in entries.iter().enumerate().skip(scroll).take(visible) {
         let is_selected = i == picker.selected;
-        let row_style = if is_selected {
-            theme.picker_selected.add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let prefix = if is_selected { "▸ " } else { "  " };
+        let (prefix, row_style) = selection_row(is_selected, theme);
         let logged_in = entry.logged_in();
         let badge_text = match entry.source.as_ref() {
             Some(source) => format!("{} ", source.badge()),

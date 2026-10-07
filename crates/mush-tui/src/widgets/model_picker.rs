@@ -1,9 +1,11 @@
 use crate::model_picker::{ModelPickerState, ModelPickerTab, filtered_models};
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{PICKER_SIZE, filter_line, key_hints, render_popup_frame};
+use crate::widgets::popup_layout::{
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row,
+};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, picker: &ModelPickerState, theme: &Theme) {
@@ -82,12 +84,7 @@ fn render_model_list(frame: &mut Frame, picker: &ModelPickerState, list_area: Re
     let mut lines: Vec<Line<'_>> = Vec::new();
     for (i, model) in models.iter().enumerate().skip(scroll).take(visible) {
         let is_selected = i == picker.selected;
-        let row_style = if is_selected {
-            theme.picker_selected.add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        let prefix = if is_selected { "▸ " } else { "  " };
+        let (prefix, row_style) = selection_row(is_selected, theme);
         let star = if picker.is_favourite(&model.id) {
             "★ "
         } else {
