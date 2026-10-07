@@ -39,7 +39,10 @@ fn redacted_token(token: &str) -> String {
 
 impl OAuthCredentials {
     pub fn is_expired(&self) -> bool {
-        timestamp_ms().saturating_add(REFRESH_BUFFER_MS) >= self.expires_at
+        crate::types::Timestamp::now()
+            .as_ms()
+            .saturating_add(REFRESH_BUFFER_MS)
+            >= self.expires_at
     }
 }
 
@@ -197,7 +200,7 @@ pub fn load_credentials() -> Result<CredentialStore, OAuthError> {
     load_credentials_from(&credentials_path())
 }
 
-pub fn load_credentials_from(path: &PathBuf) -> Result<CredentialStore, OAuthError> {
+pub fn load_credentials_from(path: &std::path::Path) -> Result<CredentialStore, OAuthError> {
     if !path.exists() {
         return Ok(CredentialStore::default());
     }
@@ -220,13 +223,6 @@ fn save_credentials_to(path: &std::path::Path, store: &CredentialStore) -> Resul
     let json = serde_json::to_string_pretty(store)?;
     crate::private_io::write_private(path, json)?;
     Ok(())
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -289,7 +285,7 @@ mod tests {
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 60 * 60_000,
+            expires_at: crate::types::Timestamp::now().as_ms() + 60 * 60_000,
             account_id: None,
         };
         assert!(!creds.is_expired());
@@ -300,7 +296,7 @@ mod tests {
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 60_000,
+            expires_at: crate::types::Timestamp::now().as_ms() + 60_000,
             account_id: None,
         };
         assert!(
@@ -314,7 +310,7 @@ mod tests {
         let creds = OAuthCredentials {
             access_token: "test".into(),
             refresh_token: "test".into(),
-            expires_at: timestamp_ms() + 10 * 60_000,
+            expires_at: crate::types::Timestamp::now().as_ms() + 10 * 60_000,
             account_id: None,
         };
         assert!(

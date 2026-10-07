@@ -144,7 +144,8 @@ async fn exchange_code_with_redirect(
     Ok(OAuthCredentials {
         access_token: data.access_token,
         refresh_token: data.refresh_token,
-        expires_at: timestamp_ms() + data.expires_in * 1000 - EXPIRY_BUFFER_MS,
+        expires_at: crate::types::Timestamp::now().as_ms() + data.expires_in * 1000
+            - EXPIRY_BUFFER_MS,
         account_id,
     })
 }
@@ -180,7 +181,8 @@ async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAu
     Ok(OAuthCredentials {
         access_token: data.access_token,
         refresh_token: data.refresh_token,
-        expires_at: timestamp_ms() + data.expires_in * 1000 - EXPIRY_BUFFER_MS,
+        expires_at: crate::types::Timestamp::now().as_ms() + data.expires_in * 1000
+            - EXPIRY_BUFFER_MS,
         account_id,
     })
 }
@@ -282,13 +284,6 @@ struct TokenResponse {
     refresh_token: String,
     id_token: String,
     expires_in: u64,
-}
-
-fn timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 pub struct CodexLoginSession {
