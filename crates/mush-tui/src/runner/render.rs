@@ -1,7 +1,6 @@
 use std::io;
 
 use ratatui::backend::{Backend, CrosstermBackend};
-use ratatui::layout::Rect;
 use ratatui::{Frame, Terminal};
 
 use crate::app::{App, AppMode};
@@ -112,7 +111,7 @@ fn draw_frame(
     let needs_input_anchor =
         app.completion.slash_menu.is_some() || app.interaction.at_picker.is_some();
     if needs_input_anchor {
-        let input_area = input_region(app, area);
+        let input_area = crate::ui::app_layout(app, area).input;
         if let Some(ref menu) = app.completion.slash_menu {
             widgets::slash_menu::render(frame, menu, input_area, &app.theme);
         }
@@ -148,13 +147,6 @@ fn draw_frame(
     if let Some(cell) = cursor {
         frame.set_cursor_position(cell);
     }
-}
-
-fn input_region(app: &App, pane_area: Rect) -> Rect {
-    let input_h = crate::ui::input_height(&app.input, pane_area.width);
-    let status_h = crate::widgets::status_bar::status_bar_height(app, pane_area.width);
-    let prompt_h = crate::widgets::prompt_line::height(app);
-    crate::ui::layout(pane_area, prompt_h, input_h, status_h).input
 }
 
 #[cfg(test)]
