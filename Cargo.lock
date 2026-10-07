@@ -3093,6 +3093,7 @@ dependencies = [
  "mush-kernel",
  "mush-treesitter",
  "pretty_assertions",
+ "reqwest 0.13.5",
  "schemars",
  "serde",
  "serde_json",

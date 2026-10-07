@@ -9,6 +9,7 @@ const DEFAULT_NUM_RESULTS: u32 = 8;
 const TIMEOUT_SECS: u64 = 25;
 const EXA_ID: &str = "exa";
 const SEARX_ID: &str = "searx";
+const NO_RESULTS: &str = "no results found. try a different query.";
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,34 +102,16 @@ impl SearchProvider for ExaProvider {
             .send()
             .await
             .map_err(|e| format!("search request failed: {e}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("search error ({status}): {body}"));
-        }
-
-        let text = response
-            .text()
-            .await
-            .map_err(|e| format!("failed to read response: {e}"))?;
+        let text = success_text(response, "search").await?;
 
         if let Some(result) = parse_sse_response(&text) {
             return result;
         }
 
-        let Ok(resp) = serde_json::from_str::<McpResponse>(&text) else {
-            return Ok("no results found. try a different query.".into());
-        };
-        if let Some(err) = resp.error {
-            Err(format!("exa error: {}", err.message))
-        } else if let Some(result) = resp.result
-            && let Some(content) = result.content.first()
-        {
-            Ok(content.text.clone())
-        } else {
-            Ok("no results found. try a different query.".into())
-        }
+        serde_json::from_str::<McpResponse>(&text)
+            .ok()
+            .and_then(McpResponse::outcome)
+            .unwrap_or_else(|| Ok(NO_RESULTS.into()))
     }
 }
 
@@ -177,21 +160,23 @@ impl SearchProvider for SearxProvider {
             .send()
             .await
             .map_err(|e| format!("searx request failed: {e}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("searx error ({status}): {body}"));
-        }
-
-        let text = response
-            .text()
-            .await
-            .map_err(|e| format!("failed to read response: {e}"))?;
+        let text = success_text(response, "searx").await?;
         let parsed: SearxResponse =
             serde_json::from_str(&text).map_err(|e| format!("failed to parse searx json: {e}"))?;
         Ok(format_searx_results(&parsed, num_results))
     }
+}
+
+async fn success_text(response: reqwest::Response, service: &str) -> Result<String, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("{service} error ({status}): {body}"));
+    }
+    response
+        .text()
+        .await
+        .map_err(|e| format!("failed to read response: {e}"))
 }
 
 fn auth_header(auth: Option<&SearchAuth>) -> Option<(String, String)> {
@@ -225,7 +210,7 @@ struct SearxResult {
 
 fn format_searx_results(resp: &SearxResponse, num_results: u32) -> String {
     if resp.results.is_empty() {
-        return "no results found. try a different query.".into();
+        return NO_RESULTS.into();
     }
     resp.results
         .iter()
@@ -382,6 +367,16 @@ struct McpResponse {
     error: Option<McpError>,
 }
 
+impl McpResponse {
+    fn outcome(self) -> Option<Result<String, String>> {
+        if let Some(err) = self.error {
+            return Some(Err(format!("exa error: {}", err.message)));
+        }
+        let content = self.result?.content.into_iter().next()?;
+        Some(Ok(content.text))
+    }
+}
+
 #[derive(Deserialize)]
 struct McpResult {
     content: Vec<McpContent>,
@@ -402,16 +397,11 @@ fn parse_sse_response(text: &str) -> Option<Result<String, String>> {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
         };
-        let Ok(resp) = serde_json::from_str::<McpResponse>(data) else {
-            continue;
-        };
-        if let Some(err) = resp.error {
-            return Some(Err(format!("exa error: {}", err.message)));
-        }
-        if let Some(result) = resp.result
-            && let Some(content) = result.content.first()
-        {
-            return Some(Ok(content.text.clone()));
+        let outcome = serde_json::from_str::<McpResponse>(data)
+            .ok()
+            .and_then(McpResponse::outcome);
+        if outcome.is_some() {
+            return outcome;
         }
     }
     None

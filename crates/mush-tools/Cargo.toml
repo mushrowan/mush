@@ -24,6 +24,7 @@ unicode-normalization.workspace = true
 unicode-segmentation.workspace = true
 schemars.workspace = true
 urlencoding.workspace = true
+reqwest.workspace = true
 htmd = "0.5.5"
 similar.workspace = true
 globset = "0.4"
