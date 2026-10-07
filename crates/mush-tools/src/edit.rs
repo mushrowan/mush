@@ -768,7 +768,7 @@ fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
         .lines()
         .chain(new_text.lines())
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
         .min()
         .unwrap_or(0);
 
@@ -779,11 +779,9 @@ fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
     let strip = |text: &str| -> String {
         text.lines()
             .map(|l| {
-                if l.len() >= min_indent {
-                    &l[min_indent..]
-                } else {
-                    l.trim_start()
-                }
+                l.char_indices()
+                    .nth(min_indent)
+                    .map_or("", |(cut, _)| &l[cut..])
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1062,6 +1060,13 @@ mod tests {
         );
         assert!(diff.contains("-     nested"), "removed: {diff}");
         assert!(diff.contains("+         more nested"), "added: {diff}");
+    }
+
+    #[test]
+    fn diff_dedents_wide_whitespace_by_character() {
+        let diff = format_edit_diff("\u{3000}keep\n old", "\u{3000}keep\n new");
+        assert!(diff.contains("- old") && diff.contains("+ new"), "{diff}");
+        assert!(diff.contains("keep"), "{diff}");
     }
 
     #[test]
