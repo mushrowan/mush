@@ -912,9 +912,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let mut tail = lock(&shared.stderr_tail);
+    keep_tail(stderr, &shared.stderr_tail).await;
+}
+
+async fn keep_tail(reader: impl tokio::io::AsyncRead + Unpin, tail: &Mutex<VecDeque<String>>) {
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::new();
+    while let Ok(1..) = reader.read_until(b'\n', &mut bytes).await {
+        let line = String::from_utf8_lossy(bytes.strip_suffix(b"\n").unwrap_or(&bytes));
+        let line = line.strip_suffix('\r').unwrap_or(&line).to_owned();
+        bytes.clear();
+        let mut tail = lock(tail);
         if tail.len() >= STDERR_TAIL_LINES {
             tail.pop_front();
         }
@@ -925,6 +933,16 @@ async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_stderr_tail_reads_past_a_line_that_is_not_utf8() {
+        let tail = Mutex::new(VecDeque::new());
+        keep_tail(&b"caf\xe9\r\nafter\nlast"[..], &tail).await;
+        assert_eq!(
+            Vec::from(tail.into_inner().unwrap()),
+            ["caf\u{fffd}", "after", "last"]
+        );
+    }
 
     #[tokio::test]
     async fn an_oversized_line_is_skipped_whole_and_the_next_line_still_reads() {
