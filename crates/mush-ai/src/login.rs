@@ -244,18 +244,9 @@ async fn validate_openrouter(
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {
     let url = format!("{base_url}/api/v1/auth/key");
-    let resp = client
-        .get(&url)
-        .bearer_auth(key)
-        .send()
-        .await
-        .map_err(network_error("openrouter"))?;
-    let status = resp.status();
-    if status.is_success() {
-        let body = resp.text().await.map_err(network_error("openrouter"))?;
-        return parse_openrouter_auth_key(&body);
-    }
-    Err(map_status("openrouter", resp).await)
+    let resp = send_checked("openrouter", client.get(&url).bearer_auth(key)).await?;
+    let body = resp.text().await.map_err(network_error("openrouter"))?;
+    parse_openrouter_auth_key(&body)
 }
 
 async fn validate_openai(
@@ -264,16 +255,8 @@ async fn validate_openai(
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {
     let url = format!("{base_url}/v1/models");
-    let resp = client
-        .get(&url)
-        .bearer_auth(key)
-        .send()
-        .await
-        .map_err(network_error("openai"))?;
-    if resp.status().is_success() {
-        return Ok(KeyInfo::default());
-    }
-    Err(map_status("openai", resp).await)
+    send_checked("openai", client.get(&url).bearer_auth(key)).await?;
+    Ok(KeyInfo::default())
 }
 
 async fn validate_anthropic(
@@ -282,17 +265,24 @@ async fn validate_anthropic(
     base_url: &str,
 ) -> Result<KeyInfo, ValidationError> {
     let url = format!("{base_url}/v1/models");
-    let resp = client
+    let request = client
         .get(&url)
         .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
-        .map_err(network_error("anthropic"))?;
+        .header("anthropic-version", "2023-06-01");
+    send_checked("anthropic", request).await?;
+    Ok(KeyInfo::default())
+}
+
+async fn send_checked(
+    provider: &str,
+    request: reqwest_middleware::RequestBuilder,
+) -> Result<reqwest::Response, ValidationError> {
+    let resp = request.send().await.map_err(network_error(provider))?;
     if resp.status().is_success() {
-        return Ok(KeyInfo::default());
+        Ok(resp)
+    } else {
+        Err(map_status(provider, resp).await)
     }
-    Err(map_status("anthropic", resp).await)
 }
 
 fn network_error<E: std::fmt::Display>(provider: &str) -> impl FnOnce(E) -> ValidationError {
