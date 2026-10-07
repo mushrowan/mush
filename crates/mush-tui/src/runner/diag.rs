@@ -8,23 +8,23 @@ use std::time::{Duration, Instant};
 const STALL_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_STALL_THRESHOLD: Duration = Duration::from_secs(2);
 
-pub(super) struct TerminalStateDump {
+pub(super) struct ProcessIdentity {
     pub timestamp: String,
     pub pid: u32,
     pub tty: Option<String>,
     pub term: Option<String>,
     pub term_program: Option<String>,
+}
+
+pub(super) struct TerminalStateDump {
+    pub identity: ProcessIdentity,
     pub raw_mode_still_enabled: bool,
     pub actual_termios: Option<TermiosProbe>,
     pub notes: Vec<String>,
 }
 
 pub(super) struct TerminalStartupDump {
-    pub timestamp: String,
-    pub pid: u32,
-    pub tty: Option<String>,
-    pub term: Option<String>,
-    pub term_program: Option<String>,
+    pub identity: ProcessIdentity,
     pub phases: Vec<StartupPhase>,
     pub notes: Vec<String>,
 }
@@ -88,11 +88,7 @@ impl TermiosProbe {
 impl TerminalStateDump {
     pub fn capture(raw_mode_still_enabled: bool, notes: Vec<String>) -> Self {
         Self {
-            timestamp: current_timestamp(),
-            pid: std::process::id(),
-            tty: current_tty(),
-            term: std::env::var("TERM").ok(),
-            term_program: std::env::var("TERM_PROGRAM").ok(),
+            identity: ProcessIdentity::capture(),
             raw_mode_still_enabled,
             actual_termios: probe_termios(),
             notes,
@@ -101,14 +97,7 @@ impl TerminalStateDump {
 
     pub fn render(&self) -> String {
         let mut s = String::from("# mush terminal-state dump\n");
-        push_identity(
-            &mut s,
-            &self.timestamp,
-            self.pid,
-            self.tty.as_deref(),
-            self.term.as_deref(),
-            self.term_program.as_deref(),
-        );
+        self.identity.push_to(&mut s);
         let _ = writeln!(s, "raw_mode_still_enabled: {}", self.raw_mode_still_enabled);
         match self.actual_termios {
             Some(t) => {
@@ -141,11 +130,7 @@ impl TerminalStateDump {
 impl TerminalStartupDump {
     pub fn capture(phases: Vec<StartupPhase>, notes: Vec<String>) -> Self {
         Self {
-            timestamp: current_timestamp(),
-            pid: std::process::id(),
-            tty: current_tty(),
-            term: std::env::var("TERM").ok(),
-            term_program: std::env::var("TERM_PROGRAM").ok(),
+            identity: ProcessIdentity::capture(),
             phases,
             notes,
         }
@@ -153,14 +138,7 @@ impl TerminalStartupDump {
 
     pub fn render(&self) -> String {
         let mut s = String::from("# mush terminal-startup dump\n");
-        push_identity(
-            &mut s,
-            &self.timestamp,
-            self.pid,
-            self.tty.as_deref(),
-            self.term.as_deref(),
-            self.term_program.as_deref(),
-        );
+        self.identity.push_to(&mut s);
         s.push_str("\nstartup phases:\n");
         for phase in &self.phases {
             let _ = match &phase.size {
@@ -199,19 +177,32 @@ impl StallSnapshot {
     }
 }
 
-fn push_identity(
-    s: &mut String,
-    timestamp: &str,
-    pid: u32,
-    tty: Option<&str>,
-    term: Option<&str>,
-    term_program: Option<&str>,
-) {
-    let _ = writeln!(s, "timestamp: {timestamp}");
-    let _ = writeln!(s, "pid: {pid}");
-    let _ = writeln!(s, "tty: {}", tty.unwrap_or("unknown"));
-    let _ = writeln!(s, "term: {}", term.unwrap_or("unset"));
-    let _ = writeln!(s, "term_program: {}", term_program.unwrap_or("unset"));
+impl ProcessIdentity {
+    fn capture() -> Self {
+        Self {
+            timestamp: current_timestamp(),
+            pid: std::process::id(),
+            tty: current_tty(),
+            term: std::env::var("TERM").ok(),
+            term_program: std::env::var("TERM_PROGRAM").ok(),
+        }
+    }
+
+    fn file_name(&self, prefix: &str) -> String {
+        format!("{prefix}-{}-{}.txt", self.timestamp, self.pid)
+    }
+
+    fn push_to(&self, s: &mut String) {
+        let _ = writeln!(s, "timestamp: {}", self.timestamp);
+        let _ = writeln!(s, "pid: {}", self.pid);
+        let _ = writeln!(s, "tty: {}", self.tty.as_deref().unwrap_or("unknown"));
+        let _ = writeln!(s, "term: {}", self.term.as_deref().unwrap_or("unset"));
+        let _ = writeln!(
+            s,
+            "term_program: {}",
+            self.term_program.as_deref().unwrap_or("unset")
+        );
+    }
 }
 
 fn push_notes(s: &mut String, notes: &[String]) {
@@ -311,7 +302,7 @@ pub(super) fn write_terminal_state_dump(
     dir: &Path,
     dump: &TerminalStateDump,
 ) -> io::Result<PathBuf> {
-    let name = format!("mush-term-{}-{}.txt", dump.timestamp, dump.pid);
+    let name = dump.identity.file_name("mush-term");
     write_dump(dir, &name, &dump.render())
 }
 
@@ -319,7 +310,7 @@ pub(super) fn write_terminal_startup_dump(
     dir: &Path,
     dump: &TerminalStartupDump,
 ) -> io::Result<PathBuf> {
-    let name = format!("mush-startup-{}-{}.txt", dump.timestamp, dump.pid);
+    let name = dump.identity.file_name("mush-startup");
     write_dump(dir, &name, &dump.render())
 }
 
@@ -549,11 +540,13 @@ mod tests {
     fn dump_file_is_created_with_owner_only_perms() {
         let tmp = tempfile::tempdir().unwrap();
         let dump = TerminalStateDump {
-            timestamp: "20260420T153045Z".into(),
-            pid: 42,
-            tty: Some("/dev/pts/9".into()),
-            term: Some("xterm-ghostty".into()),
-            term_program: Some("ghostty".into()),
+            identity: ProcessIdentity {
+                timestamp: "20260420T153045Z".into(),
+                pid: 42,
+                tty: Some("/dev/pts/9".into()),
+                term: Some("xterm-ghostty".into()),
+                term_program: Some("ghostty".into()),
+            },
             raw_mode_still_enabled: true,
             actual_termios: Some(TermiosProbe {
                 icanon: false,
@@ -700,20 +693,22 @@ mod tests {
     #[test]
     fn capture_uses_current_process_pid() {
         let dump = TerminalStateDump::capture(false, vec![]);
-        assert_eq!(dump.pid, std::process::id());
+        assert_eq!(dump.identity.pid, std::process::id());
         assert!(!dump.raw_mode_still_enabled);
-        assert!(!dump.timestamp.is_empty());
+        assert!(!dump.identity.timestamp.is_empty());
     }
 
     #[test]
     fn startup_dump_records_terminal_init_phases() {
         let tmp = tempfile::tempdir().unwrap();
         let dump = TerminalStartupDump {
-            timestamp: "20260514T213000Z".into(),
-            pid: 42,
-            tty: Some("/dev/pts/9".into()),
-            term: Some("xterm-ghostty".into()),
-            term_program: Some("ghostty".into()),
+            identity: ProcessIdentity {
+                timestamp: "20260514T213000Z".into(),
+                pid: 42,
+                tty: Some("/dev/pts/9".into()),
+                term: Some("xterm-ghostty".into()),
+                term_program: Some("ghostty".into()),
+            },
             phases: vec![
                 StartupPhase::new("before_restore", Ok(Some((120, 40)))),
                 StartupPhase::new("after_enter", Ok(Some((0, 0)))),
