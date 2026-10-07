@@ -335,14 +335,7 @@ fn file_boundaries_reject_links_permissions_fifos_and_traversal() {
         Some(ReadError::Unsafe)
     );
     fs::remove_file(&state).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        &state,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    mkfifo(&state);
     loader.refresh(&registration, now());
     assert_eq!(
         loader.snapshot.roots[0].tasks[0].read_error,
@@ -613,14 +606,7 @@ fn registration_rejects_symlink_fifo_and_writable_fixtures() {
     assert_eq!(store.load().unwrap_err(), ReadError::Unsafe);
     assert_eq!(store.update(|_| Ok(())).unwrap_err(), ReadError::Unsafe);
     fs::remove_file(store.path()).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        store.path(),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
+    mkfifo(store.path());
     assert_eq!(store.load().unwrap_err(), ReadError::Unsafe);
     fs::remove_file(store.path()).unwrap();
     fs::copy(&copy, store.path()).unwrap();
@@ -655,14 +641,7 @@ fn durable_sources_do_not_open_prompts_manifests_or_sessions() {
         root.join("one/prompt.md"),
         root.join("one/session.jsonl"),
     ] {
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            path,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-            0,
-        )
-        .unwrap();
+        mkfifo(path);
     }
     let mut loader = Loader::default();
     loader.refresh(&registration, now());
@@ -940,4 +919,10 @@ fn shared_queue_is_read_once_and_historical_roots_remain_bounded() {
         ReadError::Oversized
     );
     assert_eq!(store.load().unwrap(), registration);
+}
+
+fn mkfifo(path: impl AsRef<std::path::Path>) {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_ref().as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
 }
