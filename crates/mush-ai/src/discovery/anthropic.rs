@@ -121,12 +121,7 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         base_url: DEFAULT_BASE_URL.into(),
         reasoning,
         input,
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
+        cost: ModelCost::default(),
         context_window: TokenCount::new(entry.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW)),
         effective_context_window: None,
         max_output_tokens: TokenCount::new(entry.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT)),

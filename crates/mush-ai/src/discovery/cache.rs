@@ -138,12 +138,7 @@ mod tests {
             base_url: "https://api.anthropic.com".into(),
             reasoning: false,
             input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
+            cost: ModelCost::default(),
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
             max_output_tokens: TokenCount::new(64_000),

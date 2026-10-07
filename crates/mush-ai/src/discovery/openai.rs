@@ -113,12 +113,7 @@ fn entry_to_model(entry: OpenAiModelEntry) -> Model {
         base_url: DEFAULT_BASE_URL.into(),
         reasoning,
         input: vec![InputModality::Text, InputModality::Image],
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
+        cost: ModelCost::default(),
         context_window: TokenCount::new(DEFAULT_CONTEXT_WINDOW),
         effective_context_window: None,
         max_output_tokens: TokenCount::new(DEFAULT_MAX_OUTPUT),

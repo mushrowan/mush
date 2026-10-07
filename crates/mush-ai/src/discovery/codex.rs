@@ -162,12 +162,7 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         base_url: "https://chatgpt.com/backend-api".into(),
         reasoning,
         input,
-        cost: ModelCost {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: 0.0,
-        },
+        cost: ModelCost::default(),
         context_window: TokenCount::new(context),
         effective_context_window: None,
         max_output_tokens: TokenCount::new(max_output),

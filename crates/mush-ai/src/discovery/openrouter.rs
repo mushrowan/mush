@@ -99,12 +99,7 @@ fn entry_to_model(entry: OpenRouterModelEntry) -> Model {
         .and_then(|tp| tp.max_completion_tokens)
         .unwrap_or(DEFAULT_MAX_OUTPUT);
 
-    let cost = entry.pricing.map(pricing_to_cost).unwrap_or(ModelCost {
-        input: 0.0,
-        output: 0.0,
-        cache_read: 0.0,
-        cache_write: 0.0,
-    });
+    let cost = entry.pricing.map(pricing_to_cost).unwrap_or_default();
 
     let name = entry
         .name

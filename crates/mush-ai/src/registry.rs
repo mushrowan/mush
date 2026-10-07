@@ -312,12 +312,7 @@ mod tests {
             base_url: "https://api.anthropic.com".into(),
             reasoning: false,
             input: vec![crate::types::InputModality::Text],
-            cost: crate::types::ModelCost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
+            cost: crate::types::ModelCost::default(),
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
             max_output_tokens: TokenCount::new(8192),
