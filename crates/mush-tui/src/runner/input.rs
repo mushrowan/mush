@@ -63,6 +63,15 @@ pub(super) struct InputDeps<'a> {
     pub resize: &'a mut ResizeState,
 }
 
+impl InputDeps<'_> {
+    fn slash_env(&mut self) -> SlashEnv<'_> {
+        SlashEnv {
+            tui_config: self.tui_config,
+            pending_prompt: self.pending_prompt,
+        }
+    }
+}
+
 fn confirmation_answer(code: KeyCode) -> Option<bool> {
     match code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
@@ -429,15 +438,7 @@ async fn handle_streaming_key_event(
             edit_last_queued_steering(session, stream_state).await;
         }
         AppEvent::SlashCommand { action } => {
-            handle_slash_action(
-                session,
-                action,
-                SlashEnv {
-                    tui_config: deps.tui_config,
-                    pending_prompt: deps.pending_prompt,
-                },
-            )
-            .await;
+            handle_slash_action(session, action, deps.slash_env()).await;
         }
         _ => {}
     }
@@ -491,54 +492,10 @@ pub(super) async fn handle_idle_terminal_events(
                     continue;
                 };
 
-                if let Some(action) = handle_common_app_event(&app_event, session, deps).await {
-                    if matches!(action, LoopAction::Quit) {
-                        return Ok(LoopAction::Quit);
-                    }
-                } else {
-                    match app_event {
-                        AppEvent::UserSubmit { text, images } => {
-                            if session.connection.state().compacting {
-                                session.queue_input_during_compaction(text, images).await;
-                                continue;
-                            }
-                            submit_idle_prompt(session, deps, text, images).await;
-                        }
-                        AppEvent::SlashCommand { action } => {
-                            handle_slash_action(
-                                session,
-                                action,
-                                SlashEnv {
-                                    tui_config: deps.tui_config,
-                                    pending_prompt: deps.pending_prompt,
-                                },
-                            )
-                            .await;
-                        }
-                        AppEvent::SettingsToggleSelected => {
-                            apply_settings_toggle(session, deps.tui_config);
-                        }
-                        AppEvent::ModelSelected { model_id } => {
-                            handle_slash_action(
-                                session,
-                                crate::slash::SlashAction::Model {
-                                    model_id: Some(model_id),
-                                    show_all: false,
-                                },
-                                SlashEnv {
-                                    tui_config: deps.tui_config,
-                                    pending_prompt: deps.pending_prompt,
-                                },
-                            )
-                            .await;
-                        }
-                        AppEvent::PersistFavourites => {
-                            if let Some(ref saver) = deps.tui_config.save_favourite_models {
-                                saver(&session.app.completion.favourite_models);
-                            }
-                        }
-                        _ => {}
-                    }
+                match handle_idle_app_event(session, deps, app_event).await {
+                    IdleStep::Quit => return Ok(LoopAction::Quit),
+                    IdleStep::ReadNext => continue,
+                    IdleStep::Done => {}
                 }
             }
             Event::Mouse(mouse) => {
@@ -566,6 +523,58 @@ pub(super) async fn handle_idle_terminal_events(
     } else {
         LoopAction::Continue
     })
+}
+
+enum IdleStep {
+    Done,
+    Quit,
+    ReadNext,
+}
+
+async fn handle_idle_app_event(
+    session: &mut Session,
+    deps: &mut InputDeps<'_>,
+    app_event: AppEvent,
+) -> IdleStep {
+    if let Some(action) = handle_common_app_event(&app_event, session, deps).await {
+        return match action {
+            LoopAction::Quit => IdleStep::Quit,
+            _ => IdleStep::Done,
+        };
+    }
+    match app_event {
+        AppEvent::UserSubmit { text, images } => {
+            if session.connection.state().compacting {
+                session.queue_input_during_compaction(text, images).await;
+                return IdleStep::ReadNext;
+            }
+            submit_idle_prompt(session, deps, text, images).await;
+        }
+        AppEvent::SlashCommand { action } => {
+            handle_slash_action(session, action, deps.slash_env()).await;
+        }
+        AppEvent::SettingsToggleSelected => {
+            apply_settings_toggle(session, deps.tui_config);
+        }
+        AppEvent::ModelSelected { model_id } => {
+            handle_slash_action(
+                session,
+                crate::slash::SlashAction::Model {
+                    model_id: Some(model_id),
+                    show_all: false,
+                },
+                deps.slash_env(),
+            )
+            .await;
+        }
+        AppEvent::PersistFavourites => {
+            if let Some(ref saver) = deps.tui_config.save_favourite_models {
+                saver(&session.app.completion.favourite_models);
+            }
+        }
+        _ => {}
+    }
+    IdleStep::Done
 }
 
 async fn submit_idle_prompt(
