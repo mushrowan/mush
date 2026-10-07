@@ -146,7 +146,9 @@ pub fn parse_expression(text: &str, now_ms: u64) -> Result<ScheduleKind, String>
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         let unit = rest[digits.len()..].trim();
         let amount: u64 = digits.parse().ok()?;
-        Some(amount * unit_ms(unit)?)
+        amount
+            .checked_mul(unit_ms(unit)?)
+            .filter(|ms| now_ms.checked_add(*ms).is_some())
     };
     if let Some(rest) = lower.strip_prefix("in ") {
         let delay =
@@ -398,7 +400,7 @@ impl Scheduler {
                 ScheduleKind::Every {
                     interval_ms,
                     next_at,
-                } => *next_at = now_ms + *interval_ms,
+                } => *next_at = now_ms.saturating_add(*interval_ms),
                 ScheduleKind::Cron {
                     expression,
                     next_at,
@@ -446,6 +448,14 @@ pub fn short_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delay_too_large_to_count_is_refused() {
+        for text in ["in 999999999999999999 days", "every 18446744073709551 s"] {
+            let error = parse_expression(text, 1_000).unwrap_err();
+            assert!(error.contains("cannot read"), "{text}: {error}");
+        }
+    }
 
     #[test]
     fn expressions_parse_into_once_and_every() {
