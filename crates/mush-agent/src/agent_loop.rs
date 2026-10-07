@@ -1,11 +1,11 @@
 use futures::StreamExt;
 use mush_ai::registry::{
-    ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, ToolDefinition, retry_backoff,
-    retry_stream_error,
+    ApiRegistry, LlmContext, MAX_RETRIES, STREAM_ENDED_EARLY, retry_backoff, retry_stream_error,
 };
 use mush_ai::stream::{ABORTED_MESSAGE, PartialMessage, StreamEvent};
 use mush_ai::types::*;
 
+use crate::hooks::HookPoint;
 use crate::tool::{ToolRegistry, ToolResult};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -216,24 +216,17 @@ pub fn agent_loop(
         let mut turn_index = 0;
         let cancel = config.cancel.clone().unwrap_or_default();
 
-        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreSession).is_empty() {
-            let results = config.injections.lifecycle_hooks
-                .run_all(crate::hooks::HookPoint::PreSession, config.injections.cwd.as_deref())
-                .await;
-
-            for r in &results {
-                yield AgentEvent::HookRan {
-                    point: crate::hooks::HookPoint::PreSession,
-                    result: r.clone(),
-                };
-            }
+        let lifecycle = &config.injections.lifecycle_hooks;
+        let cwd = config.injections.cwd.as_deref();
+        for result in lifecycle.run_all(HookPoint::PreSession, cwd).await {
+            yield AgentEvent::HookRan { point: HookPoint::PreSession, result };
         }
 
         let mut pending: Vec<Message> = config.hooks.get_steering().await;
 
         'outer: loop {
             loop {
-                if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                if cancel.is_cancelled() {
                     tracing::info!("agent_loop cancelled before turn {turn_index}");
                     break 'outer;
                 }
@@ -264,15 +257,10 @@ pub fn agent_loop(
                     }
                 };
 
-                let tool_defs: Vec<ToolDefinition> =
-                    crate::tool::tool_definitions(&config.tools, config.model.api);
-
-                let system_prompt = config.system_prompt.clone();
-
                 let context = LlmContext {
-                    system_prompt,
+                    system_prompt: config.system_prompt.clone(),
                     messages: llm_messages,
-                    tools: tool_defs,
+                    tools: crate::tool::tool_definitions(&config.tools, config.model.api),
                 };
 
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
@@ -454,17 +442,8 @@ pub fn agent_loop(
                     .collect();
 
                 if tool_calls.is_empty() {
-                    if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::Stop).is_empty() {
-                        let results = config.injections.lifecycle_hooks
-                            .run_all(crate::hooks::HookPoint::Stop, config.injections.cwd.as_deref())
-                            .await;
-
-                        for r in &results {
-                            yield AgentEvent::HookRan {
-                                point: crate::hooks::HookPoint::Stop,
-                                result: r.clone(),
-                            };
-                        }
+                    for result in lifecycle.run_all(HookPoint::Stop, cwd).await {
+                        yield AgentEvent::HookRan { point: HookPoint::Stop, result };
                     }
 
                     yield AgentEvent::TurnEnd { turn_index, message: assistant_msg };
@@ -473,30 +452,17 @@ pub fn agent_loop(
 
                 let mut confirmed: Vec<&ToolCall> = Vec::new();
                 for tc in &tool_calls {
-                    {
-                        let action = config.hooks.confirm_tool(&tc.id, tc.name.as_str(), &tc.arguments).await;
-                        let deny_reason = match action {
-                            ConfirmAction::Allow => None,
-                            ConfirmAction::Deny => Some("tool call denied by user".to_string()),
-                            ConfirmAction::DenyWithReason(reason) => Some(reason),
-                        };
-                        if let Some(reason) = deny_reason {
-                            let result = ToolResult::error(reason);
-                            yield AgentEvent::ToolExecEnd {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: result.clone(),
-                            };
-                            messages.push(Message::ToolResult(ToolResultMessage {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                content: result.content,
-                                outcome: ToolOutcome::Error,
-                                timestamp_ms: Timestamp::now(),
-                                details: result.details,
-                            }));
-                            continue;
-                        }
+                    let action = config.hooks.confirm_tool(&tc.id, tc.name.as_str(), &tc.arguments).await;
+                    let deny_reason = match action {
+                        ConfirmAction::Allow => None,
+                        ConfirmAction::Deny => Some("tool call denied by user".to_string()),
+                        ConfirmAction::DenyWithReason(reason) => Some(reason),
+                    };
+                    if let Some(reason) = deny_reason {
+                        let result = ToolResult::error(reason);
+                        yield exec_end(tc, result.clone());
+                        messages.push(tool_result_message(tc, result));
+                        continue;
                     }
                     confirmed.push(tc);
                 }
@@ -504,43 +470,17 @@ pub fn agent_loop(
                 if !confirmed.is_empty() {
                     let mut allowed: Vec<&ToolCall> = Vec::new();
                     for tc in &confirmed {
-                        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PreToolUse).is_empty() {
-                            let hook_results = config.injections.lifecycle_hooks
-                                .run_for_tool(
-                                    crate::hooks::HookPoint::PreToolUse,
-                                    tc.name.as_str(),
-                                    config.injections.cwd.as_deref(),
-                                )
-                                .await;
-
-                            for r in &hook_results {
-                                yield AgentEvent::HookRan {
-                                    point: crate::hooks::HookPoint::PreToolUse,
-                                    result: r.clone(),
-                                };
-                            }
-
-                            if crate::hooks::has_blocking_failure(&hook_results) {
-                                let feedback = crate::hooks::format_hook_results(
-                                    &hook_results,
-                                    crate::hooks::HookPoint::PreToolUse,
-                                ).unwrap_or_else(|| "pre-tool hook blocked execution".into());
-                                let result = ToolResult::error(crate::redact::redact(&feedback).into_owned());
-                                yield AgentEvent::ToolExecEnd {
-                                    tool_call_id: tc.id.clone(),
-                                    tool_name: tc.name.clone(),
-                                    result: result.clone(),
-                                };
-                                messages.push(Message::ToolResult(ToolResultMessage {
-                                    tool_call_id: tc.id.clone(),
-                                    tool_name: tc.name.clone(),
-                                    content: result.content,
-                                    outcome: ToolOutcome::Error,
-                                    timestamp_ms: Timestamp::now(),
-                                    details: result.details,
-                                }));
-                                continue;
-                            }
+                        let hook_results = lifecycle.run_for_tool(HookPoint::PreToolUse, tc.name.as_str(), cwd).await;
+                        for result in &hook_results {
+                            yield AgentEvent::HookRan { point: HookPoint::PreToolUse, result: result.clone() };
+                        }
+                        if crate::hooks::has_blocking_failure(&hook_results) {
+                            let feedback = crate::hooks::format_hook_results(&hook_results, HookPoint::PreToolUse)
+                                .unwrap_or_else(|| "pre-tool hook blocked execution".into());
+                            let result = ToolResult::error(crate::redact::redact(&feedback).into_owned());
+                            yield exec_end(tc, result.clone());
+                            messages.push(tool_result_message(tc, result));
+                            continue;
                         }
                         allowed.push(tc);
                     }
@@ -553,23 +493,12 @@ pub fn agent_loop(
                         };
                     }
 
-                    if config.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    if cancel.is_cancelled() {
                         tracing::info!("agent_loop cancelled before tool execution");
                         for tc in &allowed {
                             let result = ToolResult::error("tool call cancelled before execution");
-                            yield AgentEvent::ToolExecEnd {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                result: result.clone(),
-                            };
-                            messages.push(Message::ToolResult(ToolResultMessage {
-                                tool_call_id: tc.id.clone(),
-                                tool_name: tc.name.clone(),
-                                content: result.content,
-                                outcome: result.outcome,
-                                timestamp_ms: Timestamp::now(),
-                                details: result.details,
-                            }));
+                            yield exec_end(tc, result.clone());
+                            messages.push(tool_result_message(tc, result));
                         }
                         break 'outer;
                     }
@@ -590,58 +519,28 @@ pub fn agent_loop(
                                 .scope(exec_id, crate::exec_context::CONTROL_ENDPOINT.scope(endpoint, async move { execute_tool(tools_ref, &tc).await }))
                         },
                     );
-                    let results = match config.cancel.as_ref() {
-                        Some(token) => tokio::select! {
-                            r = futs => r,
-                            _ = token.cancelled() => {
-                                tracing::info!("agent_loop cancelled during tool execution");
-                                for tc in &allowed {
-                                    let result = ToolResult::error("tool call cancelled during execution");
-                                    yield AgentEvent::ToolExecEnd {
-                                        tool_call_id: tc.id.clone(),
-                                        tool_name: tc.name.clone(),
-                                        result: result.clone(),
-                                    };
-                                    messages.push(Message::ToolResult(ToolResultMessage {
-                                        tool_call_id: tc.id.clone(),
-                                        tool_name: tc.name.clone(),
-                                        content: result.content,
-                                        outcome: result.outcome,
-                                        timestamp_ms: Timestamp::now(),
-                                        details: result.details,
-                                    }));
-                                }
-                                break 'outer;
+                    let results = tokio::select! {
+                        results = futs => results,
+                        _ = cancel.cancelled() => {
+                            tracing::info!("agent_loop cancelled during tool execution");
+                            for tc in &allowed {
+                                let result = ToolResult::error("tool call cancelled during execution");
+                                yield exec_end(tc, result.clone());
+                                messages.push(tool_result_message(tc, result));
                             }
-                        },
-                        None => futs.await,
+                            break 'outer;
+                        }
                     };
 
                     for (tc, mut result) in allowed.iter().zip(results) {
-                        if !config.injections.lifecycle_hooks.for_point(crate::hooks::HookPoint::PostToolUse).is_empty() {
-                            let hook_results = config.injections.lifecycle_hooks
-                                .run_for_tool(
-                                    crate::hooks::HookPoint::PostToolUse,
-                                    tc.name.as_str(),
-                                    config.injections.cwd.as_deref(),
-                                )
-                                .await;
-
-                            for r in &hook_results {
-                                yield AgentEvent::HookRan {
-                                    point: crate::hooks::HookPoint::PostToolUse,
-                                    result: r.clone(),
-                                };
-                            }
-
-                            if let Some(feedback) = crate::hooks::format_hook_results(
-                                &hook_results,
-                                crate::hooks::HookPoint::PostToolUse,
-                            ) {
-                                result.content.push(ToolResultContentPart::Text(TextContent {
-                                    text: crate::redact::redact(&feedback).into_owned(),
-                                }));
-                            }
+                        let hook_results = lifecycle.run_for_tool(HookPoint::PostToolUse, tc.name.as_str(), cwd).await;
+                        for result in &hook_results {
+                            yield AgentEvent::HookRan { point: HookPoint::PostToolUse, result: result.clone() };
+                        }
+                        if let Some(feedback) = crate::hooks::format_hook_results(&hook_results, HookPoint::PostToolUse) {
+                            result.content.push(ToolResultContentPart::Text(TextContent {
+                                text: crate::redact::redact(&feedback).into_owned(),
+                            }));
                         }
 
                         if let Some(ref file_rules) = config.injections.file_rules
@@ -663,26 +562,13 @@ pub fn agent_loop(
                             }));
                         }
 
-                        yield AgentEvent::ToolExecEnd {
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            result: result.clone(),
-                        };
-                        messages.push(Message::ToolResult(ToolResultMessage {
-                            tool_call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            content: result.content,
-                            outcome: result.outcome,
-                            timestamp_ms: Timestamp::now(),
-                            details: result.details,
-                        }));
+                        yield exec_end(tc, result.clone());
+                        messages.push(tool_result_message(tc, result));
                     }
 
-                    {
-                        let steering = config.hooks.get_steering().await;
-                        if !steering.is_empty() {
-                            pending = steering;
-                        }
+                    let steering = config.hooks.get_steering().await;
+                    if !steering.is_empty() {
+                        pending = steering;
                     }
                 }
 
@@ -697,19 +583,13 @@ pub fn agent_loop(
                 if pending.is_empty() {
                     pending = config.hooks.get_steering().await;
                 }
-
-                if pending.is_empty() {
-                }
             }
 
-            {
-                let follow_up = config.hooks.get_follow_up().await;
-                if !follow_up.is_empty() {
-                    let injected = follow_up.clone();
-                    pending = follow_up;
-                    yield AgentEvent::FollowUpInjected { messages: injected };
-                    continue 'outer;
-                }
+            let follow_up = config.hooks.get_follow_up().await;
+            if !follow_up.is_empty() {
+                pending = follow_up.clone();
+                yield AgentEvent::FollowUpInjected { messages: follow_up };
+                continue 'outer;
             }
 
             break;
@@ -719,6 +599,25 @@ pub fn agent_loop(
     };
 
     Box::pin(stream)
+}
+
+fn exec_end(call: &ToolCall, result: ToolResult) -> AgentEvent {
+    AgentEvent::ToolExecEnd {
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        result,
+    }
+}
+
+fn tool_result_message(call: &ToolCall, result: ToolResult) -> Message {
+    Message::ToolResult(ToolResultMessage {
+        tool_call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        content: result.content,
+        outcome: result.outcome,
+        timestamp_ms: Timestamp::now(),
+        details: result.details,
+    })
 }
 
 fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -66,11 +67,7 @@ impl LifecycleHooks {
         point: HookPoint,
         cwd: Option<&std::path::Path>,
     ) -> Vec<HookResult> {
-        let mut results = Vec::new();
-        for hook in self.for_point(point) {
-            results.push(run_hook(hook, cwd).await);
-        }
-        results
+        self.run_matching(point, cwd, |_| true).await
     }
 
     pub async fn run_for_tool(
@@ -79,11 +76,18 @@ impl LifecycleHooks {
         tool_name: &str,
         cwd: Option<&std::path::Path>,
     ) -> Vec<HookResult> {
+        self.run_matching(point, cwd, |hook| hook.matches_tool(tool_name))
+            .await
+    }
+
+    async fn run_matching(
+        &self,
+        point: HookPoint,
+        cwd: Option<&std::path::Path>,
+        matches: impl Fn(&LifecycleHook) -> bool,
+    ) -> Vec<HookResult> {
         let mut results = Vec::new();
-        for hook in self.for_point(point) {
-            if !hook.matches_tool(tool_name) {
-                continue;
-            }
+        for hook in self.for_point(point).iter().filter(|hook| matches(hook)) {
             results.push(run_hook(hook, cwd).await);
         }
         results
@@ -100,10 +104,7 @@ async fn run_hook(hook: &LifecycleHook, cwd: Option<&std::path::Path>) -> HookRe
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let result = tokio::time::timeout(hook.timeout, cmd.output()).await;
-    let blocking = hook.blocking;
-
-    match result {
+    let (success, output) = match tokio::time::timeout(hook.timeout, cmd.output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -114,26 +115,19 @@ async fn run_hook(hook: &LifecycleHook, cwd: Option<&std::path::Path>) -> HookRe
             } else {
                 format!("{stdout}\n{stderr}")
             };
-
-            HookResult {
-                success: output.status.success(),
-                output: combined,
-                command: hook.command.clone(),
-                blocking,
-            }
+            (output.status.success(), combined)
         }
-        Ok(Err(e)) => HookResult {
-            success: false,
-            output: format!("failed to run hook: {e}"),
-            command: hook.command.clone(),
-            blocking,
-        },
-        Err(_) => HookResult {
-            success: false,
-            output: format!("hook timed out after {}s", hook.timeout.as_secs()),
-            command: hook.command.clone(),
-            blocking,
-        },
+        Ok(Err(e)) => (false, format!("failed to run hook: {e}")),
+        Err(_) => (
+            false,
+            format!("hook timed out after {}s", hook.timeout.as_secs()),
+        ),
+    };
+    HookResult {
+        success,
+        output,
+        command: hook.command.clone(),
+        blocking: hook.blocking,
     }
 }
 
@@ -153,7 +147,7 @@ pub fn format_hook_results(results: &[HookResult], point: HookPoint) -> Option<S
 
     let mut out = String::new();
     for r in &failures {
-        out.push_str(&format!("[{label} failed: `{}`]\n", r.command));
+        let _ = writeln!(out, "[{label} failed: `{}`]", r.command);
         if !r.output.is_empty() {
             out.push_str(&r.output);
             if !r.output.ends_with('\n') {
