@@ -283,7 +283,7 @@ impl App {
                 .stats
                 .update_with_config(u, cost, Some(curr_config.clone()));
             for anomaly in &anomalies {
-                let msg_opt: Option<String> = match anomaly {
+                let notice = match anomaly {
                     CacheAnomaly::ContextDecrease { prev, curr } => Some(format!(
                         "⚠ context decreased: {}k → {}k (delta -{}k) without compact",
                         prev.get() / 1000,
@@ -296,73 +296,19 @@ impl App {
                         curr_cache_write,
                         reason,
                     } => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let diag = CacheBustDiagnostic {
-                            timestamp: format!("{now}"),
-                            secs_since_last_cache_activity: self.cache.elapsed_secs(),
-                            cache_ttl_secs: self.cache.ttl_secs,
-                            thinking_level: curr_config.thinking_level.clone(),
-                            model_id: curr_config.model_id.clone(),
-                            effort: curr_config.effort.clone(),
-                            bust_reason: reason.clone(),
-                            prev_model_id: prev_config_snapshot
-                                .as_ref()
-                                .map(|c| c.model_id.clone()),
-                            prev_thinking_level: prev_config_snapshot
-                                .as_ref()
-                                .map(|c| c.thinking_level.clone()),
-                            prev_effort: prev_config_snapshot
-                                .as_ref()
-                                .and_then(|c| c.effort.clone()),
-                            prev_messages_prefix_fingerprint: prev_config_snapshot
-                                .as_ref()
-                                .and_then(|c| c.messages_prefix_fingerprint),
-                            curr_messages_prefix_fingerprint: curr_config
-                                .messages_prefix_fingerprint,
-                            prev_system_fingerprint: prev_config_snapshot
-                                .as_ref()
-                                .and_then(|c| c.system_fingerprint),
-                            curr_system_fingerprint: curr_config.system_fingerprint,
-                            prev_tools_fingerprint: prev_config_snapshot
-                                .as_ref()
-                                .and_then(|c| c.tools_fingerprint),
-                            curr_tools_fingerprint: curr_config.tools_fingerprint,
-                            prev_usage: prev_usage_snapshot,
-                            curr_usage: *u,
-                            prev_context_tokens: prev_context_snapshot.get(),
-                            curr_context_tokens: u.total_input_tokens().get(),
-                            session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
-                            session_api_calls: self.stats.total_tokens.get()
-                                / u.total_tokens().get().max(1),
-                            recent_request_snapshots: self
-                                .last_request
-                                .as_ref()
-                                .map(|d| {
-                                    [d.previous_snapshot.clone(), d.snapshot.clone()]
-                                        .into_iter()
-                                        .flatten()
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        };
+                        let diag = self.cache_bust_diagnostic(
+                            reason,
+                            &curr_config,
+                            prev_config_snapshot.as_ref(),
+                            prev_usage_snapshot,
+                            prev_context_snapshot,
+                            u,
+                        );
                         let dump_note = match dump_cache_bust_diagnostic(&diag) {
                             Some(path) => format!(" (dump: {})", path.display()),
                             None => String::new(),
                         };
-
-                        let cause = match reason {
-                            BustReason::Unexplained => Some("prefix evicted"),
-                            BustReason::SystemPromptChanged => Some("system prompt changed"),
-                            BustReason::ToolsChanged => Some("tool list changed"),
-                            BustReason::ModelChanged
-                            | BustReason::ThinkingChanged
-                            | BustReason::EffortChanged
-                            | BustReason::HistoryReshaped => None,
-                        };
-                        cause.map(|cause| format!(
+                        bust_cause(reason).map(|cause| format!(
                             "⚠ probable cache bust: cache_read {}k → {}k, cache_write {}k ({cause}){dump_note}",
                             prev_cache_read.get() / 1000,
                             curr_cache_read.get() / 1000,
@@ -370,12 +316,74 @@ impl App {
                         ))
                     }
                 };
-                if let Some(msg) = msg_opt {
-                    self.push_system_message(msg);
+                if let Some(notice) = notice {
+                    self.push_system_message(notice);
                 }
             }
         } else if let Some(c) = cost {
             self.stats.total_cost += c;
         }
+    }
+
+    fn cache_bust_diagnostic(
+        &self,
+        reason: &BustReason,
+        curr_config: &CallConfig,
+        prev_config: Option<&CallConfig>,
+        prev_usage: Option<Usage>,
+        prev_context: TokenCount,
+        usage: &Usage,
+    ) -> CacheBustDiagnostic {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        CacheBustDiagnostic {
+            timestamp: format!("{now}"),
+            secs_since_last_cache_activity: self.cache.elapsed_secs(),
+            cache_ttl_secs: self.cache.ttl_secs,
+            thinking_level: curr_config.thinking_level.clone(),
+            model_id: curr_config.model_id.clone(),
+            effort: curr_config.effort.clone(),
+            bust_reason: reason.clone(),
+            prev_model_id: prev_config.map(|c| c.model_id.clone()),
+            prev_thinking_level: prev_config.map(|c| c.thinking_level.clone()),
+            prev_effort: prev_config.and_then(|c| c.effort.clone()),
+            prev_messages_prefix_fingerprint: prev_config
+                .and_then(|c| c.messages_prefix_fingerprint),
+            curr_messages_prefix_fingerprint: curr_config.messages_prefix_fingerprint,
+            prev_system_fingerprint: prev_config.and_then(|c| c.system_fingerprint),
+            curr_system_fingerprint: curr_config.system_fingerprint,
+            prev_tools_fingerprint: prev_config.and_then(|c| c.tools_fingerprint),
+            curr_tools_fingerprint: curr_config.tools_fingerprint,
+            prev_usage,
+            curr_usage: *usage,
+            prev_context_tokens: prev_context.get(),
+            curr_context_tokens: usage.total_input_tokens().get(),
+            session_total_cost: format!("{:.4}", self.stats.total_cost.get()),
+            session_api_calls: self.stats.total_tokens.get() / usage.total_tokens().get().max(1),
+            recent_request_snapshots: self
+                .last_request
+                .as_ref()
+                .map(|d| {
+                    [d.previous_snapshot.clone(), d.snapshot.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+const fn bust_cause(reason: &BustReason) -> Option<&'static str> {
+    match reason {
+        BustReason::Unexplained => Some("prefix evicted"),
+        BustReason::SystemPromptChanged => Some("system prompt changed"),
+        BustReason::ToolsChanged => Some("tool list changed"),
+        BustReason::ModelChanged
+        | BustReason::ThinkingChanged
+        | BustReason::EffortChanged
+        | BustReason::HistoryReshaped => None,
     }
 }
