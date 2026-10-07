@@ -52,12 +52,13 @@ impl ApiProvider for OpenaiCompletionsProvider {
         let response =
             super::check_response(response, "openai completions", model.id.as_str(), &url).await?;
 
-        Ok(parse_sse_stream(
+        Ok(super::sse::run_sse_stream(
             response,
             model.id.clone(),
             model.provider.clone(),
             model.api,
             call_id,
+            OpenAiCompletionsProcessor::default(),
         ))
     }
 }
@@ -788,23 +789,6 @@ impl super::sse::SseProcessor for OpenAiCompletionsProcessor {
     fn label(&self) -> &'static str {
         "openai completions"
     }
-}
-
-fn parse_sse_stream(
-    response: reqwest::Response,
-    model_id: ModelId,
-    provider_name: Provider,
-    api: Api,
-    call_id: u64,
-) -> EventStream {
-    super::sse::run_sse_stream(
-        response,
-        model_id,
-        provider_name,
-        api,
-        call_id,
-        OpenAiCompletionsProcessor::default(),
-    )
 }
 
 impl OpenAiCompletionsProcessor {
