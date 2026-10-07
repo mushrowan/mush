@@ -53,18 +53,6 @@ pub fn control_socket_path(instance: &str) -> PathBuf {
         .join(format!("{instance}.sock"))
 }
 
-pub fn discover_sockets() -> Vec<PathBuf> {
-    let dir = runtime_dir();
-    [dir.clone(), dir.join("control")]
-        .into_iter()
-        .filter_map(|dir| std::fs::read_dir(dir).ok())
-        .flatten()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "sock"))
-        .collect()
-}
-
 pub fn runtime_dir() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
         let user = rustix::process::geteuid().as_raw();

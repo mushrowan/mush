@@ -16,35 +16,33 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    pub fn text(text: impl Into<String>) -> Self {
+    fn single(part: ToolResultContentPart, outcome: ToolOutcome) -> Self {
         Self {
-            content: vec![ToolResultContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            outcome: ToolOutcome::Success,
+            content: vec![part],
+            outcome,
             details: None,
         }
+    }
+
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::single(
+            ToolResultContentPart::Text(TextContent { text: text.into() }),
+            ToolOutcome::Success,
+        )
     }
 
     pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            content: vec![ToolResultContentPart::Text(TextContent {
-                text: text.into(),
-            })],
-            outcome: ToolOutcome::Error,
-            details: None,
-        }
+        Self::single(
+            ToolResultContentPart::Text(TextContent { text: text.into() }),
+            ToolOutcome::Error,
+        )
     }
 
     pub fn image(data: String, mime_type: ImageMimeType) -> Self {
-        Self {
-            content: vec![ToolResultContentPart::Image(ImageContent {
-                data,
-                mime_type,
-            })],
-            outcome: ToolOutcome::Success,
-            details: None,
-        }
+        Self::single(
+            ToolResultContentPart::Image(ImageContent { data, mime_type }),
+            ToolOutcome::Success,
+        )
     }
 
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
@@ -211,13 +209,6 @@ impl ToolRegistry {
             .collect();
         self.order.retain(|key| keep.contains(key));
         self.tools.retain(|key, _| keep.contains(key));
-    }
-
-    #[must_use]
-    pub fn with_shared(&self, tools: impl IntoIterator<Item = SharedTool>) -> Self {
-        let mut merged = self.clone();
-        merged.extend_shared(tools);
-        merged
     }
 
     pub fn get(&self, name: &str) -> Option<&SharedTool> {
