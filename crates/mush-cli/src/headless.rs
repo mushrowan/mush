@@ -44,6 +44,15 @@ pub(crate) struct PrintExit {
     pub(crate) message: String,
 }
 
+impl PrintExit {
+    pub(crate) fn cancelled(signal: Signal) -> Self {
+        Self {
+            code: signal.exit_code(),
+            message: "cancelled".into(),
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct Status {
     #[serde(skip)]

@@ -610,9 +610,13 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         session.auto_title();
     }
     status.session_id = Some(session.meta.id.clone());
-    if !cli.no_session {
-        store.save(&session)?;
-    }
+    let persist = |session: &Session| -> Result<()> {
+        if !cli.no_session {
+            store.save(session)?;
+        }
+        Ok(())
+    };
+    persist(&session)?;
     status.write()?;
     let mut shutdown = std::pin::pin!(headless::shutdown_signal());
     let init = AppSetup::init(cli.setup_args(
@@ -624,7 +628,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         result = &mut shutdown => {
             let signal = result?;
             status.state = "cancelled";
-            return Err(headless::PrintExit { code: signal.exit_code(), message: "cancelled".into() }.into());
+            return Err(headless::PrintExit::cancelled(signal).into());
         }
         result = init => result?,
     };
@@ -641,9 +645,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     session.meta.model_id = setup.client.model.id.clone();
     status.model = Some(setup.client.model.id.to_string());
     status.state = "running";
-    if !cli.no_session {
-        store.save(&session)?;
-    }
+    persist(&session)?;
     status.write()?;
 
     let control = mush_agent::ipc::control::Control::new(session.meta.id.to_string());
@@ -660,87 +662,8 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         target: control.target(),
     });
 
-    let (compact_model, compact_options) = setup
-        .client
-        .compaction_model
-        .clone()
-        .unwrap_or_else(|| (setup.client.model.clone(), setup.client.options.clone()));
-    let context_window = compact_model
-        .context_window
-        .max(setup.client.model.context_window);
-    let session_model = (compact_model.id != setup.client.model.id)
-        .then(|| (setup.client.model.clone(), setup.client.options.clone()));
-    let target = mush_runtime::CompactionTarget {
-        model: compact_model,
-        options: compact_options,
-        window: context_window,
-        session: session_model,
-    };
-    let reg_ref = setup.registry.clone();
-    let context_tokens_shared = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let ctx_tokens_for_transform = context_tokens_shared.clone();
-    let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
-    let cwd = std::sync::Arc::new(setup.client.cwd.clone());
-    let live = std::sync::Arc::new(mush_session::compact::LiveContext {
-        system_prompt: Some(setup.system_prompt.clone()),
-        tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
-    });
-    let compaction_settings = setup.client.cfg.compaction.settings();
-    let kernel = setup.kernel_state.clone();
-    let transform: Option<mush_agent::TransformFn> = if setup.client.cfg.compaction.enabled {
-        Some(Box::new(move |msgs| {
-            let target = target.clone();
-            let ctx = ctx_tokens_for_transform.clone();
-            let owned = msgs.to_vec();
-            let hooks = lifecycle_hooks.clone();
-            let cwd = cwd.clone();
-            let reg = reg_ref.clone();
-            let live = live.clone();
-            let kernel = kernel.clone();
-            Box::pin(async move {
-                let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-                let target = target.fitting(mush_session::compact::summary_request_tokens(
-                    &owned,
-                    compaction_settings.keep_recent(&owned),
-                    &mush_session::compact::CompactionFocus::default(),
-                    &compaction_settings,
-                ));
-                let mut result = auto_compact(
-                    owned,
-                    tokens,
-                    context_window,
-                    &reg,
-                    &target.model,
-                    &target.options,
-                    Some(&hooks),
-                    Some(cwd.as_path()),
-                    target.uses_session_model().then_some(live.as_ref()),
-                    &compaction_settings,
-                )
-                .await;
-                if result.summarised_count > 0 {
-                    if let Some(notice) =
-                        mush_runtime::kernel_notice::after_compaction(kernel.as_deref()).await
-                    {
-                        result.messages.push(notice);
-                    }
-                    ctx.store(
-                        mush_session::compact::estimate_tokens(&result.messages) as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
-                        messages: result.messages,
-                        summary: result.summary,
-                        summarised_count: result.summarised_count,
-                    })
-                } else {
-                    mush_agent::ContextTransformResult::Unchanged
-                }
-            })
-        }))
-    } else {
-        None
-    };
+    let context_tokens = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let transform = compaction_transform(&setup, context_tokens.clone());
 
     let config = AgentConfig {
         model: setup.client.model.clone(),
@@ -787,7 +710,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 signalled = Some(result?);
                 cancel.cancel();
                 status.state = "cancelled";
-                if !cli.no_session { store.save(&session)?; }
+                persist(&session)?;
                 status.write()?;
                 cancel_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(2));
                 continue;
@@ -803,8 +726,8 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             }
             _ => {}
         }
-        if transcript.apply(&mut session, &event) && !cli.no_session {
-            store.save(&session)?;
+        if transcript.apply(&mut session, &event) {
+            persist(&session)?;
         }
         if let Some(json_events) = &mut json_events {
             for line in json_events.apply(&event) {
@@ -835,7 +758,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 }
             }
             AgentEvent::MessageEnd { message } => {
-                context_tokens_shared.store(
+                context_tokens.store(
                     message.usage.total_input_tokens().get(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
@@ -887,9 +810,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 }
                 let after_count = session.conversation.context_len();
                 session.meta.message_count = after_count;
-                if !cli.no_session {
-                    store.save(&session)?;
-                }
+                persist(&session)?;
                 eprintln!(
                     "{}",
                     Style::Dim.stderr(format_args!(
@@ -948,11 +869,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
 
     listener.shutdown().await?;
     if let Some(signal) = signalled {
-        return Err(headless::PrintExit {
-            code: signal.exit_code(),
-            message: "cancelled".into(),
-        }
-        .into());
+        return Err(headless::PrintExit::cancelled(signal).into());
     }
     if let Some(error) = failure {
         return Err(print_failure(format_error(&error)));
@@ -966,6 +883,90 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         print_final_text(&message);
     }
     Ok(())
+}
+
+fn compaction_transform(
+    setup: &AppSetup,
+    context_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Option<mush_agent::TransformFn> {
+    if !setup.client.cfg.compaction.enabled {
+        return None;
+    }
+    let (compact_model, compact_options) = setup
+        .client
+        .compaction_model
+        .clone()
+        .unwrap_or_else(|| (setup.client.model.clone(), setup.client.options.clone()));
+    let context_window = compact_model
+        .context_window
+        .max(setup.client.model.context_window);
+    let session_model = (compact_model.id != setup.client.model.id)
+        .then(|| (setup.client.model.clone(), setup.client.options.clone()));
+    let target = mush_runtime::CompactionTarget {
+        model: compact_model,
+        options: compact_options,
+        window: context_window,
+        session: session_model,
+    };
+    let reg_ref = setup.registry.clone();
+    let lifecycle_hooks = std::sync::Arc::new(setup.lifecycle_hooks.clone());
+    let cwd = std::sync::Arc::new(setup.client.cwd.clone());
+    let live = std::sync::Arc::new(mush_session::compact::LiveContext {
+        system_prompt: Some(setup.system_prompt.clone()),
+        tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
+    });
+    let compaction_settings = setup.client.cfg.compaction.settings();
+    let kernel = setup.kernel_state.clone();
+    Some(Box::new(move |msgs| {
+        let target = target.clone();
+        let ctx = context_tokens.clone();
+        let owned = msgs.to_vec();
+        let hooks = lifecycle_hooks.clone();
+        let cwd = cwd.clone();
+        let reg = reg_ref.clone();
+        let live = live.clone();
+        let kernel = kernel.clone();
+        Box::pin(async move {
+            let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
+            let target = target.fitting(mush_session::compact::summary_request_tokens(
+                &owned,
+                compaction_settings.keep_recent(&owned),
+                &mush_session::compact::CompactionFocus::default(),
+                &compaction_settings,
+            ));
+            let mut result = auto_compact(
+                owned,
+                tokens,
+                context_window,
+                &reg,
+                &target.model,
+                &target.options,
+                Some(&hooks),
+                Some(cwd.as_path()),
+                target.uses_session_model().then_some(live.as_ref()),
+                &compaction_settings,
+            )
+            .await;
+            if result.summarised_count > 0 {
+                if let Some(notice) =
+                    mush_runtime::kernel_notice::after_compaction(kernel.as_deref()).await
+                {
+                    result.messages.push(notice);
+                }
+                ctx.store(
+                    mush_session::compact::estimate_tokens(&result.messages) as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
+                    messages: result.messages,
+                    summary: result.summary,
+                    summarised_count: result.summarised_count,
+                })
+            } else {
+                mush_agent::ContextTransformResult::Unchanged
+            }
+        })
+    }))
 }
 
 fn print_final_text(message: &AssistantMessage) {
