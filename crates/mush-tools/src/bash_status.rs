@@ -553,6 +553,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_poll_shows_output_while_the_job_still_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let release = tmp.path().join("release");
+        let registry = make_registry();
+        let bash = crate::bash::BashTool::new(tmp.path().into())
+            .with_background_registry(registry.clone());
+        let status = BashStatusTool::new(registry);
+
+        let command = format!(
+            "echo early; while [ ! -e {} ]; do sleep 0.05; done; echo late",
+            release.display()
+        );
+        let started = bash
+            .execute(serde_json::json!({"command": command, "background": true}))
+            .await;
+        assert!(started.outcome.is_success());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let early = loop {
+            let poll = status
+                .execute(serde_json::json!({"job_id": "bg_0", "timeout": 0}))
+                .await;
+            let json: serde_json::Value = serde_json::from_str(&extract_text(&poll)).unwrap();
+            if json["output"] == "early\n" || std::time::Instant::now() > deadline {
+                break json;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(early["status"], "running", "{early}");
+        assert_eq!(early["output"], "early\n", "{early}");
+
+        let done = status
+            .execute(serde_json::json!({"job_id": "bg_0", "timeout": 10}))
+            .await;
+        let text = extract_text(&done);
+        assert!(text.contains("late") && !text.contains("early"), "{text}");
+    }
+
+    #[tokio::test]
     async fn kill_action_stops_spawned_background_process() {
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join("survived");

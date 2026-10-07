@@ -9,6 +9,7 @@ const MAX_FOREGROUND_TIMEOUT_SECS: u64 = 600;
 
 const NO_OUTPUT_TIMEOUT_SECS: u64 = 240;
 const STREAM_PIPE_YIELD_LINES: usize = 256;
+const BACKGROUND_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[cfg(unix)]
 struct ProcessGroupKillOnDrop {
@@ -450,38 +451,33 @@ async fn run_background_command(
         }
     };
 
-    let mut pg_guard = ProcessGroupKillOnDrop::new(&child);
+    let pg_guard = ProcessGroupKillOnDrop::new(&child);
     if let Some(kill_handle) = crate::background::JobKillHandle::from_child(&child) {
         registry.set_kill_handle(&job_id, kill_handle).await;
     }
     let _ = spawn_ready.send(());
 
-    let stdout_handle = tokio::spawn(stream_pipe(child.stdout.take(), None, None));
-    let stderr_handle = tokio::spawn(stream_pipe(child.stderr.take(), None, None));
-
-    let status = child.wait().await;
-    pg_guard.disarm();
-    finish_background_job(
-        &handle,
-        &registry,
-        &job_id,
-        stdout_handle,
-        stderr_handle,
-        status,
-    )
-    .await;
+    let pipes = Pipes::spawn(&mut child, None, None);
+    follow_background_job(&handle, &registry, &job_id, child, pg_guard, pipes).await;
 }
 
-async fn finish_background_job(
+async fn follow_background_job(
     handle: &tokio::sync::RwLock<crate::background::JobState>,
     registry: &crate::background::BackgroundJobRegistry,
     job_id: &str,
-    stdout_handle: tokio::task::JoinHandle<String>,
-    stderr_handle: tokio::task::JoinHandle<String>,
-    status: std::io::Result<std::process::ExitStatus>,
+    mut child: tokio::process::Child,
+    mut pg_guard: ProcessGroupKillOnDrop,
+    pipes: Pipes,
 ) {
-    let stdout = stdout_handle.await.unwrap_or_default();
-    let stderr = stderr_handle.await.unwrap_or_default();
+    let mut publish = tokio::time::interval(BACKGROUND_OUTPUT_INTERVAL);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status,
+            _ = publish.tick() => pipes.publish(&mut *handle.write().await),
+        }
+    };
+    pg_guard.disarm();
+    let (stdout, stderr) = pipes.finish().await;
 
     let mut state = handle.write().await;
     state.stdout = stdout;
@@ -496,6 +492,74 @@ async fn finish_background_job(
     }
     drop(state);
     registry.clear_kill_handle(job_id).await;
+}
+
+#[derive(Clone, Default)]
+struct Captured(Arc<std::sync::Mutex<String>>);
+
+impl Captured {
+    fn lock(&self) -> std::sync::MutexGuard<'_, String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn append_since(&self, seen: &mut String) {
+        if let Some(new) = self.lock().get(seen.len()..) {
+            seen.push_str(new);
+        }
+    }
+}
+
+struct Pipes {
+    stdout: Captured,
+    stderr: Captured,
+    readers: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl Pipes {
+    fn spawn(
+        child: &mut tokio::process::Child,
+        sink: Option<&LineSink>,
+        has_output: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        let stdout = Captured::default();
+        let stderr = Captured::default();
+        let readers = [
+            tokio::spawn(stream_pipe(
+                child.stdout.take(),
+                sink.cloned(),
+                has_output.cloned(),
+                stdout.clone(),
+            )),
+            tokio::spawn(stream_pipe(
+                child.stderr.take(),
+                sink.cloned(),
+                has_output.cloned(),
+                stderr.clone(),
+            )),
+        ];
+        Self {
+            stdout,
+            stderr,
+            readers,
+        }
+    }
+
+    fn publish(&self, state: &mut crate::background::JobState) {
+        self.stdout.append_since(&mut state.stdout);
+        self.stderr.append_since(&mut state.stderr);
+    }
+
+    async fn finish(self) -> (String, String) {
+        for reader in self.readers {
+            let _ = reader.await;
+        }
+        (
+            std::mem::take(&mut *self.stdout.lock()),
+            std::mem::take(&mut *self.stderr.lock()),
+        )
+    }
 }
 
 fn bash_command(cwd: &std::path::Path, command: &str) -> tokio::process::Command {
@@ -548,16 +612,7 @@ async fn run_foreground(
 
     let has_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let stdout_handle = tokio::spawn(stream_pipe(
-        child.stdout.take(),
-        output_sink.cloned(),
-        Some(has_output.clone()),
-    ));
-    let stderr_handle = tokio::spawn(stream_pipe(
-        child.stderr.take(),
-        output_sink.cloned(),
-        Some(has_output.clone()),
-    ));
+    let pipes = Pipes::spawn(&mut child, output_sink, Some(&has_output));
 
     enum WaitResult {
         Exited(std::io::Result<std::process::ExitStatus>),
@@ -579,8 +634,7 @@ async fn run_foreground(
     match result {
         WaitResult::Exited(Ok(status)) => {
             pg_guard.disarm();
-            let stdout = stdout_handle.await.unwrap_or_default();
-            let stderr = stderr_handle.await.unwrap_or_default();
+            let (stdout, stderr) = pipes.finish().await;
             let exit_code = status.code().unwrap_or(-1);
             let duration = started.elapsed();
             format_result(stdout, stderr, exit_code, false, duration, json_output)
@@ -600,8 +654,7 @@ async fn run_foreground(
                     TimedOutCommand {
                         child,
                         pg_guard,
-                        stdout_handle,
-                        stderr_handle,
+                        pipes,
                         duration,
                     },
                     json_output,
@@ -610,8 +663,7 @@ async fn run_foreground(
             }
 
             pg_guard.kill_now();
-            let stdout = stdout_handle.await.unwrap_or_default();
-            let stderr = stderr_handle.await.unwrap_or_default();
+            let (stdout, stderr) = pipes.finish().await;
             if json_output {
                 return format_result(stdout, stderr, -1, true, duration, true);
             }
@@ -619,8 +671,7 @@ async fn run_foreground(
         }
         WaitResult::NoOutput => {
             pg_guard.kill_now();
-            let stdout = stdout_handle.await.unwrap_or_default();
-            let stderr = stderr_handle.await.unwrap_or_default();
+            let (stdout, stderr) = pipes.finish().await;
             let duration = started.elapsed();
             if json_output {
                 return format_result(stdout, stderr, -1, true, duration, true);
@@ -638,8 +689,7 @@ async fn run_foreground(
 struct TimedOutCommand {
     child: tokio::process::Child,
     pg_guard: ProcessGroupKillOnDrop,
-    stdout_handle: tokio::task::JoinHandle<String>,
-    stderr_handle: tokio::task::JoinHandle<String>,
+    pipes: Pipes,
     duration: std::time::Duration,
 }
 
@@ -669,23 +719,12 @@ async fn continue_in_background_after_timeout(
 
     tokio::spawn(async move {
         let TimedOutCommand {
-            mut child,
-            mut pg_guard,
-            stdout_handle,
-            stderr_handle,
+            child,
+            pg_guard,
+            pipes,
             ..
         } = running;
-        let status = child.wait().await;
-        pg_guard.disarm();
-        finish_background_job(
-            &handle,
-            &registry,
-            &job_id,
-            stdout_handle,
-            stderr_handle,
-            status,
-        )
-        .await;
+        follow_background_job(&handle, &registry, &job_id, child, pg_guard, pipes).await;
     });
 
     format_backgrounded_timeout_result(&id, command, timeout_secs, duration, json_output)
@@ -816,14 +855,14 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     sink: Option<LineSink>,
     has_output: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) -> String {
+    output: Captured,
+) {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     let Some(pipe) = pipe else {
-        return String::new();
+        return;
     };
     let mut reader = BufReader::new(pipe);
-    let mut output = String::new();
     let mut bytes = Vec::new();
     let mut last_emit = std::time::Instant::now();
     let mut lines_read = 0usize;
@@ -835,7 +874,7 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
             Ok(_) => {
                 lines_read += 1;
                 let line = String::from_utf8_lossy(&bytes);
-                output.push_str(&line);
+                output.lock().push_str(&line);
                 if let Some(ref flag) = has_output {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -852,8 +891,6 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
             Err(_) => break,
         }
     }
-
-    output
 }
 
 #[cfg(test)]
@@ -987,7 +1024,7 @@ mod tests {
         let drain = {
             let yielded = yielded.clone();
             async move {
-                let _ = stream_pipe(Some(reader), None, None).await;
+                stream_pipe(Some(reader), None, None, Captured::default()).await;
                 assert!(
                     yielded.load(std::sync::atomic::Ordering::Relaxed),
                     "stream_pipe drained buffered output without yielding"
