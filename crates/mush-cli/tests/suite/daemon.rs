@@ -32,8 +32,8 @@ impl Daemon {
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !socket.exists() {
-            assert!(Instant::now() < deadline, "daemon socket never appeared");
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            assert!(Instant::now() < deadline, "daemon socket never answered");
             std::thread::sleep(Duration::from_millis(10));
         }
         Self { dir, socket, child }
