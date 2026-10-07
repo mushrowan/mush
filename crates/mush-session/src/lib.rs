@@ -9,6 +9,7 @@ pub mod session;
 pub mod store;
 pub mod title;
 pub mod tree;
+mod user_text;
 
 pub use compact::*;
 pub use conversation::*;

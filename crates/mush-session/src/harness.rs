@@ -37,9 +37,8 @@ impl Kind {
 
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|kind| kind.as_str() == text.trim().to_lowercase())
+        let text = text.trim().to_lowercase();
+        Self::ALL.into_iter().find(|kind| kind.as_str() == text)
     }
 }
 
@@ -406,13 +405,9 @@ impl State {
         self.entries.values().all(BTreeMap::is_empty) && self.diagnostics().is_empty()
     }
 
-    fn get(&self, kind: Kind, id: &str) -> Option<&Entry> {
-        self.entries.get(&kind)?.get(id)
-    }
-
     #[must_use]
     pub fn entry(&self, kind: Kind, id: &str) -> Option<&Entry> {
-        self.get(kind, id)
+        self.entries.get(&kind)?.get(id)
     }
 
     #[must_use]
@@ -435,7 +430,7 @@ impl State {
         if let Some(error) = validate(edit, &id) {
             return Err(error);
         }
-        let before = self.get(edit.kind, &id).cloned();
+        let before = self.entry(edit.kind, &id).cloned();
         match (edit.action, &before) {
             (Action::Create, Some(_)) => return Err(format!("{id} already exists")),
             (Action::Update, None) => return Err(format!("{id} not found")),
@@ -694,7 +689,7 @@ impl State {
                 applied.push(AppliedEdit::failed(edit, entry_id, None, error));
                 continue;
             }
-            let before = self.get(edit.kind, &entry_id).cloned();
+            let before = self.entry(edit.kind, &entry_id).cloned();
             match (edit.action, &before) {
                 (Action::Delete, None) | (Action::Update, None) => {
                     applied.push(AppliedEdit::failed(
@@ -879,35 +874,23 @@ fn merge_entry(edit: &Edit, id: &str, before: Option<&Entry>, scope: Scope, sour
 }
 
 fn entry_line(entry: &Entry, content_chars: usize) -> String {
-    let reference = if entry.kind == Kind::Skill && !entry.reference.is_empty() {
-        format!(
-            " ref={}",
-            compact(
-                &Value::Object(entry.reference.clone()).to_string(),
-                content_chars
-            )
-        )
-    } else {
-        String::new()
-    };
-    let arguments = if entry.kind == Kind::Skill && !entry.arguments.is_empty() {
-        format!(
-            " args={}",
-            compact(
-                &Value::Object(entry.arguments.clone()).to_string(),
-                content_chars
-            )
-        )
-    } else {
-        String::new()
+    let skill_field = |label: &str, fields: &Map<String, Value>| {
+        if entry.kind == Kind::Skill && !fields.is_empty() {
+            let json = serde_json::to_string(fields).unwrap_or_default();
+            format!(" {label}={}", compact(&json, content_chars))
+        } else {
+            String::new()
+        }
     };
     format!(
-        "- [{}:{}] {} ({}, v{}){reference}{arguments}: {}",
+        "- [{}:{}] {} ({}, v{}){}{}: {}",
         entry.scope.as_str(),
         entry.id,
         entry.title,
         entry.path,
         entry.version,
+        skill_field("ref", &entry.reference),
+        skill_field("args", &entry.arguments),
         compact(&entry.content, content_chars)
     )
 }
@@ -1143,22 +1126,21 @@ fn incomplete_json(candidate: &str) -> bool {
 }
 
 fn validate(edit: &Edit, id: &str) -> Option<String> {
+    let action = edit.action.as_str();
     if edit.kind == Kind::Prompt && id == "base_system_prompt" {
         return Some("the base system prompt is not editable".into());
     }
     if edit.action != Action::Create && id.is_empty() {
-        return Some(format!("{} requires an id", edit.action.as_str()));
+        return Some(format!("{action} requires an id"));
     }
     if edit.id.as_deref() == Some("") {
         return Some(format!(
-            "{} requires id to be a non-empty string when provided",
-            edit.action.as_str()
+            "{action} requires id to be a non-empty string when provided"
         ));
     }
     if edit.path.as_deref() == Some("") {
         return Some(format!(
-            "{} requires path to be a non-empty string when provided",
-            edit.action.as_str()
+            "{action} requires path to be a non-empty string when provided"
         ));
     }
     if edit.action == Action::Delete {
@@ -1166,29 +1148,20 @@ fn validate(edit: &Edit, id: &str) -> Option<String> {
     }
     let creating = edit.action == Action::Create;
     if creating && (edit.title.is_none() || edit.content.is_none()) {
-        return Some(format!(
-            "{} requires title and content",
-            edit.action.as_str()
-        ));
+        return Some(format!("{action} requires title and content"));
     }
     if edit.kind == Kind::Skill {
         if creating && edit.arguments.is_none() {
-            return Some(format!("{} skill requires arguments", edit.action.as_str()));
+            return Some(format!("{action} skill requires arguments"));
         }
         let Some(reference) = &edit.reference else {
             if creating {
-                return Some(format!(
-                    "{} skill requires a python reference",
-                    edit.action.as_str()
-                ));
+                return Some(format!("{action} skill requires a python reference"));
             }
             return None;
         };
         if reference.get("type").and_then(Value::as_str) != Some("python") {
-            return Some(format!(
-                "{} skill reference.type must be python",
-                edit.action.as_str()
-            ));
+            return Some(format!("{action} skill reference.type must be python"));
         }
         let non_empty = |key: &str| {
             reference
@@ -1197,16 +1170,10 @@ fn validate(edit: &Edit, id: &str) -> Option<String> {
                 .is_some_and(|s| !s.is_empty())
         };
         if !non_empty("import") && !non_empty("python_import") {
-            return Some(format!(
-                "{} skill requires a python import",
-                edit.action.as_str()
-            ));
+            return Some(format!("{action} skill requires a python import"));
         }
         if !non_empty("callable") && !non_empty("call_pattern") {
-            return Some(format!(
-                "{} skill requires callable or call_pattern",
-                edit.action.as_str()
-            ));
+            return Some(format!("{action} skill requires callable or call_pattern"));
         }
     }
     None
@@ -1357,7 +1324,10 @@ impl RefinementResult {
     pub fn notice(&self) -> String {
         let mut lines = vec![
             "these harness edits are already applied, nothing to do".to_string(),
-            format!("summary: {}", compact(&self.summary, OVERVIEW_CONTENT_CHARS)),
+            format!(
+                "summary: {}",
+                compact(&self.summary, OVERVIEW_CONTENT_CHARS)
+            ),
         ];
         for edit in self.applied_edits.iter().filter(|edit| edit.applied) {
             let entry = edit.after.as_ref().or(edit.before.as_ref());
@@ -1425,35 +1395,24 @@ pub fn load_merged(session_id: &mush_ai::types::SessionId) -> State {
     )
 }
 
+const DIGEST: crate::user_text::TaggedBlock = crate::user_text::TaggedBlock {
+    prefix: DIGEST_PREFIX,
+    tag: "harness_digest",
+};
+
 #[must_use]
 pub fn digest_message(state: &State) -> mush_ai::types::Message {
-    mush_ai::types::Message::User(
-        mush_ai::types::UserMessage::builder()
-            .content(mush_ai::types::UserContent::Text(format!(
-                "{DIGEST_PREFIX}\n\n<harness_digest fingerprint=\"{}\">\n{}\n</harness_digest>",
-                state.fingerprint(),
-                state.digest()
-            )))
-            .timestamp_ms(mush_ai::types::Timestamp::now())
-            .build(),
-    )
+    DIGEST.message(&state.fingerprint(), &state.digest())
 }
 
 #[must_use]
 pub fn extract_digest(text: &str) -> Option<(String, String)> {
-    let rest = text.strip_prefix(DIGEST_PREFIX)?.trim_start();
-    let rest = rest.strip_prefix("<harness_digest fingerprint=\"")?;
-    let (fingerprint, rest) = rest.split_once("\">")?;
-    let body = rest.trim().strip_suffix("</harness_digest>")?.trim();
-    Some((fingerprint.to_string(), body.to_string()))
+    DIGEST.extract(text)
 }
 
 #[must_use]
 pub fn latest_digest_fingerprint(messages: &[mush_ai::types::Message]) -> Option<String> {
-    messages.iter().rev().find_map(|message| match message {
-        mush_ai::types::Message::User(user) => extract_digest(&user.text()).map(|(fp, _)| fp),
-        _ => None,
-    })
+    DIGEST.latest_fingerprint(messages)
 }
 
 pub fn append_history(dir: &Path, result: &RefinementResult) -> std::io::Result<()> {
@@ -1541,7 +1500,7 @@ mod tests {
         );
         assert!(result.applied_edits[0].applied);
         assert_eq!(result.applied_edits[0].id, "always_run_nextest");
-        let entry = state.get(Kind::Memory, "always_run_nextest").unwrap();
+        let entry = state.entry(Kind::Memory, "always_run_nextest").unwrap();
         assert_eq!(entry.version, 1);
         assert_eq!(entry.scope, Scope::Local);
         assert_eq!(state.refinements.len(), 1);
@@ -1564,7 +1523,8 @@ mod tests {
 
     #[test]
     fn an_applied_edit_saved_with_a_duplicated_id_still_loads() {
-        let json = r#"{"action":"delete","kind":"memory","id":"nextest","id":"nextest","applied":true}"#;
+        let json =
+            r#"{"action":"delete","kind":"memory","id":"nextest","id":"nextest","applied":true}"#;
         let edit: AppliedEdit = serde_json::from_str(json).unwrap();
         assert_eq!(edit.id, "nextest");
         assert_eq!(edit.edit.id.as_deref(), Some("nextest"));
@@ -1584,7 +1544,7 @@ mod tests {
         update.action = Action::Update;
         update.id = Some("tests".into());
         state.apply(&proposal(vec![update]), "ref_2", Scope::Local, None);
-        let entry = state.get(Kind::Memory, "tests").unwrap();
+        let entry = state.entry(Kind::Memory, "tests").unwrap();
         assert_eq!(entry.version, 2);
         assert_eq!(entry.content, "run them twice");
         assert_eq!(entry.path, "general");
@@ -1658,8 +1618,8 @@ mod tests {
                 Some("update skill requires a python reference"),
             ]
         );
-        assert_eq!(state.get(Kind::Memory, "tests").unwrap().version, 1);
-        assert_eq!(state.get(Kind::Skill, "lint").unwrap().version, 1);
+        assert_eq!(state.entry(Kind::Memory, "tests").unwrap().version, 1);
+        assert_eq!(state.entry(Kind::Skill, "lint").unwrap().version, 1);
     }
 
     #[test]
@@ -1697,8 +1657,8 @@ mod tests {
         assert_eq!(rollback.edits[0].action, Action::Delete);
         assert_eq!(rollback.edits[1].action, Action::Update);
         state.apply(&rollback, "ref_3", Scope::Local, Some("ref_2"));
-        assert_eq!(state.get(Kind::Memory, "keep").unwrap().content, "v1");
-        assert!(state.get(Kind::Memory, "extra").is_none());
+        assert_eq!(state.entry(Kind::Memory, "keep").unwrap().content, "v1");
+        assert!(state.entry(Kind::Memory, "extra").is_none());
     }
 
     #[test]
