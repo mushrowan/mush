@@ -1,7 +1,7 @@
 use mush_ai::types::{Message, ThinkingLevel};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::tree::{EntryId, SessionEntry, SessionTree, TreeNode};
+use crate::tree::{EntryId, SessionEntry, SessionTree};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("compaction discarded, the conversation changed while it ran")]
@@ -12,12 +12,18 @@ pub struct ConversationState {
     tree: SessionTree,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct ConversationStateRepr {
     #[serde(default)]
     messages: Vec<Message>,
     #[serde(default)]
     tree: SessionTree,
+}
+
+#[derive(Serialize)]
+struct ConversationStateRef<'a> {
+    messages: Vec<Message>,
+    tree: &'a SessionTree,
 }
 
 impl ConversationState {
@@ -75,16 +81,8 @@ impl ConversationState {
         self.context()
     }
 
-    pub fn len(&self) -> usize {
-        self.context_len()
-    }
-
     pub fn tree(&self) -> &SessionTree {
         &self.tree
-    }
-
-    pub fn tree_mut(&mut self) -> &mut SessionTree {
-        &mut self.tree
     }
 
     pub fn branch(&mut self, from_id: &EntryId) -> bool {
@@ -152,10 +150,6 @@ impl ConversationState {
         self.tree.entries()
     }
 
-    pub fn tree_nodes(&self) -> Vec<TreeNode> {
-        self.tree.tree()
-    }
-
     pub fn user_messages_in_branch(&self) -> Vec<&SessionEntry> {
         self.tree.user_messages_in_branch()
     }
@@ -186,9 +180,9 @@ impl Serialize for ConversationState {
     where
         S: Serializer,
     {
-        ConversationStateRepr {
+        ConversationStateRef {
             messages: self.context(),
-            tree: self.tree.clone(),
+            tree: &self.tree,
         }
         .serialize(serializer)
     }

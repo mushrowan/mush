@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::harness::{RefinementResult, RefinementSource};
+use crate::user_text::user_text;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Display, Serialize, Deserialize)]
 pub struct EntryId(String);
@@ -79,12 +80,6 @@ pub struct RecentHistory {
     pub omitted: usize,
     pub usage: Usage,
     pub cost: Dollars,
-}
-
-#[derive(Debug, Clone)]
-pub struct TreeNode {
-    pub entry: SessionEntry,
-    pub children: Vec<TreeNode>,
 }
 
 const PREVIEW: usize = 400;
@@ -197,7 +192,8 @@ impl SessionTree {
                     };
                     branch[..kept]
                         .iter()
-                        .filter_map(|entry| entry_to_message(entry))
+                        .copied()
+                        .filter_map(entry_to_message)
                         .collect()
                 }
                 EntryKind::Message {
@@ -208,8 +204,7 @@ impl SessionTree {
                         .into_iter()
                         .filter_map(entry_to_message)
                         .collect();
-                    let receipts =
-                        EventMessage::summary(String::new(), Timestamp::zero(), &history).receipts;
+                    let receipts = summary_receipts(&history);
                     if event
                         .receipts
                         .iter()
@@ -223,8 +218,7 @@ impl SessionTree {
                 }
                 _ => continue,
             };
-            let receipts =
-                EventMessage::summary(String::new(), Timestamp::zero(), &messages).receipts;
+            let receipts = summary_receipts(&messages);
             match &mut Arc::make_mut(&mut tree.entries[index]).kind {
                 EntryKind::BranchSummary { event_receipts, .. }
                 | EntryKind::Compaction { event_receipts, .. } => {
@@ -257,23 +251,8 @@ impl<'de> Deserialize<'de> for SessionTree {
     }
 }
 
-fn push_context_message(
-    messages: &mut Vec<Message>,
-    limit: Option<usize>,
-    message: Message,
-) -> bool {
-    if let Some(limit) = limit
-        && messages.len() >= limit
-    {
-        return false;
-    }
-
-    messages.push(message);
-    if let Some(limit) = limit {
-        messages.len() < limit
-    } else {
-        true
-    }
+fn summary_receipts(messages: &[Message]) -> Vec<EventReceipt> {
+    EventMessage::summary(String::new(), Timestamp::zero(), messages).receipts
 }
 
 fn is_digest(entry: &SessionEntry) -> bool {
@@ -311,28 +290,15 @@ fn entry_to_message(entry: &SessionEntry) -> Option<Message> {
             kind: EventKind::Summary,
             receipts: event_receipts.clone(),
         }),
-        EntryKind::BranchSummary { summary, .. } => Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(mush_ai::types::branch_summary_text(
-                    summary,
-                )))
-                .timestamp_ms(entry.timestamp)
-                .build(),
-        ),
-        EntryKind::Compaction { summary, .. } => Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(mush_ai::types::compaction_summary_text(
-                    summary,
-                )))
-                .timestamp_ms(entry.timestamp)
-                .build(),
-        ),
-        EntryKind::Refinement { source, result } => Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(result.notice_message(*source)))
-                .timestamp_ms(entry.timestamp)
-                .build(),
-        ),
+        EntryKind::BranchSummary { summary, .. } => {
+            user_text(branch_summary_text(summary), entry.timestamp)
+        }
+        EntryKind::Compaction { summary, .. } => {
+            user_text(compaction_summary_text(summary), entry.timestamp)
+        }
+        EntryKind::Refinement { source, result } => {
+            user_text(result.notice_message(*source), entry.timestamp)
+        }
         EntryKind::ThinkingLevelChange { .. } => return None,
     })
 }
@@ -465,29 +431,23 @@ impl SessionTree {
     }
 
     fn append(&mut self, kind: EntryKind) -> EntryId {
-        let entry = SessionEntry {
-            id: EntryId::new(),
-            parent_id: self.leaf_id.clone(),
+        self.append_under(self.leaf_id.clone(), kind)
+    }
+
+    fn append_under(&mut self, parent_id: Option<EntryId>, kind: EntryKind) -> EntryId {
+        let id = EntryId::new();
+        self.push(SessionEntry {
+            id: id.clone(),
+            parent_id,
             timestamp: Timestamp::now(),
             kind,
-        };
-        let id = entry.id.clone();
-        self.push(entry);
+        });
         self.leaf_id = Some(id.clone());
         id
     }
 
     pub fn append_thinking_level(&mut self, thinking_level: ThinkingLevel) -> EntryId {
-        let entry = SessionEntry {
-            id: EntryId::new(),
-            parent_id: self.leaf_id.clone(),
-            timestamp: Timestamp::now(),
-            kind: EntryKind::ThinkingLevelChange { thinking_level },
-        };
-        let id = entry.id.clone();
-        self.push(entry);
-        self.leaf_id = Some(id.clone());
-        id
+        self.append(EntryKind::ThinkingLevelChange { thinking_level })
     }
 
     pub fn thinking_level(&self) -> Option<ThinkingLevel> {
@@ -532,24 +492,15 @@ impl SessionTree {
             .clone()
             .or_else(|| from_id.clone())
             .unwrap_or_default();
-        let event_receipts =
-            EventMessage::summary(String::new(), Timestamp::zero(), &self.build_context()).receipts;
-        self.leaf_id = from_id.clone();
-
-        let entry = SessionEntry {
-            id: EntryId::new(),
-            parent_id: from_id,
-            timestamp: Timestamp::now(),
-            kind: EntryKind::BranchSummary {
+        let event_receipts = summary_receipts(&self.build_context());
+        self.append_under(
+            from_id,
+            EntryKind::BranchSummary {
                 summary: summary.into(),
                 from_id: old_leaf,
                 event_receipts,
             },
-        };
-        let id = entry.id.clone();
-        self.push(entry);
-        self.leaf_id = Some(id.clone());
-        id
+        )
     }
 
     pub fn compact_at_leaf(
@@ -565,26 +516,12 @@ impl SessionTree {
             }
             entry.id.clone()
         };
-        let parent_id = self.leaf_id.clone();
-        let entry = SessionEntry {
-            id: EntryId::new(),
-            parent_id,
-            timestamp: Timestamp::now(),
-            kind: EntryKind::Compaction {
-                summary,
-                first_kept_id,
-                event_receipts: EventMessage::summary(
-                    String::new(),
-                    Timestamp::zero(),
-                    &self.build_context_prefix(first_kept_context_index),
-                )
-                .receipts,
-            },
-        };
-        let id = entry.id.clone();
-        self.push(entry);
-        self.leaf_id = Some(id.clone());
-        Some(id)
+        let event_receipts = summary_receipts(&self.build_context_prefix(first_kept_context_index));
+        Some(self.append(EntryKind::Compaction {
+            summary,
+            first_kept_id,
+            event_receipts,
+        }))
     }
 
     pub fn reset_leaf(&mut self) {
@@ -624,15 +561,6 @@ impl SessionTree {
         }
         path.reverse();
         path
-    }
-
-    pub fn entries_matching_prefix(&self, prefix: &str) -> Vec<&SessionEntry> {
-        let prefix = prefix.to_ascii_lowercase();
-        self.entries
-            .iter()
-            .filter(|entry| entry.id.starts_with(&prefix))
-            .map(|entry| &**entry)
-            .collect()
     }
 
     pub fn unanswered_tool_calls(&self, id: &EntryId) -> Vec<ToolCallId> {
@@ -746,11 +674,11 @@ impl SessionTree {
     }
 
     pub fn build_context(&self) -> Vec<Message> {
-        self.collect_context(None)
+        self.collect_context(usize::MAX)
     }
 
     pub fn build_context_prefix(&self, limit: usize) -> Vec<Message> {
-        self.collect_context(Some(limit))
+        self.collect_context(limit)
     }
 
     pub fn build_display_history(&self) -> Vec<Message> {
@@ -792,7 +720,8 @@ impl SessionTree {
         RecentHistory {
             messages: branch[start..]
                 .iter()
-                .filter_map(|entry| entry_to_message(entry))
+                .copied()
+                .filter_map(entry_to_message)
                 .collect(),
             omitted,
             usage,
@@ -847,17 +776,10 @@ impl SessionTree {
         entries
     }
 
-    fn collect_context(&self, limit: Option<usize>) -> Vec<Message> {
+    fn collect_context(&self, limit: usize) -> Vec<Message> {
         let entries = self.context_entries();
-        let capacity = limit.map_or(entries.len(), |limit| limit.min(entries.len()));
-        let mut messages = Vec::with_capacity(capacity);
-
-        for message in entries.into_iter().filter_map(entry_to_message) {
-            if !push_context_message(&mut messages, limit, message) {
-                return messages;
-            }
-        }
-
+        let mut messages = Vec::with_capacity(limit.min(entries.len()));
+        messages.extend(entries.into_iter().filter_map(entry_to_message).take(limit));
         messages
     }
 
@@ -870,42 +792,6 @@ impl SessionTree {
             .positions
             .get(id)
             .map(|&position| &*self.entries[position])
-    }
-
-    pub fn children(&self, parent_id: &EntryId) -> Vec<&SessionEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.parent_id.as_ref() == Some(parent_id))
-            .map(|e| &**e)
-            .collect()
-    }
-
-    pub fn roots(&self) -> Vec<&SessionEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.parent_id.is_none())
-            .map(|e| &**e)
-            .collect()
-    }
-
-    pub fn tree(&self) -> Vec<TreeNode> {
-        fn build_subtree(entry: &SessionEntry, all: &[Arc<SessionEntry>]) -> TreeNode {
-            let children: Vec<TreeNode> = all
-                .iter()
-                .filter(|e| e.parent_id.as_ref() == Some(&entry.id))
-                .map(|child| build_subtree(child, all))
-                .collect();
-            TreeNode {
-                entry: entry.clone(),
-                children,
-            }
-        }
-
-        self.entries
-            .iter()
-            .filter(|e| e.parent_id.is_none())
-            .map(|root| build_subtree(root, &self.entries))
-            .collect()
     }
 
     pub fn user_messages_in_branch(&self) -> Vec<&SessionEntry> {
@@ -1113,36 +999,6 @@ mod tests {
                 .unwrap()
                 .contains("\"source\":\"self\"")
         );
-    }
-
-    #[test]
-    fn a_unique_prefix_resolves_to_one_entry() {
-        let mut tree = SessionTree::new();
-        let id = tree.append_message(user_msg("q0"));
-
-        let found = tree.entries_matching_prefix(&id[..4]);
-
-        assert_eq!(found.len(), 1, "one entry should match");
-        assert_eq!(found[0].id, id);
-    }
-
-    #[test]
-    fn an_ambiguous_prefix_reports_every_candidate() {
-        let mut tree = SessionTree::new();
-        tree.append_message(user_msg("q0"));
-        tree.append_message(user_msg("q1"));
-
-        let found = tree.entries_matching_prefix("");
-
-        assert_eq!(found.len(), 2);
-    }
-
-    #[test]
-    fn an_unknown_prefix_matches_nothing() {
-        let mut tree = SessionTree::new();
-        tree.append_message(user_msg("q0"));
-
-        assert!(tree.entries_matching_prefix("zzzzzzzz").is_empty());
     }
 
     #[test]
@@ -1544,9 +1400,9 @@ mod tests {
         tree.branch(&u1);
         tree.append_message(assistant_msg("branch 2"));
 
-        let nodes = tree.tree();
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].children.len(), 2);
+        assert!(tree.is_branch_point(&u1));
+        let roots = tree.entries().iter().filter(|e| e.parent_id.is_none());
+        assert_eq!(roots.count(), 1);
     }
 
     #[test]
@@ -1583,7 +1439,7 @@ mod tests {
         assert!(tree.leaf_id().is_none());
 
         tree.append_message(user_msg("second root"));
-        let roots = tree.roots();
-        assert_eq!(roots.len(), 2);
+        let roots = tree.entries().iter().filter(|e| e.parent_id.is_none());
+        assert_eq!(roots.count(), 2);
     }
 }
