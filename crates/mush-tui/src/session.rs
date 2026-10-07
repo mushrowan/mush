@@ -7,10 +7,12 @@ use crate::input_buffer::PendingImage;
 
 pub use mush_runtime::{AgentConnection, InProcessConnection, PendingPrompt, SessionRuntime};
 
+pub type ImageProtocols = HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>;
+
 pub struct Session {
     pub app: App,
     pub connection: Box<dyn AgentConnection>,
-    pub image_protos: HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
+    pub image_protos: ImageProtocols,
     pub label: Option<String>,
 }
 
@@ -65,12 +67,7 @@ impl Session {
             .await;
     }
 
-    pub fn fields_mut(
-        &mut self,
-    ) -> (
-        &mut App,
-        &mut HashMap<(usize, usize), ratatui_image::protocol::StatefulProtocol>,
-    ) {
+    pub fn fields_mut(&mut self) -> (&mut App, &mut ImageProtocols) {
         (&mut self.app, &mut self.image_protos)
     }
 

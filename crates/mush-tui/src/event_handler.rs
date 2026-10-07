@@ -4,13 +4,11 @@ use mush_ai::stream::StreamEvent;
 use mush_ai::types::*;
 
 use crate::app::App;
+use crate::session::ImageProtocols;
 
 pub struct EventCtx<'a> {
     pub app: &'a mut App,
-    pub image_protos: &'a mut std::collections::HashMap<
-        (usize, usize),
-        ratatui_image::protocol::StatefulProtocol,
-    >,
+    pub image_protos: &'a mut ImageProtocols,
 }
 
 pub fn handle_agent_event(
@@ -112,10 +110,7 @@ fn show_tool_start(
 
 fn show_tool_end(
     app: &mut App,
-    image_protos: &mut std::collections::HashMap<
-        (usize, usize),
-        ratatui_image::protocol::StatefulProtocol,
-    >,
+    image_protos: &mut ImageProtocols,
     image_picker: Option<&ratatui_image::picker::Picker>,
     tool_call_id: &ToolCallId,
     tool_name: &str,
