@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::{Value, json};
 
 use crate::request_snapshot::{
-    REDACTED_HEADER_VALUE, is_sensitive_header, is_sensitive_json_field, looks_like_secret,
+    REDACTED_HEADER_VALUE, looks_like_secret, redact_body, redact_json_value, redacted_headers,
 };
 
 static CALL_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -77,7 +77,7 @@ fn flush_word(word: &mut String, out: &mut String) {
         return;
     }
     let trimmed = word.trim_matches(|ch: char| ch.is_ascii_punctuation());
-    if !trimmed.is_empty() && looks_like_secret(trimmed) {
+    if looks_like_secret(trimmed) {
         out.push_str(&word.replacen(trimmed, REDACTED_HEADER_VALUE, 1));
     } else {
         out.push_str(word);
@@ -85,51 +85,8 @@ fn flush_word(word: &mut String, out: &mut String) {
     word.clear();
 }
 
-fn redact_value_preserving(value: &mut Value, field: Option<&str>) {
-    if field.is_some_and(is_sensitive_json_field) {
-        *value = Value::String(REDACTED_HEADER_VALUE.to_string());
-        return;
-    }
-    match value {
-        Value::String(text) => *text = redact_secrets_preserving(text),
-        Value::Array(items) => {
-            for item in items {
-                redact_value_preserving(item, None);
-            }
-        }
-        Value::Object(map) => {
-            for (key, val) in map.iter_mut() {
-                let key = key.clone();
-                redact_value_preserving(val, Some(&key));
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-fn redact_body(body_json: &str) -> Value {
-    match serde_json::from_str::<Value>(body_json) {
-        Ok(mut value) => {
-            redact_value_preserving(&mut value, None);
-            value
-        }
-        Err(_) => Value::String(redact_secrets_preserving(body_json)),
-    }
-}
-
-fn redact_headers(headers: &[(&str, &str)]) -> Value {
-    let map: serde_json::Map<String, Value> = headers
-        .iter()
-        .map(|(name, value)| {
-            let safe = if is_sensitive_header(name) {
-                REDACTED_HEADER_VALUE.to_string()
-            } else {
-                (*value).to_string()
-            };
-            ((*name).to_string(), Value::String(safe))
-        })
-        .collect();
-    Value::Object(map)
+fn redact_body_preserving(body_json: &str) -> Value {
+    redact_body(body_json, redact_secrets_preserving)
 }
 
 fn build_request(
@@ -145,8 +102,8 @@ fn build_request(
         "kind": "request",
         "method": method,
         "url": url,
-        "headers": redact_headers(headers),
-        "body": body.map(redact_body),
+        "headers": redacted_headers(headers),
+        "body": body.map(redact_body_preserving),
     })
 }
 
@@ -161,8 +118,8 @@ fn build_response(
         "call_id": call_id,
         "kind": "response",
         "status": status,
-        "headers": redact_headers(headers),
-        "body": body.map(redact_body),
+        "headers": redacted_headers(headers),
+        "body": body.map(redact_body_preserving),
     })
 }
 
@@ -179,7 +136,7 @@ fn build_sse(call_id: u64, seq: u64, event: &str, data: &str) -> Value {
 
 fn build_assembled(call_id: u64, message: &crate::types::AssistantMessage) -> Value {
     let mut body = serde_json::to_value(message).unwrap_or(Value::Null);
-    redact_value_preserving(&mut body, None);
+    redact_json_value(&mut body, None, redact_secrets_preserving);
     json!({
         "ts_ms": now_ms(),
         "call_id": call_id,

@@ -29,39 +29,16 @@ pub fn preview_text(text: &str, max_chars: usize) -> String {
 
 #[must_use]
 pub fn safe_preview_text(text: &str, max_chars: usize) -> String {
-    preview_text(&redact_secret_text(text), max_chars)
+    preview_text(
+        &crate::request_snapshot::redact_secret_text(text),
+        max_chars,
+    )
 }
 
 #[must_use]
 pub fn safe_preview_bytes(bytes: &[u8], max_chars: usize) -> String {
     let text = String::from_utf8_lossy(bytes);
     safe_preview_text(&text, max_chars)
-}
-
-fn redact_secret_text(text: &str) -> String {
-    text.split_whitespace()
-        .map(redact_secret_word)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn redact_secret_word(word: &str) -> String {
-    let trimmed = word.trim_matches(|ch: char| ch.is_ascii_punctuation());
-    if looks_like_secret(trimmed) {
-        word.replacen(trimmed, "<redacted>", 1)
-    } else {
-        word.to_string()
-    }
-}
-
-fn looks_like_secret(text: &str) -> bool {
-    if text.len() < 12 {
-        return false;
-    }
-    text.starts_with("sk-")
-        || text.starts_with("sk_")
-        || text.starts_with("sess-")
-        || text.starts_with("eyJ")
 }
 
 pub struct SseParser {

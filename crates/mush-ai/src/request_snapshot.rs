@@ -120,16 +120,11 @@ fn split_last_user(messages_json: &str) -> (String, String, String) {
     });
 
     match last_user_idx {
-        Some(idx) => {
-            let prefix: Vec<_> = arr[..idx].to_vec();
-            let last = &arr[idx];
-            let tail: Vec<_> = arr[idx + 1..].to_vec();
-            (
-                serde_json::to_string(&prefix).unwrap_or_default(),
-                serde_json::to_string(last).unwrap_or_default(),
-                serde_json::to_string(&tail).unwrap_or_default(),
-            )
-        }
+        Some(idx) => (
+            serde_json::to_string(&arr[..idx]).unwrap_or_default(),
+            serde_json::to_string(&arr[idx]).unwrap_or_default(),
+            serde_json::to_string(&arr[idx + 1..]).unwrap_or_default(),
+        ),
         None => (messages_json.to_string(), String::new(), String::new()),
     }
 }
@@ -189,24 +184,45 @@ pub(crate) fn is_sensitive_json_field(name: &str) -> bool {
     })
 }
 
-fn redact_snapshot_body(body_json: &str) -> serde_json::Value {
+pub(crate) fn redacted_headers(headers: &[(&str, &str)]) -> serde_json::Value {
+    headers
+        .iter()
+        .map(|&(name, value)| {
+            let safe = if is_sensitive_header(name) {
+                REDACTED_HEADER_VALUE
+            } else {
+                value
+            };
+            (name.to_string(), serde_json::Value::from(safe))
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+pub(crate) fn redact_body(body_json: &str, redact_text: fn(&str) -> String) -> serde_json::Value {
     match serde_json::from_str::<serde_json::Value>(body_json) {
         Ok(mut value) => {
-            redact_json_value(&mut value, None);
+            redact_json_value(&mut value, None, redact_text);
             value
         }
-        Err(_) => serde_json::Value::String(redact_secret_text(body_json)),
+        Err(_) => serde_json::Value::String(redact_text(body_json)),
     }
 }
 
 pub fn body_uses_context_management(body_json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(body_json)
         .ok()
-        .and_then(|body| body.get("context_management").cloned())
-        .is_some_and(|context_management| !context_management.is_null())
+        .is_some_and(|body| {
+            body.get("context_management")
+                .is_some_and(|cm| !cm.is_null())
+        })
 }
 
-fn redact_json_value(value: &mut serde_json::Value, field_name: Option<&str>) {
+pub(crate) fn redact_json_value(
+    value: &mut serde_json::Value,
+    field_name: Option<&str>,
+    redact_text: fn(&str) -> String,
+) {
     if field_name.is_some_and(is_sensitive_json_field) {
         *value = serde_json::Value::String(REDACTED_HEADER_VALUE.to_string());
         return;
@@ -214,23 +230,23 @@ fn redact_json_value(value: &mut serde_json::Value, field_name: Option<&str>) {
 
     match value {
         serde_json::Value::String(text) => {
-            *text = redact_secret_text(text);
+            *text = redact_text(text);
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                redact_json_value(value, None);
+                redact_json_value(value, None, redact_text);
             }
         }
         serde_json::Value::Object(map) => {
             for (key, value) in map.iter_mut() {
-                redact_json_value(value, Some(key));
+                redact_json_value(value, Some(key), redact_text);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
 
-fn redact_secret_text(text: &str) -> String {
+pub(crate) fn redact_secret_text(text: &str) -> String {
     text.split_whitespace()
         .map(redact_secret_word)
         .collect::<Vec<_>>()
@@ -300,26 +316,14 @@ pub fn dump_in(
     let filename = format!("{scope}-{ts_ms:013}-{seq:04}.json");
     let path = dir.join(&filename);
 
-    let headers_json: serde_json::Map<String, serde_json::Value> = headers
-        .iter()
-        .map(|(name, value)| {
-            let safe = if is_sensitive_header(name) {
-                REDACTED_HEADER_VALUE.to_string()
-            } else {
-                (*value).to_string()
-            };
-            ((*name).to_string(), serde_json::Value::String(safe))
-        })
-        .collect();
-
     let envelope = serde_json::json!({
         "_snapshot": {
             "provider": provider,
             "timestamp_ms": ts_ms,
             "fingerprint": fingerprint,
-            "headers": headers_json,
+            "headers": redacted_headers(headers),
         },
-        "body": redact_snapshot_body(body_json)
+        "body": redact_body(body_json, redact_secret_text)
     });
 
     match serde_json::to_string_pretty(&envelope) {
@@ -341,37 +345,31 @@ pub fn recent_snapshots(provider: &str, limit: usize) -> Vec<PathBuf> {
 
 #[must_use]
 pub fn recent_snapshots_in(dir: &Path, provider: &str, limit: usize) -> Vec<PathBuf> {
-    let prefix = format!("{provider}-");
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let mut matches: Vec<(PathBuf, std::time::SystemTime)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            let name = path.file_name()?.to_str()?.to_string();
-            if !name.starts_with(&prefix) || !name.ends_with(".json") {
-                return None;
-            }
-            let mtime = e.metadata().and_then(|m| m.modified()).ok()?;
-            Some((path, mtime))
-        })
-        .collect();
-    matches.sort_by_key(|b| std::cmp::Reverse(b.1));
-    matches.into_iter().take(limit).map(|(p, _)| p).collect()
+    snapshots_newest_first(dir, provider)
+        .into_iter()
+        .take(limit)
+        .collect()
 }
 
 fn prune_old_snapshots(dir: &Path, scope: &str) {
+    for old in snapshots_newest_first(dir, scope)
+        .into_iter()
+        .skip(SNAPSHOT_RETENTION)
+    {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+fn snapshots_newest_first(dir: &Path, scope: &str) -> Vec<PathBuf> {
     let prefix = format!("{scope}-");
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
     let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
         .flatten()
         .filter_map(|e| {
             let path = e.path();
-            let name = path.file_name()?.to_str()?.to_string();
+            let name = path.file_name()?.to_str()?;
             if !name.starts_with(&prefix) || !name.ends_with(".json") {
                 return None;
             }
@@ -379,13 +377,8 @@ fn prune_old_snapshots(dir: &Path, scope: &str) {
             Some((path, mtime))
         })
         .collect();
-    if files.len() <= SNAPSHOT_RETENTION {
-        return;
-    }
     files.sort_by_key(|b| std::cmp::Reverse(b.1));
-    for (old, _) in files.into_iter().skip(SNAPSHOT_RETENTION) {
-        let _ = std::fs::remove_file(old);
-    }
+    files.into_iter().map(|(path, _)| path).collect()
 }
 
 #[cfg(test)]
