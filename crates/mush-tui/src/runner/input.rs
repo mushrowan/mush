@@ -49,20 +49,11 @@ impl ResizeState {
     }
 }
 
+#[derive(Debug)]
 pub(super) enum LoopAction {
     Continue,
     Redraw,
     Quit,
-}
-
-impl std::fmt::Debug for LoopAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Continue => f.write_str("Continue"),
-            Self::Redraw => f.write_str("Redraw"),
-            Self::Quit => f.write_str("Quit"),
-        }
-    }
 }
 
 pub(super) struct InputDeps<'a> {
@@ -122,16 +113,12 @@ async fn answer_branch_summary(
             .await;
         }
         BranchSummaryChoice::Summarise => {
-            match session
-                .connection
-                .send(mush_runtime::ClientCommand::SummariseAndNavigate { entry_id })
-                .await
-            {
-                Ok(events) => {
-                    super::looping::apply_command_events(session, tui_config, events).await;
-                }
-                Err(error) => session.app.push_system_message(error.to_string()),
-            }
+            super::commands::send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::SummariseAndNavigate { entry_id },
+            )
+            .await;
         }
     }
 }
@@ -181,7 +168,6 @@ fn trace_dropped_event(event: Event, phase: &str) {
 async fn handle_common_app_event(
     app_event: &AppEvent,
     session: &mut Session,
-    _stream_state: Option<&mut StreamState>,
     deps: &mut InputDeps<'_>,
 ) -> Option<LoopAction> {
     match app_event {
@@ -221,11 +207,10 @@ async fn handle_compaction_recovery_action(
     deps: &mut InputDeps<'_>,
     action: crate::app_state::CompactionRecoveryAction,
 ) {
-    let Some(recovery) = session.app.interaction.compaction_recovery.take() else {
-        session.app.interaction.mode = app::AppMode::Insert;
-        return;
-    };
     session.app.interaction.mode = app::AppMode::Insert;
+    if session.app.interaction.compaction_recovery.take().is_none() {
+        return;
+    }
 
     let command = match action {
         crate::app_state::CompactionRecoveryAction::Retry => {
@@ -242,11 +227,7 @@ async fn handle_compaction_recovery_action(
             return;
         }
     };
-    drop(recovery);
-    match session.connection.send(command).await {
-        Ok(events) => super::looping::apply_command_events(session, deps.tui_config, events).await,
-        Err(error) => session.app.push_system_message(error.to_string()),
-    }
+    super::commands::send_command(session, deps.tui_config, command).await;
 }
 
 async fn validate_and_save_api_key(app: &mut App, entry_id: &str, provider_name: &str, key: &str) {
@@ -429,9 +410,7 @@ async fn handle_streaming_key_event(
         return Ok(LoopAction::Redraw);
     };
 
-    if let Some(action) =
-        handle_common_app_event(&app_event, session, Some(stream_state), deps).await
-    {
+    if let Some(action) = handle_common_app_event(&app_event, session, deps).await {
         return Ok(match action {
             LoopAction::Continue => LoopAction::Redraw,
             action => action,
@@ -514,8 +493,7 @@ pub(super) async fn handle_idle_terminal_events(
                     continue;
                 };
 
-                if let Some(action) = handle_common_app_event(&app_event, session, None, deps).await
-                {
+                if let Some(action) = handle_common_app_event(&app_event, session, deps).await {
                     if matches!(action, LoopAction::Quit) {
                         return Ok(LoopAction::Quit);
                     }
@@ -526,52 +504,7 @@ pub(super) async fn handle_idle_terminal_events(
                                 session.queue_input_during_compaction(text, images).await;
                                 continue;
                             }
-                            let expanded = slash::expand_template(&text);
-                            let pane = &mut *session;
-                            if pane.label.is_none() && pane.connection.state().context_len == 0 {
-                                pane.label = Some(expanded.chars().take(30).collect());
-                            }
-                            let pane = &mut *session;
-                            let pending_images: Vec<Vec<u8>> =
-                                images.iter().map(|img| img.data.clone()).collect();
-                            if pending_images.is_empty() {
-                                pane.app.push_user_message(expanded.clone());
-                            } else {
-                                let msg_idx = pane.app.messages.len();
-                                pane.app.push_user_message_with_images(
-                                    expanded.clone(),
-                                    pending_images.clone(),
-                                );
-                                if let Some(picker) = deps.image_picker {
-                                    for (img_idx, data) in pending_images.iter().enumerate() {
-                                        if let Ok(dyn_img) = image::load_from_memory(data) {
-                                            let proto = picker.new_resize_protocol(dyn_img);
-                                            pane.image_protos.insert((msg_idx, img_idx), proto);
-                                        }
-                                    }
-                                }
-                            }
-                            let pane = &mut *session;
-                            pane.app.active_tools.clear();
-                            pane.app.start_streaming();
-                            match pane
-                                .connection
-                                .send(mush_runtime::ClientCommand::Prompt {
-                                    text: expanded,
-                                    images,
-                                })
-                                .await
-                            {
-                                Ok(events) => {
-                                    super::looping::apply_command_events(
-                                        pane,
-                                        deps.tui_config,
-                                        events,
-                                    )
-                                    .await
-                                }
-                                Err(error) => pane.app.push_system_message(error.to_string()),
-                            }
+                            submit_idle_prompt(session, deps, text, images).await;
                         }
                         AppEvent::SlashCommand { action } => {
                             handle_slash_action(
@@ -640,6 +573,42 @@ pub(super) async fn handle_idle_terminal_events(
     } else {
         LoopAction::Continue
     })
+}
+
+async fn submit_idle_prompt(
+    session: &mut Session,
+    deps: &mut InputDeps<'_>,
+    text: String,
+    images: Vec<crate::input_buffer::PendingImage>,
+) {
+    let expanded = slash::expand_template(&text);
+    if session.label.is_none() && session.connection.state().context_len == 0 {
+        session.label = Some(expanded.chars().take(30).collect());
+    }
+    let image_bytes: Vec<Vec<u8>> = images.iter().map(|img| img.data.clone()).collect();
+    let msg_idx = session.app.messages.len();
+    if let Some(picker) = deps.image_picker {
+        for (img_idx, data) in image_bytes.iter().enumerate() {
+            if let Ok(dyn_img) = image::load_from_memory(data) {
+                let proto = picker.new_resize_protocol(dyn_img);
+                session.image_protos.insert((msg_idx, img_idx), proto);
+            }
+        }
+    }
+    session
+        .app
+        .push_user_message_with_images(expanded.clone(), image_bytes);
+    session.app.active_tools.clear();
+    session.app.start_streaming();
+    super::commands::send_command(
+        session,
+        deps.tui_config,
+        mush_runtime::ClientCommand::Prompt {
+            text: expanded,
+            images,
+        },
+    )
+    .await;
 }
 
 fn cancel_signal_for_event(stream_state: &mut StreamState, event: &Event) {
