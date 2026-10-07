@@ -249,16 +249,10 @@ async fn validate_openrouter(
         .bearer_auth(key)
         .send()
         .await
-        .map_err(|e| ValidationError::Network {
-            provider: "openrouter".into(),
-            reason: e.to_string(),
-        })?;
+        .map_err(network_error("openrouter"))?;
     let status = resp.status();
     if status.is_success() {
-        let body = resp.text().await.map_err(|e| ValidationError::Network {
-            provider: "openrouter".into(),
-            reason: e.to_string(),
-        })?;
+        let body = resp.text().await.map_err(network_error("openrouter"))?;
         return parse_openrouter_auth_key(&body);
     }
     Err(map_status("openrouter", resp).await)
@@ -275,10 +269,7 @@ async fn validate_openai(
         .bearer_auth(key)
         .send()
         .await
-        .map_err(|e| ValidationError::Network {
-            provider: "openai".into(),
-            reason: e.to_string(),
-        })?;
+        .map_err(network_error("openai"))?;
     if resp.status().is_success() {
         return Ok(KeyInfo::default());
     }
@@ -297,14 +288,18 @@ async fn validate_anthropic(
         .header("anthropic-version", "2023-06-01")
         .send()
         .await
-        .map_err(|e| ValidationError::Network {
-            provider: "anthropic".into(),
-            reason: e.to_string(),
-        })?;
+        .map_err(network_error("anthropic"))?;
     if resp.status().is_success() {
         return Ok(KeyInfo::default());
     }
     Err(map_status("anthropic", resp).await)
+}
+
+fn network_error<E: std::fmt::Display>(provider: &str) -> impl FnOnce(E) -> ValidationError {
+    move |error| ValidationError::Network {
+        provider: provider.into(),
+        reason: error.to_string(),
+    }
 }
 
 async fn map_status(provider: &str, resp: reqwest::Response) -> ValidationError {
