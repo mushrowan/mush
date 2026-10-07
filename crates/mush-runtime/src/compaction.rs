@@ -189,39 +189,40 @@ async fn build_applied_compaction(
     lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
     cwd: Option<&Path>,
 ) -> AppliedCompaction {
-    use mush_session::compact;
-
-    let summary = result.summary.clone();
-    let summarised_count = result.summarised_count;
-    let diagnostics = result.diagnostics;
-    let compacted = result.messages;
-
-    if let Some(hooks) = lifecycle_hooks
-        && !hooks
-            .for_point(mush_agent::HookPoint::PostCompaction)
-            .is_empty()
-    {
-        let hook_results = hooks
-            .run_all(mush_agent::HookPoint::PostCompaction, cwd)
-            .await;
-        for r in &hook_results {
-            if !r.success {
-                tracing::warn!(command = %r.command, "post-compaction hook failed: {}", r.output);
-            }
-        }
-    }
-
-    let tokens_after = compact::estimate_tokens(&compacted);
+    run_post_compaction_hooks(lifecycle_hooks, cwd).await;
     AppliedCompaction {
-        messages: compacted,
-        summary,
+        tokens_after: mush_session::compact::estimate_tokens(&result.messages),
+        messages: result.messages,
+        summary: result.summary,
         tokens_before,
-        tokens_after,
-        summarised_count,
+        summarised_count: result.summarised_count,
         before_count,
         model_id,
-        diagnostics,
+        diagnostics: result.diagnostics,
         instructions: None,
+    }
+}
+
+pub(crate) async fn run_post_compaction_hooks(
+    lifecycle_hooks: Option<&mush_agent::LifecycleHooks>,
+    cwd: Option<&Path>,
+) {
+    let Some(hooks) = lifecycle_hooks else {
+        return;
+    };
+    if hooks
+        .for_point(mush_agent::HookPoint::PostCompaction)
+        .is_empty()
+    {
+        return;
+    }
+    for result in hooks
+        .run_all(mush_agent::HookPoint::PostCompaction, cwd)
+        .await
+    {
+        if !result.success {
+            tracing::warn!(command = %result.command, "post-compaction hook failed: {}", result.output);
+        }
     }
 }
 

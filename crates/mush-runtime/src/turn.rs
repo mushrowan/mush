@@ -259,13 +259,11 @@ impl SessionRuntime {
         let thinking_level = self.thinking_level.clone();
         let context_tokens = self.context_tokens;
         let TurnDeps {
-            config,
-            injections,
+            ref config,
+            ref injections,
             tools,
             registry,
-        } = deps;
-        let tools: &ToolRegistry = tools;
-        let registry: &ApiRegistry = registry;
+        } = *deps;
         let steering_queue = self.steering_queue.clone();
         self.deliver_pending_harness_digest();
         self.refresh_notes();
@@ -562,21 +560,7 @@ pub async fn auto_compact(
         );
     }
 
-    if let Some(hooks) = lifecycle_hooks
-        && !hooks
-            .for_point(mush_agent::HookPoint::PostCompaction)
-            .is_empty()
-    {
-        let results = hooks
-            .run_all(mush_agent::HookPoint::PostCompaction, cwd)
-            .await;
-        for r in &results {
-            if !r.success {
-                tracing::warn!(command = %r.command, "post-compaction hook failed: {}", r.output);
-            }
-        }
-    }
-
+    crate::compaction::run_post_compaction_hooks(lifecycle_hooks, cwd).await;
     result
 }
 
