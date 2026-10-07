@@ -46,21 +46,18 @@ pub fn copy(text: &str, env: &Environment, out: &mut impl Write) -> Result<(), C
 fn feed_tool(text: &str, tool: &str) -> Result<(), CopyError> {
     use std::process::Stdio;
 
+    let failed = |error: std::io::Error| CopyError::Command(format!("{tool}: {error}"));
     let mut child = Command::new(tool)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+        .map_err(failed)?;
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+        stdin.write_all(text.as_bytes()).map_err(failed)?;
     }
     drop(child.stdin.take());
-    let status = child
-        .wait()
-        .map_err(|error| CopyError::Command(format!("{tool}: {error}")))?;
+    let status = child.wait().map_err(failed)?;
     if status.success() {
         Ok(())
     } else {
@@ -149,23 +146,9 @@ fn read_wl_paste() -> Option<ClipboardImage> {
         return None;
     }
 
-    let types: Vec<String> = String::from_utf8_lossy(&list.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
-
-    let (wire, api_mime) = select_mime(&types)?;
-
-    let data = Command::new("wl-paste")
-        .args(["--type", &wire, "--no-newline"])
-        .output()
-        .ok()?;
-    if !data.status.success() || data.stdout.is_empty() {
-        return None;
-    }
-
-    finish(data.stdout, api_mime)
+    let (wire, api_mime) = select_mime(&mime_types(&list.stdout))?;
+    let data = clipboard_bytes("wl-paste", &["--type", &wire, "--no-newline"])?;
+    finish(data, api_mime)
 }
 
 fn read_xclip() -> Option<ClipboardImage> {
@@ -174,14 +157,10 @@ fn read_xclip() -> Option<ClipboardImage> {
         .output()
         .ok()?;
 
-    let types: Vec<String> = if targets.status.success() {
-        String::from_utf8_lossy(&targets.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect()
+    let types = if targets.status.success() {
+        mime_types(&targets.stdout)
     } else {
-        vec![]
+        Vec::new()
     };
 
     let (wire, api_mime) = if !types.is_empty() {
@@ -190,15 +169,21 @@ fn read_xclip() -> Option<ClipboardImage> {
         ("image/png".to_string(), Some(ImageMimeType::Png))
     };
 
-    let data = Command::new("xclip")
-        .args(["-selection", "clipboard", "-t", &wire, "-o"])
-        .output()
-        .ok()?;
-    if !data.status.success() || data.stdout.is_empty() {
-        return None;
-    }
+    let data = clipboard_bytes("xclip", &["-selection", "clipboard", "-t", &wire, "-o"])?;
+    finish(data, api_mime)
+}
 
-    finish(data.stdout, api_mime)
+fn mime_types(listing: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(listing)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn clipboard_bytes(program: &str, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new(program).args(args).output().ok()?;
+    (output.status.success() && !output.stdout.is_empty()).then_some(output.stdout)
 }
 
 fn read_macos() -> Option<ClipboardImage> {

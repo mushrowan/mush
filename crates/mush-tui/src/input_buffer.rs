@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::fmt::Write;
 
 use ratatui::layout::Rect;
 
@@ -42,10 +43,21 @@ impl InputBuffer {
     }
 
     pub fn step_back_one_char(&mut self) {
-        self.cursor = self.text[..self.cursor]
+        self.cursor = self.prev_char_boundary();
+    }
+
+    fn prev_char_boundary(&self) -> usize {
+        self.text[..self.cursor]
             .char_indices()
             .next_back()
-            .map_or(0, |(byte, _)| byte);
+            .map_or(0, |(byte, _)| byte)
+    }
+
+    fn next_char_boundary(&self) -> usize {
+        self.text[self.cursor..]
+            .chars()
+            .next()
+            .map_or(self.text.len(), |c| self.cursor + c.len_utf8())
     }
 
     #[must_use]
@@ -83,11 +95,7 @@ impl InputBuffer {
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
-            let prev = self.text[..self.cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            let prev = self.prev_char_boundary();
             self.remove_images_in_range(prev, self.cursor);
             self.text.drain(prev..self.cursor);
             self.cursor = prev;
@@ -97,11 +105,7 @@ impl InputBuffer {
 
     pub fn delete(&mut self) {
         if self.cursor < self.text.len() {
-            let next = self.text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.text.len());
+            let next = self.next_char_boundary();
             self.remove_images_in_range(self.cursor, next);
             self.text.drain(self.cursor..next);
             self.ensure_cursor_visible();
@@ -110,22 +114,14 @@ impl InputBuffer {
 
     pub fn cursor_left(&mut self) {
         if self.cursor > 0 {
-            self.cursor = self.text[..self.cursor]
-                .char_indices()
-                .next_back()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            self.cursor = self.prev_char_boundary();
             self.ensure_cursor_visible();
         }
     }
 
     pub fn cursor_right(&mut self) {
         if self.cursor < self.text.len() {
-            self.cursor = self.text[self.cursor..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| self.cursor + i)
-                .unwrap_or(self.text.len());
+            self.cursor = self.next_char_boundary();
             self.ensure_cursor_visible();
         }
     }
@@ -213,7 +209,7 @@ impl InputBuffer {
         for ch in input.chars() {
             if ch == IMAGE_PLACEHOLDER {
                 n += 1;
-                out.push_str(&format!("[image {n}]"));
+                let _ = write!(out, "[image {n}]");
             } else {
                 out.push(ch);
             }
@@ -309,6 +305,10 @@ fn column_offset(text: &str, start: usize, end: usize, column: usize) -> usize {
         .map_or(end, |(offset, _)| start + offset)
 }
 
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
 pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     let before = &s[..cursor];
     if before.is_empty() {
@@ -317,7 +317,7 @@ pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     let skip_end = before
         .char_indices()
         .rev()
-        .find(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .find(|(_, c)| is_word_char(*c))
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     if skip_end == 0 {
@@ -326,7 +326,7 @@ pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
     before[..skip_end]
         .char_indices()
         .rev()
-        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .find(|(_, c)| !is_word_char(*c))
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0)
 }
@@ -336,12 +336,12 @@ pub(crate) fn word_boundary_right(s: &str, cursor: usize) -> usize {
     let mut chars = after.char_indices();
     let word_end = chars
         .by_ref()
-        .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
+        .find(|(_, c)| !is_word_char(*c))
         .map(|(i, _)| i)
         .unwrap_or(after.len());
     let past_ws = after[word_end..]
         .char_indices()
-        .find(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .find(|(_, c)| is_word_char(*c))
         .map(|(i, _)| word_end + i)
         .unwrap_or(after.len());
     cursor + past_ws

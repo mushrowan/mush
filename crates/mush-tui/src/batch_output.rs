@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 const MAX_PREVIEW_LINES: usize = 5;
 const MAX_SINGLE_TOOL_LINES: usize = 5;
 const MAX_PREVIEW_LINE_LEN: usize = 120;
@@ -72,24 +74,21 @@ pub fn truncate_output_large(output: &str) -> String {
 }
 
 fn truncate_output_with_cap(output: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    let total = lines.len();
-    let skipped = total.saturating_sub(max_lines);
-    let preview: Vec<String> = lines
-        .into_iter()
-        .skip(skipped)
-        .map(|l| {
-            if l.len() > MAX_PREVIEW_LINE_LEN {
-                let end = l.floor_char_boundary(MAX_PREVIEW_LINE_LEN);
-                format!("{}…", &l[..end])
-            } else {
-                l.to_string()
-            }
-        })
-        .collect();
-    let body = preview.join("\n");
-    if skipped == 0 {
-        return body;
+    let skipped = output.lines().count().saturating_sub(max_lines);
+    let mut preview = String::new();
+    if skipped > 0 {
+        let _ = writeln!(preview, "… {skipped} earlier lines");
     }
-    format!("… {skipped} earlier lines\n{body}")
+    for (index, line) in output.lines().skip(skipped).enumerate() {
+        if index > 0 {
+            preview.push('\n');
+        }
+        if line.len() > MAX_PREVIEW_LINE_LEN {
+            preview.push_str(&line[..line.floor_char_boundary(MAX_PREVIEW_LINE_LEN)]);
+            preview.push('…');
+        } else {
+            preview.push_str(line);
+        }
+    }
+    preview
 }
