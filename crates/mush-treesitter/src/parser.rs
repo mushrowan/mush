@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use crate::language::Language;
@@ -18,19 +18,19 @@ pub enum ParseError {
     Io(#[from] std::io::Error),
 }
 
-struct CachedTree {
+#[derive(Clone)]
+struct ParsedFile {
     language: Language,
     source: Vec<u8>,
     tree: tree_sitter::Tree,
+}
+
+struct CachedTree {
+    parsed: ParsedFile,
     mtime: SystemTime,
 }
 
-struct CachedTreeRef {
-    language: Language,
-    source: Vec<u8>,
-    tree: tree_sitter::Tree,
-}
-
+#[derive(Default)]
 pub struct ParserPool {
     parsers: Mutex<HashMap<Language, tree_sitter::Parser>>,
     tree_cache: Mutex<HashMap<PathBuf, CachedTree>>,
@@ -38,10 +38,7 @@ pub struct ParserPool {
 
 impl ParserPool {
     pub fn new() -> Self {
-        Self {
-            parsers: Mutex::new(HashMap::new()),
-            tree_cache: Mutex::new(HashMap::new()),
-        }
+        Self::default()
     }
 
     pub fn parse(
@@ -53,102 +50,74 @@ impl ParserPool {
             .tree_sitter_language()
             .ok_or(ParseError::GrammarNotAvailable(language))?;
 
-        let mut parsers = self.parsers.lock().unwrap_or_else(|e| e.into_inner());
-        let parser = parsers.entry(language).or_insert_with(|| {
-            let mut p = tree_sitter::Parser::new();
-            #[expect(
-                clippy::expect_used,
-                reason = "grammar was just validated by tree_sitter_language()"
-            )]
-            p.set_language(&ts_lang).expect("grammar version mismatch");
-            p
-        });
+        let mut parsers = lock(&self.parsers);
+        let parser = parsers
+            .entry(language)
+            .or_insert_with(|| new_parser(&ts_lang));
 
         parser.parse(source, None).ok_or(ParseError::ParseFailed)
     }
 
     pub fn parse_file(&self, path: &Path) -> Result<(Language, tree_sitter::Tree), ParseError> {
-        let cached = self.parse_file_cached(path)?;
-        Ok((cached.language, cached.tree.clone()))
+        let parsed = self.parse_file_cached(path)?;
+        Ok((parsed.language, parsed.tree))
     }
 
     pub fn symbols_from_file(
         &self,
         path: &Path,
     ) -> Result<(Language, Vec<SymbolInfo>), ParseError> {
-        let cached = self.parse_file_cached(path)?;
+        let parsed = self.parse_file_cached(path)?;
         let syms =
-            symbols::extract_symbols(cached.language, &cached.source, &cached.tree, Some(path));
-        Ok((cached.language, syms))
+            symbols::extract_symbols(parsed.language, &parsed.source, &parsed.tree, Some(path));
+        Ok((parsed.language, syms))
     }
 
-    fn parse_file_cached(&self, path: &Path) -> Result<CachedTreeRef, ParseError> {
-        let language = Language::detect(path)
-            .ok_or_else(|| ParseError::UnsupportedLanguage(path.display().to_string()))?;
+    fn parse_file_cached(&self, path: &Path) -> Result<ParsedFile, ParseError> {
+        let language = detect_language(path)?;
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let mtime = std::fs::metadata(path)?.modified().ok();
 
         if let Some(mtime) = mtime
-            && let Some(entry) = self
-                .tree_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&canon)
+            && let Some(entry) = lock(&self.tree_cache).get(&canon)
             && entry.mtime == mtime
-            && entry.language == language
+            && entry.parsed.language == language
         {
-            return Ok(CachedTreeRef {
-                language,
-                source: entry.source.clone(),
-                tree: entry.tree.clone(),
-            });
+            return Ok(entry.parsed.clone());
         }
 
         let source = std::fs::read(path)?;
         let tree = self.parse(language, &source)?;
+        let parsed = ParsedFile {
+            language,
+            source,
+            tree,
+        };
 
         if let Some(mtime) = mtime {
-            let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.insert(
+            lock(&self.tree_cache).insert(
                 canon,
                 CachedTree {
-                    language,
-                    source: source.clone(),
-                    tree: tree.clone(),
+                    parsed: parsed.clone(),
                     mtime,
                 },
             );
         }
 
-        Ok(CachedTreeRef {
-            language,
-            source,
-            tree,
-        })
+        Ok(parsed)
     }
 
     pub fn invalidate(&self, path: &Path) {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.remove(&canon);
+        lock(&self.tree_cache).remove(&canon);
     }
 
     pub fn invalidate_all(&self) {
-        let mut cache = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner());
-        cache.clear();
+        lock(&self.tree_cache).clear();
     }
 
     pub fn cached_file_count(&self) -> usize {
-        self.tree_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
-    }
-}
-
-impl Default for ParserPool {
-    fn default() -> Self {
-        Self::new()
+        lock(&self.tree_cache).len()
     }
 }
 
@@ -161,6 +130,27 @@ impl std::fmt::Debug for ParserPool {
             .field("cached_files", &cache_count)
             .finish()
     }
+}
+
+pub(crate) fn detect_language(path: &Path) -> Result<Language, ParseError> {
+    Language::detect(path)
+        .ok_or_else(|| ParseError::UnsupportedLanguage(path.display().to_string()))
+}
+
+pub(crate) fn new_parser(language: &tree_sitter::Language) -> tree_sitter::Parser {
+    let mut parser = tree_sitter::Parser::new();
+    #[expect(
+        clippy::expect_used,
+        reason = "grammar was just validated by tree_sitter_language()"
+    )]
+    parser
+        .set_language(language)
+        .expect("grammar version mismatch");
+    parser
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

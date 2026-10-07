@@ -1,8 +1,11 @@
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
+use crate::parser::{detect_language, new_parser};
 use crate::references::extract_references;
 use crate::symbols::{self, SymbolInfo, SymbolKind};
 use crate::{Language, ParserPool};
@@ -10,6 +13,15 @@ use crate::{Language, ParserPool};
 struct FileData {
     definitions: Vec<SymbolInfo>,
     references: HashSet<String>,
+}
+
+impl FileData {
+    fn extract(language: Language, source: &[u8], tree: &tree_sitter::Tree, path: &Path) -> Self {
+        Self {
+            definitions: symbols::extract_symbols(language, source, tree, Some(path)),
+            references: extract_references(source, tree),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,12 +105,13 @@ impl RepoMap {
             } else {
                 let mut s = format!("{}:\n", entry.path.display());
                 for sym in &entry.symbols {
-                    s.push_str(&format!(
-                        "  {:>4}│{} {}\n",
+                    let _ = writeln!(
+                        s,
+                        "  {:>4}│{} {}",
                         sym.start_line + 1,
                         sym.kind.label(),
                         sym.signature,
-                    ));
+                    );
                 }
                 s.push('\n');
                 s
@@ -122,12 +135,13 @@ impl RepoMap {
 
         let dropped = self.files.len().saturating_sub(emitted);
         if dropped > 0 {
-            output.push_str(&format!(
+            let _ = writeln!(
+                output,
                 "[…{dropped} more files omitted from this view ({} total). \
                  narrow with `path` to focus on a subtree, raise `limit`, \
-                 or pass `summary_only=true` to fit more entries.]\n",
+                 or pass `summary_only=true` to fit more entries.]",
                 self.files.len()
-            ));
+            );
         }
 
         output
@@ -164,12 +178,13 @@ fn rank_symbols(
                 | SymbolKind::Enum => 2,
                 SymbolKind::Function | SymbolKind::Method => 1,
                 SymbolKind::Module => 3,
-                _ => 0,
+                SymbolKind::Constant
+                | SymbolKind::Variable
+                | SymbolKind::Type
+                | SymbolKind::Impl
+                | SymbolKind::Import => 0,
             };
-            let ref_count = def_index
-                .get(sym.name.as_str())
-                .map(|v| v.len())
-                .unwrap_or(0);
+            let ref_count = def_index.get(sym.name.as_str()).map_or(0, Vec::len);
             (ref_count + kind_bonus, sym)
         })
         .collect();
@@ -296,48 +311,33 @@ fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathB
 }
 
 fn parse_file_data(pool: &ParserPool, path: &Path) -> Result<FileData, crate::ParseError> {
-    let language = Language::detect(path)
-        .ok_or_else(|| crate::ParseError::UnsupportedLanguage(path.display().to_string()))?;
+    let language = detect_language(path)?;
     let source = std::fs::read(path)?;
     let tree = pool.parse(language, &source)?;
-
-    Ok(FileData {
-        definitions: symbols::extract_symbols(language, &source, &tree, Some(path)),
-        references: extract_references(&source, &tree),
-    })
+    Ok(FileData::extract(language, &source, &tree, path))
 }
 
 fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
-    use std::cell::RefCell;
-
     thread_local! {
-        static PARSERS: RefCell<std::collections::HashMap<Language, tree_sitter::Parser>> =
-            RefCell::new(std::collections::HashMap::new());
+        static PARSERS: RefCell<HashMap<Language, tree_sitter::Parser>> =
+            RefCell::new(HashMap::new());
     }
 
-    let language = Language::detect(path)
-        .ok_or_else(|| crate::ParseError::UnsupportedLanguage(path.display().to_string()))?;
+    let language = detect_language(path)?;
     let ts_lang = language
         .tree_sitter_language()
         .ok_or(crate::ParseError::GrammarNotAvailable(language))?;
     let source = std::fs::read(path)?;
 
     let tree = PARSERS.with_borrow_mut(|parsers| {
-        let parser = parsers.entry(language).or_insert_with(|| {
-            let mut p = tree_sitter::Parser::new();
-            #[expect(clippy::expect_used, reason = "ABI mismatch is a build-time bug")]
-            p.set_language(&ts_lang).expect("grammar version mismatch");
-            p
-        });
-        parser
+        parsers
+            .entry(language)
+            .or_insert_with(|| new_parser(&ts_lang))
             .parse(&source, None)
             .ok_or(crate::ParseError::ParseFailed)
     })?;
 
-    Ok(FileData {
-        definitions: symbols::extract_symbols(language, &source, &tree, Some(path)),
-        references: extract_references(&source, &tree),
-    })
+    Ok(FileData::extract(language, &source, &tree, path))
 }
 
 fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
@@ -456,13 +456,10 @@ impl IncrementalRepoMap {
     }
 
     pub fn add_new_files(&mut self) -> bool {
-        let all_files = discover_files(&self.root);
-        let mut new_files = Vec::new();
-        for path in all_files {
-            if !self.file_data.contains_key(&path) {
-                new_files.push(path);
-            }
-        }
+        let new_files: Vec<PathBuf> = discover_files(&self.root)
+            .into_iter()
+            .filter(|path| !self.file_data.contains_key(path))
+            .collect();
         if new_files.is_empty() {
             return false;
         }
@@ -555,12 +552,7 @@ fn build_from_data(
         })
         .collect();
 
-    ranked.sort_by(|a, b| {
-        b.rank
-            .partial_cmp(&a.rank)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    ranked.sort_by(|a, b| b.rank.total_cmp(&a.rank).then_with(|| a.path.cmp(&b.path)));
 
     ranked.retain(|f| !f.symbols.is_empty());
 

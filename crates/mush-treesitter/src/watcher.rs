@@ -42,83 +42,48 @@ impl RepoMapWatcher {
         let map: SharedRepoMap = Arc::new(RwLock::new(RepoMap::default()));
         let ready = Arc::new(AtomicBool::new(false));
 
-        let state = Arc::new(std::sync::Mutex::new(WatcherState {
+        let state = Arc::new(Mutex::new(WatcherState {
             incr_map: None,
             pending_changed: Vec::new(),
             pending_removed: Vec::new(),
         }));
 
-        let map_clone = map.clone();
-        let state_clone = state.clone();
-        let ready_clone = ready.clone();
-        let root_owned_for_build = root.to_path_buf();
-
         let (debounce_tx, debounce_rx) = std::sync::mpsc::channel::<()>();
 
-        std::thread::spawn(move || {
-            let incr_map = IncrementalRepoMap::new(&root_owned_for_build);
-            let initial = incr_map.map().clone();
-
-            if let Ok(mut guard) = map_clone.write() {
-                *guard = initial;
-            }
-            {
-                let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
-                guard.incr_map = Some(incr_map);
-
-                let changed: Vec<PathBuf> = std::mem::take(&mut guard.pending_changed);
-                let removed: Vec<PathBuf> = std::mem::take(&mut guard.pending_removed);
-                if (!changed.is_empty() || !removed.is_empty())
-                    && let Some(ref mut incr) = guard.incr_map
+        std::thread::spawn({
+            let map = map.clone();
+            let state = state.clone();
+            let ready = ready.clone();
+            let root = root.to_path_buf();
+            move || {
+                let incr_map = IncrementalRepoMap::new(&root);
+                let initial = incr_map.map().clone();
+                if let Ok(mut guard) = map.write() {
+                    *guard = initial;
+                }
                 {
-                    let any_update = incr.update(&changed, &removed);
-                    let any_new = incr.add_new_files();
-                    if any_update || any_new {
-                        let snapshot = incr.map().clone();
-                        if let Ok(mut guard) = map_clone.write() {
-                            *guard = snapshot;
-                        }
-                    }
+                    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.incr_map = Some(incr_map);
+                    guard.apply_pending(&map);
                 }
-            }
-            ready_clone.store(true, Ordering::Release);
-            tracing::debug!("repo map initial build complete");
+                ready.store(true, Ordering::Release);
+                tracing::debug!("repo map initial build complete");
 
-            loop {
-                if debounce_rx.recv().is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(DEBOUNCE_MS));
-                while debounce_rx.try_recv().is_ok() {}
+                while debounce_rx.recv().is_ok() {
+                    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS));
+                    while debounce_rx.try_recv().is_ok() {}
 
-                let mut guard = state_clone.lock().unwrap_or_else(|e| e.into_inner());
-                let changed: Vec<PathBuf> = std::mem::take(&mut guard.pending_changed);
-                let removed: Vec<PathBuf> = std::mem::take(&mut guard.pending_removed);
-
-                if changed.is_empty() && removed.is_empty() {
-                    continue;
-                }
-
-                if let Some(ref mut incr) = guard.incr_map {
-                    let any_update = incr.update(&changed, &removed);
-                    let any_new = incr.add_new_files();
-
-                    if any_update || any_new {
-                        let snapshot = incr.map().clone();
-                        let file_count = snapshot.files.len();
-                        if let Ok(mut guard) = map_clone.write() {
-                            *guard = snapshot;
-                        }
-                        tracing::debug!(files = file_count, "repo map updated");
+                    let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(files) = guard.apply_pending(&map) {
+                        tracing::debug!(files, "repo map updated");
                     }
                 }
             }
         });
 
-        let root_owned = root.to_path_buf();
         let watcher_slot: Arc<Mutex<Option<RecommendedWatcher>>> = Arc::new(Mutex::new(None));
         let watcher_for_cb = watcher_slot.clone();
-        let root_for_cb = root_owned.clone();
+        let root_for_cb = root.to_path_buf();
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             let Ok(event) = res else { return };
 
@@ -175,7 +140,7 @@ impl RepoMapWatcher {
         })
         .ok()?;
 
-        for dir in discover_watch_dirs(&root_owned) {
+        for dir in discover_watch_dirs(root) {
             let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
         }
 
@@ -201,6 +166,28 @@ struct WatcherState {
     incr_map: Option<IncrementalRepoMap>,
     pending_changed: Vec<PathBuf>,
     pending_removed: Vec<PathBuf>,
+}
+
+impl WatcherState {
+    fn apply_pending(&mut self, map: &SharedRepoMap) -> Option<usize> {
+        let changed = std::mem::take(&mut self.pending_changed);
+        let removed = std::mem::take(&mut self.pending_removed);
+        if changed.is_empty() && removed.is_empty() {
+            return None;
+        }
+        let incr = self.incr_map.as_mut()?;
+        let any_update = incr.update(&changed, &removed);
+        let any_new = incr.add_new_files();
+        if !(any_update || any_new) {
+            return None;
+        }
+        let snapshot = incr.map().clone();
+        let file_count = snapshot.files.len();
+        if let Ok(mut guard) = map.write() {
+            *guard = snapshot;
+        }
+        Some(file_count)
+    }
 }
 
 #[cfg(test)]
