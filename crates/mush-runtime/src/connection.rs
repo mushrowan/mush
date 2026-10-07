@@ -445,28 +445,7 @@ impl InProcessConnection {
         }
         let timeout = autonomous.gate_timeout();
         self.gate_task = Some(tokio::spawn(async move {
-            let mut runs = Vec::new();
-            for command in commands {
-                let snapshot = crate::autonomous::workspace_snapshot(autonomous.cwd());
-                if autonomous.skip_gate(&command, snapshot.as_deref()) {
-                    runs.push(crate::autonomous::GateRun {
-                        command,
-                        passed: false,
-                        skipped: true,
-                        exit_text: String::new(),
-                        output: String::new(),
-                        snapshot,
-                    });
-                    break;
-                }
-                let run = crate::autonomous::run_gate(&command, autonomous.cwd(), timeout).await;
-                let passed = run.passed;
-                runs.push(run);
-                if !passed {
-                    break;
-                }
-            }
-            runs
+            autonomous.run_gates(commands, timeout).await
         }));
     }
 

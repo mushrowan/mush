@@ -186,6 +186,45 @@ struct Inner {
     last_decision_at: Option<Instant>,
 }
 
+impl Inner {
+    fn limit_reached(&self) -> Option<String> {
+        if self
+            .limits
+            .max_continuations
+            .is_some_and(|max| self.continuations >= max)
+        {
+            return Some(format!("{} continuations used", self.continuations));
+        }
+        if self.limits.max_turns.is_some_and(|max| self.turns >= max) {
+            return Some(format!("{} assistant turns used", self.turns));
+        }
+        if self.limits.max_tokens.is_some_and(|max| self.tokens >= max) {
+            return Some(format!("{} tokens used", self.tokens));
+        }
+        if let (Some(timeout), Some(started)) = (self.limits.timeout_ms, self.started_at)
+            && started.elapsed() >= Duration::from_millis(timeout)
+        {
+            return Some(format!(
+                "{} minutes elapsed",
+                started.elapsed().as_secs() / 60
+            ));
+        }
+        None
+    }
+
+    fn stop(&mut self, reason: String) -> Decision {
+        self.enabled = false;
+        self.due = false;
+        self.stopped = Some(reason.clone());
+        Decision::Stop(reason)
+    }
+
+    fn stop_at_limit(&mut self) -> Option<Decision> {
+        let reason = self.limit_reached()?;
+        Some(self.stop(reason))
+    }
+}
+
 pub struct Autonomous {
     inner: Mutex<Inner>,
     cwd: PathBuf,
@@ -279,35 +318,6 @@ impl Autonomous {
         inner.enabled && inner.due
     }
 
-    fn limit_reached(inner: &Inner) -> Option<String> {
-        if inner
-            .limits
-            .max_continuations
-            .is_some_and(|max| inner.continuations >= max)
-        {
-            return Some(format!("{} continuations used", inner.continuations));
-        }
-        if inner.limits.max_turns.is_some_and(|max| inner.turns >= max) {
-            return Some(format!("{} assistant turns used", inner.turns));
-        }
-        if inner
-            .limits
-            .max_tokens
-            .is_some_and(|max| inner.tokens >= max)
-        {
-            return Some(format!("{} tokens used", inner.tokens));
-        }
-        if let (Some(timeout), Some(started)) = (inner.limits.timeout_ms, inner.started_at)
-            && started.elapsed() >= Duration::from_millis(timeout)
-        {
-            return Some(format!(
-                "{} minutes elapsed",
-                started.elapsed().as_secs() / 60
-            ));
-        }
-        None
-    }
-
     #[must_use]
     pub fn gate_commands(&self) -> Vec<String> {
         self.inner.lock().gates.commands.clone()
@@ -321,6 +331,31 @@ impl Autonomous {
     #[must_use]
     pub fn cwd(&self) -> &Path {
         &self.cwd
+    }
+
+    pub async fn run_gates(&self, commands: Vec<String>, timeout: Duration) -> Vec<GateRun> {
+        let mut runs = Vec::new();
+        for command in commands {
+            let snapshot = workspace_snapshot(&self.cwd);
+            if self.skip_gate(&command, snapshot.as_deref()) {
+                runs.push(GateRun {
+                    command,
+                    passed: false,
+                    skipped: true,
+                    exit_text: String::new(),
+                    output: String::new(),
+                    snapshot,
+                });
+                break;
+            }
+            let run = run_gate(&command, &self.cwd, timeout).await;
+            let passed = run.passed;
+            runs.push(run);
+            if !passed {
+                break;
+            }
+        }
+        runs
     }
 
     #[must_use]
@@ -349,11 +384,8 @@ impl Autonomous {
             return Decision::Idle;
         }
         inner.last_decision_at = Some(Instant::now());
-        if let Some(reason) = Self::limit_reached(&inner) {
-            inner.enabled = false;
-            inner.due = false;
-            inner.stopped = Some(reason.clone());
-            return Decision::Stop(reason);
+        if let Some(stop) = inner.stop_at_limit() {
+            return stop;
         }
         inner.continuations += 1;
         Decision::Continue(format!(
@@ -379,42 +411,34 @@ impl Autonomous {
             }
             let failed = gate_results.into_iter().find(|run| !run.passed);
             let Some(run) = failed else {
-                inner.enabled = false;
-                inner.stopped = Some("all gates passed".into());
-                return Decision::Stop("all gates passed".into());
+                return inner.stop("all gates passed".into());
             };
-            let attempt = inner.gate_attempts.get(&run.command).copied().unwrap_or(0) + 1;
-            inner.gate_attempts.insert(run.command.clone(), attempt);
+            let attempts = inner.gate_attempts.entry(run.command.clone()).or_insert(0);
+            *attempts += 1;
+            let attempt = *attempts;
             let failure = GateFailure {
-                command: run.command.clone(),
+                command: run.command,
                 attempt,
                 exit_text: if run.skipped {
                     "not rerun: workspace unchanged since the previous failure".into()
                 } else {
-                    run.exit_text.clone()
+                    run.exit_text
                 },
-                output: run.output.clone(),
-                snapshot: run.snapshot.clone(),
+                output: run.output,
+                snapshot: run.snapshot,
             };
             inner.last_failure = Some(failure.clone());
             if attempt > inner.gates.max_retries {
-                inner.enabled = false;
-                let reason = format!("gate `{}` failed {} times", run.command, attempt);
-                inner.stopped = Some(reason.clone());
-                return Decision::Stop(reason);
+                return inner.stop(format!("gate `{}` failed {attempt} times", failure.command));
             }
-            if let Some(reason) = Self::limit_reached(&inner) {
-                inner.enabled = false;
-                inner.stopped = Some(reason.clone());
-                return Decision::Stop(reason);
+            if let Some(stop) = inner.stop_at_limit() {
+                return stop;
             }
             inner.continuations += 1;
             return Decision::Continue(gate_failure_prompt(&failure, inner.gates.max_retries));
         }
-        if let Some(reason) = Self::limit_reached(&inner) {
-            inner.enabled = false;
-            inner.stopped = Some(reason.clone());
-            return Decision::Stop(reason);
+        if let Some(stop) = inner.stop_at_limit() {
+            return stop;
         }
         inner.continuations += 1;
         Decision::Continue(format!(
