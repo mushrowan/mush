@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -107,15 +108,19 @@ impl SubagentPanel {
     }
 
     pub fn invalidate(&mut self) {
+        self.reset(None, Instant::now());
+        self.visible_rows.set(1);
+    }
+
+    fn reset(&mut self, store: Option<RegistrationStore>, now: Instant) {
         self.generation = self.generation.wrapping_add(1);
-        self.store = None;
+        self.store = store;
         self.snapshot = Snapshot::default();
         self.loader = Some(Loader::default());
         self.selected = 0;
         self.details = false;
         self.detail_scroll = 0;
-        self.visible_rows.set(1);
-        self.next_refresh = Instant::now();
+        self.next_refresh = now;
     }
 
     pub async fn poll(
@@ -140,14 +145,7 @@ impl SubagentPanel {
             }
         };
         if self.store.as_ref() != Some(&store) {
-            self.generation = self.generation.wrapping_add(1);
-            self.store = Some(store.clone());
-            self.snapshot = Snapshot::default();
-            self.loader = Some(Loader::default());
-            self.selected = 0;
-            self.details = false;
-            self.detail_scroll = 0;
-            self.next_refresh = now;
+            self.reset(Some(store.clone()), now);
             changed = self.open;
         }
         if self.pending.as_ref().is_some_and(|task| task.is_finished())
@@ -157,23 +155,11 @@ impl SubagentPanel {
                 Ok((identity, generation, loader))
                     if identity == store && generation == self.generation =>
                 {
-                    let selected = self
-                        .snapshot
-                        .roots
-                        .iter()
-                        .flat_map(|r| {
-                            r.tasks
-                                .iter()
-                                .map(move |t| (&r.source.directory, &t.worker))
-                        })
+                    let selected = task_keys(&self.snapshot)
                         .nth(self.selected)
                         .map(|(root, worker)| (root.clone(), worker.clone()));
                     self.snapshot = loader.snapshot().clone();
-                    let tasks = self.snapshot.roots.iter().flat_map(|r| {
-                        r.tasks
-                            .iter()
-                            .map(move |t| (&r.source.directory, &t.worker))
-                    });
+                    let tasks = task_keys(&self.snapshot);
                     if let Some(selected) = selected {
                         self.selected = tasks
                             .clone()
@@ -209,6 +195,14 @@ impl SubagentPanel {
         }
         changed
     }
+}
+
+fn task_keys(snapshot: &Snapshot) -> impl Iterator<Item = (&PathBuf, &String)> + Clone {
+    snapshot.roots.iter().flat_map(|root| {
+        root.tasks
+            .iter()
+            .map(move |task| (&root.source.directory, &task.worker))
+    })
 }
 
 impl Drop for SubagentPanel {
