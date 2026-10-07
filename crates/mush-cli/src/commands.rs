@@ -186,52 +186,36 @@ pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Re
 
     println!("\n{}\n", Style::Bold.stdout("auth"));
 
-    let has_anthropic_env = std::env::var("ANTHROPIC_API_KEY").is_ok();
-    let has_openrouter_env = std::env::var("OPENROUTER_API_KEY").is_ok();
-    let has_openai_env = std::env::var("OPENAI_API_KEY").is_ok();
-    let has_anthropic_cfg = cfg.api_keys.anthropic.is_some();
-    let has_openrouter_cfg = cfg.api_keys.openrouter.is_some();
-    let has_openai_cfg = cfg.api_keys.openai.is_some();
-
+    let key_source = |env: &str, configured: bool| {
+        if std::env::var(env).is_ok() {
+            Some("env var")
+        } else if configured {
+            Some("config file")
+        } else {
+            None
+        }
+    };
     let oauth_store = mush_ai::oauth::load_credentials().unwrap_or_default();
-    let has_anthropic_oauth = oauth_store.has_provider("anthropic");
-    let has_openai_codex_oauth = oauth_store.has_provider("openai-codex");
+    let oauth = |provider: &str| oauth_store.has_provider(provider).then_some("oauth");
+    let not_configured = Style::Dim.stdout("- not configured");
 
-    print!("  anthropic:   ");
-    if has_anthropic_env {
-        println!("{}", Style::Green.stdout("✓ env var"));
-    } else if has_anthropic_cfg {
-        println!("{}", Style::Green.stdout("✓ config file"));
-    } else if has_anthropic_oauth {
-        println!("{}", Style::Green.stdout("✓ oauth"));
-    } else {
-        println!("{}", Style::Red.stdout("✗ not configured"));
-    }
-
-    print!("  openrouter:  ");
-    if has_openrouter_env {
-        println!("{}", Style::Green.stdout("✓ env var"));
-    } else if has_openrouter_cfg {
-        println!("{}", Style::Green.stdout("✓ config file"));
-    } else {
-        println!("{}", Style::Dim.stdout("- not configured"));
-    }
-
-    print!("  openai:      ");
-    if has_openai_env {
-        println!("{}", Style::Green.stdout("✓ env var"));
-    } else if has_openai_cfg {
-        println!("{}", Style::Green.stdout("✓ config file"));
-    } else {
-        println!("{}", Style::Dim.stdout("- not configured"));
-    }
-
-    print!("  openai-codex:");
-    if has_openai_codex_oauth {
-        println!("{}", Style::Green.stdout(" ✓ oauth"));
-    } else {
-        println!("{}", Style::Dim.stdout(" - not configured"));
-    }
+    print_auth(
+        "anthropic:   ",
+        key_source("ANTHROPIC_API_KEY", cfg.api_keys.anthropic.is_some())
+            .or_else(|| oauth("anthropic")),
+        Style::Red.stdout("✗ not configured"),
+    );
+    print_auth(
+        "openrouter:  ",
+        key_source("OPENROUTER_API_KEY", cfg.api_keys.openrouter.is_some()),
+        &not_configured,
+    );
+    print_auth(
+        "openai:      ",
+        key_source("OPENAI_API_KEY", cfg.api_keys.openai.is_some()),
+        &not_configured,
+    );
+    print_auth("openai-codex: ", oauth("openai-codex"), &not_configured);
 
     let store = SessionStore::new(SessionStore::default_dir());
     let session_count = store.list().map(|s| s.len()).unwrap_or(0);
@@ -244,6 +228,16 @@ pub async fn status(terminal_overrides: mush_tui::TerminalPolicyOverrides) -> Re
     }
 
     Ok(())
+}
+
+fn print_auth(label: &str, source: Option<&str>, missing: impl std::fmt::Display) {
+    match source {
+        Some(source) => println!(
+            "  {label}{}",
+            Style::Green.stdout(format_args!("✓ {source}"))
+        ),
+        None => println!("  {label}{missing}"),
+    }
 }
 
 pub async fn login(
