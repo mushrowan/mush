@@ -122,15 +122,9 @@ fn build_request_body(
         }));
     }
 
-    let trimming =
-        if options.cache_retention.unwrap_or(CacheRetention::Short) == CacheRetention::None {
-            ToolResultTrimming::SlidingWindow
-        } else {
-            ToolResultTrimming::Preserve
-        };
     let mut visitor = OpenaiVisitor {
         model,
-        trimming,
+        trimming: super::trimming_for_retention(options.cache_retention),
         out: &mut all_messages,
         pending_images: Vec::new(),
     };
@@ -516,20 +510,8 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
     }
 
     fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
-        let raw_text = tr
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let has_images = tr
-            .content
-            .iter()
-            .any(|part| matches!(part, ToolResultContentPart::Image(_)));
+        let raw_text = super::tool_result_text(tr);
+        let has_images = super::tool_result_has_images(tr);
         let text = if raw_text.is_empty() && has_images {
             std::borrow::Cow::Borrowed("(see attached image)")
         } else {

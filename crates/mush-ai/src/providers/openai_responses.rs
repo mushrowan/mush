@@ -160,11 +160,7 @@ fn build_request_body(
         model,
         input_system_prompt,
         messages,
-        if cache_retention == CacheRetention::None {
-            ToolResultTrimming::SlidingWindow
-        } else {
-            ToolResultTrimming::Preserve
-        },
+        super::trimming_for_retention(options.cache_retention),
     );
     let instructions = if is_codex {
         Some(system_prompt.clone().unwrap_or_default())
@@ -421,22 +417,9 @@ impl MessageVisitor for OpenaiResponsesVisitor<'_> {
     }
 
     fn on_tool_result(&mut self, tr: &ToolResultMessage, is_old_turn: bool) {
-        let raw_text = tr
-            .content
-            .iter()
-            .filter_map(|p| match p {
-                ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
+        let raw_text = super::tool_result_text(tr);
         let text = maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming);
-
-        let has_images = tr
-            .content
-            .iter()
-            .any(|p| matches!(p, ToolResultContentPart::Image(_)));
+        let has_images = super::tool_result_has_images(tr);
 
         self.out.push(serde_json::json!({
             "type": "function_call_output",

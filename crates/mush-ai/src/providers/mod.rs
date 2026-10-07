@@ -8,9 +8,10 @@ use std::borrow::Cow;
 
 use crate::registry::ApiRegistry;
 use crate::types::{
-    AccountLabel, ApiKey, AssistantContentPart, AssistantMessage, EffortLevel, ImageContent,
-    Message, Model, StreamOptions, TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage,
-    ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
+    AccountLabel, ApiKey, AssistantContentPart, AssistantMessage, CacheRetention, EffortLevel,
+    ImageContent, Message, Model, StreamOptions, TextContent, ThinkingContent, ThinkingLevel,
+    ToolResultContentPart, ToolResultMessage, ToolResultTrimming, TurnPivot, UserMessage,
+    find_recent_boundary,
 };
 
 const TRIM_TOOL_OUTPUT_CHARS: usize = 1500;
@@ -135,6 +136,33 @@ pub(crate) fn maybe_trim_tool_output(
     } else {
         Cow::Borrowed(text)
     }
+}
+
+pub(crate) fn trimming_for_retention(retention: Option<CacheRetention>) -> ToolResultTrimming {
+    if retention.unwrap_or(CacheRetention::Short) == CacheRetention::None {
+        ToolResultTrimming::SlidingWindow
+    } else {
+        ToolResultTrimming::Preserve
+    }
+}
+
+pub(crate) fn tool_result_text(result: &ToolResultMessage) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ToolResultContentPart::Text(text) => Some(text.text.as_str()),
+            ToolResultContentPart::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn tool_result_has_images(result: &ToolResultMessage) -> bool {
+    result
+        .content
+        .iter()
+        .any(|part| matches!(part, ToolResultContentPart::Image(_)))
 }
 
 pub fn normalize_tool_name(name: &str) -> String {
