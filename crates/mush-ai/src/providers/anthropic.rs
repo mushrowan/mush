@@ -1552,207 +1552,23 @@ fn process_sse_event(
         SseEvent::ContentBlockStart {
             index,
             content_block,
-        } => {
-            if blocks.len() <= index {
-                blocks.resize_with(index + 1, || AnthropicBlock {
-                    output_index: None,
-                    block: StreamBlock::ServerSideTranscript,
-                });
-            }
-            let output_index = output.content.len();
-            let block = &mut blocks[index];
-            block.output_index =
-                (!matches!(content_block, ContentBlockData::Unknown)).then_some(output_index);
-            match content_block {
-                ContentBlockData::Text { text } => {
-                    block.block = StreamBlock::Text { text: text.clone() };
-                    output
-                        .content
-                        .push(AssistantContentPart::Text(TextContent { text }));
-                    events.push(StreamEvent::TextStart {
-                        content_index: output_index,
-                    });
-                }
-                ContentBlockData::Thinking { thinking } => {
-                    block.block = StreamBlock::Thinking {
-                        text: thinking.clone(),
-                        signature: None,
-                    };
-                    output.content.push(AssistantContentPart::Thinking(
-                        ThinkingContent::Thinking {
-                            thinking,
-                            signature: None,
-                        },
-                    ));
-                    events.push(StreamEvent::ThinkingStart {
-                        content_index: output_index,
-                    });
-                }
-                ContentBlockData::RedactedThinking { data } => {
-                    block.block = StreamBlock::Thinking {
-                        text: "[reasoning redacted]".into(),
-                        signature: Some(data.clone()),
-                    };
-                    output.content.push(AssistantContentPart::Thinking(
-                        ThinkingContent::Redacted { data },
-                    ));
-                    events.push(StreamEvent::ThinkingStart {
-                        content_index: output_index,
-                    });
-                }
-                ContentBlockData::ToolUse { id, name } => {
-                    let resolved_name = if is_oauth {
-                        from_claude_code_name(&name, tools)
-                    } else {
-                        name.clone()
-                    };
-                    block.block = StreamBlock::ToolCall {
-                        id: id.clone(),
-                        name: resolved_name.clone(),
-                        args_buf: String::new(),
-                    };
-                    output
-                        .content
-                        .push(AssistantContentPart::ToolCall(ToolCall {
-                            id: ToolCallId::from(id),
-                            name: ToolName::from(resolved_name),
-                            arguments: serde_json::Value::Object(Default::default()),
-                        }));
-                    events.push(StreamEvent::ToolCallStart {
-                        content_index: output_index,
-                    });
-                }
-                ContentBlockData::ServerToolUse { id, name, input } => {
-                    block.block = StreamBlock::ServerSideTranscript;
-                    output
-                        .content
-                        .push(AssistantContentPart::ServerToolUse(ServerToolUse {
-                            id: ToolCallId::from(id),
-                            name: ToolName::from(name),
-                            input,
-                        }));
-                }
-                ContentBlockData::AdvisorToolResult {
-                    tool_use_id,
-                    content,
-                } => {
-                    block.block = StreamBlock::ServerSideTranscript;
-                    output.content.push(AssistantContentPart::AdvisorToolResult(
-                        AdvisorToolResult {
-                            tool_use_id: ToolCallId::from(tool_use_id),
-                            content,
-                        },
-                    ));
-                }
-                ContentBlockData::Unknown => {
-                    block.block = StreamBlock::ServerSideTranscript;
-                }
-            }
-        }
+        } => start_block(
+            index,
+            content_block,
+            output,
+            blocks,
+            is_oauth,
+            tools,
+            &mut events,
+        ),
         SseEvent::ContentBlockDelta { index, delta } => {
-            let Some(block) = blocks.get_mut(index) else {
-                return events;
-            };
-            let Some(content_index) = block.output_index else {
-                return events;
-            };
-
-            match delta {
-                DeltaData::TextDelta { text } => {
-                    if let StreamBlock::Text { text: buf } = &mut block.block {
-                        buf.push_str(&text);
-                    }
-                    if let Some(AssistantContentPart::Text(tc)) =
-                        output.content.get_mut(content_index)
-                    {
-                        tc.text.push_str(&text);
-                    }
-                    events.push(StreamEvent::TextDelta {
-                        content_index,
-                        delta: text,
-                    });
-                }
-                DeltaData::ThinkingDelta { thinking } => {
-                    if let StreamBlock::Thinking { text: buf, .. } = &mut block.block {
-                        buf.push_str(&thinking);
-                    }
-                    if let Some(AssistantContentPart::Thinking(tc)) =
-                        output.content.get_mut(content_index)
-                        && let Some(buf) = tc.text_mut()
-                    {
-                        buf.push_str(&thinking);
-                    }
-                    events.push(StreamEvent::ThinkingDelta {
-                        content_index,
-                        delta: thinking,
-                    });
-                }
-                DeltaData::InputJsonDelta { partial_json } => {
-                    if let StreamBlock::ToolCall { args_buf, .. } = &mut block.block {
-                        args_buf.push_str(&partial_json);
-                    }
-                    events.push(StreamEvent::ToolCallDelta {
-                        content_index,
-                        delta: partial_json,
-                    });
-                }
-                DeltaData::SignatureDelta { signature } => {
-                    if let StreamBlock::Thinking { signature: sig, .. } = &mut block.block {
-                        sig.get_or_insert_with(String::new).push_str(&signature);
-                    }
-                    if let Some(AssistantContentPart::Thinking(tc)) =
-                        output.content.get_mut(content_index)
-                        && let Some(sig) = tc.signature_mut()
-                    {
-                        sig.get_or_insert_with(String::new).push_str(&signature);
-                    }
-                }
-                DeltaData::CitationsDelta | DeltaData::Unknown => {}
+            if let Some(block) = blocks.get_mut(index) {
+                apply_delta(block, delta, output, &mut events);
             }
         }
         SseEvent::ContentBlockStop { index } => {
-            if let Some(block) = blocks.get(index)
-                && let Some(content_index) = block.output_index
-            {
-                match &block.block {
-                    StreamBlock::Text { text } => {
-                        events.push(StreamEvent::TextEnd {
-                            content_index,
-                            text: text.clone(),
-                        });
-                    }
-                    StreamBlock::Thinking { text: thinking, .. } => {
-                        events.push(StreamEvent::ThinkingEnd {
-                            content_index,
-                            thinking: thinking.clone(),
-                        });
-                    }
-                    StreamBlock::ToolCall { id, name, args_buf } => {
-                        let arguments = serde_json::from_str(args_buf).unwrap_or_else(|err| {
-                            tracing::warn!(
-                                tool = %name,
-                                tool_id = %id,
-                                args_len = args_buf.len(),
-                                args_preview = %safe_preview_text(args_buf, 240),
-                                error = %err,
-                                "tool call arguments failed to parse, falling back to empty object"
-                            );
-                            serde_json::Value::Object(Default::default())
-                        });
-                        if let Some(AssistantContentPart::ToolCall(tc)) =
-                            output.content.get_mut(content_index)
-                        {
-                            tc.arguments = arguments.clone();
-                        }
-                        events.push(StreamEvent::ToolCallEnd {
-                            content_index,
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments,
-                        });
-                    }
-                    StreamBlock::ServerSideTranscript => {}
-                }
+            if let Some(block) = blocks.get(index) {
+                stop_block(block, output, &mut events);
             }
         }
         SseEvent::MessageDelta { delta, usage } => {
@@ -1776,6 +1592,221 @@ fn process_sse_event(
     }
 
     events
+}
+
+fn start_block(
+    index: usize,
+    content_block: ContentBlockData,
+    output: &mut AssistantMessage,
+    blocks: &mut Vec<AnthropicBlock>,
+    is_oauth: bool,
+    tools: &[ToolDefinition],
+    events: &mut Vec<StreamEvent>,
+) {
+    if blocks.len() <= index {
+        blocks.resize_with(index + 1, || AnthropicBlock {
+            output_index: None,
+            block: StreamBlock::ServerSideTranscript,
+        });
+    }
+    let output_index = output.content.len();
+    let block = &mut blocks[index];
+    block.output_index =
+        (!matches!(content_block, ContentBlockData::Unknown)).then_some(output_index);
+    match content_block {
+        ContentBlockData::Text { text } => {
+            block.block = StreamBlock::Text { text: text.clone() };
+            output
+                .content
+                .push(AssistantContentPart::Text(TextContent { text }));
+            events.push(StreamEvent::TextStart {
+                content_index: output_index,
+            });
+        }
+        ContentBlockData::Thinking { thinking } => {
+            block.block = StreamBlock::Thinking {
+                text: thinking.clone(),
+                signature: None,
+            };
+            output
+                .content
+                .push(AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                    thinking,
+                    signature: None,
+                }));
+            events.push(StreamEvent::ThinkingStart {
+                content_index: output_index,
+            });
+        }
+        ContentBlockData::RedactedThinking { data } => {
+            block.block = StreamBlock::Thinking {
+                text: "[reasoning redacted]".into(),
+                signature: Some(data.clone()),
+            };
+            output
+                .content
+                .push(AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                    data,
+                }));
+            events.push(StreamEvent::ThinkingStart {
+                content_index: output_index,
+            });
+        }
+        ContentBlockData::ToolUse { id, name } => {
+            let resolved_name = if is_oauth {
+                from_claude_code_name(&name, tools)
+            } else {
+                name.clone()
+            };
+            block.block = StreamBlock::ToolCall {
+                id: id.clone(),
+                name: resolved_name.clone(),
+                args_buf: String::new(),
+            };
+            output
+                .content
+                .push(AssistantContentPart::ToolCall(ToolCall {
+                    id: ToolCallId::from(id),
+                    name: ToolName::from(resolved_name),
+                    arguments: serde_json::Value::Object(Default::default()),
+                }));
+            events.push(StreamEvent::ToolCallStart {
+                content_index: output_index,
+            });
+        }
+        ContentBlockData::ServerToolUse { id, name, input } => {
+            block.block = StreamBlock::ServerSideTranscript;
+            output
+                .content
+                .push(AssistantContentPart::ServerToolUse(ServerToolUse {
+                    id: ToolCallId::from(id),
+                    name: ToolName::from(name),
+                    input,
+                }));
+        }
+        ContentBlockData::AdvisorToolResult {
+            tool_use_id,
+            content,
+        } => {
+            block.block = StreamBlock::ServerSideTranscript;
+            output
+                .content
+                .push(AssistantContentPart::AdvisorToolResult(AdvisorToolResult {
+                    tool_use_id: ToolCallId::from(tool_use_id),
+                    content,
+                }));
+        }
+        ContentBlockData::Unknown => {
+            block.block = StreamBlock::ServerSideTranscript;
+        }
+    }
+}
+
+fn apply_delta(
+    block: &mut AnthropicBlock,
+    delta: DeltaData,
+    output: &mut AssistantMessage,
+    events: &mut Vec<StreamEvent>,
+) {
+    let Some(content_index) = block.output_index else {
+        return;
+    };
+    match delta {
+        DeltaData::TextDelta { text } => {
+            if let StreamBlock::Text { text: buf } = &mut block.block {
+                buf.push_str(&text);
+            }
+            if let Some(AssistantContentPart::Text(tc)) = output.content.get_mut(content_index) {
+                tc.text.push_str(&text);
+            }
+            events.push(StreamEvent::TextDelta {
+                content_index,
+                delta: text,
+            });
+        }
+        DeltaData::ThinkingDelta { thinking } => {
+            if let StreamBlock::Thinking { text: buf, .. } = &mut block.block {
+                buf.push_str(&thinking);
+            }
+            if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(content_index)
+                && let Some(buf) = tc.text_mut()
+            {
+                buf.push_str(&thinking);
+            }
+            events.push(StreamEvent::ThinkingDelta {
+                content_index,
+                delta: thinking,
+            });
+        }
+        DeltaData::InputJsonDelta { partial_json } => {
+            if let StreamBlock::ToolCall { args_buf, .. } = &mut block.block {
+                args_buf.push_str(&partial_json);
+            }
+            events.push(StreamEvent::ToolCallDelta {
+                content_index,
+                delta: partial_json,
+            });
+        }
+        DeltaData::SignatureDelta { signature } => {
+            if let StreamBlock::Thinking { signature: sig, .. } = &mut block.block {
+                sig.get_or_insert_with(String::new).push_str(&signature);
+            }
+            if let Some(AssistantContentPart::Thinking(tc)) = output.content.get_mut(content_index)
+                && let Some(sig) = tc.signature_mut()
+            {
+                sig.get_or_insert_with(String::new).push_str(&signature);
+            }
+        }
+        DeltaData::CitationsDelta | DeltaData::Unknown => {}
+    }
+}
+
+fn stop_block(
+    block: &AnthropicBlock,
+    output: &mut AssistantMessage,
+    events: &mut Vec<StreamEvent>,
+) {
+    let Some(content_index) = block.output_index else {
+        return;
+    };
+    match &block.block {
+        StreamBlock::Text { text } => {
+            events.push(StreamEvent::TextEnd {
+                content_index,
+                text: text.clone(),
+            });
+        }
+        StreamBlock::Thinking { text: thinking, .. } => {
+            events.push(StreamEvent::ThinkingEnd {
+                content_index,
+                thinking: thinking.clone(),
+            });
+        }
+        StreamBlock::ToolCall { id, name, args_buf } => {
+            let arguments = serde_json::from_str(args_buf).unwrap_or_else(|err| {
+                tracing::warn!(
+                    tool = %name,
+                    tool_id = %id,
+                    args_len = args_buf.len(),
+                    args_preview = %safe_preview_text(args_buf, 240),
+                    error = %err,
+                    "tool call arguments failed to parse, falling back to empty object"
+                );
+                serde_json::Value::Object(Default::default())
+            });
+            if let Some(AssistantContentPart::ToolCall(tc)) = output.content.get_mut(content_index)
+            {
+                tc.arguments = arguments.clone();
+            }
+            events.push(StreamEvent::ToolCallEnd {
+                content_index,
+                id: id.clone(),
+                name: name.clone(),
+                arguments,
+            });
+        }
+        StreamBlock::ServerSideTranscript => {}
+    }
 }
 
 fn map_stop_reason(
