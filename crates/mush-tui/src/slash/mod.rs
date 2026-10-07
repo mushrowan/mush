@@ -591,6 +591,10 @@ fn parse_goal(args: &str) -> Result<GoalAction, SlashParseError> {
     })
 }
 
+fn non_empty(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
     let Some(command) = input.strip_prefix('/') else {
         return Err(SlashParseError::MissingPrefix);
@@ -614,7 +618,7 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
                 })
             } else {
                 Ok(SlashAction::Model {
-                    model_id: (!args.is_empty()).then(|| args.to_string()),
+                    model_id: non_empty(args),
                     show_all: false,
                 })
             }
@@ -647,14 +651,14 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         }
         "pause" if matches!(args, "off" | "clear") => Ok(SlashAction::Resumed),
         "pause" => Ok(SlashAction::Pause {
-            reason: (!args.is_empty()).then(|| args.to_string()),
+            reason: non_empty(args),
         }),
         "unpause" => Ok(SlashAction::Resumed),
         "compaction-model" | "compact-model" => Ok(SlashAction::CompactionModel {
-            model_id: (!args.is_empty()).then(|| args.to_string()),
+            model_id: non_empty(args),
         }),
         "export" => Ok(SlashAction::Export {
-            path: (!args.is_empty()).then(|| args.to_string()),
+            path: non_empty(args),
         }),
         "undo" => Ok(SlashAction::Undo),
         "search" => Ok(SlashAction::Search {
@@ -674,11 +678,11 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
             question: args.to_string(),
         }),
         "name" | "rename" => Ok(SlashAction::Name {
-            title: (!args.is_empty()).then(|| args.to_string()),
+            title: non_empty(args),
         }),
         "credits" => Ok(SlashAction::Credits),
         "endpoints" => Ok(SlashAction::Endpoints {
-            model_id: (!args.is_empty()).then(|| args.to_string()),
+            model_id: non_empty(args),
         }),
         "card" => Ok(SlashAction::Card),
         "mcp" => parse_mcp(args).map(SlashAction::Mcp),
@@ -788,7 +792,7 @@ fn parse_refine(args: &str) -> Result<mush_session::refine::RefineRequest, Slash
         return Err(SlashParseError::RefineUsage);
     }
     Ok(mush_session::refine::RefineRequest {
-        instructions: (!rest.is_empty()).then(|| rest.to_string()),
+        instructions: non_empty(rest),
         rollback: None,
         global,
         source: mush_session::harness::RefinementSource::User,
@@ -816,7 +820,7 @@ fn parse_compact_focus(
     }
     Ok(mush_session::compact::CompactionFocus {
         context_budget,
-        instructions: (!rest.is_empty()).then(|| rest.to_string()),
+        instructions: non_empty(rest),
     })
 }
 
@@ -825,7 +829,7 @@ fn parse_mcp(args: &str) -> Result<McpQuery, SlashParseError> {
     match sub {
         "" => Ok(McpQuery::Status),
         "tools" => Ok(McpQuery::Tools {
-            server: (!rest.is_empty()).then(|| rest.to_string()),
+            server: non_empty(rest),
         }),
         "schema" if rest.is_empty() => Err(SlashParseError::McpUsage),
         "schema" => Ok(McpQuery::Schema {
