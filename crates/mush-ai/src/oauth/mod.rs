@@ -48,6 +48,9 @@ impl From<reqwest_middleware::Error> for OAuthError {
     }
 }
 
+pub type OAuthFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, OAuthError>> + Send + 'a>>;
+
 pub struct AuthPrompt {
     pub url: String,
     pub instructions: String,
@@ -55,9 +58,7 @@ pub struct AuthPrompt {
 
 pub struct BrowserLogin {
     pub auth_url: String,
-    completion: std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send>,
-    >,
+    completion: OAuthFuture<'static, OAuthCredentials>,
 }
 
 impl BrowserLogin {
@@ -85,26 +86,11 @@ pub trait OAuthProvider: Send + Sync {
 
     fn begin_login(&self) -> Result<(AuthPrompt, PkceChallenge), OAuthError>;
 
-    fn begin_browser_login(
-        &self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
-    >;
+    fn begin_browser_login(&self) -> OAuthFuture<'_, BrowserLogin>;
 
-    fn exchange_code(
-        &self,
-        code: &str,
-        pkce: &PkceChallenge,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    >;
+    fn exchange_code(&self, code: &str, pkce: &PkceChallenge) -> OAuthFuture<'_, OAuthCredentials>;
 
-    fn refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    >;
+    fn refresh_token(&self, refresh_token: &str) -> OAuthFuture<'_, OAuthCredentials>;
 
     fn api_key(&self, creds: &OAuthCredentials) -> String {
         creds.access_token.clone()
@@ -412,11 +398,7 @@ mod tests {
             unreachable!()
         }
 
-        fn begin_browser_login(
-            &self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
-        > {
+        fn begin_browser_login(&self) -> OAuthFuture<'_, BrowserLogin> {
             unreachable!()
         }
 
@@ -424,18 +406,11 @@ mod tests {
             &self,
             _code: &str,
             _pkce: &PkceChallenge,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-        > {
+        ) -> OAuthFuture<'_, OAuthCredentials> {
             unreachable!()
         }
 
-        fn refresh_token(
-            &self,
-            refresh_token: &str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-        > {
+        fn refresh_token(&self, refresh_token: &str) -> OAuthFuture<'_, OAuthCredentials> {
             let generation = self
                 .refreshes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -560,11 +535,7 @@ mod tests {
             unreachable!()
         }
 
-        fn begin_browser_login(
-            &self,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
-        > {
+        fn begin_browser_login(&self) -> OAuthFuture<'_, BrowserLogin> {
             unreachable!()
         }
 
@@ -572,18 +543,11 @@ mod tests {
             &self,
             _code: &str,
             _pkce: &PkceChallenge,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-        > {
+        ) -> OAuthFuture<'_, OAuthCredentials> {
             unreachable!()
         }
 
-        fn refresh_token(
-            &self,
-            _refresh_token: &str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-        > {
+        fn refresh_token(&self, _refresh_token: &str) -> OAuthFuture<'_, OAuthCredentials> {
             Box::pin(async {
                 Err(OAuthError::TokenRefresh(
                     r#"{"error": "invalid_grant", "error_description": "Refresh token expired"}"#

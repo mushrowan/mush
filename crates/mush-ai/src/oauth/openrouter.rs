@@ -34,11 +34,7 @@ impl OAuthProvider for OpenRouterOAuth {
         ))
     }
 
-    fn begin_browser_login(
-        &self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
-    > {
+    fn begin_browser_login(&self) -> super::OAuthFuture<'_, BrowserLogin> {
         Box::pin(async move {
             let session = OpenRouterLoginSession::start().await?;
             let auth_url = session.auth_url.clone();
@@ -50,9 +46,7 @@ impl OAuthProvider for OpenRouterOAuth {
         &self,
         code: &str,
         pkce: &PkceChallenge,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    > {
+    ) -> super::OAuthFuture<'_, OAuthCredentials> {
         let input = code.to_string();
         let verifier = pkce.verifier.clone();
         Box::pin(async move {
@@ -67,12 +61,7 @@ impl OAuthProvider for OpenRouterOAuth {
         })
     }
 
-    fn refresh_token(
-        &self,
-        _refresh_token: &str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    > {
+    fn refresh_token(&self, _refresh_token: &str) -> super::OAuthFuture<'_, OAuthCredentials> {
         Box::pin(async move {
             Err(OAuthError::TokenRefresh(
                 "openrouter api keys do not expire and cannot be refreshed; \

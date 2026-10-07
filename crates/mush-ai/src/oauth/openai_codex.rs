@@ -39,11 +39,7 @@ impl OAuthProvider for OpenaiCodexOAuth {
         Ok((prompt, pkce))
     }
 
-    fn begin_browser_login(
-        &self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<BrowserLogin, OAuthError>> + Send + '_>,
-    > {
+    fn begin_browser_login(&self) -> super::OAuthFuture<'_, BrowserLogin> {
         Box::pin(async move {
             let session = CodexLoginSession::start().await?;
             let auth_url = session.auth_url.clone();
@@ -55,20 +51,13 @@ impl OAuthProvider for OpenaiCodexOAuth {
         &self,
         code: &str,
         pkce: &PkceChallenge,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    > {
+    ) -> super::OAuthFuture<'_, OAuthCredentials> {
         let input = code.to_string();
         let verifier = pkce.verifier.clone();
         Box::pin(async move { exchange_code_impl(&input, &verifier).await })
     }
 
-    fn refresh_token(
-        &self,
-        refresh_token: &str,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<OAuthCredentials, OAuthError>> + Send + '_>,
-    > {
+    fn refresh_token(&self, refresh_token: &str) -> super::OAuthFuture<'_, OAuthCredentials> {
         let token = refresh_token.to_string();
         Box::pin(async move { refresh_token_impl(&token).await })
     }
