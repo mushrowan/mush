@@ -120,11 +120,7 @@ pub async fn deliver(directory: &Path, message: &Path) -> Result<()> {
 
 pub async fn reopen(manifest: &Manifest, job: &Worker, previous: Option<&Value>) -> Result<()> {
     let dir = manifest.directory.join(&job.name);
-    if let Some(tracked) =
-        read_json(&dir.join("process.json")).and_then(|value| serde_json::from_value(value).ok())
-    {
-        crate::signal_tree(&tracked, "-KILL").await;
-    }
+    crate::kill_recorded(&dir).await;
     let Some(previous) = previous else {
         return Ok(());
     };

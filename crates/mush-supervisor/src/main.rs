@@ -409,6 +409,14 @@ async fn signal_tree(tracked: &HashMap<u32, u64>, signal: &str) {
     }
 }
 
+async fn kill_recorded(dir: &Path) {
+    if let Some(tracked) = read_json(&dir.join("process.json"))
+        .and_then(|value| serde_json::from_value::<HashMap<u32, u64>>(value).ok())
+    {
+        signal_tree(&tracked, "-KILL").await;
+    }
+}
+
 async fn terminate(child: &mut tokio::process::Child, tracked: &mut HashMap<u32, u64>) {
     if let Some(pid) = child.id() {
         descendants(pid, tracked);
@@ -560,12 +568,7 @@ async fn worker(
         )
     };
     if manifest.journalled() && previous_state == Some("running") {
-        let process = read_json(&dir.join("process.json"));
-        if let Some(tracked) =
-            process.and_then(|v| serde_json::from_value::<HashMap<u32, u64>>(v).ok())
-        {
-            signal_tree(&tracked, "-KILL").await;
-        }
+        kill_recorded(&dir).await;
         save(
             &progress,
             "error",
@@ -622,7 +625,7 @@ async fn worker(
         let admission_id = mush_supervisor::review::digest(
             format!("{}:{}:{round}", manifest.directory.display(), job.name).as_bytes(),
         );
-        let _execution = if manifest.execution_locked {
+        let execution = if manifest.execution_locked {
             manifest.execution_lease.clone()
         } else {
             manifest
@@ -655,9 +658,7 @@ async fn worker(
             }
         }
         let base = fs::read_to_string(&job.prompt)?;
-        let prompt = prompts::assignment(&base, round, &job.report, manifest.until);
-        let inbox = manifest.directory.join("inbox").join(&job.name);
-        let mut prompt = prompt;
+        let mut prompt = prompts::assignment(&base, round, &job.report, manifest.until);
         if manifest.journalled() {
             prompt.push_str(&format!("\n\nwrite an owner-only json report at {} with these exact identity fields: {}. set state to working, done, blocked or awaiting_input. done means this assignment is complete. blocked means a prerequisite is unavailable. awaiting_input means a decision is needed.", job.report.display(), json!({"run_id": events::run_id(&manifest)?, "worker_id":job.name, "assignment_id":assignment, "round":round})));
         }
@@ -665,20 +666,10 @@ async fn worker(
             prompt.push_str("\n\nexplicit follow-up assignment. the previous completed task remains in history. work on this assignment within the existing permissions, then update your report:\n");
             prompt.push_str(&follow_up);
         }
-        let mut messages = Vec::new();
-        if inbox.exists() {
-            let mut paths: Vec<_> = fs::read_dir(&inbox)?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .collect();
-            paths.sort();
-            for path in paths {
-                if path.extension().is_some_and(|e| e == "txt") {
-                    let text = fs::read_to_string(&path)?;
-                    prompt.push_str("\n\ncoordinator task update (within original scope only):\n");
-                    prompt.push_str(&text);
-                    messages.push(path);
-                }
-            }
+        let messages = poke::messages(&manifest.directory, &job.name)?;
+        for path in &messages {
+            prompt.push_str("\n\ncoordinator task update (within original scope only):\n");
+            prompt.push_str(&fs::read_to_string(path)?);
         }
         let log_path = dir.join(format!("round-{round:03}.log"));
         let headless_status = dir.join(format!("round-{round:03}.json"));
@@ -722,39 +713,35 @@ async fn worker(
             None
         };
         use std::os::fd::AsRawFd;
-        let mut execution_fds = Vec::new();
-        if let Some(file) = &_execution {
-            execution_fds.push(file.as_raw_fd());
+        let mut inherited_fds = Vec::new();
+        if let Some(file) = &execution {
+            inherited_fds.push(file.as_raw_fd());
         }
         if let Some(file) = &manifest.run_lease {
-            execution_fds.push(file.as_raw_fd());
+            inherited_fds.push(file.as_raw_fd());
         }
         if let Some(file) = &claim_guard {
-            execution_fds.push(file.as_raw_fd());
+            inherited_fds.push(file.as_raw_fd());
+        }
+        match &session_lease {
+            Some(lease) => {
+                let fd = lease.as_raw_fd();
+                cmd.env("MUSH_SESSION_LEASE_FD", fd.to_string());
+                inherited_fds.push(fd);
+            }
+            None => {
+                cmd.env_remove("MUSH_SESSION_LEASE_FD");
+            }
         }
         unsafe {
             cmd.pre_exec(move || {
-                for fd in &execution_fds {
+                for fd in &inherited_fds {
                     if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
                 Ok(())
             });
-        }
-        if let Some(lease) = &session_lease {
-            let fd = lease.as_raw_fd();
-            cmd.env("MUSH_SESSION_LEASE_FD", fd.to_string());
-            unsafe {
-                cmd.pre_exec(move || {
-                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        } else {
-            cmd.env_remove("MUSH_SESSION_LEASE_FD");
         }
         cmd.arg("-p").arg(prompt);
         save(&progress, "running", round, "", None)?;
@@ -902,12 +889,12 @@ async fn worker(
                     .unwrap_or_else(|| classify(&tail(&log_path, 16384))),
             )
         };
-        let status_cancelled =
-            read_json(&headless_status).is_some_and(|s| s["state"] == "cancelled");
+        let headless = read_json(&headless_status);
+        let status_cancelled = headless.as_ref().is_some_and(|s| s["state"] == "cancelled");
         if manifest.journalled()
             && (child_survived
                 || failure.is_none()
-                    && read_json(&headless_status).is_none_or(|s| {
+                    && headless.as_ref().is_none_or(|s| {
                         s["state"] != "completed"
                             || s["session_id"]
                                 .as_str()
@@ -1040,7 +1027,7 @@ async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Re
     let mut jobs = JoinSet::new();
     let mut active = HashSet::new();
     let mut attempted = HashSet::new();
-    for job in manifest.workers.clone() {
+    for job in &manifest.workers {
         let messages = poke::messages(&manifest.directory, &job.name)?;
         if !pending_only || !messages.is_empty() {
             attempted.extend(messages);
@@ -1048,7 +1035,7 @@ async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Re
             spawn_worker(
                 &mut jobs,
                 manifest.clone(),
-                job,
+                job.clone(),
                 permits.clone(),
                 receiver.clone(),
             );
@@ -1098,11 +1085,7 @@ async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Re
                 None => {},
             }
                 delivery_pending = manifest.orchestrator_inbox.is_some();
-                if delivery_pending && delivery.is_empty() {
-                    let manifest = Arc::clone(&manifest);
-                    delivery.spawn_blocking(move || events::replay(&manifest));
-                    delivery_pending = false;
-                }
+                start_delivery(&mut delivery, &manifest, &mut delivery_pending);
             },
             result = delivery.join_next(), if !delivery.is_empty() => {
                 if let Some(result) = result {
@@ -1117,11 +1100,7 @@ async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Re
             _ = tokio::signal::ctrl_c() => { cancel.send_replace(true); },
             _ = tick.tick() => {
                 if Utc::now() >= manifest.until || manifest.directory.join("STOP").exists() { cancel.send_replace(true); }
-                if delivery_pending && delivery.is_empty() {
-                    let manifest = Arc::clone(&manifest);
-                    delivery.spawn_blocking(move || events::replay(&manifest));
-                    delivery_pending = false;
-                }
+                start_delivery(&mut delivery, &manifest, &mut delivery_pending);
             },
         }
     }
@@ -1138,36 +1117,48 @@ async fn supervise(mut manifest: Manifest, lock: Lock, pending_only: bool) -> Re
     Ok(())
 }
 
+fn start_delivery(
+    delivery: &mut JoinSet<Result<()>>,
+    manifest: &Arc<Manifest>,
+    pending: &mut bool,
+) {
+    if *pending && delivery.is_empty() {
+        let manifest = Arc::clone(manifest);
+        delivery.spawn_blocking(move || events::replay(&manifest));
+        *pending = false;
+    }
+}
+
 fn spawn_worker(
     jobs: &mut JoinSet<(String, Result<()>)>,
-    m: Arc<Manifest>,
+    manifest: Arc<Manifest>,
     job: Worker,
-    p: Arc<Semaphore>,
-    s: watch::Receiver<bool>,
+    permits: Arc<Semaphore>,
+    stop: watch::Receiver<bool>,
 ) {
     let name = job.name.clone();
     jobs.spawn(async move {
-        let state_path = m.directory.join(&name).join("state.json");
-        let result = worker(Arc::clone(&m), job.clone(), p, s).await;
+        let state_path = manifest.directory.join(&name).join("state.json");
+        let result = worker(Arc::clone(&manifest), job.clone(), permits, stop).await;
         if let Err(error) = &result {
             let mut state = read_json(&state_path).unwrap_or_else(|| json!({"name":name}));
             state["state"] = json!("error");
             state["detail"] = json!(error.to_string());
             state["at"] = json!(Utc::now());
             if !events::has_terminal_event(&state_path) {
-                let saved = if m.journalled() {
+                let saved = if manifest.journalled() {
                     let round = state["round"]
                         .as_u64()
                         .and_then(|n| u32::try_from(n).ok())
                         .unwrap_or(1);
                     events::save(
-                        &m,
+                        &manifest,
                         &job,
                         events::assignment(Some(&state), round),
                         &State {
                             name: &name,
                             state: "error",
-                            model: state["model"].as_str().unwrap_or(&m.model),
+                            model: state["model"].as_str().unwrap_or(&manifest.model),
                             round,
                             session_id: state["session_id"].as_str(),
                             at: Utc::now(),
