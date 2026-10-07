@@ -198,15 +198,10 @@ impl ForbiddenCharsGuard {
     }
 }
 
-fn augment_schema(mut schema: serde_json::Value) -> serde_json::Value {
-    let serde_json::Value::Object(ref mut top) = schema else {
-        return schema;
-    };
-    let Some(serde_json::Value::Object(props)) = top.get_mut("properties") else {
-        return schema;
-    };
-    props.insert(
-        ALLOW_FORBIDDEN_CHARS_KEY.into(),
+fn augment_schema(schema: serde_json::Value) -> serde_json::Value {
+    crate::util::with_property(
+        schema,
+        ALLOW_FORBIDDEN_CHARS_KEY,
         serde_json::json!({
             "type": "boolean",
             "description": "bypass the configured forbidden_chars guard for this call. \
@@ -214,8 +209,7 @@ fn augment_schema(mut schema: serde_json::Value) -> serde_json::Value {
                             required (e.g. quoting a verbatim source) - prefer fixing the \
                             content first"
         }),
-    );
-    schema
+    )
 }
 
 #[async_trait::async_trait]
@@ -243,14 +237,7 @@ impl mush_agent::tool::AgentTool for ForbiddenCharsGuard {
     }
 
     async fn execute(&self, mut args: serde_json::Value) -> mush_agent::tool::ToolResult {
-        let bypass = args
-            .get(ALLOW_FORBIDDEN_CHARS_KEY)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if let serde_json::Value::Object(ref mut map) = args {
-            map.remove(ALLOW_FORBIDDEN_CHARS_KEY);
-        }
-        if !bypass {
+        if !crate::util::take_flag(&mut args, ALLOW_FORBIDDEN_CHARS_KEY) {
             for content in (self.extractor)(&args) {
                 if let Err(err) = self.chars.check(&content) {
                     let saved = mush_agent::truncation::save_rejected_content(&content);

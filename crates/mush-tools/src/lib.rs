@@ -145,7 +145,7 @@ pub fn builtin_tools_with_options(
         forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
             bash_tool,
             forbidden_chars.clone(),
-            bash_content_extractor(),
+            field_extractor("command"),
             forbidden_chars::BypassVisibility::Hidden,
         ),
         Arc::new(bash_status::BashStatusTool::new(bg_registry)),
@@ -197,7 +197,7 @@ fn write_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) 
             cwd,
         ),
         forbidden_chars,
-        write_content_extractor(),
+        field_extractor("content"),
         forbidden_chars::BypassVisibility::Advertised,
     )
 }
@@ -212,18 +212,9 @@ fn edit_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -
     )
 }
 
-fn bash_content_extractor() -> forbidden_chars::ContentExtractor {
-    Arc::new(|args: &serde_json::Value| {
-        args.get("command")
-            .and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default()
-    })
-}
-
-fn write_content_extractor() -> forbidden_chars::ContentExtractor {
-    Arc::new(|args: &serde_json::Value| {
-        args.get("content")
+fn field_extractor(field: &'static str) -> forbidden_chars::ContentExtractor {
+    Arc::new(move |args: &serde_json::Value| {
+        args.get(field)
             .and_then(|v| v.as_str())
             .map(|s| vec![s.to_string()])
             .unwrap_or_default()

@@ -27,6 +27,28 @@ pub(crate) fn write_lock<T: ?Sized>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T>
     lock.write().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub(crate) fn take_flag(args: &mut serde_json::Value, key: &str) -> bool {
+    let set = args
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if let serde_json::Value::Object(map) = args {
+        map.remove(key);
+    }
+    set
+}
+
+pub(crate) fn with_property(
+    mut schema: serde_json::Value,
+    key: &str,
+    property: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(serde_json::Value::Object(props)) = schema.get_mut("properties") {
+        props.insert(key.into(), property);
+    }
+    schema
+}
+
 pub fn gitignore_hint(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let status = Command::new("git")

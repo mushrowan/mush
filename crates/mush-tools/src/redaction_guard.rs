@@ -109,19 +109,17 @@ fn rejection_message() -> String {
     )
 }
 
-fn augment_schema(mut schema: Value) -> Value {
-    if let Some(Value::Object(props)) = schema.get_mut("properties") {
-        props.insert(
-            ALLOW_REDACTION_MARKER_KEY.into(),
-            serde_json::json!({
-                "type": "boolean",
-                "description": "write content that adds a [REDACTED] marker anyway. defaults to \
-                                false. the marker stands in for a hidden secret, so only set this \
-                                when the marker text itself is wanted"
-            }),
-        );
-    }
-    schema
+fn augment_schema(schema: Value) -> Value {
+    crate::util::with_property(
+        schema,
+        ALLOW_REDACTION_MARKER_KEY,
+        serde_json::json!({
+            "type": "boolean",
+            "description": "write content that adds a [REDACTED] marker anyway. defaults to \
+                            false. the marker stands in for a hidden secret, so only set this \
+                            when the marker text itself is wanted"
+        }),
+    )
 }
 
 #[async_trait::async_trait]
@@ -149,13 +147,7 @@ impl AgentTool for RedactionMarkerGuard {
     }
 
     async fn execute(&self, mut args: Value) -> ToolResult {
-        let bypass = args
-            .get(ALLOW_REDACTION_MARKER_KEY)
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if let Value::Object(ref mut map) = args {
-            map.remove(ALLOW_REDACTION_MARKER_KEY);
-        }
+        let bypass = crate::util::take_flag(&mut args, ALLOW_REDACTION_MARKER_KEY);
         if !bypass
             && self
                 .replacements(&args)
