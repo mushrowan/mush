@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use crate::session::Session;
 use crate::slash::{self, SlashAction};
 
@@ -118,21 +120,23 @@ pub(crate) fn format_autonomous(status: Option<&mush_runtime::AutonomousStatus>)
         ),
     );
     if !status.gates.commands.is_empty() {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "\ngates ({} retries, {}s each): {}",
             status.gates.max_retries,
             status.gates.timeout_ms / 1000,
             status.gates.commands.join(" ; ")
-        ));
+        );
     }
     if let Some(failure) = &status.last_failure {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             "\nlast gate failure: `{}` {} (attempt {})",
             failure.command, failure.exit_text, failure.attempt
-        ));
+        );
     }
     if let Some(reason) = &status.stopped {
-        text.push_str(&format!("\nstopped: {reason}"));
+        let _ = write!(text, "\nstopped: {reason}");
     }
     text
 }
@@ -204,13 +208,13 @@ pub(crate) fn format_goal(goal: Option<&mush_runtime::Goal>) -> String {
         goal.tokens_used
     );
     if let Some(budget) = goal.token_budget {
-        text.push_str(&format!(" of {budget}"));
+        let _ = write!(text, " of {budget}");
     }
     if let Some(summary) = &goal.summary {
-        text.push_str(&format!("\nsummary: {summary}"));
+        let _ = write!(text, "\nsummary: {summary}");
     }
     if let Some(error) = &goal.error {
-        text.push_str(&format!("\nerror: {error}"));
+        let _ = write!(text, "\nerror: {error}");
     }
     text
 }
@@ -576,35 +580,7 @@ pub(super) async fn handle_slash_action(
                 }
             };
         }
-        SlashAction::Reload => {
-            let Some(reload) = tui_config.reload_context.clone() else {
-                session
-                    .app
-                    .push_system_message("/reload not supported in this build".to_string());
-                return false;
-            };
-            let reloaded = reload(&tui_config.cwd);
-            let _ = session
-                .connection
-                .send(mush_runtime::ClientCommand::ReloadSystemPrompt)
-                .await;
-            apply_reloaded_templates(session, &reloaded.templates);
-            apply_reloaded_skills(session, &reloaded.skills.skills);
-            let warnings = reloaded.skills.diagnostics.len();
-            tui_config.skills = reloaded.skills;
-            let templates = reloaded.templates.len();
-            let skills = tui_config.skills.skills.len();
-            session.app.status = Some(crate::app_state::Status::from(format!(
-                "reloaded AGENTS.md, {templates} prompt template{s}, {skills} skill{ks}{w}",
-                s = plural(templates),
-                ks = plural(skills),
-                w = if warnings == 0 {
-                    String::new()
-                } else {
-                    format!(" ({warnings} warnings, /skills)")
-                },
-            )));
-        }
+        SlashAction::Reload => reload_context(session, tui_config).await,
         SlashAction::RefreshModels => refresh_models(session, tui_config).await,
         other_action => {
             if let Some(prompt) = slash::handle(
@@ -622,6 +598,36 @@ pub(super) async fn handle_slash_action(
     }
 
     state_changed
+}
+
+async fn reload_context(session: &mut Session, tui_config: &mut TuiConfig) {
+    let Some(reload) = tui_config.reload_context.clone() else {
+        session
+            .app
+            .push_system_message("/reload not supported in this build".to_string());
+        return;
+    };
+    let reloaded = reload(&tui_config.cwd);
+    let _ = session
+        .connection
+        .send(mush_runtime::ClientCommand::ReloadSystemPrompt)
+        .await;
+    apply_reloaded_templates(session, &reloaded.templates);
+    apply_reloaded_skills(session, &reloaded.skills.skills);
+    let warnings = reloaded.skills.diagnostics.len();
+    tui_config.skills = reloaded.skills;
+    let templates = reloaded.templates.len();
+    let skills = tui_config.skills.skills.len();
+    session.app.status = Some(crate::app_state::Status::from(format!(
+        "reloaded AGENTS.md, {templates} prompt template{s}, {skills} skill{ks}{w}",
+        s = plural(templates),
+        ks = plural(skills),
+        w = if warnings == 0 {
+            String::new()
+        } else {
+            format!(" ({warnings} warnings, /skills)")
+        },
+    )));
 }
 
 fn plural(count: usize) -> &'static str {
@@ -878,13 +884,14 @@ async fn handle_endpoints(
                 } else {
                     ""
                 };
-                report.push_str(&format!(
+                let _ = write!(
+                    report,
                     "\n  · {} (ctx {}){}",
                     ep.provider_name, ep.context_length, cache_badge
-                ));
+                );
             }
             if let Some(unique) = endpoints.unique_caching_provider() {
-                report.push_str(&format!("\n→ sole caching provider: {unique}"));
+                let _ = write!(report, "\n→ sole caching provider: {unique}");
             }
             pane.app.push_system_message(report);
         }
