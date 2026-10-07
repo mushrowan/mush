@@ -106,15 +106,7 @@ impl CredentialStore for FileCredentialStore {
 }
 
 fn default_credentials_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
-        PathBuf::from(dir).join("api-keys.json")
-    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(config).join("mush/api-keys.json")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config/mush/api-keys.json")
-    } else {
-        PathBuf::from(".mush/api-keys.json")
-    }
+    crate::dirs::config_dir().join("api-keys.json")
 }
 
 #[derive(Debug, Clone)]

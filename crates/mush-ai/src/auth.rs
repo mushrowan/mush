@@ -134,20 +134,8 @@ fn storage_key(provider: &Provider) -> &str {
     config_key(provider)
 }
 
-fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(config).join("mush")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config/mush")
-    } else {
-        PathBuf::from(".mush")
-    }
-}
-
 fn config_path() -> PathBuf {
-    config_dir().join("config.toml")
+    crate::dirs::config_dir().join("config.toml")
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -571,15 +571,7 @@ fn load_user_models() -> Vec<Model> {
 }
 
 fn user_models_path() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
-        std::path::PathBuf::from(dir).join("models.json")
-    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        std::path::PathBuf::from(config).join("mush/models.json")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".config/mush/models.json")
-    } else {
-        std::path::PathBuf::from(".mush/models.json")
-    }
+    crate::dirs::config_dir().join("models.json")
 }
 
 #[cfg(test)]

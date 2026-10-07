@@ -161,15 +161,7 @@ impl CredentialStore {
 }
 
 fn credentials_path() -> PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_CONFIG_DIR") {
-        PathBuf::from(dir).join("oauth.json")
-    } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
-        PathBuf::from(config).join("mush/oauth.json")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config/mush/oauth.json")
-    } else {
-        PathBuf::from(".mush/oauth.json")
-    }
+    crate::dirs::config_dir().join("oauth.json")
 }
 
 pub struct StoreLock {
