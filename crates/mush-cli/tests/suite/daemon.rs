@@ -133,7 +133,8 @@ fn env(dir: &Path) -> Vec<(String, String)> {
 }
 
 fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    rustix::process::Pid::from_raw(pid as i32)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
 }
 
 #[tokio::test]
