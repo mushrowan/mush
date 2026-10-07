@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn the_table_shows_the_agent_and_the_prompt() {
         let now = Timestamp::now().as_ms();
-        let rendered = table(&[job("j1", Some(now + 600_000))]);
+        let rendered = table(&[job("j1", Some(now + 630_000))]);
         let lines: Vec<_> = rendered.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("agent"));
