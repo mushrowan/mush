@@ -381,7 +381,14 @@ fn read_file(
         return ToolResult::text(format!("(empty file, {} bytes)", content.len()));
     }
 
-    let start = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
+    let start = offset.unwrap_or(1).saturating_sub(1);
+    if start >= total_lines {
+        return ToolResult::error(format!(
+            "line {} is past the end of {} ({total_lines} lines)",
+            start.saturating_add(1),
+            path.display()
+        ));
+    }
     let content_max = MAX_LINES - CONTENT_LINE_HEADROOM;
     let max_lines = limit.unwrap_or(content_max).min(content_max);
 
@@ -921,6 +928,18 @@ mod tests {
         assert!(!text.contains("L9:"));
     }
 
+    #[test]
+    fn reading_past_the_end_says_how_long_the_file_is() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "one\ntwo\n").unwrap();
+
+        let result = read_file(&file, Some(3), None, false, DEFAULT_MAX_IMAGE_BYTES);
+
+        assert!(result.outcome.is_error());
+        assert!(extract_text(&result).contains("(2 lines)"), "{result:?}");
+    }
+
     #[tokio::test]
     async fn read_windows_past_the_largest_line_number_do_not_panic() {
         let dir = temp_dir();
@@ -934,7 +953,8 @@ mod tests {
             serde_json::json!({"path": path, "start_line": 1, "end_line": usize::MAX}),
             serde_json::json!({"path": path, "around_line": 1, "context_after": usize::MAX}),
         ] {
-            let _ = tool.execute(args).await;
+            let result = tool.execute(args.clone()).await;
+            assert!(!extract_text(&result).is_empty(), "{args}");
         }
     }
 
