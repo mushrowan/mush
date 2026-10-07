@@ -824,16 +824,17 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
     };
     let mut reader = BufReader::new(pipe);
     let mut output = String::new();
-    let mut line = String::new();
+    let mut bytes = Vec::new();
     let mut last_emit = std::time::Instant::now();
     let mut lines_read = 0usize;
 
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes).await {
             Ok(0) => break,
             Ok(_) => {
                 lines_read += 1;
+                let line = String::from_utf8_lossy(&bytes);
                 output.push_str(&line);
                 if let Some(ref flag) = has_output {
                     flag.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -956,6 +957,22 @@ mod tests {
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn output_after_invalid_utf8_is_kept() {
+        let cwd = tempfile::tempdir().unwrap();
+        let result = run_command(
+            cwd.path(),
+            "printf 'caf\\351\\n'; echo after",
+            10,
+            None,
+            false,
+        )
+        .await;
+        assert!(result.outcome.is_success(), "{result:?}");
+        let text = extract_text(&result);
+        assert!(text.contains("caf\u{fffd}\nafter"), "{text}");
     }
 
     #[tokio::test(flavor = "current_thread")]
