@@ -772,27 +772,24 @@ fn attached_images(
 
 #[must_use]
 pub fn format_cell_output(output: &CellOutput) -> String {
-    let mut text = String::new();
-    if !output.stdout.is_empty() {
-        text.push_str(&output.stdout);
-    }
-    if !output.stderr.is_empty() {
+    fn start_line(text: &mut String) {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
+    }
+
+    let mut text = output.stdout.clone();
+    if !output.stderr.is_empty() {
+        start_line(&mut text);
         text.push_str("[stderr]\n");
         text.push_str(&output.stderr);
     }
     if let Some(result) = &output.result {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
+        start_line(&mut text);
         text.push_str(result);
     }
     if let Some(error) = &output.error {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
+        start_line(&mut text);
         if error.traceback.is_empty() {
             text.push_str(&format!("{}: {}", error.ename, error.evalue));
         } else {
@@ -800,9 +797,7 @@ pub fn format_cell_output(output: &CellOutput) -> String {
         }
     }
     if !output.background.is_empty() {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
+        start_line(&mut text);
         text.push_str("[background output (unattributed)]\n");
         text.push_str(&output.background);
     }
@@ -861,29 +856,9 @@ impl AgentTool for IpythonTool {
                 if run.output.ok {
                     self.schedule_snapshot();
                 }
-                let details = CellDetails {
-                    duration_ms: u64::try_from(run.output.duration.as_millis()).unwrap_or(u64::MAX),
-                    stdout: run.output.stdout.clone(),
-                    stderr: run.output.stderr.clone(),
-                    result: run.output.result.clone(),
-                    error: run.output.error.as_ref().map(|error| CellErrorDetails {
-                        ename: error.ename.clone(),
-                        evalue: error.evalue.clone(),
-                        traceback: error.traceback.clone(),
-                    }),
-                    diffs: self
-                        .mush_host
-                        .as_ref()
-                        .map(|host| host.take_diffs(&exec_id))
-                        .unwrap_or_default(),
-                    images: 0,
-                    kernel_restarted: run.kernel_restarted,
-                    sent_messages: self
-                        .mush_host
-                        .as_ref()
-                        .map(|host| host.take_sent_messages(&exec_id))
-                        .unwrap_or_default(),
-                    background: run.output.background.clone(),
+                let (diffs, sent_messages) = match &self.mush_host {
+                    Some(host) => (host.take_diffs(&exec_id), host.take_sent_messages(&exec_id)),
+                    None => (Vec::new(), Vec::new()),
                 };
                 let refusal = (!run.output.attachments.is_empty())
                     .then(|| self.vision_refusal())
@@ -895,9 +870,24 @@ impl AgentTool for IpythonTool {
                     }
                     None => attached_images(&run.output.attachments, &mut text),
                 };
-                let mut details = details;
-                details.images = images.len();
-                let mut result = if run.output.ok && refusal.is_none() {
+                let output = run.output;
+                let details = CellDetails {
+                    duration_ms: u64::try_from(output.duration.as_millis()).unwrap_or(u64::MAX),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    result: output.result,
+                    error: output.error.map(|error| CellErrorDetails {
+                        ename: error.ename,
+                        evalue: error.evalue,
+                        traceback: error.traceback,
+                    }),
+                    diffs,
+                    images: images.len(),
+                    kernel_restarted: run.kernel_restarted,
+                    sent_messages,
+                    background: output.background,
+                };
+                let mut result = if output.ok && refusal.is_none() {
                     ToolResult::text(text)
                 } else {
                     ToolResult::error(text)
