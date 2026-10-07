@@ -41,7 +41,7 @@ enum Disposition {
 }
 
 async fn probe(socket: &Path) -> io::Result<Disposition> {
-    if !answers(socket) {
+    if !listening(socket) {
         return Ok(Disposition::Absent);
     }
     match mush_daemon::supervisor::request(socket, &SupervisorRequest::Status).await {
@@ -93,7 +93,7 @@ pub async fn ensure_running() -> Result<PathBuf> {
     .await?;
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
-        if answers(&socket) {
+        if listening(&socket) {
             return Ok(socket);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -109,11 +109,9 @@ pub async fn take_over(stale: &StaleDaemon) -> Result<()> {
             "{stale}. run mush shutdown to stop it, then try again"
         ));
     }
-    eprint!("{stale}. stopping it interrupts that work. stop it and continue? [y/N] ");
-    std::io::Write::flush(&mut std::io::stderr())?;
-    let mut answer = String::new();
-    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)?;
-    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+    if !confirmed(format_args!(
+        "{stale}. stopping it interrupts that work. stop it and continue?"
+    ))? {
         return Err(eyre!("left the other daemon running"));
     }
     match stop_stale(&stale.socket).await {
@@ -125,13 +123,13 @@ pub async fn take_over(stale: &StaleDaemon) -> Result<()> {
     }
 }
 
-fn answers(socket: &Path) -> bool {
+pub(crate) fn listening(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 async fn wait_until_gone(socket: &Path) -> bool {
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
-    while answers(socket) {
+    while listening(socket) {
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
@@ -173,7 +171,7 @@ async fn open_in(
 
 pub async fn stop(selector: &str, json: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
-    let supervised = answers(&socket);
+    let supervised = listening(&socket);
     let workers = if supervised {
         crate::agents::live().await?
     } else {
@@ -204,8 +202,7 @@ pub async fn stop(selector: &str, json: bool) -> Result<()> {
                 };
                 match mush_daemon::supervisor::request(&socket, &request).await? {
                     SupervisorReply::Done => {}
-                    SupervisorReply::Error(error) => return Err(eyre!("{error}")),
-                    other => return Err(eyre!("unexpected daemon reply: {other:?}")),
+                    other => return Err(reply_error(other)),
                 }
             } else {
                 mush_daemon::supervisor::stop_unsupervised(worker).await?;
@@ -232,7 +229,7 @@ fn archive(session_id: &str) -> Result<()> {
 
 pub async fn shutdown(force: bool, json: bool) -> Result<()> {
     let socket = mush_daemon::daemon_socket_path();
-    let stopped = if answers(&socket) {
+    let stopped = if listening(&socket) {
         let workers = crate::agents::live().await?;
         if !force && !confirm_shutdown(workers.len(), json)? {
             println!("left running");
@@ -240,8 +237,7 @@ pub async fn shutdown(force: bool, json: bool) -> Result<()> {
         }
         match mush_daemon::supervisor::request(&socket, &SupervisorRequest::Shutdown).await? {
             SupervisorReply::Done => workers,
-            SupervisorReply::Error(error) => return Err(eyre!("{error}")),
-            other => return Err(eyre!("unexpected daemon reply: {other:?}")),
+            other => return Err(reply_error(other)),
         }
     } else {
         shutdown_unsupervised(force, json).await?
@@ -285,11 +281,22 @@ fn confirm_shutdown(workers: usize, json: bool) -> Result<bool> {
             "{workers} agent(s) are running, pass --force to stop them"
         ));
     }
-    eprint!("stop {workers} running agent(s)? [y/N] ");
+    Ok(confirmed(format_args!("stop {workers} running agent(s)?"))?)
+}
+
+fn confirmed(question: std::fmt::Arguments<'_>) -> io::Result<bool> {
+    eprint!("{question} [y/N] ");
     std::io::Write::flush(&mut std::io::stderr())?;
     let mut answer = String::new();
     std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
+}
+
+pub(crate) fn reply_error(reply: SupervisorReply) -> color_eyre::Report {
+    match reply {
+        SupervisorReply::Error(error) => eyre!("{error}"),
+        other => eyre!("unexpected daemon reply: {other:?}"),
+    }
 }
 
 pub async fn send(session: &str, text: &str) -> Result<()> {
@@ -530,7 +537,7 @@ mod tests {
         let socket = dir.path().join("daemon.sock");
         let fake = fake_daemon(socket.clone(), mush_daemon::build_id(), Some(Vec::new()));
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Current);
-        assert!(answers(&socket));
+        assert!(listening(&socket));
         fake.abort();
     }
 
@@ -542,7 +549,7 @@ mod tests {
         let fake = fake_daemon(socket.clone(), "other".into(), Some(workers));
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Stopped);
         assert_eq!(fake.await.unwrap(), ["Shutdown"]);
-        assert!(!answers(&socket));
+        assert!(!listening(&socket));
     }
 
     #[tokio::test]
@@ -552,7 +559,7 @@ mod tests {
         let workers = vec![descriptor(true, false), descriptor(false, false)];
         let fake = fake_daemon(socket.clone(), "other".into(), Some(workers));
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(Some(1)));
-        assert!(answers(&socket));
+        assert!(listening(&socket));
         fake.abort();
     }
 
@@ -562,7 +569,7 @@ mod tests {
         let socket = dir.path().join("daemon.sock");
         let fake = fake_daemon(socket.clone(), "other".into(), None);
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(None));
-        assert!(answers(&socket));
+        assert!(listening(&socket));
         fake.abort();
     }
 

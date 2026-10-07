@@ -62,10 +62,6 @@ async fn answers(socket: &Path) -> bool {
     )
 }
 
-fn listening(socket: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(socket).is_ok()
-}
-
 fn descriptors() -> Vec<(PathBuf, WorkerDescriptor)> {
     let dir = mush_daemon::workers_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -122,7 +118,7 @@ pub async fn findings(fix: bool) -> Result<Vec<Finding>> {
                 fixed: false,
             }),
             _ => {
-                let live = listening(&socket);
+                let live = crate::daemon::listening(&socket);
                 let fixed = fix && !live && std::fs::remove_file(&socket).is_ok();
                 findings.push(Finding {
                     what: "daemon".into(),
@@ -196,7 +192,7 @@ pub async fn findings(fix: bool) -> Result<Vec<Finding>> {
         if !path.exists() {
             continue;
         }
-        if listening(&path) {
+        if crate::daemon::listening(&path) {
             findings.push(Finding {
                 what: format!("socket {}", path.display()),
                 health: Health::Unreachable,
@@ -262,8 +258,7 @@ pub fn report(findings: &[Finding]) -> String {
 }
 
 pub async fn doctor(fix: bool, json: bool) -> Result<()> {
-    let findings = findings(fix).await;
-    let findings = findings?;
+    let findings = findings(fix).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&findings)?);
         return Ok(());
@@ -305,7 +300,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("silent.sock");
         let _listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        assert!(listening(&socket));
+        assert!(crate::daemon::listening(&socket));
         assert!(!answers(&socket).await);
     }
 }

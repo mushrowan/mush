@@ -322,13 +322,12 @@ pub fn roster() -> mush_tui::AgentRoster {
 
 pub async fn live() -> Result<Vec<WorkerDescriptor>> {
     let socket = mush_daemon::daemon_socket_path();
-    if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    if !crate::daemon::listening(&socket) {
         return Ok(Vec::new());
     }
     match mush_daemon::supervisor::request(&socket, &SupervisorRequest::List).await? {
         SupervisorReply::Workers(workers) => Ok(workers),
-        SupervisorReply::Error(error) => Err(eyre!("{error}")),
-        other => Err(eyre!("unexpected daemon reply: {other:?}")),
+        other => Err(crate::daemon::reply_error(other)),
     }
 }
 
