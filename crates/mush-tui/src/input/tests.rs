@@ -1,4 +1,6 @@
+use super::pickers::apply_model_completions;
 use super::*;
+use crate::session_picker::SessionScope;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use mush_ai::types::{ThinkingLevel, TokenCount};
 use ratatui::layout::Rect;
