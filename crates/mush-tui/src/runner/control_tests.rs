@@ -210,7 +210,7 @@ async fn reviewer_control_turn_cannot_bypass_tool_confirmation() {
     enqueue(&control, "during-confirm");
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "during-confirm"), Outcome::Queued);
-    super::streams::answer_confirmation(&mut runtime.session, &mut state, false).await;
+    super::streams::answer_confirmation(&mut runtime.session, false).await;
     while let Some((pane, generation, event)) =
         runtime.session.in_process().runtime.turns.next().await
     {
@@ -939,7 +939,6 @@ async fn event_waits_for_tool_and_user_steering_then_runs_exactly_once() {
     enqueue(&control, "during-tool");
     super::streams::submit_streaming_input(
         &mut runtime.session,
-        &state,
         "ordinary steering".into(),
         vec![],
     )
@@ -1038,7 +1037,7 @@ async fn a_queued_event_starts_right_after_the_abort() {
     }
     tokio::select! { _ = entered.notified() => {}, _ = runtime.session.in_process().runtime.turns.next() => panic!() }
     enqueue(&control, "after-cancel");
-    super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
+    super::streams::abort_focused_stream(&mut runtime.session).await;
     assert!(!runtime.session.connection.state().turn_active);
     poll(&state, &mut runtime, &config).await.unwrap();
     assert_eq!(outcome(&control, "active"), Outcome::Cancelled);
@@ -1145,7 +1144,7 @@ async fn cancellation_drops_pending_provider_connection() {
             }
         }
     }
-    super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
+    super::streams::abort_focused_stream(&mut runtime.session).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while runtime
             .session
@@ -1219,7 +1218,7 @@ async fn one_shot_wake_dispatches_after_deadline_and_can_rearm() {
 #[tokio::test]
 async fn pending_user_inputs_and_session_switch_block_old_events() {
     let (mut runtime, mut config, control) = fixture();
-    let mut state = StreamState::new();
+    let state = StreamState::new();
     enqueue(&control, "old");
     runtime.session.in_process().runtime.pending_prompt =
         Some(crate::session::PendingPrompt::text("ordinary"));
@@ -1232,7 +1231,7 @@ async fn pending_user_inputs_and_session_switch_block_old_events() {
     assert_eq!(outcome(&control, "old"), Outcome::Unavailable);
     enqueue(&control, "cancel");
     poll(&state, &mut runtime, &config).await.unwrap();
-    super::streams::abort_focused_stream(&mut runtime.session, &mut state).await;
+    super::streams::abort_focused_stream(&mut runtime.session).await;
     assert_eq!(outcome(&control, "cancel"), Outcome::Cancelled);
 }
 

@@ -408,7 +408,7 @@ async fn handle_streaming_key_event(
             return Ok(LoopAction::Continue);
         }
         if let Some(allowed) = confirmation_answer(key.code) {
-            answer_confirmation(session, stream_state, allowed).await;
+            answer_confirmation(session, allowed).await;
             return Ok(LoopAction::Redraw);
         }
         return Ok(LoopAction::Continue);
@@ -428,14 +428,14 @@ async fn handle_streaming_key_event(
 
     match app_event {
         AppEvent::Abort => {
-            abort_focused_stream(session, stream_state).await;
+            abort_focused_stream(session).await;
         }
         AppEvent::UserSubmit { text, images } => {
-            submit_streaming_input(session, stream_state, text, images).await;
+            submit_streaming_input(session, text, images).await;
             record_model_use(session, deps.tui_config);
         }
         AppEvent::EditSteering => {
-            edit_last_queued_steering(session, stream_state).await;
+            edit_last_queued_steering(session).await;
         }
         AppEvent::SlashCommand { action } => {
             handle_slash_action(session, action, deps.slash_env()).await;

@@ -4,7 +4,6 @@ use mush_agent::AgentEvent;
 use mush_ai::types::{Model, Provider, TokenCount, ToolOutcome};
 
 use crate::session::Session;
-use mush_ai::types::PaneId;
 
 use super::TuiConfig;
 
@@ -133,11 +132,7 @@ pub(super) async fn answer_kernel_busy(
     );
 }
 
-pub(super) async fn answer_confirmation(
-    session: &mut Session,
-    _stream_state: &mut StreamState,
-    allowed: bool,
-) {
+pub(super) async fn answer_confirmation(session: &mut Session, allowed: bool) {
     let _ = session
         .connection
         .send(mush_runtime::ClientCommand::ConfirmTool { allow: allowed })
@@ -154,8 +149,8 @@ pub(super) async fn answer_confirmation(
     }
 }
 
-pub(super) async fn handle_turn_ended(
-    session: &mut Session,
+pub(super) fn handle_turn_ended(
+    session: &Session,
     stream_state: &mut StreamState,
     automatic_continuation: bool,
     cancelled: bool,
@@ -176,7 +171,6 @@ pub(super) async fn handle_turn_ended(
 
 pub(super) async fn handle_agent_event_side_effects(
     session: &mut Session,
-    pane_id: PaneId,
     event: &AgentEvent,
     tui_config: &TuiConfig,
 ) {
@@ -189,13 +183,12 @@ pub(super) async fn handle_agent_event_side_effects(
             .state()
             .turn_model
             .unwrap_or_else(|| tui_config.model.clone());
-        reconcile_openrouter_generation(session, pane_id, gen_id, &model, tui_config).await;
+        reconcile_openrouter_generation(session, gen_id, &model, tui_config).await;
     }
 }
 
 async fn reconcile_openrouter_generation(
     session: &mut Session,
-    _pane_id: PaneId,
     gen_id: String,
     model: &Model,
     tui_config: &TuiConfig,
@@ -229,7 +222,7 @@ async fn reconcile_openrouter_generation(
     );
 }
 
-pub(super) async fn abort_focused_stream(session: &mut Session, _stream_state: &mut StreamState) {
+pub(super) async fn abort_focused_stream(session: &mut Session) {
     let events = session
         .connection
         .send(mush_runtime::ClientCommand::AbortAndSendQueued)
@@ -292,7 +285,6 @@ fn show_cancelled_tools(pane: &mut Session, ids: &[mush_ai::types::ToolCallId]) 
 
 pub(super) async fn submit_streaming_input(
     session: &mut Session,
-    _stream_state: &StreamState,
     text: String,
     images: Vec<crate::input_buffer::PendingImage>,
 ) {
@@ -318,7 +310,7 @@ pub(super) async fn submit_streaming_input(
     }
 }
 
-pub(super) async fn edit_last_queued_steering(session: &mut Session, _stream_state: &StreamState) {
+pub(super) async fn edit_last_queued_steering(session: &mut Session) {
     let Some(queued_text) = session.app.pop_last_queued_message() else {
         session.app.status = Some("no queued messages to edit".into());
         return;
@@ -395,8 +387,8 @@ mod tests {
     use mush_ai::models;
     use mush_ai::registry::ApiRegistry;
     use mush_ai::types::{
-        Message, ModelId, StreamOptions, Timestamp, ToolCallId, UserContent, UserContentPart,
-        UserMessage,
+        Message, ModelId, PaneId, StreamOptions, Timestamp, ToolCallId, UserContent,
+        UserContentPart, UserMessage,
     };
     use std::collections::HashMap;
 
@@ -728,7 +720,6 @@ mod tests {
 
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
@@ -746,7 +737,6 @@ mod tests {
 
         submit_streaming_input(
             &mut session,
-            &stream_state,
             "look at this".into(),
             vec![PendingImage {
                 data: vec![1, 2, 3, 4],
@@ -784,7 +774,6 @@ mod tests {
     async fn submit_streaming_input_uses_text_only_when_no_images() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
@@ -800,7 +789,7 @@ mod tests {
             },
         );
 
-        submit_streaming_input(&mut session, &stream_state, "just words".into(), Vec::new()).await;
+        submit_streaming_input(&mut session, "just words".into(), Vec::new()).await;
 
         let queue = steering_queue.lock().await;
         let Message::User(user_msg) = &queue[0] else {
@@ -816,7 +805,6 @@ mod tests {
     async fn edit_last_queued_steering_replaces_queue_entry_not_duplicates() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let stream_state = StreamState::new();
         let (_confirm_req_tx, confirm_req_rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = Arc::new(Mutex::new(Vec::new()));
 
@@ -832,20 +820,14 @@ mod tests {
             },
         );
 
-        submit_streaming_input(
-            &mut session,
-            &stream_state,
-            "original message ".into(),
-            Vec::new(),
-        )
-        .await;
+        submit_streaming_input(&mut session, "original message ".into(), Vec::new()).await;
         assert_eq!(
             steering_queue.lock().await.len(),
             1,
             "first submit puts one entry in queue"
         );
 
-        edit_last_queued_steering(&mut session, &stream_state).await;
+        edit_last_queued_steering(&mut session).await;
         let queue_len_after_lift = steering_queue.lock().await.len();
         assert_eq!(
             queue_len_after_lift, 0,
@@ -860,7 +842,7 @@ mod tests {
         session.app.input.text = "edited message".into();
         session.app.input.cursor = "edited message".len();
         let edited = session.app.input.take_text();
-        submit_streaming_input(&mut session, &stream_state, edited, Vec::new()).await;
+        submit_streaming_input(&mut session, edited, Vec::new()).await;
 
         let queue = steering_queue.lock().await;
         assert_eq!(
@@ -1025,7 +1007,7 @@ mod tests {
             .unwrap();
 
         assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
-        answer_confirmation(&mut session, &mut stream_state, true).await;
+        answer_confirmation(&mut session, true).await;
 
         assert!(reply_rx.await.unwrap());
         let app = &session.app;
@@ -1077,7 +1059,7 @@ mod tests {
             .unwrap();
 
         assert!(poll_confirmation_prompt(&mut session, &mut stream_state).await);
-        answer_confirmation(&mut session, &mut stream_state, false).await;
+        answer_confirmation(&mut session, false).await;
 
         assert!(!reply_rx.await.unwrap());
         let app = &session.app;
@@ -1287,7 +1269,6 @@ mod tests {
     async fn abort_focused_stream_sends_queued_steers_as_one_new_turn() {
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = session.in_process().runtime.steering_queue.clone();
@@ -1304,20 +1285,8 @@ mod tests {
         );
         session.app.start_streaming();
 
-        submit_streaming_input(
-            &mut session,
-            &stream_state,
-            "first steer".into(),
-            Vec::new(),
-        )
-        .await;
-        submit_streaming_input(
-            &mut session,
-            &stream_state,
-            "second steer".into(),
-            Vec::new(),
-        )
-        .await;
+        submit_streaming_input(&mut session, "first steer".into(), Vec::new()).await;
+        submit_streaming_input(&mut session, "second steer".into(), Vec::new()).await;
 
         assert_eq!(
             session
@@ -1331,7 +1300,7 @@ mod tests {
         );
         assert_eq!(session.app.messages.iter().filter(|m| m.queued).count(), 2);
 
-        abort_focused_stream(&mut session, &mut stream_state).await;
+        abort_focused_stream(&mut session).await;
 
         assert!(
             session.app.input.text.is_empty(),
@@ -1380,7 +1349,6 @@ mod tests {
 
         let pane_id = PaneId::new(1);
         let mut session = Session::new(app());
-        let mut stream_state = StreamState::new();
 
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let steering_queue = session.in_process().runtime.steering_queue.clone();
@@ -1423,7 +1391,7 @@ mod tests {
         session.app.finish_streaming(None, None);
         session.app.start_tool(&tool_call_id, "read", "src/lib.rs");
 
-        abort_focused_stream(&mut session, &mut stream_state).await;
+        abort_focused_stream(&mut session).await;
 
         let ctx = session.in_process().runtime.conversation.context();
         let Some(Message::ToolResult(result)) = ctx.last() else {

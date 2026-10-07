@@ -220,22 +220,20 @@ pub(super) async fn dispatch_client_event(
     tui_config: &mut super::TuiConfig,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    let pane_id = mush_runtime::PRIMARY_PANE;
     match event {
         ClientEvent::Agent { event, applied, .. } => {
-            dispatch_agent_event(pane_id, event, applied, runtime, tui_config, image_picker).await;
+            dispatch_agent_event(event, applied, runtime, tui_config, image_picker).await;
         }
         ClientEvent::TurnEnded { cancelled } => {
             runtime.session.app.end_turn();
             let automatic_continuation =
                 runtime.pending_prompt.is_some() || runtime.session.connection.state().compacting;
             super::streams::handle_turn_ended(
-                &mut runtime.session,
+                &runtime.session,
                 stream_state,
                 automatic_continuation,
                 cancelled,
-            )
-            .await;
+            );
         }
         ClientEvent::ConfirmRequest {
             tool_call_id,
@@ -362,37 +360,27 @@ fn apply_command_event(
 }
 
 async fn dispatch_agent_event(
-    pane_id: mush_ai::types::PaneId,
     event: AgentEvent,
     applied: mush_runtime::Applied,
     runtime: &mut RunnerRuntime,
     tui_config: &mut super::TuiConfig,
     image_picker: &Option<ratatui_image::picker::Picker>,
 ) {
-    {
-        let pane = &mut runtime.session;
-        let state = pane.connection.state();
-        let model = state.turn_model.unwrap_or_else(|| tui_config.model.clone());
-        pane.app.last_request = state.last_request;
-        let (app, image_protos) = pane.fields_mut();
-        let mut ctx = event_handler::EventCtx { app, image_protos };
-        event_handler::handle_agent_event(
-            &mut ctx,
-            &event,
-            applied,
-            &model,
-            tui_config.debug_cache,
-            image_picker,
-        );
-    }
-
-    super::streams::handle_agent_event_side_effects(
-        &mut runtime.session,
-        pane_id,
+    let session = &mut runtime.session;
+    let state = session.connection.state();
+    let model = state.turn_model.unwrap_or_else(|| tui_config.model.clone());
+    session.app.last_request = state.last_request;
+    let (app, image_protos) = session.fields_mut();
+    event_handler::handle_agent_event(
+        &mut event_handler::EventCtx { app, image_protos },
         &event,
-        tui_config,
-    )
-    .await;
+        applied,
+        &model,
+        tui_config.debug_cache,
+        image_picker,
+    );
+
+    super::streams::handle_agent_event_side_effects(&mut runtime.session, &event, tui_config).await;
 
     if let AgentEvent::ToolExecEnd { tool_name, .. } = &event
         && tool_exec_may_touch_tty(tool_name.as_str())
