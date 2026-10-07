@@ -1,5 +1,5 @@
 use crate::path_utils::shorten_path;
-use crate::session_picker::{SessionPickerState, SessionScope, filtered_sessions};
+use crate::session_picker::{Liveness, SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{
     PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row, truncate_chars,
@@ -64,54 +64,22 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
     let visible = list_area.height as usize;
     let scroll = (picker.selected + 1).saturating_sub(visible);
 
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, meta) in sessions.iter().enumerate().skip(scroll).take(visible) {
-        let is_selected = i == picker.selected;
-        let title = meta.title.as_deref().unwrap_or("(untitled)");
-        let age = meta.updated_at.age_display();
-        let msgs = format!("{}msg", meta.message_count);
-
-        let (prefix, style) = selection_row(is_selected, theme);
-
-        let cwd_display = if show_cwd {
-            format!("{}  ", shorten_path(&meta.cwd))
-        } else {
-            String::new()
-        };
-        let live = picker.live.get(&meta.id).copied();
-        let live_label = live
-            .map(|live| format!("{}  ", live.label()))
-            .unwrap_or_default();
-        let meta_right = format!("{cwd_display}{msgs}  {age}");
-        let meta_width = live_label.len() + meta_right.len() + 1;
-
-        let max_title = (list_area.width as usize).saturating_sub(prefix.len() + meta_width);
-        let title_display = truncate_chars(title, max_title);
-
-        let padding = (list_area.width as usize)
-            .saturating_sub(
-                prefix.len() + title_display.len() + live_label.len() + meta_right.len(),
+    let mut lines: Vec<Line<'_>> = sessions
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(i, meta)| {
+            session_row(
+                meta,
+                i == picker.selected,
+                picker.live.get(&meta.id).copied(),
+                show_cwd,
+                list_area.width as usize,
+                theme,
             )
-            .max(1);
-        let live_style = match live {
-            Some(
-                crate::session_picker::Liveness::Stale | crate::session_picker::Liveness::Failed,
-            ) => theme.tool_error,
-            Some(crate::session_picker::Liveness::Working) => theme.selection_marker,
-            Some(
-                crate::session_picker::Liveness::Idle | crate::session_picker::Liveness::Paused,
-            )
-            | None => theme.dim,
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(title_display, style),
-            Span::raw(" ".repeat(padding)),
-            Span::styled(live_label, live_style),
-            Span::styled(meta_right, theme.dim),
-        ]));
-    }
+        })
+        .collect();
 
     if sessions.is_empty() {
         let msg = match picker.scope {
@@ -123,6 +91,52 @@ pub fn render(frame: &mut Frame, picker: &SessionPickerState, theme: &Theme) {
 
     let text = ratatui::text::Text::from(lines);
     frame.render_widget(text, list_area);
+}
+
+fn session_row(
+    meta: &mush_session::SessionMeta,
+    is_selected: bool,
+    live: Option<Liveness>,
+    show_cwd: bool,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let title = meta.title.as_deref().unwrap_or("(untitled)");
+    let age = meta.updated_at.age_display();
+    let msgs = format!("{}msg", meta.message_count);
+
+    let (prefix, style) = selection_row(is_selected, theme);
+
+    let cwd_display = if show_cwd {
+        format!("{}  ", shorten_path(&meta.cwd))
+    } else {
+        String::new()
+    };
+    let live_label = live
+        .map(|live| format!("{}  ", live.label()))
+        .unwrap_or_default();
+    let meta_right = format!("{cwd_display}{msgs}  {age}");
+    let meta_width = live_label.len() + meta_right.len() + 1;
+
+    let max_title = width.saturating_sub(prefix.len() + meta_width);
+    let title_display = truncate_chars(title, max_title);
+
+    let padding = width
+        .saturating_sub(prefix.len() + title_display.len() + live_label.len() + meta_right.len())
+        .max(1);
+    let live_style = match live {
+        Some(Liveness::Stale | Liveness::Failed) => theme.tool_error,
+        Some(Liveness::Working) => theme.selection_marker,
+        Some(Liveness::Idle | Liveness::Paused) | None => theme.dim,
+    };
+
+    Line::from(vec![
+        Span::styled(prefix, style),
+        Span::styled(title_display, style),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(live_label, live_style),
+        Span::styled(meta_right, theme.dim),
+    ])
 }
 
 #[cfg(test)]
