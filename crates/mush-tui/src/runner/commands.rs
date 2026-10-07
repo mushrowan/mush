@@ -228,7 +228,222 @@ pub(super) async fn handle_slash_action(
         tui_config,
         pending_prompt,
     } = env;
-    let mut state_changed = false;
+    if conversation_switch_blocked(session, tui_config, pending_prompt.is_some(), &action) {
+        session.app.status = Some("wait for the active turn before switching conversation".into());
+        return false;
+    }
+    match action {
+        SlashAction::Subagents { args } => {
+            super::subagents::command(&mut session.app, tui_config, &args).await;
+            false
+        }
+        SlashAction::Compact { focus } => {
+            send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Compact { focus, auto: false },
+            )
+            .await
+        }
+        SlashAction::Refine(request) => {
+            send_command(
+                session,
+                tui_config,
+                mush_runtime::ClientCommand::Refine(request),
+            )
+            .await;
+            false
+        }
+        SlashAction::Side { question } => {
+            slash::side_question::ask_side_question(&mut session.app, &question);
+            let _ = session
+                .connection
+                .send(mush_runtime::ClientCommand::SideQuestion(question))
+                .await;
+            false
+        }
+        SlashAction::SystemPrompt => {
+            let text = match session.connection.system_prompt().await {
+                Some(prompt) => format!(
+                    "system prompt ({} chars):\n\n{prompt}",
+                    prompt.chars().count()
+                ),
+                None => "no system prompt is set".to_string(),
+            };
+            session.app.push_system_message(text);
+            false
+        }
+        SlashAction::Autonomous(action) => {
+            let command = autonomous_command(action, &tui_config.autonomous)
+                .map(mush_runtime::ClientCommand::Autonomous);
+            if send_unless_status(session, tui_config, command).await {
+                session
+                    .app
+                    .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
+            }
+            false
+        }
+        SlashAction::Heartbeat(action) => {
+            let command = heartbeat_command(action).map(mush_runtime::ClientCommand::Schedule);
+            send_unless_status(session, tui_config, command).await;
+            session
+                .app
+                .push_system_message(format_heartbeat(session.app.heartbeat()));
+            false
+        }
+        SlashAction::Schedule(action) => {
+            let command = schedule_command(action).map(mush_runtime::ClientCommand::Schedule);
+            if send_unless_status(session, tui_config, command).await {
+                session
+                    .app
+                    .push_system_message(format_jobs(&session.app.jobs));
+            }
+            false
+        }
+        SlashAction::Goal(action) => {
+            if let Some(command) = goal_command(action) {
+                send_command(
+                    session,
+                    tui_config,
+                    mush_runtime::ClientCommand::Goal(command),
+                )
+                .await;
+            } else {
+                session
+                    .app
+                    .push_system_message(format_goal(session.app.goal.as_ref()));
+            }
+            false
+        }
+        SlashAction::Export { path } => {
+            slash::handle_export(
+                &mut session.app,
+                &session.connection.history().await,
+                path.as_deref().unwrap_or(""),
+            );
+            false
+        }
+        SlashAction::LoginComplete { code } => {
+            if complete_login(&mut session.app, code).await {
+                refresh_models(session, tui_config).await;
+            }
+            false
+        }
+        SlashAction::LoginApiKey { provider, key } => {
+            let message = match super::input::run_validation_and_save(&provider, key.expose()).await
+            {
+                super::input::SaveOutcome::Saved(toast) => toast,
+                super::input::SaveOutcome::Failed(reason) => {
+                    format!("{provider} login failed: {reason}")
+                }
+            };
+            session.app.push_system_message(message);
+            false
+        }
+        SlashAction::Login { provider, account } => {
+            slash::handle_login_start(&mut session.app, tui_config, provider.as_deref(), account)
+                .await;
+            false
+        }
+        SlashAction::Credits => {
+            handle_credits(session, tui_config).await;
+            false
+        }
+        SlashAction::Endpoints { model_id } => {
+            handle_endpoints(session, tui_config, model_id.as_deref()).await;
+            false
+        }
+        SlashAction::Mcp(query) => {
+            let report = mcp_report(tui_config.mcp.as_deref(), &query).await;
+            session.app.push_system_message(report);
+            false
+        }
+        SlashAction::New { name, prompt } => {
+            start_new_conversation(session, tui_config, pending_prompt, name, prompt).await;
+            true
+        }
+        SlashAction::Fork { index: Some(index) } => {
+            run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::Fork {
+                    before_user_message: index,
+                },
+            )
+            .await
+        }
+        SlashAction::Clone => {
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clone).await;
+            true
+        }
+        SlashAction::Clear => {
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clear).await;
+            false
+        }
+        SlashAction::Undo => {
+            run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await
+        }
+        SlashAction::NavigateTree { entry_id } => {
+            navigate_tree(session, tui_config, entry_id).await
+        }
+        SlashAction::Branch { index: Some(index) } => {
+            run_session_command(
+                session,
+                tui_config,
+                mush_runtime::SessionCommand::Branch {
+                    user_message: index,
+                },
+            )
+            .await
+        }
+        SlashAction::Name { title: Some(title) } => {
+            let title = crate::widgets::top_bar::sanitise_title(&title);
+            if title.is_empty() {
+                session.app.push_system_message("usage: /name <title>");
+            } else {
+                run_session_command(
+                    session,
+                    tui_config,
+                    mush_runtime::SessionCommand::Name { title: Some(title) },
+                )
+                .await;
+            }
+            false
+        }
+        SlashAction::Resume { session_id } => {
+            open_conversation(session, tui_config, WorkerTarget::Resume(session_id)).await
+        }
+        SlashAction::Reload => {
+            reload_context(session, tui_config).await;
+            false
+        }
+        SlashAction::RefreshModels => {
+            refresh_models(session, tui_config).await;
+            false
+        }
+        other_action => {
+            if let Some(prompt) = slash::handle(
+                &mut session.app,
+                session.connection.as_mut(),
+                tui_config,
+                &other_action,
+            )
+            .await
+            {
+                session.app.start_streaming();
+                *pending_prompt = Some(prompt);
+            }
+            false
+        }
+    }
+}
+
+fn conversation_switch_blocked(
+    session: &Session,
+    tui_config: &TuiConfig,
+    prompt_pending: bool,
+    action: &SlashAction,
+) -> bool {
     let switches_worker = tui_config.worker_opener.is_some()
         && matches!(action, SlashAction::New { .. } | SlashAction::Resume { .. });
     let changes_conversation = !switches_worker
@@ -243,361 +458,173 @@ pub(super) async fn handle_slash_action(
                 | SlashAction::Clone
         );
     let state = session.connection.state();
-    if changes_conversation
+    changes_conversation
         && state.controlled
         && (state.turn_active
             || session.app.stream.active
             || !session.app.active_tools.is_empty()
             || state.pending_prompt
-            || pending_prompt.is_some()
+            || prompt_pending
             || state.compacting)
+}
+
+async fn open_conversation(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    target: WorkerTarget,
+) -> bool {
+    match tui_config.worker_opener.clone() {
+        Some(opener) => switch_worker(session, tui_config, &opener, target).await,
+        None => {
+            let command = match target {
+                WorkerTarget::New => mush_runtime::SessionCommand::New,
+                WorkerTarget::Resume(id) => mush_runtime::SessionCommand::Resume { id },
+            };
+            run_session_command(session, tui_config, command).await
+        }
+    }
+}
+
+async fn start_new_conversation(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    pending_prompt: &mut Option<String>,
+    name: Option<String>,
+    prompt: Option<String>,
+) {
+    if !open_conversation(session, tui_config, WorkerTarget::New).await {
+        if let Some(prompt) = prompt {
+            session.app.input.text = prompt;
+            session.app.input.cursor = session.app.input.text.len();
+        }
+        return;
+    }
+    if let Some(title) = name
+        .map(|name| crate::widgets::top_bar::sanitise_title(&name))
+        .filter(|title| !title.is_empty())
     {
-        session.app.status = Some("wait for the active turn before switching conversation".into());
+        run_session_command(
+            session,
+            tui_config,
+            mush_runtime::SessionCommand::Name { title: Some(title) },
+        )
+        .await;
+    }
+    if let Some(prompt) = prompt {
+        session.app.push_user_message(prompt.clone());
+        session.app.start_streaming();
+        *pending_prompt = Some(prompt);
+    }
+}
+
+async fn navigate_tree(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    entry_id: mush_session::tree::EntryId,
+) -> bool {
+    let leaves_something_behind = session.connection.navigation_impact(&entry_id).await > 0;
+    if leaves_something_behind && !tui_config.branch_summary_skip_prompt {
+        session.app.interaction.branch_summary_ask = Some(entry_id);
+        session.app.interaction.mode = crate::app::AppMode::ToolConfirm;
         return false;
     }
-    match action {
-        SlashAction::Subagents { args } => {
-            super::subagents::command(&mut session.app, tui_config, &args).await;
-        }
-        SlashAction::Compact { focus } => {
-            state_changed = send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Compact { focus, auto: false },
-            )
-            .await;
-        }
-        SlashAction::Refine(request) => {
-            send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Refine(request),
-            )
-            .await;
-        }
-        SlashAction::Side { question } => {
-            slash::side_question::ask_side_question(&mut session.app, &question);
-            let _ = session
-                .connection
-                .send(mush_runtime::ClientCommand::SideQuestion(question))
-                .await;
-        }
-        SlashAction::SystemPrompt => {
-            let text = match session.connection.system_prompt().await {
-                Some(prompt) => format!(
-                    "system prompt ({} chars):\n\n{prompt}",
-                    prompt.chars().count()
-                ),
-                None => "no system prompt is set".to_string(),
-            };
-            session.app.push_system_message(text);
-        }
-        SlashAction::Autonomous(action) => {
-            let command = match action {
-                slash::AutonomousAction::Status => {
-                    session
-                        .app
-                        .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
-                    return false;
-                }
-                slash::AutonomousAction::On(overrides) => {
-                    let (limits, gates, subagent_keep_alive_ms) =
-                        overrides.resolve(&tui_config.autonomous);
-                    mush_runtime::AutonomousCommand::On {
-                        limits,
-                        gates,
-                        subagent_keep_alive_ms,
-                    }
-                }
-                slash::AutonomousAction::Off => mush_runtime::AutonomousCommand::Off,
-            };
-            if send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Autonomous(command),
-            )
-            .await
-            {
-                session
-                    .app
-                    .push_system_message(format_autonomous(session.app.autonomous.as_ref()));
-            }
-        }
-        SlashAction::Heartbeat(action) => {
-            let command = match action {
-                slash::HeartbeatAction::Status => {
-                    session
-                        .app
-                        .push_system_message(format_heartbeat(session.app.heartbeat()));
-                    return false;
-                }
-                slash::HeartbeatAction::Set {
-                    expression,
-                    prompt,
-                    follow_up,
-                } => mush_runtime::ScheduleCommand::Heartbeat {
-                    expression,
-                    prompt,
-                    delivery: if follow_up {
-                        mush_runtime::Delivery::FollowUp
-                    } else {
-                        mush_runtime::Delivery::Steer
-                    },
-                },
-                slash::HeartbeatAction::Pause => mush_runtime::ScheduleCommand::HeartbeatPause,
-                slash::HeartbeatAction::Resume => mush_runtime::ScheduleCommand::HeartbeatResume,
-                slash::HeartbeatAction::Clear => mush_runtime::ScheduleCommand::HeartbeatClear,
-            };
-            send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Schedule(command),
-            )
-            .await;
-            session
-                .app
-                .push_system_message(format_heartbeat(session.app.heartbeat()));
-        }
-        SlashAction::Schedule(action) => {
-            let command = match action {
-                slash::ScheduleAction::List => {
-                    session
-                        .app
-                        .push_system_message(format_jobs(&session.app.jobs));
-                    return false;
-                }
-                slash::ScheduleAction::Add {
-                    expression,
-                    prompt,
-                    label,
-                } => mush_runtime::ScheduleCommand::Add {
-                    expression,
-                    prompt,
-                    label,
-                    source: mush_runtime::JobSource::Schedule,
-                },
-                slash::ScheduleAction::Pause(id) => mush_runtime::ScheduleCommand::Pause(id),
-                slash::ScheduleAction::Resume(id) => mush_runtime::ScheduleCommand::Resume(id),
-                slash::ScheduleAction::Cancel(id) => mush_runtime::ScheduleCommand::Cancel(id),
-            };
-            if send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Schedule(command),
-            )
-            .await
-            {
-                session
-                    .app
-                    .push_system_message(format_jobs(&session.app.jobs));
-            }
-        }
-        SlashAction::Goal(action) => {
-            let command = match action {
-                slash::GoalAction::Status => {
-                    session
-                        .app
-                        .push_system_message(format_goal(session.app.goal.as_ref()));
-                    return false;
-                }
-                slash::GoalAction::Set {
-                    objective,
-                    token_budget,
-                } => mush_runtime::GoalCommand::Create {
-                    objective,
-                    token_budget,
-                },
-                slash::GoalAction::Pause => mush_runtime::GoalCommand::Pause,
-                slash::GoalAction::Resume => mush_runtime::GoalCommand::Resume,
-                slash::GoalAction::Clear => mush_runtime::GoalCommand::Clear,
-                slash::GoalAction::Complete => {
-                    mush_runtime::GoalCommand::Complete { summary: None }
-                }
-                slash::GoalAction::Fail { error } => mush_runtime::GoalCommand::Fail { error },
-            };
-            send_command(
-                session,
-                tui_config,
-                mush_runtime::ClientCommand::Goal(command),
-            )
-            .await;
-        }
-        SlashAction::Export { path } => {
-            slash::handle_export(
-                &mut session.app,
-                &session.connection.history().await,
-                path.as_deref().unwrap_or(""),
-            );
-        }
-        SlashAction::LoginComplete { code } => {
-            if complete_login(&mut session.app, code).await {
-                refresh_models(session, tui_config).await;
-            }
-        }
-        SlashAction::LoginApiKey { provider, key } => {
-            let message = match super::input::run_validation_and_save(&provider, key.expose()).await
-            {
-                super::input::SaveOutcome::Saved(toast) => toast,
-                super::input::SaveOutcome::Failed(reason) => {
-                    format!("{provider} login failed: {reason}")
-                }
-            };
-            session.app.push_system_message(message);
-        }
-        SlashAction::Login { provider, account } => {
-            slash::handle_login_start(
-                &mut session.app,
-                tui_config,
-                provider.as_deref(),
-                account.clone(),
-            )
-            .await;
-        }
-        SlashAction::Credits => {
-            handle_credits(session, tui_config).await;
-        }
-        SlashAction::Endpoints { model_id } => {
-            handle_endpoints(session, tui_config, model_id.as_deref()).await;
-        }
-        SlashAction::Mcp(query) => {
-            let report = mcp_report(tui_config.mcp.as_deref(), &query).await;
-            session.app.push_system_message(report);
-        }
-        SlashAction::New { name, prompt } => {
-            let created = match tui_config.worker_opener.clone() {
-                Some(opener) => {
-                    switch_worker(session, tui_config, &opener, WorkerTarget::New).await
-                }
-                None => {
-                    run_session_command(session, tui_config, mush_runtime::SessionCommand::New)
-                        .await
-                }
-            };
-            state_changed = true;
-            if !created {
-                if let Some(prompt) = prompt {
-                    session.app.input.text = prompt;
-                    session.app.input.cursor = session.app.input.text.len();
-                }
-                return state_changed;
-            }
-            if let Some(title) = name
-                .map(|name| crate::widgets::top_bar::sanitise_title(&name))
-                .filter(|title| !title.is_empty())
-            {
-                run_session_command(
-                    session,
-                    tui_config,
-                    mush_runtime::SessionCommand::Name { title: Some(title) },
-                )
-                .await;
-            }
-            if let Some(prompt) = prompt {
-                session.app.push_user_message(prompt.clone());
-                session.app.start_streaming();
-                *pending_prompt = Some(prompt);
-            }
-        }
-        SlashAction::Fork { index: Some(index) } => {
-            state_changed = run_session_command(
-                session,
-                tui_config,
-                mush_runtime::SessionCommand::Fork {
-                    before_user_message: index,
-                },
-            )
-            .await;
-        }
-        SlashAction::Clone => {
-            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clone).await;
-            state_changed = true;
-        }
-        SlashAction::Clear => {
-            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clear).await;
-        }
-        SlashAction::Undo => {
-            state_changed =
-                run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await;
-        }
-        SlashAction::NavigateTree { entry_id } => {
-            let leaves_something_behind = session.connection.navigation_impact(&entry_id).await > 0;
-            if leaves_something_behind && !tui_config.branch_summary_skip_prompt {
-                session.app.interaction.branch_summary_ask = Some(entry_id);
-                session.app.interaction.mode = crate::app::AppMode::ToolConfirm;
-            } else {
-                state_changed = run_session_command(
-                    session,
-                    tui_config,
-                    mush_runtime::SessionCommand::NavigateTree {
-                        entry_id,
-                        summary: None,
-                    },
-                )
-                .await;
-            }
-        }
-        SlashAction::Branch { index: Some(index) } => {
-            state_changed = run_session_command(
-                session,
-                tui_config,
-                mush_runtime::SessionCommand::Branch {
-                    user_message: index,
-                },
-            )
-            .await;
-        }
-        SlashAction::Name { title: Some(title) } => {
-            let title = crate::widgets::top_bar::sanitise_title(&title);
-            if title.is_empty() {
-                session.app.push_system_message("usage: /name <title>");
-            } else {
-                run_session_command(
-                    session,
-                    tui_config,
-                    mush_runtime::SessionCommand::Name { title: Some(title) },
-                )
-                .await;
-            }
-        }
-        SlashAction::Resume { session_id } => {
-            state_changed = match tui_config.worker_opener.clone() {
-                Some(opener) => {
-                    switch_worker(
-                        session,
-                        tui_config,
-                        &opener,
-                        WorkerTarget::Resume(session_id),
-                    )
-                    .await
-                }
-                None => {
-                    run_session_command(
-                        session,
-                        tui_config,
-                        mush_runtime::SessionCommand::Resume { id: session_id },
-                    )
-                    .await
-                }
-            };
-        }
-        SlashAction::Reload => reload_context(session, tui_config).await,
-        SlashAction::RefreshModels => refresh_models(session, tui_config).await,
-        other_action => {
-            if let Some(prompt) = slash::handle(
-                &mut session.app,
-                session.connection.as_mut(),
-                tui_config,
-                &other_action,
-            )
-            .await
-            {
-                session.app.start_streaming();
-                *pending_prompt = Some(prompt);
-            }
-        }
-    }
+    run_session_command(
+        session,
+        tui_config,
+        mush_runtime::SessionCommand::NavigateTree {
+            entry_id,
+            summary: None,
+        },
+    )
+    .await
+}
 
-    state_changed
+async fn send_unless_status(
+    session: &mut Session,
+    tui_config: &mut TuiConfig,
+    command: Option<mush_runtime::ClientCommand>,
+) -> bool {
+    match command {
+        Some(command) => send_command(session, tui_config, command).await,
+        None => true,
+    }
+}
+
+fn autonomous_command(
+    action: slash::AutonomousAction,
+    defaults: &mush_runtime::AutonomousDefaults,
+) -> Option<mush_runtime::AutonomousCommand> {
+    Some(match action {
+        slash::AutonomousAction::Status => return None,
+        slash::AutonomousAction::On(overrides) => {
+            let (limits, gates, subagent_keep_alive_ms) = overrides.resolve(defaults);
+            mush_runtime::AutonomousCommand::On {
+                limits,
+                gates,
+                subagent_keep_alive_ms,
+            }
+        }
+        slash::AutonomousAction::Off => mush_runtime::AutonomousCommand::Off,
+    })
+}
+
+fn heartbeat_command(action: slash::HeartbeatAction) -> Option<mush_runtime::ScheduleCommand> {
+    Some(match action {
+        slash::HeartbeatAction::Status => return None,
+        slash::HeartbeatAction::Set {
+            expression,
+            prompt,
+            follow_up,
+        } => mush_runtime::ScheduleCommand::Heartbeat {
+            expression,
+            prompt,
+            delivery: if follow_up {
+                mush_runtime::Delivery::FollowUp
+            } else {
+                mush_runtime::Delivery::Steer
+            },
+        },
+        slash::HeartbeatAction::Pause => mush_runtime::ScheduleCommand::HeartbeatPause,
+        slash::HeartbeatAction::Resume => mush_runtime::ScheduleCommand::HeartbeatResume,
+        slash::HeartbeatAction::Clear => mush_runtime::ScheduleCommand::HeartbeatClear,
+    })
+}
+
+fn schedule_command(action: slash::ScheduleAction) -> Option<mush_runtime::ScheduleCommand> {
+    Some(match action {
+        slash::ScheduleAction::List => return None,
+        slash::ScheduleAction::Add {
+            expression,
+            prompt,
+            label,
+        } => mush_runtime::ScheduleCommand::Add {
+            expression,
+            prompt,
+            label,
+            source: mush_runtime::JobSource::Schedule,
+        },
+        slash::ScheduleAction::Pause(id) => mush_runtime::ScheduleCommand::Pause(id),
+        slash::ScheduleAction::Resume(id) => mush_runtime::ScheduleCommand::Resume(id),
+        slash::ScheduleAction::Cancel(id) => mush_runtime::ScheduleCommand::Cancel(id),
+    })
+}
+
+fn goal_command(action: slash::GoalAction) -> Option<mush_runtime::GoalCommand> {
+    Some(match action {
+        slash::GoalAction::Status => return None,
+        slash::GoalAction::Set {
+            objective,
+            token_budget,
+        } => mush_runtime::GoalCommand::Create {
+            objective,
+            token_budget,
+        },
+        slash::GoalAction::Pause => mush_runtime::GoalCommand::Pause,
+        slash::GoalAction::Resume => mush_runtime::GoalCommand::Resume,
+        slash::GoalAction::Clear => mush_runtime::GoalCommand::Clear,
+        slash::GoalAction::Complete => mush_runtime::GoalCommand::Complete { summary: None },
+        slash::GoalAction::Fail { error } => mush_runtime::GoalCommand::Fail { error },
+    })
 }
 
 async fn reload_context(session: &mut Session, tui_config: &mut TuiConfig) {
