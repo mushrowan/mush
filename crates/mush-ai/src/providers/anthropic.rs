@@ -324,16 +324,8 @@ fn record_request_snapshot(
         &crate::http::header_pairs(headers),
     );
     let ttl_secs =
-        anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth).map_or(
-            0,
-            |cc| {
-                if cc.ttl.as_deref() == Some("1h") {
-                    3600
-                } else {
-                    300
-                }
-            },
-        );
+        anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth)
+            .map_or(0, |cc| cc.ttl_secs());
     crate::request_snapshot::record_request(
         session.unwrap_or(""),
         fp,
@@ -394,6 +386,16 @@ struct CacheControl {
     ttl: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<String>,
+}
+
+impl CacheControl {
+    fn ttl_secs(&self) -> u16 {
+        if self.ttl.as_deref() == Some("1h") {
+            3600
+        } else {
+            300
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -525,24 +527,26 @@ fn build_request_body(
         oauth_advisor_model(model, messages, tools, options, is_oauth),
     );
 
-    let thinking = match &options.thinking {
+    let (thinking, effective_max_tokens) = match &options.thinking {
         Some(level) if *level != ThinkingLevel::Off && model.reasoning => {
             if model.supports_adaptive_thinking && !options.force_budget_thinking {
-                Some(ThinkingConfig::Adaptive {
+                let adaptive = ThinkingConfig::Adaptive {
                     config_type: "adaptive".into(),
                     display: thinking_display(options, is_oauth).into(),
-                })
+                };
+                (Some(adaptive), max_tokens.get())
             } else {
-                let (_, budget) =
+                let (max_tokens, budget) =
                     budget_thinking_tokens(level, max_tokens.get(), model.max_output_tokens.get());
-                Some(ThinkingConfig::Enabled {
+                let enabled = ThinkingConfig::Enabled {
                     config_type: "enabled".into(),
                     budget_tokens: budget,
                     display: "summarized".into(),
-                })
+                };
+                (Some(enabled), max_tokens)
             }
         }
-        _ => None,
+        _ => (None, max_tokens.get()),
     };
     let output_config = if model.reasoning {
         super::requested_effort(options)
@@ -557,13 +561,6 @@ fn build_request_body(
         options.temperature.map(|t| t.value())
     } else {
         None
-    };
-
-    let effective_max_tokens = match (&options.thinking, &thinking) {
-        (Some(level), Some(ThinkingConfig::Enabled { .. })) => {
-            budget_thinking_tokens(level, max_tokens.get(), model.max_output_tokens.get()).0
-        }
-        _ => max_tokens.get(),
     };
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
@@ -926,12 +923,13 @@ fn budget_thinking_tokens(level: &ThinkingLevel, base: u64, model_max: u64) -> (
     } else {
         wanted.min(model_max)
     };
-    if max_tokens <= budget {
-        let budget = max_tokens
+    let budget = if max_tokens <= budget {
+        max_tokens
             .saturating_sub(MIN_THINKING_TOKENS)
-            .max(MIN_THINKING_TOKENS);
-        return (max_tokens, budget);
-    }
+            .max(MIN_THINKING_TOKENS)
+    } else {
+        budget
+    };
     (max_tokens, budget)
 }
 
