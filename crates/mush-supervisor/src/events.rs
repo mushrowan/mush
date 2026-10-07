@@ -1,5 +1,4 @@
 use std::fs;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use mush_supervisor::inbox::{
@@ -7,7 +6,7 @@ use mush_supervisor::inbox::{
 };
 use serde_json::{Value, json};
 
-use crate::{Manifest, Result, State, Worker, atomic, read_json};
+use crate::{Manifest, Result, State, Worker, atomic, private_subdirectory, read_json};
 
 pub fn initialise(manifest: &Manifest) -> Result<()> {
     if manifest.journalled() {
@@ -89,11 +88,7 @@ pub fn report_state(
     assignment: u32,
     round: u32,
 ) -> Result<String> {
-    let report = match read_private(&job.report, 2 * 1024 * 1024) {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
-        Err(_) => None,
-    };
-    let Some(report) = report else {
+    let Some(report) = worker_report(job) else {
         return Ok("working".into());
     };
     if report["run_id"] != run_id(manifest)?
@@ -119,19 +114,13 @@ pub fn save(
         value["assignment_id"] = json!(assignment);
         if let Some(reason) = reason {
             let reports = dir.join("event-reports");
-            if !reports.exists() {
-                fs::DirBuilder::new().mode(0o700).create(&reports)?;
-            }
-            private_directory(&reports)?;
+            private_subdirectory(&reports)?;
             let report_path = reports.join(format!("assignment-{assignment:04}.json"));
             if report_path.exists() {
-                let journal: Value =
-                    serde_json::from_slice(&read_private(&report_path, 3 * 1024 * 1024)?)?;
+                let journal = terminal_report(&report_path)?;
                 return atomic(&dir.join("state.json"), &journal["state"]);
             }
-            let report = read_private(&job.report, 2 * 1024 * 1024)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+            let report = worker_report(job);
             let review = job
                 .review_verdict
                 .as_ref()
@@ -184,7 +173,7 @@ pub fn replay(manifest: &Manifest) -> Result<()> {
             if std::time::Instant::now() >= deadline {
                 return Err("orchestrator replay budget exhausted, events remain queued".into());
             }
-            let value: Value = serde_json::from_slice(&read_private(&path, 3 * 1024 * 1024)?)?;
+            let value = terminal_report(&path)?;
             let event: Event = serde_json::from_value(value["state"]["terminal_event"].clone())?;
             if event.run_id != run_id(manifest)?
                 || event.worker_id != job.name
@@ -250,7 +239,7 @@ pub fn recover(manifest: &Manifest, job: &Worker) -> Result<()> {
         return Ok(());
     }
     if let Some(path) = reports(manifest, job)?.last() {
-        let value: Value = serde_json::from_slice(&read_private(path, 3 * 1024 * 1024)?)?;
+        let value = terminal_report(path)?;
         let state = &value["state"];
         if state["round"]
             .as_u64()
@@ -264,6 +253,18 @@ pub fn recover(manifest: &Manifest, job: &Worker) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn worker_report(job: &Worker) -> Option<Value> {
+    let bytes = read_private(&job.report, 2 * 1024 * 1024).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn terminal_report(path: &Path) -> Result<Value> {
+    Ok(serde_json::from_slice(&read_private(
+        path,
+        3 * 1024 * 1024,
+    )?)?)
 }
 
 pub fn has_terminal_event(path: &Path) -> bool {

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -259,6 +259,14 @@ fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+fn private_subdirectory(path: &Path) -> Result<()> {
+    if !path.exists() {
+        fs::DirBuilder::new().mode(0o700).create(path)?;
+    }
+    mush_supervisor::inbox::private_directory(path)?;
+    Ok(())
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     let file = OpenOptions::new()
         .read(true)
@@ -376,12 +384,7 @@ async fn worker(
     let data = dir.join("mush-data");
     fs::create_dir_all(&data)?;
     if manifest.admission.is_some() {
-        use std::os::unix::fs::DirBuilderExt;
-        let sessions = data.join("sessions");
-        if !sessions.exists() {
-            fs::DirBuilder::new().mode(0o700).create(&sessions)?;
-        }
-        mush_supervisor::inbox::private_directory(&sessions)?;
+        private_subdirectory(&data.join("sessions"))?;
     }
     if let Some(home) = std::env::var_os("HOME") {
         let discovery = PathBuf::from(home).join(".local/share/mush/discovered-models.json");
