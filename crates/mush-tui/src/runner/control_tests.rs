@@ -548,7 +548,9 @@ async fn control_pty_lifecycle_delivers_once() {
         .env("MUSH_DATA_DIR", dir.path().join("data"))
         .env("XDG_RUNTIME_DIR", dir.path())
         .env("MUSH_CONTROL_PTY_DIR", dir.path())
-        .current_dir(dir.path())
+        .current_dir(dir.path());
+    #[cfg(target_os = "linux")]
+    command
         .args([
             "--quiet",
             "--return",
@@ -558,7 +560,10 @@ async fn control_pty_lifecycle_delivers_once() {
             "--log-out",
         ])
         .arg(dir.path().join("tty.log"))
-        .arg("--")
+        .arg("--");
+    #[cfg(target_os = "macos")]
+    command.args(["-q", "-F"]).arg(dir.path().join("tty.log"));
+    command
         .arg(&binary)
         .args([
             "--exact",
