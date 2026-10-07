@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use mush_ai::registry::{ApiRegistry, LlmContext};
 use mush_ai::types::*;
 
+use crate::user_text::user_text;
+
 const DEFAULT_KEEP_RECENT: usize = 10;
 
 const CHARS_PER_TOKEN: usize = 4;
@@ -14,14 +16,12 @@ pub use mush_ai::types::COMPACTION_SUMMARY_PREFIX;
 pub const COMPACTION_OUTCOME_PREFIX: &str = "[compaction-outcome]";
 
 #[must_use]
-pub fn outcome_message(outcome: &str, reason: &str) -> mush_ai::types::Message {
-    mush_ai::types::Message::User(
-        mush_ai::types::UserMessage::builder()
-            .content(mush_ai::types::UserContent::Text(format!(
-                "{COMPACTION_OUTCOME_PREFIX}\n\nthe compaction you requested was {outcome}: {reason}"
-            )))
-            .timestamp_ms(mush_ai::types::Timestamp::now())
-            .build(),
+pub fn outcome_message(outcome: &str, reason: &str) -> Message {
+    user_text(
+        format!(
+            "{COMPACTION_OUTCOME_PREFIX}\n\nthe compaction you requested was {outcome}: {reason}"
+        ),
+        Timestamp::now(),
     )
 }
 
@@ -127,12 +127,7 @@ impl CompactionFailureReport {
     pub fn into_fallback_result(self) -> CompactionResult {
         let keep = self.keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
         if self.messages.len() <= keep {
-            return CompactionResult {
-                summarised_count: 0,
-                summary: String::new(),
-                messages: self.messages,
-                diagnostics: self.diagnostics,
-            };
+            return CompactionResult::unchanged(self.messages, self.diagnostics);
         }
 
         let split_at = self.messages.len() - keep;
@@ -145,6 +140,17 @@ impl CompactionFailureReport {
         let mut result = compact_with_summary(self.messages, &summary, self.keep_recent);
         result.diagnostics = self.diagnostics;
         result
+    }
+}
+
+impl CompactionResult {
+    fn unchanged(messages: Vec<Message>, diagnostics: CompactionDiagnostics) -> Self {
+        Self {
+            messages,
+            summarised_count: 0,
+            summary: String::new(),
+            diagnostics,
+        }
     }
 }
 
@@ -359,23 +365,8 @@ fn brief_transcript(messages: &[Message]) -> String {
                 parts.push(format!("[{i}] user: {text}"));
             }
             Message::Assistant(a) => {
-                let text: String = a
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let tools: Vec<&str> = a
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantContentPart::ToolCall(tc) => Some(tc.name.as_str()),
-                        _ => None,
-                    })
-                    .collect();
+                let text = assistant_text(a).unwrap_or_default();
+                let tools = assistant_tool_names(a);
                 let tool_str = if tools.is_empty() {
                     String::new()
                 } else {
@@ -385,16 +376,7 @@ fn brief_transcript(messages: &[Message]) -> String {
                 parts.push(format!("[{i}] assistant: {truncated}{tool_str}"));
             }
             Message::ToolResult(tr) => {
-                let text: String = tr
-                    .content
-                    .iter()
-                    .filter_map(|p| match p {
-                        ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let truncated = truncate_with_ellipsis(&text, 100);
+                let truncated = truncate_with_ellipsis(&tool_result_text(tr), 100);
                 let status = if tr.outcome.is_error() {
                     " (error)"
                 } else {
@@ -440,12 +422,7 @@ pub fn compact_with_summary(
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
 
     if messages.len() <= keep {
-        return CompactionResult {
-            summarised_count: 0,
-            summary: String::new(),
-            messages,
-            diagnostics: CompactionDiagnostics::default(),
-        };
+        return CompactionResult::unchanged(messages, CompactionDiagnostics::default());
     }
 
     let split_at = messages.len() - keep;
@@ -454,15 +431,8 @@ pub fn compact_with_summary(
         .position(|m| !matches!(m, Message::ToolResult(_)))
         .map(|offset| split_at + offset);
     let Some(split_at) = split_at else {
-        return CompactionResult {
-            summarised_count: 0,
-            summary: String::new(),
-            messages,
-            diagnostics: CompactionDiagnostics::default(),
-        };
+        return CompactionResult::unchanged(messages, CompactionDiagnostics::default());
     };
-    let kept = messages[split_at..].to_vec();
-
     let summary_msg = if messages[..split_at]
         .iter()
         .any(|m| matches!(m, Message::Event(_)))
@@ -473,17 +443,11 @@ pub fn compact_with_summary(
             &messages[..split_at],
         ))
     } else {
-        Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(mush_ai::types::compaction_summary_text(
-                    summary,
-                )))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )
+        user_text(compaction_summary_text(summary), Timestamp::now())
     };
-    let mut result = vec![summary_msg];
-    result.extend(kept);
+    let mut result = Vec::with_capacity(messages.len() - split_at + 1);
+    result.push(summary_msg);
+    result.extend(messages.into_iter().skip(split_at));
 
     CompactionResult {
         summarised_count: split_at,
@@ -655,22 +619,6 @@ pub fn needs_compaction_for_messages(
     )
 }
 
-pub fn needs_compaction_for_estimated_payload(
-    context_tokens: TokenCount,
-    baseline_estimated_tokens: TokenCount,
-    current_estimated_tokens: TokenCount,
-    context_window: TokenCount,
-    message_count: usize,
-    settings: &CompactionSettings,
-) -> bool {
-    let effective_tokens = compaction_tokens_for_estimated_payload(
-        context_tokens,
-        baseline_estimated_tokens,
-        current_estimated_tokens,
-    );
-    needs_compaction_at(effective_tokens, context_window, message_count, settings)
-}
-
 pub fn compaction_tokens_for_estimated_payload(
     context_tokens: TokenCount,
     baseline_estimated_tokens: TokenCount,
@@ -769,27 +717,17 @@ pub async fn try_llm_compact(
     settings: &CompactionSettings,
 ) -> Result<CompactionResult, CompactionFailureReport> {
     let keep = keep_recent.unwrap_or(DEFAULT_KEEP_RECENT);
-
-    if messages.len() <= keep {
-        return Ok(CompactionResult {
-            summarised_count: 0,
-            summary: String::new(),
-            messages,
-            diagnostics: CompactionDiagnostics {
-                model_id: model.id.to_string(),
-                ..CompactionDiagnostics::default()
-            },
-        });
-    }
-
-    let split_at = messages.len() - keep;
-
-    let compact_options = compaction_stream_options(options, live.is_some(), settings);
-    let mut old_start = 0;
     let mut diagnostics = CompactionDiagnostics {
         model_id: model.id.to_string(),
         ..CompactionDiagnostics::default()
     };
+    if messages.len() <= keep {
+        return Ok(CompactionResult::unchanged(messages, diagnostics));
+    }
+
+    let split_at = messages.len() - keep;
+    let compact_options = compaction_stream_options(options, live.is_some(), settings);
+    let mut old_start = 0;
     let summary = loop {
         let old_slice = &messages[..split_at][old_start..];
         let context = compaction_context(old_slice, &messages[split_at..], &focus, live);
@@ -890,14 +828,12 @@ fn branch_summary_context(abandoned: &[Message], budget_tokens: usize) -> Option
     let input = input.get(start..).filter(|input| !input.is_empty())?;
     Some(LlmContext {
         system_prompt: Some(COMPACTION_PROMPT.to_string()),
-        messages: vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(format!(
-                    "<conversation>\n{}\n</conversation>\n\n{BRANCH_SUMMARY_INSTRUCTIONS}",
-                    serialize_conversation(input)
-                )))
-                .timestamp_ms(Timestamp::now())
-                .build(),
+        messages: vec![user_text(
+            format!(
+                "<conversation>\n{}\n</conversation>\n\n{BRANCH_SUMMARY_INSTRUCTIONS}",
+                serialize_conversation(input)
+            ),
+            Timestamp::now(),
         )],
         tools: vec![],
     })
@@ -1041,14 +977,9 @@ fn compaction_context(
             .chain(recent_messages)
             .cloned()
             .collect();
-        messages.push(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(checkpoint_instruction(
-                    recent_messages.len(),
-                    focus,
-                )))
-                .timestamp_ms(Timestamp::now())
-                .build(),
+        messages.push(user_text(
+            checkpoint_instruction(recent_messages.len(), focus),
+            Timestamp::now(),
         ));
         return LlmContext {
             system_prompt: live.system_prompt.clone(),
@@ -1060,16 +991,9 @@ fn compaction_context(
         &summariser_input(old_messages),
         &summariser_input(recent_messages),
     );
-    let system_prompt = compaction_system_prompt(focus);
-
     LlmContext {
-        system_prompt: Some(system_prompt),
-        messages: vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(request_body))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )],
+        system_prompt: Some(compaction_system_prompt(focus)),
+        messages: vec![user_text(request_body, Timestamp::now())],
         tools: vec![],
     }
 }
@@ -1120,40 +1044,34 @@ fn fallback_summary_from_reason(
     );
 
     if dropped_messages > 0 {
-        out.push_str(&format!(
-            "\nThe LLM compaction request also had to drop the oldest {dropped_messages} messages before falling back.\n"
-        ));
+        let _ = writeln!(
+            out,
+            "\nThe LLM compaction request also had to drop the oldest {dropped_messages} messages before falling back."
+        );
     }
 
-    let prior_summaries = fallback_prior_summaries(old_messages);
-    if !prior_summaries.is_empty() {
-        out.push_str("\n## Prior summaries\n\n");
-        for summary in prior_summaries {
-            out.push_str(&format!("- {}\n", truncate_with_ellipsis(&summary, 500)));
+    let sections = [
+        ("Prior summaries", fallback_prior_summaries(old_messages)),
+        (
+            "Recent user requests",
+            fallback_recent_user_requests(old_messages, recent_messages, 8),
+        ),
+        (
+            "Recent assistant notes",
+            fallback_recent_assistant_notes(old_messages, 8),
+        ),
+        (
+            "Tool and file activity",
+            fallback_recent_tool_activity(old_messages, recent_messages, 12),
+        ),
+    ];
+    for (heading, items) in sections {
+        if items.is_empty() {
+            continue;
         }
-    }
-
-    let user_requests = fallback_recent_user_requests(old_messages, recent_messages, 8);
-    if !user_requests.is_empty() {
-        out.push_str("\n## Recent user requests\n\n");
-        for request in user_requests {
-            out.push_str(&format!("- {request}\n"));
-        }
-    }
-
-    let assistant_notes = fallback_recent_assistant_notes(old_messages, 8);
-    if !assistant_notes.is_empty() {
-        out.push_str("\n## Recent assistant notes\n\n");
-        for note in assistant_notes {
-            out.push_str(&format!("- {note}\n"));
-        }
-    }
-
-    let tool_activity = fallback_recent_tool_activity(old_messages, recent_messages, 12);
-    if !tool_activity.is_empty() {
-        out.push_str("\n## Tool and file activity\n\n");
-        for activity in tool_activity {
-            out.push_str(&format!("- {activity}\n"));
+        let _ = write!(out, "\n## {heading}\n\n");
+        for item in items {
+            let _ = writeln!(out, "- {item}");
         }
     }
 
@@ -1174,10 +1092,10 @@ fn fallback_prior_summaries(messages: &[Message]) -> Vec<String> {
         .filter_map(|message| match message {
             Message::User(user) => {
                 let text = user.text();
-                mush_ai::types::strip_compaction_summary_prefix(&text)
+                strip_compaction_summary_prefix(&text)
                     .map(str::trim)
                     .filter(|summary| !summary.is_empty())
-                    .map(str::to_string)
+                    .map(|summary| truncate_with_ellipsis(summary, 500))
             }
             _ => None,
         })
@@ -1189,43 +1107,36 @@ fn fallback_recent_user_requests(
     recent_messages: &[Message],
     limit: usize,
 ) -> Vec<String> {
-    old_messages
-        .iter()
-        .chain(recent_messages.iter())
-        .rev()
-        .filter_map(|message| match message {
-            Message::User(user) => {
-                let text = user.text();
-                if mush_ai::types::strip_compaction_summary_prefix(&text).is_some() {
-                    None
-                } else {
-                    Some(truncate_with_ellipsis(&text, 240))
+    newest_in_order(
+        old_messages
+            .iter()
+            .chain(recent_messages.iter())
+            .rev()
+            .filter_map(|message| match message {
+                Message::User(user) => {
+                    let text = user.text();
+                    if mush_ai::types::strip_compaction_summary_prefix(&text).is_some() {
+                        None
+                    } else {
+                        Some(truncate_with_ellipsis(&text, 240))
+                    }
                 }
-            }
-            _ => None,
-        })
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+                _ => None,
+            }),
+        limit,
+    )
 }
 
 fn fallback_recent_assistant_notes(messages: &[Message], limit: usize) -> Vec<String> {
-    messages
-        .iter()
-        .rev()
-        .filter_map(|message| match message {
+    newest_in_order(
+        messages.iter().rev().filter_map(|message| match message {
             Message::Assistant(assistant) => assistant_text(assistant)
                 .filter(|text| !text.trim().is_empty())
                 .map(|text| truncate_with_ellipsis(&text, 240)),
             _ => None,
-        })
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+        }),
+        limit,
+    )
 }
 
 fn fallback_recent_tool_activity(
@@ -1233,36 +1144,40 @@ fn fallback_recent_tool_activity(
     recent_messages: &[Message],
     limit: usize,
 ) -> Vec<String> {
-    old_messages
-        .iter()
-        .chain(recent_messages.iter())
-        .rev()
-        .filter_map(|message| match message {
-            Message::Assistant(assistant) => {
-                let tools = assistant_tool_names(assistant);
-                (!tools.is_empty())
-                    .then(|| format!("assistant requested tools: {}", tools.join(", ")))
-            }
-            Message::ToolResult(result) => {
-                let status = if result.outcome.is_error() {
-                    "error"
-                } else {
-                    "ok"
-                };
-                let text = tool_result_text(result);
-                Some(format!(
-                    "{} result ({status}): {}",
-                    result.tool_name,
-                    truncate_with_ellipsis(&text, 180)
-                ))
-            }
-            Message::User(_) | Message::Event(_) => None,
-        })
-        .take(limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
+    newest_in_order(
+        old_messages
+            .iter()
+            .chain(recent_messages.iter())
+            .rev()
+            .filter_map(|message| match message {
+                Message::Assistant(assistant) => {
+                    let tools = assistant_tool_names(assistant);
+                    (!tools.is_empty())
+                        .then(|| format!("assistant requested tools: {}", tools.join(", ")))
+                }
+                Message::ToolResult(result) => {
+                    let status = if result.outcome.is_error() {
+                        "error"
+                    } else {
+                        "ok"
+                    };
+                    let text = tool_result_text(result);
+                    Some(format!(
+                        "{} result ({status}): {}",
+                        result.tool_name,
+                        truncate_with_ellipsis(&text, 180)
+                    ))
+                }
+                Message::User(_) | Message::Event(_) => None,
+            }),
+        limit,
+    )
+}
+
+fn newest_in_order(newest_first: impl Iterator<Item = String>, limit: usize) -> Vec<String> {
+    let mut items: Vec<String> = newest_first.take(limit).collect();
+    items.reverse();
+    items
 }
 
 fn assistant_text(assistant: &AssistantMessage) -> Option<String> {
@@ -1921,10 +1836,12 @@ mod tests {
         let before_new_payload = TokenCount::new(estimate_tokens(&messages[..20]) as u64);
         let after_new_payload = TokenCount::new(estimate_tokens(&messages) as u64);
 
-        assert!(needs_compaction_for_estimated_payload(
-            previous_api_tokens,
-            before_new_payload,
-            after_new_payload,
+        assert!(needs_compaction_at(
+            compaction_tokens_for_estimated_payload(
+                previous_api_tokens,
+                before_new_payload,
+                after_new_payload,
+            ),
             context_window,
             messages.len(),
             &CompactionSettings::default(),
