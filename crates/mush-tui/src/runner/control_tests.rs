@@ -658,6 +658,16 @@ async fn control_pty_lifecycle_delivers_once() {
     })
     .await
     .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !std::fs::read_to_string(dir.path().join("tty.log"))
+            .unwrap()
+            .contains("non-human event")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     child
         .stdin
         .as_mut()
