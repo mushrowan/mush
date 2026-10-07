@@ -771,8 +771,8 @@ fn format_result(
     let duration_secs = tenths_of_seconds(duration);
     let status = command_status(exit_code, timed_out);
 
-    if json_output {
-        let json = serde_json::json!({
+    let body = if json_output {
+        serde_json::json!({
             "stdout": &stdout,
             "stderr": &stderr,
             "exit_code": exit_code,
@@ -783,40 +783,28 @@ fn format_result(
             "stderr_lines": stderr.lines().count(),
             "stdout_bytes": stdout.len(),
             "stderr_bytes": stderr.len(),
-        });
-        if exit_code != 0 || timed_out {
-            ToolResult::error(json.to_string())
-        } else {
-            ToolResult::text(json.to_string())
-        }
+        })
+        .to_string()
     } else {
-        let mut output = String::new();
-
-        if !stdout.is_empty() {
-            output.push_str(&stdout);
-        }
-
-        if !stderr.is_empty() {
-            if !output.is_empty() {
-                output.push('\n');
-            }
-            output.push_str(&stderr);
-        }
-
-        if output.is_empty() {
-            output = "(no output)".into();
-        }
-
-        let preamble = format!(
-            "Exit code: {exit_code}\nStatus: {}\nDuration: {duration_secs}s\n\n",
-            status.as_str()
-        );
-
-        if exit_code != 0 || timed_out {
-            ToolResult::error(format!("{preamble}{output}"))
+        let streams: Vec<&str> = [stdout.as_str(), stderr.as_str()]
+            .into_iter()
+            .filter(|stream| !stream.is_empty())
+            .collect();
+        let output = if streams.is_empty() {
+            "(no output)".to_string()
         } else {
-            ToolResult::text(format!("{preamble}{output}"))
-        }
+            streams.join("\n")
+        };
+        format!(
+            "Exit code: {exit_code}\nStatus: {}\nDuration: {duration_secs}s\n\n{output}",
+            status.as_str()
+        )
+    };
+
+    if exit_code != 0 || timed_out {
+        ToolResult::error(body)
+    } else {
+        ToolResult::text(body)
     }
 }
 
