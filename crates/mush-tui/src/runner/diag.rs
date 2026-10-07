@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -99,46 +100,30 @@ impl TerminalStateDump {
     }
 
     pub fn render(&self) -> String {
-        let mut s = String::new();
-        s.push_str("# mush terminal-state dump\n");
-        s.push_str(&format!("timestamp: {}\n", self.timestamp));
-        s.push_str(&format!("pid: {}\n", self.pid));
-        s.push_str(&format!(
-            "tty: {}\n",
-            self.tty.as_deref().unwrap_or("unknown")
-        ));
-        s.push_str(&format!(
-            "term: {}\n",
-            self.term.as_deref().unwrap_or("unset")
-        ));
-        s.push_str(&format!(
-            "term_program: {}\n",
-            self.term_program.as_deref().unwrap_or("unset")
-        ));
-        s.push_str(&format!(
-            "raw_mode_still_enabled: {}\n",
-            self.raw_mode_still_enabled
-        ));
+        let mut s = String::from("# mush terminal-state dump\n");
+        push_identity(
+            &mut s,
+            &self.timestamp,
+            self.pid,
+            self.tty.as_deref(),
+            self.term.as_deref(),
+            self.term_program.as_deref(),
+        );
+        let _ = writeln!(s, "raw_mode_still_enabled: {}", self.raw_mode_still_enabled);
         match self.actual_termios {
             Some(t) => {
-                s.push_str(&format!(
-                    "actual_termios: icanon={} echo={} isig={} looks_raw={}\n",
+                let _ = writeln!(
+                    s,
+                    "actual_termios: icanon={} echo={} isig={} looks_raw={}",
                     t.icanon,
                     t.echo,
                     t.isig,
                     t.looks_raw()
-                ));
+                );
             }
-            None => {
-                s.push_str("actual_termios: unavailable\n");
-            }
+            None => s.push_str("actual_termios: unavailable\n"),
         }
-        if !self.notes.is_empty() {
-            s.push_str("\nnotes:\n");
-            for note in &self.notes {
-                s.push_str(&format!("- {note}\n"));
-            }
-        }
+        push_notes(&mut s, &self.notes);
         s.push_str(
             "\nrestore sequence attempted:\n\
              - PopKeyboardEnhancementFlags (\\e[<u)\n\
@@ -167,67 +152,75 @@ impl TerminalStartupDump {
     }
 
     pub fn render(&self) -> String {
-        let mut s = String::new();
-        s.push_str("# mush terminal-startup dump\n");
-        s.push_str(&format!("timestamp: {}\n", self.timestamp));
-        s.push_str(&format!("pid: {}\n", self.pid));
-        s.push_str(&format!(
-            "tty: {}\n",
-            self.tty.as_deref().unwrap_or("unknown")
-        ));
-        s.push_str(&format!(
-            "term: {}\n",
-            self.term.as_deref().unwrap_or("unset")
-        ));
-        s.push_str(&format!(
-            "term_program: {}\n",
-            self.term_program.as_deref().unwrap_or("unset")
-        ));
+        let mut s = String::from("# mush terminal-startup dump\n");
+        push_identity(
+            &mut s,
+            &self.timestamp,
+            self.pid,
+            self.tty.as_deref(),
+            self.term.as_deref(),
+            self.term_program.as_deref(),
+        );
         s.push_str("\nstartup phases:\n");
         for phase in &self.phases {
-            match &phase.size {
+            let _ = match &phase.size {
                 Ok(Some((width, height))) => {
-                    s.push_str(&format!("- {}: size={}x{}\n", phase.name, width, height));
+                    writeln!(s, "- {}: size={}x{}", phase.name, width, height)
                 }
-                Ok(None) => {
-                    s.push_str(&format!("- {}: size=not checked\n", phase.name));
-                }
-                Err(error) => {
-                    s.push_str(&format!("- {}: size_error={}\n", phase.name, error));
-                }
-            }
+                Ok(None) => writeln!(s, "- {}: size=not checked", phase.name),
+                Err(error) => writeln!(s, "- {}: size_error={}", phase.name, error),
+            };
         }
-        if !self.notes.is_empty() {
-            s.push_str("\nnotes:\n");
-            for note in &self.notes {
-                s.push_str(&format!("- {note}\n"));
-            }
-        }
+        push_notes(&mut s, &self.notes);
         s
     }
 }
 
 impl StallSnapshot {
     pub fn render(&self) -> String {
-        let mut s = String::new();
-        s.push_str("# mush tui stall dump\n");
-        s.push_str(&format!("timestamp: {}\n", current_timestamp()));
-        s.push_str(&format!("pid: {}\n", std::process::id()));
-        s.push_str(&format!("phase: {}\n", self.phase));
-        s.push_str(&format!("detail: {}\n", self.detail));
-        s.push_str(&format!("loop_iteration: {}\n", self.loop_iteration));
-        s.push_str(&format!("draw_count: {}\n", self.draw_count));
-        s.push_str(&format!("elapsed_ms: {}\n", self.elapsed.as_millis()));
-        s.push_str(&format!("active_streams: {}\n", self.active_streams));
+        let mut s = String::from("# mush tui stall dump\n");
+        let _ = writeln!(s, "timestamp: {}", current_timestamp());
+        let _ = writeln!(s, "pid: {}", std::process::id());
+        let _ = writeln!(s, "phase: {}", self.phase);
+        let _ = writeln!(s, "detail: {}", self.detail);
+        let _ = writeln!(s, "loop_iteration: {}", self.loop_iteration);
+        let _ = writeln!(s, "draw_count: {}", self.draw_count);
+        let _ = writeln!(s, "elapsed_ms: {}", self.elapsed.as_millis());
+        let _ = writeln!(s, "active_streams: {}", self.active_streams);
         s.push_str("active_tools:\n");
         if self.active_tools.is_empty() {
             s.push_str("- none\n");
         } else {
             for tool in &self.active_tools {
-                s.push_str(&format!("- {tool}\n"));
+                let _ = writeln!(s, "- {tool}");
             }
         }
         s
+    }
+}
+
+fn push_identity(
+    s: &mut String,
+    timestamp: &str,
+    pid: u32,
+    tty: Option<&str>,
+    term: Option<&str>,
+    term_program: Option<&str>,
+) {
+    let _ = writeln!(s, "timestamp: {timestamp}");
+    let _ = writeln!(s, "pid: {pid}");
+    let _ = writeln!(s, "tty: {}", tty.unwrap_or("unknown"));
+    let _ = writeln!(s, "term: {}", term.unwrap_or("unset"));
+    let _ = writeln!(s, "term_program: {}", term_program.unwrap_or("unset"));
+}
+
+fn push_notes(s: &mut String, notes: &[String]) {
+    if notes.is_empty() {
+        return;
+    }
+    s.push_str("\nnotes:\n");
+    for note in notes {
+        let _ = writeln!(s, "- {note}");
     }
 }
 
@@ -318,31 +311,32 @@ pub(super) fn write_terminal_state_dump(
     dir: &Path,
     dump: &TerminalStateDump,
 ) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
-    let path = dir.join(format!("mush-term-{}-{}.txt", dump.timestamp, dump.pid));
-    write_owner_only(&path, dump.render().as_bytes())?;
-    Ok(path)
+    let name = format!("mush-term-{}-{}.txt", dump.timestamp, dump.pid);
+    write_dump(dir, &name, &dump.render())
 }
 
 pub(super) fn write_terminal_startup_dump(
     dir: &Path,
     dump: &TerminalStartupDump,
 ) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
-    let path = dir.join(format!("mush-startup-{}-{}.txt", dump.timestamp, dump.pid));
-    write_owner_only(&path, dump.render().as_bytes())?;
-    Ok(path)
+    let name = format!("mush-startup-{}-{}.txt", dump.timestamp, dump.pid);
+    write_dump(dir, &name, &dump.render())
 }
 
 pub(super) fn write_stall_dump(dir: &Path, dump: &StallSnapshot) -> io::Result<PathBuf> {
-    fs::create_dir_all(dir)?;
-    let path = dir.join(format!(
+    let name = format!(
         "mush-stall-{}-{}-{}.txt",
         current_timestamp(),
         std::process::id(),
         dump.loop_iteration
-    ));
-    write_owner_only(&path, dump.render().as_bytes())?;
+    );
+    write_dump(dir, &name, &dump.render())
+}
+
+fn write_dump(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(name);
+    write_owner_only(&path, contents.as_bytes())?;
     Ok(path)
 }
 
