@@ -1,16 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use grep_regex::RegexMatcherBuilder;
-use ignore::WalkBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::{clean_regex_pattern, inject_note, resolve_path, truncate_lines};
-
-const MAX_IGNORED_SUMMARIES: usize = 20;
-const MAX_IGNORED_SUMMARY_MATCHES: usize = 500;
+use crate::util::{clean_regex_pattern, inject_note, resolve_path};
+use crate::walk::{self, PathMatch};
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -107,11 +103,10 @@ impl AgentTool for FindTool {
             args.type_filter,
             args.include_ignored,
         )
-        .await
     }
 }
 
-async fn run_find(
+fn run_find(
     cwd: &Path,
     pattern: &str,
     search_path: &Path,
@@ -119,7 +114,7 @@ async fn run_find(
     include_ignored: bool,
 ) -> ToolResult {
     let cleaned = clean_regex_pattern(pattern);
-    let result = run_find_inner(
+    let result = find_cleaned(
         cwd,
         &cleaned.pattern,
         search_path,
@@ -129,7 +124,7 @@ async fn run_find(
     inject_note(result, cleaned.note)
 }
 
-fn run_find_inner(
+fn find_cleaned(
     cwd: &Path,
     pattern: &str,
     search_path: &Path,
@@ -150,48 +145,7 @@ fn run_find_inner(
 
     let visible = collect_matches(cwd, search_path, type_filter, &matcher, false);
     let all = collect_matches(cwd, search_path, type_filter, &matcher, true);
-    let visible_paths: BTreeSet<PathBuf> = visible.iter().map(|entry| entry.path.clone()).collect();
-
-    let mut lines: Vec<String> = visible.into_iter().map(|entry| entry.display).collect();
-    let ignored: Vec<FindMatch> = all
-        .into_iter()
-        .filter(|entry| !visible_paths.contains(&entry.path))
-        .collect();
-
-    if include_ignored {
-        lines.extend(
-            ignored
-                .into_iter()
-                .map(|entry| format!("* {}", entry.display)),
-        );
-        return ToolResult::text(format_lines_with_ignored_note(&lines, "files", true));
-    }
-
-    ToolResult::text(format_lines_with_ignored_summary(
-        &lines,
-        &summarise_ignored(search_path, &ignored_for_summary(&ignored)),
-        "files",
-    ))
-}
-
-#[derive(Debug, Clone)]
-struct FindMatch {
-    path: PathBuf,
-    display: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FindMatchForSummary {
-    pub(crate) path: PathBuf,
-}
-
-fn ignored_for_summary(ignored: &[FindMatch]) -> Vec<FindMatchForSummary> {
-    ignored
-        .iter()
-        .map(|entry| FindMatchForSummary {
-            path: entry.path.clone(),
-        })
-        .collect()
+    ToolResult::text(walk::render(search_path, visible, all, include_ignored))
 }
 
 fn collect_matches(
@@ -200,21 +154,10 @@ fn collect_matches(
     type_filter: Option<FindType>,
     matcher: &grep_regex::RegexMatcher,
     include_ignored: bool,
-) -> Vec<FindMatch> {
-    let mut builder = WalkBuilder::new(search_path);
-    builder
-        .hidden(!include_ignored)
-        .ignore(!include_ignored)
-        .git_ignore(!include_ignored)
-        .git_exclude(!include_ignored)
-        .git_global(!include_ignored)
-        .parents(true)
-        .require_git(false);
-
+) -> Vec<PathMatch> {
     let mut matches = Vec::new();
-    for entry in builder.build().filter_map(Result::ok) {
-        let file_type = entry.file_type();
-        if !matches_type(file_type, type_filter) {
+    for entry in walk::walk(search_path, include_ignored).filter_map(Result::ok) {
+        if !matches_type(entry.file_type(), type_filter) {
             continue;
         }
 
@@ -225,11 +168,7 @@ fn collect_matches(
             continue;
         }
 
-        let path = entry.path().to_path_buf();
-        matches.push(FindMatch {
-            display: display_path(cwd, search_path, &path),
-            path,
-        });
+        matches.push(PathMatch::new(cwd, search_path, entry.into_path()));
     }
     matches.sort_by(|left, right| left.display.cmp(&right.display));
     matches
@@ -243,109 +182,12 @@ fn matches_type(file_type: Option<std::fs::FileType>, type_filter: Option<FindTy
     }
 }
 
-fn display_path(cwd: &Path, search_path: &Path, path: &Path) -> String {
-    path.strip_prefix(search_path)
-        .ok()
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .or_else(|| path.strip_prefix(cwd).ok())
-        .unwrap_or(path)
-        .display()
-        .to_string()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IgnoredSummary {
-    base: String,
-    count: usize,
-}
-
-pub(crate) fn summarise_ignored(
-    search_path: &Path,
-    ignored: &[FindMatchForSummary],
-) -> Vec<IgnoredSummary> {
-    let mut counts = BTreeMap::<String, usize>::new();
-    for entry in ignored.iter().take(MAX_IGNORED_SUMMARY_MATCHES) {
-        let base = ignored_base(search_path, &entry.path);
-        *counts.entry(base).or_default() += 1;
-    }
-
-    counts
-        .into_iter()
-        .take(MAX_IGNORED_SUMMARIES)
-        .map(|(base, count)| IgnoredSummary { base, count })
-        .collect()
-}
-
-fn ignored_base(search_path: &Path, path: &Path) -> String {
-    let relative = path.strip_prefix(search_path).unwrap_or(path);
-    let mut components = relative.components();
-    let first = components
-        .next()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    if path.is_dir() || components.next().is_some() {
-        format!("{first}/")
-    } else {
-        first
-    }
-}
-
-pub(crate) fn format_lines_with_ignored_summary(
-    lines: &[String],
-    summaries: &[IgnoredSummary],
-    noun: &str,
-) -> String {
-    let mut output = if lines.is_empty() {
-        if summaries.is_empty() {
-            format!("no {noun} found")
-        } else {
-            format!("no visible {noun} found")
-        }
-    } else {
-        truncate_owned_lines(lines, noun)
-    };
-
-    if !summaries.is_empty() {
-        output.push_str("\n\nignored matches omitted:");
-        for summary in summaries {
-            let plural = if summary.count == 1 {
-                "match"
-            } else {
-                "matches"
-            };
-            output.push_str(&format!("\n* {} {} {plural}", summary.base, summary.count));
-        }
-        output.push_str(
-            "\n\nIgnored matches are prefixed with *. Use include_ignored: true to show ignored matches.",
-        );
-    }
-
-    output
-}
-
-pub(crate) fn format_lines_with_ignored_note(
-    lines: &[String],
-    noun: &str,
-    include_ignored: bool,
-) -> String {
-    let mut output = truncate_owned_lines(lines, noun);
-    if include_ignored && lines.iter().any(|line| line.starts_with("* ")) {
-        output.push_str("\n\nIgnored matches are prefixed with *.");
-    }
-    output
-}
-
-fn truncate_owned_lines(lines: &[String], noun: &str) -> String {
-    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
-    truncate_lines(&borrowed, noun)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn find_files_by_extension() {
+    #[test]
+    fn find_files_by_extension() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn x() {}\n").unwrap();
@@ -357,21 +199,20 @@ mod tests {
             dir.path(),
             Some(FindType::File),
             false,
-        )
-        .await;
+        );
         let text = crate::util::extract_text(&result);
         assert!(text.contains("main.rs"));
         assert!(text.contains("lib.rs"));
         assert!(!text.contains("notes.txt"));
     }
 
-    #[tokio::test]
-    async fn find_substring_pattern_matches_filename() {
+    #[test]
+    fn find_substring_pattern_matches_filename() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("zx.py"), "").unwrap();
         std::fs::write(dir.path().join("normal.txt"), "").unwrap();
 
-        let result = run_find(dir.path(), "zx", dir.path(), None, false).await;
+        let result = run_find(dir.path(), "zx", dir.path(), None, false);
         let text = crate::util::extract_text(&result);
         assert!(
             text.contains("zx.py"),
@@ -380,12 +221,12 @@ mod tests {
         assert!(!text.contains("normal.txt"));
     }
 
-    #[tokio::test]
-    async fn find_strips_trailing_unmatched_quote_and_notes_it() {
+    #[test]
+    fn find_strips_trailing_unmatched_quote_and_notes_it() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("mise.toml"), "").unwrap();
 
-        let result = run_find(dir.path(), "mise\"", dir.path(), None, false).await;
+        let result = run_find(dir.path(), "mise\"", dir.path(), None, false);
         let text = crate::util::extract_text(&result);
         assert!(
             text.contains("mise.toml"),
@@ -397,20 +238,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn find_no_results() {
+    #[test]
+    fn find_no_results() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
 
-        let result = run_find(dir.path(), r".*\.py$", dir.path(), None, false).await;
+        let result = run_find(dir.path(), r".*\.py$", dir.path(), None, false);
         let text = crate::util::extract_text(&result);
         assert_eq!(text, "no files found");
     }
 
-    #[tokio::test]
-    async fn find_invalid_regex_returns_error_not_silent() {
+    #[test]
+    fn find_invalid_regex_returns_error_not_silent() {
         let dir = tempfile::TempDir::new().unwrap();
-        let result = run_find(dir.path(), "[", dir.path(), None, false).await;
+        let result = run_find(dir.path(), "[", dir.path(), None, false);
         assert!(
             result.outcome.is_error(),
             "invalid regex must produce a tool error",
@@ -422,19 +263,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn find_nonexistent_search_path_returns_error() {
+    #[test]
+    fn find_nonexistent_search_path_returns_error() {
         let cwd = tempfile::TempDir::new().unwrap();
         let bogus = cwd.path().join("does-not-exist");
-        let result = run_find(cwd.path(), "anything", &bogus, None, false).await;
+        let result = run_find(cwd.path(), "anything", &bogus, None, false);
         assert!(
             result.outcome.is_error(),
             "nonexistent path must produce a tool error",
         );
     }
 
-    #[tokio::test]
-    async fn find_summarises_ignored_matches_by_default() {
+    #[test]
+    fn find_summarises_ignored_matches_by_default() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
         std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
@@ -446,8 +287,7 @@ mod tests {
             dir.path(),
             Some(FindType::File),
             false,
-        )
-        .await;
+        );
         let text = crate::util::extract_text(&result);
 
         assert!(text.contains("no visible files found"), "got: {text}");
@@ -457,8 +297,8 @@ mod tests {
         assert!(!text.contains("target/debug/generated.rs"), "got: {text}");
     }
 
-    #[tokio::test]
-    async fn find_include_ignored_marks_ignored_matches() {
+    #[test]
+    fn find_include_ignored_marks_ignored_matches() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
         std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
@@ -470,8 +310,7 @@ mod tests {
             dir.path(),
             Some(FindType::File),
             true,
-        )
-        .await;
+        );
         let text = crate::util::extract_text(&result);
 
         assert!(text.contains("* target/debug/generated.rs"), "got: {text}");

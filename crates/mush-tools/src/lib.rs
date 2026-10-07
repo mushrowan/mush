@@ -22,6 +22,7 @@ pub mod redaction_guard;
 pub mod repo_map;
 pub mod skills;
 pub mod util;
+mod walk;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write;
