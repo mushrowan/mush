@@ -106,26 +106,18 @@ impl SessionRuntime {
     async fn dispatch(&mut self, command: SessionCommand) -> Vec<SessionEvent> {
         match command {
             SessionCommand::New => {
-                self.save_now();
-                self.snapshot_kernel(&self.session_id.clone()).await;
+                self.leave_session().await;
                 if let Some(kernel) = &self.kernel_state {
                     kernel.reset().await;
                 }
-                let id = SessionId::new();
-                let lease = self.next_lease(&id);
                 self.restore_rlm_max_depth(None);
                 self.set_accounts(mush_ai::types::SessionAccounts::default());
-                self.replace_session(id, ConversationState::new(), None, lease);
-                let mut events = self.session_changed_events();
-                events.push(SessionEvent::TranscriptReplaced {
-                    reason: Replaced::New,
-                    messages: Vec::new(),
-                    editor_text: None,
-                });
-                events.push(SessionEvent::Status(
+                self.enter_fresh_session(ConversationState::new());
+                self.fresh_session_events(
+                    Replaced::New,
+                    None,
                     "new session started (previous session saved)".into(),
-                ));
-                events
+                )
             }
             SessionCommand::Resume { id } => {
                 let store = SessionStore::new(SessionStore::default_dir());
@@ -148,9 +140,7 @@ impl SessionRuntime {
                 if lease.is_some() && !loaded.meta.lifecycle.is_live() {
                     let _ = store.set_lifecycle(&id, mush_session::Lifecycle::Live);
                 }
-                self.save_now();
-                let previous = self.session_id.clone();
-                self.snapshot_kernel(&previous).await;
+                self.leave_session().await;
                 if let Some(kernel) = &self.kernel_state {
                     kernel.reset().await;
                 }
@@ -167,11 +157,7 @@ impl SessionRuntime {
                 events.push(SessionEvent::SystemPromptChanged(
                     self.system_prompt.clone(),
                 ));
-                events.push(SessionEvent::TranscriptReplaced {
-                    reason: Replaced::Resumed,
-                    messages: self.conversation.context(),
-                    editor_text: None,
-                });
+                events.push(self.transcript_replaced(Replaced::Resumed, None));
                 events.push(SessionEvent::Status(format!(
                     "resumed: {}",
                     title.as_deref().unwrap_or("untitled")
@@ -198,39 +184,23 @@ impl SessionRuntime {
                         "that message is no longer in the conversation",
                     ))];
                 };
-                self.save_now();
-                self.snapshot_kernel(&self.session_id.clone()).await;
-                let id = SessionId::new();
-                let lease = self.next_lease(&id);
-                self.replace_session(id, forked, None, lease);
-                let mut events = self.session_changed_events();
-                events.push(SessionEvent::TranscriptReplaced {
-                    reason: Replaced::Forked,
-                    messages: self.conversation.context(),
-                    editor_text: Some(prompt),
-                });
-                events.push(SessionEvent::Status(format!(
-                    "forked before message {before_user_message}"
-                )));
-                events
+                self.leave_session().await;
+                self.enter_fresh_session(forked);
+                self.fresh_session_events(
+                    Replaced::Forked,
+                    Some(prompt),
+                    format!("forked before message {before_user_message}"),
+                )
             }
             SessionCommand::Clone => {
                 let branch = self.conversation.cloned_branch();
-                self.save_now();
-                self.snapshot_kernel(&self.session_id.clone()).await;
-                let id = SessionId::new();
-                let lease = self.next_lease(&id);
-                self.replace_session(id, branch, None, lease);
-                let mut events = self.session_changed_events();
-                events.push(SessionEvent::TranscriptReplaced {
-                    reason: Replaced::Cloned,
-                    messages: self.conversation.context(),
-                    editor_text: None,
-                });
-                events.push(SessionEvent::Status(
+                self.leave_session().await;
+                self.enter_fresh_session(branch);
+                self.fresh_session_events(
+                    Replaced::Cloned,
+                    None,
                     "cloned the current branch into a new session".into(),
-                ));
-                events
+                )
             }
             SessionCommand::Branch { user_message } => {
                 let user_messages = self.conversation.user_messages_in_branch();
@@ -244,18 +214,9 @@ impl SessionRuntime {
                         "invalid: use 1-{count} (try /tree to see messages)"
                     ))];
                 };
-                match parent {
-                    Some(parent) => {
-                        self.conversation.branch(&parent);
-                    }
-                    None => self.conversation.reset_leaf(),
-                }
+                self.move_leaf_to(parent);
                 vec![
-                    SessionEvent::TranscriptReplaced {
-                        reason: Replaced::Branched,
-                        messages: self.conversation.context(),
-                        editor_text: None,
-                    },
+                    self.transcript_replaced(Replaced::Branched, None),
                     SessionEvent::Status(format!("branched before: {preview}")),
                 ]
             }
@@ -276,18 +237,9 @@ impl SessionRuntime {
                 match undone {
                     None => vec![SessionEvent::Failed("nothing to undo".into())],
                     Some((parent, status)) => {
-                        match parent {
-                            Some(parent) => {
-                                self.conversation.branch(&parent);
-                            }
-                            None => self.conversation.reset_leaf(),
-                        }
+                        self.move_leaf_to(parent);
                         vec![
-                            SessionEvent::TranscriptReplaced {
-                                reason: Replaced::Undone,
-                                messages: self.conversation.context(),
-                                editor_text: None,
-                            },
+                            self.transcript_replaced(Replaced::Undone, None),
                             SessionEvent::Status(status.into()),
                         ]
                     }
@@ -440,6 +392,46 @@ impl SessionRuntime {
         self.attach_kernel_session();
     }
 
+    async fn leave_session(&self) {
+        self.save_now();
+        self.snapshot_kernel(&self.session_id).await;
+    }
+
+    fn enter_fresh_session(&mut self, conversation: ConversationState) {
+        let id = SessionId::new();
+        let lease = self.next_lease(&id);
+        self.replace_session(id, conversation, None, lease);
+    }
+
+    fn fresh_session_events(
+        &self,
+        reason: Replaced,
+        editor_text: Option<String>,
+        status: String,
+    ) -> Vec<SessionEvent> {
+        let mut events = self.session_changed_events();
+        events.push(self.transcript_replaced(reason, editor_text));
+        events.push(SessionEvent::Status(status));
+        events
+    }
+
+    fn transcript_replaced(&self, reason: Replaced, editor_text: Option<String>) -> SessionEvent {
+        SessionEvent::TranscriptReplaced {
+            reason,
+            messages: self.conversation.context(),
+            editor_text,
+        }
+    }
+
+    fn move_leaf_to(&mut self, parent: Option<mush_session::tree::EntryId>) {
+        match parent {
+            Some(parent) => {
+                self.conversation.branch(&parent);
+            }
+            None => self.conversation.reset_leaf(),
+        }
+    }
+
     fn session_changed_events(&self) -> Vec<SessionEvent> {
         vec![
             SessionEvent::SessionIdChanged(self.session_id.clone()),
@@ -468,32 +460,27 @@ impl SessionRuntime {
         };
         let new_leaf = navigation_leaf(tree, target);
         self.harness_digest_pending = true;
-        let status = match (new_leaf, summary) {
-            (Some(leaf), Some(summary)) => {
-                self.conversation.branch_with_summary(&leaf, summary);
+        let status = match summary {
+            Some(summary) => {
+                match new_leaf {
+                    Some(leaf) => {
+                        self.conversation.branch_with_summary(&leaf, summary);
+                    }
+                    None => {
+                        self.conversation.reset_leaf_with_summary(summary);
+                    }
+                }
                 format!("branched before: {preview}, with a summary of the branch left behind")
             }
-            (Some(leaf), None) => {
-                self.conversation.branch(&leaf);
-                format!("branched before: {preview}")
-            }
-            (None, Some(summary)) => {
-                self.conversation.reset_leaf_with_summary(summary);
-                format!("branched before: {preview}, with a summary of the branch left behind")
-            }
-            (None, None) => {
-                self.conversation.reset_leaf();
+            None => {
+                self.move_leaf_to(new_leaf);
                 format!("branched before: {preview}")
             }
         };
         self.adopt_branch_thinking_level()
             .into_iter()
             .chain([
-                SessionEvent::TranscriptReplaced {
-                    reason: Replaced::Branched,
-                    messages: self.conversation.context(),
-                    editor_text,
-                },
+                self.transcript_replaced(Replaced::Branched, editor_text),
                 SessionEvent::Status(status),
             ])
             .collect()
