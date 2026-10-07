@@ -273,6 +273,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "the supervisor reads processes and boot id from /proc"
+    )]
     fn independent_runs_share_capacity_and_unresolved_claims() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

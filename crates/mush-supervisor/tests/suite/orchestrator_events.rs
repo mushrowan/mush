@@ -208,6 +208,10 @@ async fn repeat_done_is_an_automatic_continuation() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 async fn terminal_reasons_do_not_report_failed_work_as_completed() {
     for (script, reason) in [
         ("report blocked", TerminalReason::Blocked),

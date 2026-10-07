@@ -131,6 +131,10 @@ async fn stop_interrupts_rate_limit_backoff() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 async fn restarting_preserves_previous_stall() {
     let fixture = Fixture::new("sleep 300 &\necho $! >child\nwait", 6);
     let mut manifest: Value =

@@ -205,6 +205,10 @@ printf '{"state":"done","run_id":"%s","worker_id":"producer","assignment_id":%s,
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn independent_actions_and_duplicate_replay() {
     for resume in [false, true] {
         for parent in [false, true] {
@@ -297,6 +301,10 @@ fn drift_stop_and_capacity() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn parent_unavailable_reconnect_and_changed_verdict() {
     let fixture = Fixture::new(true, true, "rejected");
     let detached = fixture.root.path().join("detached");
@@ -423,6 +431,10 @@ fn malformed_stale_partial_and_ambiguous_claim_refuse() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn late_verdict_capacity_release_and_default_manual() {
     let fixture = Fixture::new(true, false, "rejected");
     let source = fixture
@@ -480,6 +492,10 @@ fn unsafe_paths_and_duplicate_keys() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn concurrent_router_and_manual_follow_up_cannot_duplicate() {
     let fixture = Fixture::new_worker(true, false, "rejected", "sleep 1");
     let mut first = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
@@ -532,6 +548,10 @@ fn concurrent_router_and_manual_follow_up_cannot_duplicate() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn crash_after_spawn_preserves_claim_and_refuses_relaunch() {
     let fixture = Fixture::new_worker(
         true,
@@ -609,6 +629,10 @@ fn crash_after_spawn_preserves_claim_and_refuses_relaunch() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn stop_before_spawn_and_enable_are_observable() {
     let fixture = Fixture::new(true, true, "rejected");
     fixture.ok(&["review-disable", fixture.route.to_str().unwrap()]);
@@ -698,6 +722,10 @@ fn registered_configuration_is_immutable() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn independent_reviewer_run_captures_verdict_before_late_routing() {
     let fixture = Fixture::new(true, true, "rejected");
     let root = fixture.root.path();
@@ -757,6 +785,10 @@ printf '{"version":1,"task":"parser-task","assignment":"task-review","generation
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn schema_examples_are_executable() {
     let fixture = Fixture::new(true, true, "rejected");
     fixture.route();
@@ -838,6 +870,10 @@ fn bound_regression_evidence_is_captured_and_worker_paths_cannot_redirect_it() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn disabling_an_active_correction_cancels_without_retry() {
     let fixture = Fixture::new_worker(
         true,
@@ -985,6 +1021,10 @@ printf '{"version":1,"task":"parser-task","assignment":"task-review","generation
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn task_continuation_reuses_original_reviewer_after_process_restart() {
     let fixture = Fixture::new_worker(true, true, "rejected", "sleep 0.1");
     fixture.reviewer_history();
@@ -1437,6 +1477,10 @@ fn unrelated_task_can_establish_a_separate_pair_in_shared_registry() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn running_owner_discovers_prepared_successor_without_another_wake() {
     let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
     fixture.reviewer_history();
@@ -1523,6 +1567,10 @@ fn stopped_generation_and_candidate_mismatch_cannot_advance() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn reviewer_launch_crash_keeps_original_session_and_never_replays() {
     let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
     fixture.reviewer_history();
@@ -1630,6 +1678,10 @@ fn partial_capture_cannot_deliver_an_unbound_verdict() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn surviving_correction_retains_workspace_lock_after_router_crash() {
     let fixture = Fixture::new_worker(
         true,
@@ -1749,6 +1801,10 @@ fn surviving_correction_retains_workspace_lock_after_router_crash() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn prepared_real_jj_workspace_resumes_without_revision_mutation() {
     let mut fixture = Fixture::new(true, false, "rejected");
     fs::remove_file(fixture.root.path().join("bin/jj")).unwrap();
@@ -1848,6 +1904,10 @@ fn disable_is_durable_while_launch_transaction_is_owned() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn late_run_identity_drift_is_rejected_at_final_launch() {
     let fixture = Fixture::new(true, false, "rejected");
     fs::write(fixture.root.path().join("bin/jj"),format!("#!/bin/sh\nset -eu\ncase \"$*\" in *'conflicts() & @'*) exit 0;; esac\nprintf '%s' '{{\"run_id\":\"replacement-run\"}}' >'{}'\nprintf '%s' '{}'\n",fixture.run.join("event-run.json").display(),"1".repeat(40))).unwrap();
@@ -1863,6 +1923,10 @@ fn late_run_identity_drift_is_rejected_at_final_launch() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn parent_status_transitions_are_bounded_durable_and_ack_independent() {
     let fixture = Fixture::new(true, true, "rejected");
     let policy = fixture.root.path().join("pool/policy.json");
@@ -1966,6 +2030,10 @@ fn unreceipted_or_truncated_capture_never_delivers_parent_details() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn disable_during_final_validation_prevents_spawn() {
     let fixture = Fixture::new(true, false, "rejected");
     let marker = fixture.root.path().join("validating");
@@ -1997,6 +2065,10 @@ fn disable_during_final_validation_prevents_spawn() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn completed_action_reaches_parent_after_acknowledged_history_fills() {
     let fixture = Fixture::new(true, true, "rejected");
     let policy = fixture.root.path().join("pool/policy.json");
@@ -2047,6 +2119,10 @@ fn completed_action_reaches_parent_after_acknowledged_history_fills() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn full_unacknowledged_history_retains_completion_until_space_is_acknowledged() {
     let fixture = Fixture::new(true, true, "rejected");
     let report = fixture.cwd.join("report.json");
@@ -2128,6 +2204,10 @@ fn full_unacknowledged_history_retains_completion_until_space_is_acknowledged() 
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn acknowledged_compaction_keeps_sequence_across_multiple_restarts() {
     let fixture = Fixture::new(true, true, "rejected");
     let report = fixture.cwd.join("report.json");
@@ -2215,6 +2295,10 @@ fn another_tasks_verdict_cannot_launch_or_reach_parent() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn full_outbox_replays_after_parent_returns_with_completed_correction() {
     let fixture = Fixture::new(true, true, "rejected");
     let detached = fixture.root.path().join("detached-parent");
@@ -2362,6 +2446,10 @@ fn router_killed_after_outbox_write_replays_the_same_parent_event() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn retained_outbox_replays_when_latest_action_cannot_be_persisted() {
     let fixture = Fixture::new(true, true, "rejected");
     let detached = fixture.root.path().join("detached-parent");
@@ -2414,6 +2502,10 @@ fn retained_outbox_replays_when_latest_action_cannot_be_persisted() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the supervisor reads processes and boot id from /proc"
+)]
 fn failed_compaction_preserves_pending_events_and_rejects_rebound_parent() {
     let fixture = Fixture::new(true, true, "rejected");
     let report = fixture.cwd.join("report.json");
