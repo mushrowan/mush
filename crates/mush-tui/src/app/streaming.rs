@@ -77,68 +77,47 @@ impl App {
         if !self.has_running_tool() {
             self.current_tool_batch += 1;
         }
-        self.active_tools.push(ActiveToolState {
-            tool_call_id: tool_call_id.clone(),
-            name: name.to_string(),
-            summary: summary.to_string(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        self.active_tools.push(ActiveToolState::running(
+            tool_call_id.clone(),
+            name.to_string(),
+            summary.to_string(),
+        ));
         self.stream.tool_args.clear();
         let batch_idx = self.current_tool_batch;
         if let Some(mut turn) = self.current_turn_message_mut() {
-            turn.tool_calls.push(DisplayToolCall {
-                tool_call_id: tool_call_id.clone(),
-                name: name.to_string(),
-                summary: summary.to_string(),
-                status: ToolCallStatus::Running,
-                output: None,
-                image_data: None,
-                batch: batch_idx,
-                bash_done: None,
-                cell: None,
-            });
+            turn.tool_calls.push(DisplayToolCall::new(
+                tool_call_id.clone(),
+                name.to_string(),
+                summary.to_string(),
+                ToolCallStatus::Running,
+                batch_idx,
+            ));
         }
     }
 
-    pub fn start_batch_tool(
-        &mut self,
-        tool_call_id: &ToolCallId,
-        sub_calls: &[(String, String)],
-    ) {
+    pub fn start_batch_tool(&mut self, tool_call_id: &ToolCallId, sub_calls: &[(String, String)]) {
         self.current_tool_batch += 1;
         self.stream.tool_args.clear();
-        for (i, (name, sub_summary)) in sub_calls.iter().enumerate() {
-            self.active_tools.push(ActiveToolState {
-                tool_call_id: ToolCallId::from(mush_agent::exec_context::batch_sub_exec_id(
-                    tool_call_id.as_str(),
-                    i,
-                )),
-                name: name.clone(),
-                summary: sub_summary.clone(),
-                live_output: None,
-                status: ToolCallStatus::Running,
-                output: None,
-            });
+        let sub_ids: Vec<ToolCallId> = (0..sub_calls.len())
+            .map(|index| crate::display_types::batch_sub_call_id(tool_call_id, index))
+            .collect();
+        for (id, (name, summary)) in sub_ids.iter().zip(sub_calls) {
+            self.active_tools.push(ActiveToolState::running(
+                id.clone(),
+                name.clone(),
+                summary.clone(),
+            ));
         }
         let batch_idx = self.current_tool_batch;
         if let Some(mut turn) = self.current_turn_message_mut() {
-            for (i, (name, sub_summary)) in sub_calls.iter().enumerate() {
-                turn.tool_calls.push(DisplayToolCall {
-                    tool_call_id: ToolCallId::from(mush_agent::exec_context::batch_sub_exec_id(
-                        tool_call_id.as_str(),
-                        i,
-                    )),
-                    name: name.clone(),
-                    summary: sub_summary.clone(),
-                    status: ToolCallStatus::Running,
-                    output: None,
-                    image_data: None,
-                    batch: batch_idx,
-                    bash_done: None,
-                    cell: None,
-                });
+            for (id, (name, summary)) in sub_ids.into_iter().zip(sub_calls) {
+                turn.tool_calls.push(DisplayToolCall::new(
+                    id,
+                    name.clone(),
+                    summary.clone(),
+                    ToolCallStatus::Running,
+                    batch_idx,
+                ));
             }
         }
     }

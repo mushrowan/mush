@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use mush_agent::summarise_tool_args;
 use mush_ai::types::{
     AssistantContentPart, AssistantMessage, Dollars, Message, Model, ModelId, Provider, StopReason,
-    ToolCallId, ToolOutcome, ToolResultContentPart, ToolResultMessage,
+    ToolCallId, ToolResultContentPart, ToolResultMessage,
 };
 
 use crate::app::{
     App, DisplayMessage, DisplayToolCall, MessageRole, ThinkingDisplay, ToolCallStatus,
 };
 use crate::batch_output::parse_batch_output;
+use crate::display_types::batch_sub_call_id;
 
 pub(crate) use mush_runtime::compaction::extract_compaction_summary;
 
@@ -34,6 +35,22 @@ fn extract_user_images(user: &mush_ai::types::UserMessage) -> Vec<Vec<u8>> {
         .collect()
 }
 
+pub(crate) fn batch_sub_calls(args: &serde_json::Value) -> Vec<(String, String)> {
+    args["tool_calls"]
+        .as_array()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|call| {
+                    let name = call["tool"].as_str().unwrap_or("?").to_string();
+                    let summary = summarise_tool_args(&name, &call["parameters"]);
+                    (name, summary)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_display();
 
@@ -56,12 +73,7 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
                     app.push_bash_done(&done, None);
                 } else {
-                    let images = extract_user_images(user);
-                    if images.is_empty() {
-                        app.push_user_message(text);
-                    } else {
-                        app.push_user_message_with_images(text, images);
-                    }
+                    app.push_user_message_with_images(text, extract_user_images(user));
                 }
             }
             Message::Assistant(assistant) => {
@@ -82,57 +94,33 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
                 }
 
                 for part in &assistant.content {
-                    if let AssistantContentPart::ToolCall(tool_call) = part {
-                        if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
-                            let sub_calls = tool_call.arguments["tool_calls"]
-                                .as_array()
-                                .cloned()
-                                .unwrap_or_default();
-                            let first_tc_idx = tool_calls.len();
-                            for (i, sub) in sub_calls.iter().enumerate() {
-                                let name = sub["tool"].as_str().unwrap_or("?").to_string();
-                                let summary = summarise_tool_args(&name, &sub["parameters"]);
-                                tool_calls.push(DisplayToolCall {
-                                    tool_call_id: mush_ai::types::ToolCallId::from(
-                                        mush_agent::exec_context::batch_sub_exec_id(
-                                            tool_call.id.as_str(),
-                                            i,
-                                        ),
-                                    ),
-                                    name,
-                                    summary,
-                                    status: call_status,
-                                    output: None,
-                                    image_data: None,
-                                    batch: batch_counter,
-                                    bash_done: None,
-                                    cell: None,
-                                });
-                            }
-                            batch_tool_ids.push((
-                                tool_call.id.clone(),
-                                msg_idx,
-                                first_tc_idx,
-                                sub_calls.len(),
+                    let AssistantContentPart::ToolCall(tool_call) = part else {
+                        continue;
+                    };
+                    if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
+                        let sub_calls = batch_sub_calls(&tool_call.arguments);
+                        let first_tc_idx = tool_calls.len();
+                        let count = sub_calls.len();
+                        for (i, (name, summary)) in sub_calls.into_iter().enumerate() {
+                            tool_calls.push(DisplayToolCall::new(
+                                batch_sub_call_id(&tool_call.id, i),
+                                name,
+                                summary,
+                                call_status,
+                                batch_counter,
                             ));
-                        } else {
-                            let tc_idx = tool_calls.len();
-                            tool_calls.push(DisplayToolCall {
-                                tool_call_id: tool_call.id.clone(),
-                                name: tool_call.name.to_string(),
-                                summary: summarise_tool_args(
-                                    tool_call.name.as_str(),
-                                    &tool_call.arguments,
-                                ),
-                                status: call_status,
-                                output: None,
-                                image_data: None,
-                                batch: batch_counter,
-                                bash_done: None,
-                                cell: None,
-                            });
-                            tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
                         }
+                        batch_tool_ids.push((tool_call.id.clone(), msg_idx, first_tc_idx, count));
+                    } else {
+                        let tc_idx = tool_calls.len();
+                        tool_calls.push(DisplayToolCall::new(
+                            tool_call.id.clone(),
+                            tool_call.name.to_string(),
+                            summarise_tool_args(tool_call.name.as_str(), &tool_call.arguments),
+                            call_status,
+                            batch_counter,
+                        ));
+                        tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
                     }
                 }
 
@@ -237,7 +225,7 @@ fn apply_tool_result(
         return;
     };
 
-    tool_call.status = display_tool_status(result.outcome);
+    tool_call.status = ToolCallStatus::from(result.outcome);
     tool_call.output = tool_result_text(&result.content);
     if tool_call.name == "ipython"
         && let Some(details) = &result.details
@@ -253,15 +241,7 @@ fn apply_batch_result(
     count: usize,
     result: &ToolResultMessage,
 ) {
-    let text = result
-        .content
-        .iter()
-        .filter_map(|p| match p {
-            ToolResultContentPart::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let text = joined_text(&result.content);
 
     let sections = parse_batch_output(&text);
 
@@ -303,23 +283,18 @@ fn apply_batch_result(
     }
 }
 
-fn display_tool_status(outcome: ToolOutcome) -> ToolCallStatus {
-    if outcome.is_error() {
-        ToolCallStatus::Error
-    } else {
-        ToolCallStatus::Done
-    }
-}
-
-fn tool_result_text(content: &[ToolResultContentPart]) -> Option<String> {
-    let text = content
+fn joined_text(content: &[ToolResultContentPart]) -> String {
+    content
         .iter()
         .filter_map(|part| match part {
             ToolResultContentPart::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
-        .collect::<Vec<_>>()
-        .join("");
+        .collect()
+}
+
+fn tool_result_text(content: &[ToolResultContentPart]) -> Option<String> {
+    let text = joined_text(content);
     if !text.is_empty() {
         return Some(text);
     }
@@ -336,7 +311,7 @@ mod tests {
     use mush_ai::models;
     use mush_ai::types::{
         Api, AssistantMessage, Provider, TextContent, Timestamp, TokenCount, ToolCall, ToolName,
-        Usage, UserContent, UserMessage,
+        ToolOutcome, Usage, UserContent, UserMessage,
     };
 
     fn test_model() -> mush_ai::types::Model {

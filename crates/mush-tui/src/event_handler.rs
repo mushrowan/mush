@@ -152,19 +152,7 @@ fn show_tool_start(
     args: &serde_json::Value,
 ) {
     if tool_name.eq_ignore_ascii_case("batch") {
-        let sub_calls: Vec<(String, String)> = args["tool_calls"]
-            .as_array()
-            .map(|calls| {
-                calls
-                    .iter()
-                    .map(|c| {
-                        let name = c["tool"].as_str().unwrap_or("?").to_string();
-                        let sub_summary = summarise_tool_args(&name, &c["parameters"]);
-                        (name, sub_summary)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let sub_calls = crate::conversation_display::batch_sub_calls(args);
         app.start_batch_tool(tool_call_id, &sub_calls);
     } else {
         let summary = summarise_tool_args(tool_name, args);

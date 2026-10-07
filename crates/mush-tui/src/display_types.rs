@@ -245,6 +245,36 @@ pub struct DisplayToolCall {
     pub cell: Option<mush_tools::ipython::CellDetails>,
 }
 
+impl DisplayToolCall {
+    #[must_use]
+    pub fn new(
+        tool_call_id: ToolCallId,
+        name: String,
+        summary: String,
+        status: ToolCallStatus,
+        batch: u32,
+    ) -> Self {
+        Self {
+            tool_call_id,
+            name,
+            summary,
+            status,
+            output: None,
+            image_data: None,
+            batch,
+            bash_done: None,
+            cell: None,
+        }
+    }
+}
+
+pub(crate) fn batch_sub_call_id(batch_call_id: &ToolCallId, index: usize) -> ToolCallId {
+    ToolCallId::from(mush_agent::exec_context::batch_sub_exec_id(
+        batch_call_id.as_str(),
+        index,
+    ))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallStatus {
     Running,
@@ -270,6 +300,20 @@ pub struct ActiveToolState {
     pub live_output: Option<String>,
     pub status: ToolCallStatus,
     pub output: Option<String>,
+}
+
+impl ActiveToolState {
+    #[must_use]
+    pub fn running(tool_call_id: ToolCallId, name: String, summary: String) -> Self {
+        Self {
+            tool_call_id,
+            name,
+            summary,
+            live_output: None,
+            status: ToolCallStatus::Running,
+            output: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
