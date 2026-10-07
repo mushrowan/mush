@@ -12,6 +12,7 @@ use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
 
 const CONTENT_LINE_HEADROOM: usize = 5;
 const MAX_LINE_CHARS: usize = 500;
+const DEFAULT_AROUND_CONTEXT: usize = 20;
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
 
@@ -136,19 +137,10 @@ impl ReadArgs {
             (_, _, Some(_)) if self.offset.is_some() || self.limit.is_some() => {
                 return Err(ReadArgsError::AroundLineConflictsWithOffsetLimit);
             }
-            (_, _, Some(around_line))
-                if self.context_before.is_some() || self.context_after.is_some() =>
-            {
-                ReadWindow::Around {
-                    around_line,
-                    context_before: self.context_before.unwrap_or(20),
-                    context_after: self.context_after.unwrap_or(20),
-                }
-            }
             (_, _, Some(around_line)) => ReadWindow::Around {
                 around_line,
-                context_before: 20,
-                context_after: 20,
+                context_before: self.context_before.unwrap_or(DEFAULT_AROUND_CONTEXT),
+                context_after: self.context_after.unwrap_or(DEFAULT_AROUND_CONTEXT),
             },
             (Some(_), _, _) if self.context_before.is_some() || self.context_after.is_some() => {
                 return Err(ReadArgsError::ContextRequiresAroundLine);
@@ -336,8 +328,7 @@ impl AgentTool for ReadTool {
         let ledger = self.ledger.clone();
 
         tokio::task::spawn_blocking(move || {
-            let (result, _lines_read) =
-                read_file(&path, args.offset, args.limit, json_output, max_image_bytes);
+            let result = read_file(&path, args.offset, args.limit, json_output, max_image_bytes);
             if result.outcome.is_success() {
                 ledger.record(&path);
             }
@@ -360,38 +351,29 @@ fn read_file(
     limit: Option<usize>,
     json_output: bool,
     max_image_bytes: usize,
-) -> (ToolResult, usize) {
+) -> ToolResult {
     if !path.exists() {
-        return (
-            ToolResult::error(format!("file not found: {}", path.display())),
-            0,
-        );
+        return ToolResult::error(format!("file not found: {}", path.display()));
     }
 
     if !path.is_file() {
-        return (
-            ToolResult::error(format!("not a file: {}", path.display())),
-            0,
-        );
+        return ToolResult::error(format!("not a file: {}", path.display()));
     }
 
     if is_image(path) {
-        return (read_image(path, max_image_bytes), 0);
+        return read_image(path, max_image_bytes);
     }
 
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) => return (ToolResult::error(format!("failed to read file: {e}")), 0),
+        Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
     };
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
     if total_lines == 0 {
-        return (
-            ToolResult::text(format!("(empty file, {} bytes)", content.len())),
-            0,
-        );
+        return ToolResult::text(format!("(empty file, {} bytes)", content.len()));
     }
 
     let start = offset.unwrap_or(1).saturating_sub(1).min(total_lines);
@@ -453,9 +435,9 @@ fn read_file(
         if let Some(mtime) = modified {
             json["modified_epoch"] = serde_json::json!(mtime);
         }
-        (ToolResult::text(json.to_string()), lines_written)
+        ToolResult::text(json.to_string())
     } else {
-        (ToolResult::text(result), lines_written)
+        ToolResult::text(result)
     }
 }
 
@@ -471,8 +453,6 @@ pub(crate) struct ResizedImage {
 }
 
 pub(crate) fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<ResizedImage, String> {
-    use image::ImageEncoder;
-
     const QUALITY: u8 = 85;
 
     let img = image::load_from_memory(data).map_err(|error| error.to_string())?;
@@ -482,11 +462,7 @@ pub(crate) fn resize_image_to_fit(data: &[u8], max_bytes: usize) -> Result<Resiz
     loop {
         let rgb = current.to_rgb8();
         let (w, h) = rgb.dimensions();
-
-        let mut bytes = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, QUALITY)
-            .write_image(rgb.as_raw(), w, h, image::ExtendedColorType::Rgb8)
-            .map_err(|error| error.to_string())?;
+        let bytes = crate::attachment::jpeg(&rgb, QUALITY)?;
 
         if bytes.len() <= max_bytes || (w <= MIN_IMAGE_DIM && h <= MIN_IMAGE_DIM) {
             return Ok(ResizedImage {
@@ -520,14 +496,10 @@ fn read_image(path: &Path, max_image_bytes: usize) -> ToolResult {
             .and_then(|e| e.to_str())
             .unwrap_or("png")
             .to_lowercase();
-        return ToolResult {
-            content: vec![ToolResultContentPart::Image(ImageContent {
-                data: encode(&data),
-                mime_type: mush_ai::types::ImageMimeType::from_extension(&ext),
-            })],
-            outcome: mush_ai::types::ToolOutcome::Success,
-            details: None,
-        };
+        return ToolResult::image(
+            encode(&data),
+            mush_ai::types::ImageMimeType::from_extension(&ext),
+        );
     }
 
     let mb = |bytes: usize| bytes as f64 / 1_048_576.0;
@@ -656,7 +628,7 @@ mod tests {
         fs::write(&file, make_png(512, 512)).unwrap();
 
         let max = 8_000;
-        let (result, _) = read_file(&file, None, None, false, max);
+        let result = read_file(&file, None, None, false, max);
         assert!(result.outcome.is_success());
 
         let text = extract_text(&result);
@@ -685,7 +657,7 @@ mod tests {
         let data = make_png(16, 16);
         fs::write(&file, &data).unwrap();
 
-        let (result, _) = read_file(&file, None, None, false, 10_000_000);
+        let result = read_file(&file, None, None, false, 10_000_000);
         assert!(result.outcome.is_success());
 
         use base64::Engine;
@@ -773,7 +745,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         assert!(result.outcome.is_success());
         let text = extract_text(&result);
         assert!(text.contains("L1: line 1"));
@@ -786,7 +758,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let (result, _) = read_file(&file, Some(3), None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, Some(3), None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(!text.contains("L1:"));
         assert!(!text.contains("L2:"));
@@ -804,7 +776,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let (result, _) = read_file(&file, None, Some(5), false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, Some(5), false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(text.contains("L1: line 1"));
         assert!(text.contains("L5: line 5"));
@@ -815,7 +787,7 @@ mod tests {
 
     #[test]
     fn read_nonexistent_file() {
-        let (result, _) = read_file(
+        let result = read_file(
             Path::new("/nonexistent/file.txt"),
             None,
             None,
@@ -828,7 +800,7 @@ mod tests {
     #[test]
     fn read_directory_returns_error() {
         let dir = temp_dir();
-        let (result, _) = read_file(dir.path(), None, None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(dir.path(), None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         assert!(result.outcome.is_error());
     }
 
@@ -847,7 +819,7 @@ mod tests {
         let file = dir.path().join("empty.txt");
         fs::write(&file, "").unwrap();
 
-        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(text.contains("empty file"));
     }
@@ -858,7 +830,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3").unwrap();
 
-        let (result, _) = read_file(&file, None, None, true, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, None, true, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 3);
@@ -1068,7 +1040,7 @@ mod tests {
         let long_line = "x".repeat(1000);
         fs::write(&file, &long_line).unwrap();
 
-        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         assert!(text.starts_with("L1: "));
         let content = text.strip_prefix("L1: ").unwrap();
@@ -1081,7 +1053,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "line 1\nline 2\nline 3\nline 4").unwrap();
 
-        let (result, _) = read_file(&file, Some(3), None, true, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, Some(3), None, true, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["total_lines"], 4);
@@ -1126,7 +1098,7 @@ mod tests {
             .join("\n");
         fs::write(&file, &content).unwrap();
 
-        let (result, _) = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
+        let result = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);
         let text = extract_text(&result);
 
         let line_count = text.lines().count();

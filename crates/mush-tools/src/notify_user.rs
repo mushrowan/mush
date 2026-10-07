@@ -8,13 +8,8 @@ struct NotifyUserArgs {
     body: String,
 }
 
+#[derive(Default)]
 pub struct NotifyUserTool;
-
-impl Default for NotifyUserTool {
-    fn default() -> Self {
-        Self
-    }
-}
 
 impl NotifyUserTool {
     pub fn new() -> Self {

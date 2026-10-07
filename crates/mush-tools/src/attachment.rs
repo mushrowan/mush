@@ -67,7 +67,7 @@ fn flatten(mut rgba: image::RgbaImage) -> image::RgbImage {
     DynamicImage::ImageRgba8(rgba).into_rgb8()
 }
 
-fn jpeg(image: &image::RgbImage, quality: u8) -> Result<Vec<u8>, String> {
+pub(crate) fn jpeg(image: &image::RgbImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
         .write_image(

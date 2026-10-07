@@ -93,11 +93,8 @@ impl AgentTool for BashStatusTool {
 
         self.registry.reap_expired().await;
 
-        let handle = match self.registry.get(&args.job_id).await {
-            Some(h) => h,
-            None => {
-                return ToolResult::error(format!("no background job with id: {}", args.job_id));
-            }
+        let Some(handle) = self.registry.get(&args.job_id).await else {
+            return ToolResult::error(format!("no background job with id: {}", args.job_id));
         };
 
         if matches!(args.action, StatusAction::Kill) {
@@ -162,15 +159,7 @@ fn format_job_result(state: &mut crate::background::JobState) -> ToolResult {
     );
 
     if status.is_error() {
-        ToolResult {
-            content: vec![mush_ai::types::ToolResultContentPart::Text(
-                mush_ai::types::TextContent {
-                    text: format!("{preamble}{output}"),
-                },
-            )],
-            outcome: mush_ai::types::ToolOutcome::Error,
-            details: None,
-        }
+        ToolResult::error(format!("{preamble}{output}"))
     } else {
         ToolResult::text(format!("{preamble}{output}"))
     }
