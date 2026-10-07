@@ -100,16 +100,21 @@ impl RepoMapWatcher {
                     if !path.is_dir() {
                         continue;
                     }
-                    let dirs = discover_watch_dirs(&root_for_cb)
-                        .into_iter()
-                        .filter(|dir| dir.starts_with(path));
-                    if let Ok(mut slot) = watcher_for_cb.lock()
-                        && let Some(w) = slot.as_mut()
-                    {
-                        for dir in dirs {
-                            let _ = w.watch(&dir, RecursiveMode::NonRecursive);
+                    let root = root_for_cb.clone();
+                    let created = path.clone();
+                    let watcher_slot = watcher_for_cb.clone();
+                    std::thread::spawn(move || {
+                        let dirs = discover_watch_dirs(&root)
+                            .into_iter()
+                            .filter(|dir| dir.starts_with(&created));
+                        if let Ok(mut slot) = watcher_slot.lock()
+                            && let Some(w) = slot.as_mut()
+                        {
+                            for dir in dirs {
+                                let _ = w.watch(&dir, RecursiveMode::NonRecursive);
+                            }
                         }
-                    }
+                    });
                 }
             }
 
@@ -337,6 +342,34 @@ mod tests {
         assert!(
             text.contains("goodbye"),
             "map should update after file change: {text}"
+        );
+    }
+
+    #[test]
+    fn watcher_keeps_detecting_changes_after_a_directory_is_created() {
+        let dir = tempdir().unwrap();
+        setup_test_repo(dir.path());
+
+        let watcher = RepoMapWatcher::start(dir.path()).unwrap();
+        wait_ready(&watcher, Duration::from_secs(10));
+
+        fs::create_dir(dir.path().join("src/nested")).unwrap();
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 500));
+        fs::write(
+            dir.path().join("src/utils.rs"),
+            "pub fn goodbye() -> &'static str { \"bye\" }\n",
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut text = map_text(&watcher);
+        while !text.contains("goodbye") && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            text = map_text(&watcher);
+        }
+        assert!(
+            text.contains("goodbye"),
+            "map should update after a directory is created: {text}"
         );
     }
 
