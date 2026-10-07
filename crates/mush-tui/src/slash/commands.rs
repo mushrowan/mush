@@ -597,7 +597,7 @@ const HELP_TEXT: &str = concat!(
     "  /logs [n]      - show last n log entries (default 50)\n",
     "  /settings      - open runtime settings overlay (j/k, space toggles)\n",
     "  /settings show - print current settings state\n",
-    "  /login [p] [key] - oauth + api-key login picker (or pass id to skip, plus a key to save it)\n\n",
+    "  /login [p] [key] - oauth + api-key login picker (or pass id to skip, plus a key to save it)\n",
     "  /login-complete <code> - finish a paste-the-code oauth flow (fallback)\n",
     "  /card          - show agent capability card\n",
     "  /debug         - dump internal state (for bug reports)\n",
@@ -1245,6 +1245,12 @@ mod tests {
 
         handle_effort(&mut app, false, Some("low"));
         assert_eq!(app.thinking_level, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn the_help_command_list_has_no_gaps() {
+        let (list, _tip) = HELP_TEXT.split_once("\n\ntip:").unwrap();
+        assert!(!list.contains("\n\n"), "{list}");
     }
 
     #[test]
