@@ -53,103 +53,129 @@ pub(crate) fn batch_sub_calls(args: &serde_json::Value) -> Vec<(String, String)>
 
 pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     app.clear_display();
-
-    let mut tool_call_positions = HashMap::<ToolCallId, (usize, usize)>::new();
-    let mut batch_tool_ids: Vec<(ToolCallId, usize, usize, usize)> = Vec::new();
-    let mut batch_counter: u32 = 0;
+    let mut rebuild = Rebuild::default();
     for message in conversation {
         match message {
             Message::Event(event) => app.push_event_message(event),
-            Message::User(user) => {
-                let text = user.text();
-                if let Some(body) = extract_compaction_summary(&text) {
-                    app.push_system_message(format_compaction_banner(&body));
-                } else if mush_session::harness::extract_digest(&text).is_some()
-                    || mush_runtime::notes::extract(&text).is_some()
-                    || mush_runtime::kernel_notice::is_notice(&text)
-                {
-                } else if mush_session::harness::is_refinement_notice(&text) {
-                    app.push_system_message(text);
-                } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
-                    app.push_bash_done(&done, None);
-                } else {
-                    app.push_user_message_with_images(text, extract_user_images(user));
-                }
-            }
-            Message::Assistant(assistant) => {
-                let msg_idx = app.messages.len();
-                let mut tool_calls = Vec::new();
+            Message::User(user) => push_rebuilt_user_message(app, user),
+            Message::Assistant(assistant) => rebuild.push_assistant(app, assistant),
+            Message::ToolResult(result) => rebuild.apply_result(app, result),
+        }
+    }
+}
 
-                let call_status = if assistant.is_replayable() {
-                    ToolCallStatus::Running
-                } else {
-                    ToolCallStatus::Error
-                };
-                let has_tools = assistant
-                    .content
-                    .iter()
-                    .any(|p| matches!(p, AssistantContentPart::ToolCall(_)));
-                if has_tools {
-                    batch_counter += 1;
-                }
+fn push_rebuilt_user_message(app: &mut App, user: &mush_ai::types::UserMessage) {
+    let text = user.text();
+    if let Some(body) = extract_compaction_summary(&text) {
+        app.push_system_message(format_compaction_banner(&body));
+    } else if mush_session::harness::extract_digest(&text).is_some()
+        || mush_runtime::notes::extract(&text).is_some()
+        || mush_runtime::kernel_notice::is_notice(&text)
+    {
+    } else if mush_session::harness::is_refinement_notice(&text) {
+        app.push_system_message(text);
+    } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
+        app.push_bash_done(&done, None);
+    } else {
+        app.push_user_message_with_images(text, extract_user_images(user));
+    }
+}
 
-                for part in &assistant.content {
-                    let AssistantContentPart::ToolCall(tool_call) = part else {
-                        continue;
-                    };
-                    if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
-                        let sub_calls = batch_sub_calls(&tool_call.arguments);
-                        let first_tc_idx = tool_calls.len();
-                        let count = sub_calls.len();
-                        for (i, (name, summary)) in sub_calls.into_iter().enumerate() {
-                            tool_calls.push(DisplayToolCall::new(
-                                batch_sub_call_id(&tool_call.id, i),
-                                name,
-                                summary,
-                                call_status,
-                                batch_counter,
-                            ));
-                        }
-                        batch_tool_ids.push((tool_call.id.clone(), msg_idx, first_tc_idx, count));
-                    } else {
-                        let tc_idx = tool_calls.len();
-                        tool_calls.push(DisplayToolCall::new(
-                            tool_call.id.clone(),
-                            tool_call.name.to_string(),
-                            summarise_tool_args(tool_call.name.as_str(), &tool_call.arguments),
-                            call_status,
-                            batch_counter,
-                        ));
-                        tool_call_positions.insert(tool_call.id.clone(), (msg_idx, tc_idx));
-                    }
-                }
+struct PendingBatch {
+    id: ToolCallId,
+    msg_idx: usize,
+    first_tc: usize,
+    count: usize,
+}
 
-                app.messages.push(DisplayMessage {
-                    tool_calls,
-                    thinking: assistant.thinking(),
-                    thinking_expanded: app.thinking_display == ThinkingDisplay::Expanded,
-                    usage: Some(assistant.usage),
-                    model_id: Some(assistant.model.clone()),
-                    ..DisplayMessage::new(
-                        MessageRole::Assistant,
-                        assistant.text().trim_start_matches('\n'),
-                    )
+#[derive(Default)]
+struct Rebuild {
+    tool_call_positions: HashMap<ToolCallId, (usize, usize)>,
+    batches: Vec<PendingBatch>,
+    batch_counter: u32,
+}
+
+impl Rebuild {
+    fn push_assistant(&mut self, app: &mut App, assistant: &AssistantMessage) {
+        let msg_idx = app.messages.len();
+        let mut tool_calls = Vec::new();
+
+        let call_status = if assistant.is_replayable() {
+            ToolCallStatus::Running
+        } else {
+            ToolCallStatus::Error
+        };
+        let has_tools = assistant
+            .content
+            .iter()
+            .any(|p| matches!(p, AssistantContentPart::ToolCall(_)));
+        if has_tools {
+            self.batch_counter += 1;
+        }
+
+        for part in &assistant.content {
+            let AssistantContentPart::ToolCall(tool_call) = part else {
+                continue;
+            };
+            if tool_call.name.as_str().eq_ignore_ascii_case("batch") {
+                let sub_calls = batch_sub_calls(&tool_call.arguments);
+                let first_tc = tool_calls.len();
+                let count = sub_calls.len();
+                for (i, (name, summary)) in sub_calls.into_iter().enumerate() {
+                    tool_calls.push(DisplayToolCall::new(
+                        batch_sub_call_id(&tool_call.id, i),
+                        name,
+                        summary,
+                        call_status,
+                        self.batch_counter,
+                    ));
+                }
+                self.batches.push(PendingBatch {
+                    id: tool_call.id.clone(),
+                    msg_idx,
+                    first_tc,
+                    count,
                 });
-                if let Some(notice) = failed_turn_notice(assistant) {
-                    app.push_system_message(notice);
-                }
+            } else {
+                let tc_idx = tool_calls.len();
+                tool_calls.push(DisplayToolCall::new(
+                    tool_call.id.clone(),
+                    tool_call.name.to_string(),
+                    summarise_tool_args(tool_call.name.as_str(), &tool_call.arguments),
+                    call_status,
+                    self.batch_counter,
+                ));
+                self.tool_call_positions
+                    .insert(tool_call.id.clone(), (msg_idx, tc_idx));
             }
-            Message::ToolResult(result) => {
-                if let Some(pos) = batch_tool_ids
-                    .iter()
-                    .position(|(id, _, _, _)| *id == result.tool_call_id)
-                {
-                    let (_, msg_idx, first_tc, count) = batch_tool_ids.remove(pos);
-                    apply_batch_result(app, msg_idx, first_tc, count, result);
-                } else {
-                    apply_tool_result(app, &tool_call_positions, result);
-                }
-            }
+        }
+
+        app.messages.push(DisplayMessage {
+            tool_calls,
+            thinking: assistant.thinking(),
+            thinking_expanded: app.thinking_display == ThinkingDisplay::Expanded,
+            usage: Some(assistant.usage),
+            model_id: Some(assistant.model.clone()),
+            ..DisplayMessage::new(
+                MessageRole::Assistant,
+                assistant.text().trim_start_matches('\n'),
+            )
+        });
+        if let Some(notice) = failed_turn_notice(assistant) {
+            app.push_system_message(notice);
+        }
+    }
+
+    fn apply_result(&mut self, app: &mut App, result: &ToolResultMessage) {
+        if let Some(pos) = self
+            .batches
+            .iter()
+            .position(|batch| batch.id == result.tool_call_id)
+        {
+            let batch = self.batches.remove(pos);
+            apply_batch_result(app, batch.msg_idx, batch.first_tc, batch.count, result);
+        } else {
+            apply_tool_result(app, &self.tool_call_positions, result);
         }
     }
 }
