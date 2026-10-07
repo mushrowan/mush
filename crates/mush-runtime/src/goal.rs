@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::nonpoison::Mutex;
 
 use mush_ai::types::Timestamp;
@@ -43,6 +43,11 @@ impl Goal {
     pub fn remaining_tokens(&self) -> Option<u64> {
         self.token_budget
             .map(|budget| budget.saturating_sub(self.tokens_used))
+    }
+
+    fn budget_spent(&self) -> bool {
+        self.token_budget
+            .is_some_and(|budget| self.tokens_used >= budget)
     }
 
     #[must_use]
@@ -125,6 +130,19 @@ struct Inner {
     budget_notice_sent: bool,
 }
 
+impl Inner {
+    fn loaded(path: Option<&Path>) -> Self {
+        Self {
+            goal: crate::persist::load_json(path),
+            ..Self::default()
+        }
+    }
+
+    fn budget_notice_due(&self) -> Option<Continuation> {
+        (!self.budget_notice_sent).then_some(Continuation::BudgetLimit)
+    }
+}
+
 pub struct GoalStore {
     inner: Mutex<Inner>,
     path: Mutex<Option<PathBuf>>,
@@ -133,46 +151,24 @@ pub struct GoalStore {
 impl GoalStore {
     #[must_use]
     pub fn new(path: Option<PathBuf>) -> Self {
-        let goal = path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Goal>(&bytes).ok());
         Self {
-            inner: Mutex::new(Inner {
-                goal,
-                due: None,
-                budget_notice_sent: false,
-            }),
+            inner: Mutex::new(Inner::loaded(path.as_deref())),
             path: Mutex::new(path),
         }
     }
 
     pub fn rebind(&self, path: Option<PathBuf>) {
-        let goal = path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Goal>(&bytes).ok());
+        let inner = Inner::loaded(path.as_deref());
         *self.path.lock() = path;
-        let mut inner = self.inner.lock();
-        inner.goal = goal;
-        inner.due = None;
-        inner.budget_notice_sent = false;
+        *self.inner.lock() = inner;
     }
 
     fn persist(&self, goal: Option<&Goal>) {
-        let path = self.path.lock().clone();
-        let Some(path) = path else {
+        let Some(path) = self.path.lock().clone() else {
             return;
         };
         match goal {
-            Some(goal) => {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Ok(bytes) = serde_json::to_vec_pretty(goal) {
-                    let _ = mush_ai::private_io::write_private(&path, bytes);
-                }
-            }
+            Some(goal) => crate::persist::write_json(&path, goal),
             None => {
                 let _ = std::fs::remove_file(path);
             }
@@ -246,9 +242,7 @@ impl GoalStore {
                 if !matches!(goal.status, GoalStatus::Paused | GoalStatus::BudgetLimited) {
                     return Err(format!("the goal is {:?}, nothing to resume", goal.status));
                 }
-                let exhausted = goal
-                    .token_budget
-                    .is_some_and(|budget| goal.tokens_used >= budget);
+                let exhausted = goal.budget_spent();
                 if exhausted {
                     if goal.status == GoalStatus::BudgetLimited {
                         return Err("the goal's token budget is already spent; set a new goal \
@@ -286,15 +280,12 @@ impl GoalStore {
         }
         goal.tokens_used += tokens;
         goal.updated_at = Timestamp::now();
-        if goal
-            .token_budget
-            .is_some_and(|budget| goal.tokens_used >= budget)
-        {
+        if goal.budget_spent() {
             goal.set_status(GoalStatus::BudgetLimited, Timestamp::now());
         }
         let goal = goal.clone();
         if goal.status == GoalStatus::BudgetLimited {
-            inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
+            inner.due = inner.budget_notice_due();
         }
         drop(inner);
         self.persist(Some(&goal));
@@ -350,18 +341,15 @@ impl GoalStore {
         };
         match goal.status {
             GoalStatus::Active => {
-                if goal
-                    .token_budget
-                    .is_some_and(|budget| goal.tokens_used >= budget)
-                {
+                if goal.budget_spent() {
                     goal.set_status(GoalStatus::BudgetLimited, Timestamp::now());
-                    inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
+                    inner.due = inner.budget_notice_due();
                 } else {
                     inner.due = Some(Continuation::Continue);
                 }
             }
             GoalStatus::BudgetLimited => {
-                inner.due = (!inner.budget_notice_sent).then_some(Continuation::BudgetLimit);
+                inner.due = inner.budget_notice_due();
             }
             GoalStatus::Paused | GoalStatus::Complete | GoalStatus::Failed => inner.due = None,
         }

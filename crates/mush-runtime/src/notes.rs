@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::nonpoison::Mutex;
 
@@ -13,21 +13,14 @@ pub struct Notes {
 impl Notes {
     #[must_use]
     pub fn new(path: Option<PathBuf>) -> Arc<Self> {
-        let memory = path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .unwrap_or_default();
         Arc::new(Self {
+            memory: Mutex::new(load(path.as_deref())),
             path: Mutex::new(path),
-            memory: Mutex::new(memory),
         })
     }
 
     pub fn rebind(&self, path: Option<PathBuf>) {
-        let memory = path
-            .as_ref()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .unwrap_or_default();
+        let memory = load(path.as_deref());
         *self.path.lock() = path;
         *self.memory.lock() = memory;
     }
@@ -75,19 +68,20 @@ impl Notes {
     }
 
     fn persist(&self, text: &str) {
-        let path = self.path.lock().clone();
-        let Some(path) = path else {
+        let Some(path) = self.path.lock().clone() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if text.is_empty() {
             let _ = std::fs::remove_file(&path);
         } else {
-            let _ = mush_ai::private_io::write_private(&path, text.as_bytes());
+            crate::persist::write_private(&path, text);
         }
     }
+}
+
+fn load(path: Option<&Path>) -> String {
+    path.and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
 }
 
 pub use mush_session::notes::{extract, fingerprint, latest_fingerprint, message};

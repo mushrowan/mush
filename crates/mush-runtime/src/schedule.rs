@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::nonpoison::Mutex;
 
 use mush_ai::types::Timestamp;
@@ -63,6 +63,23 @@ impl Job {
             (ScheduleKind::Every { next_at, .. } | ScheduleKind::Cron { next_at, .. }, _) => {
                 Some(*next_at)
             }
+        }
+    }
+
+    fn is_live_heartbeat(&self) -> bool {
+        self.source == JobSource::Heartbeat
+            && matches!(self.status, JobStatus::Active | JobStatus::Paused)
+    }
+
+    fn resume(&mut self, now_ms: u64) {
+        self.status = JobStatus::Active;
+        if let ScheduleKind::Every {
+            interval_ms,
+            next_at,
+        } = &mut self.schedule
+            && *next_at < now_ms
+        {
+            *next_at = now_ms + *interval_ms;
         }
     }
 
@@ -188,37 +205,21 @@ pub struct Scheduler {
 impl Scheduler {
     #[must_use]
     pub fn new(path: Option<PathBuf>) -> Self {
-        let jobs = path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Vec<Job>>(&bytes).ok())
-            .unwrap_or_default();
         Self {
-            jobs: Mutex::new(jobs),
+            jobs: Mutex::new(load_jobs(path.as_deref())),
             path: Mutex::new(path),
         }
     }
 
     pub fn rebind(&self, path: Option<PathBuf>) {
-        let jobs = path
-            .as_ref()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Vec<Job>>(&bytes).ok())
-            .unwrap_or_default();
+        let jobs = load_jobs(path.as_deref());
         *self.path.lock() = path;
         *self.jobs.lock() = jobs;
     }
 
     fn persist(&self, jobs: &[Job]) {
-        let path = self.path.lock().clone();
-        let Some(path) = path else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(bytes) = serde_json::to_vec_pretty(jobs) {
-            let _ = mush_ai::private_io::write_private(&path, bytes);
+        if let Some(path) = self.path.lock().clone() {
+            crate::persist::write_json(&path, jobs);
         }
     }
 
@@ -232,10 +233,7 @@ impl Scheduler {
         self.jobs
             .lock()
             .iter()
-            .find(|job| {
-                job.source == JobSource::Heartbeat
-                    && matches!(job.status, JobStatus::Active | JobStatus::Paused)
-            })
+            .find(|job| job.is_live_heartbeat())
             .cloned()
     }
 
@@ -257,13 +255,14 @@ impl Scheduler {
                 if prompt.trim().is_empty() {
                     return Err("a heartbeat needs an instruction".into());
                 }
-                for job in jobs.iter_mut() {
-                    if job.source == JobSource::Heartbeat && job.status != JobStatus::Cancelled {
-                        job.status = JobStatus::Cancelled;
-                    }
+                for job in jobs
+                    .iter_mut()
+                    .filter(|job| job.source == JobSource::Heartbeat)
+                {
+                    job.status = JobStatus::Cancelled;
                 }
                 jobs.push(Job {
-                    id: new_id(),
+                    id: short_id(),
                     label: Some("heartbeat".into()),
                     prompt: prompt.trim().to_string(),
                     schedule,
@@ -300,7 +299,7 @@ impl Scheduler {
                     return Err("a scheduled prompt needs text".into());
                 }
                 jobs.push(Job {
-                    id: new_id(),
+                    id: short_id(),
                     label: label
                         .map(|label| label.trim().to_string())
                         .filter(|l| !l.is_empty()),
@@ -327,15 +326,7 @@ impl Scheduler {
                 if job.status != JobStatus::Paused {
                     return Err(format!("{id} is {:?}", job.status));
                 }
-                job.status = JobStatus::Active;
-                if let ScheduleKind::Every {
-                    interval_ms,
-                    next_at,
-                } = &mut job.schedule
-                    && *next_at < now_ms
-                {
-                    *next_at = now_ms + *interval_ms;
-                }
+                job.resume(now_ms);
             }
             ScheduleCommand::Cancel(id) => {
                 let job = find_mut(&mut jobs, &id)?;
@@ -372,31 +363,12 @@ impl Scheduler {
                     job.delivery = delivery;
                 }
             }
-            ScheduleCommand::HeartbeatPause
-            | ScheduleCommand::HeartbeatResume
-            | ScheduleCommand::HeartbeatClear => {
-                let job = jobs
-                    .iter_mut()
-                    .find(|job| {
-                        job.source == JobSource::Heartbeat
-                            && matches!(job.status, JobStatus::Active | JobStatus::Paused)
-                    })
-                    .ok_or_else(|| "no heartbeat is set".to_string())?;
-                job.status = match command {
-                    ScheduleCommand::HeartbeatPause => JobStatus::Paused,
-                    ScheduleCommand::HeartbeatResume => {
-                        if let ScheduleKind::Every {
-                            interval_ms,
-                            next_at,
-                        } = &mut job.schedule
-                            && *next_at < now_ms
-                        {
-                            *next_at = now_ms + *interval_ms;
-                        }
-                        JobStatus::Active
-                    }
-                    _ => JobStatus::Cancelled,
-                };
+            ScheduleCommand::HeartbeatPause => {
+                live_heartbeat(&mut jobs)?.status = JobStatus::Paused;
+            }
+            ScheduleCommand::HeartbeatResume => live_heartbeat(&mut jobs)?.resume(now_ms),
+            ScheduleCommand::HeartbeatClear => {
+                live_heartbeat(&mut jobs)?.status = JobStatus::Cancelled;
             }
         }
         jobs.retain(|job| {
@@ -449,14 +421,20 @@ impl Scheduler {
     }
 }
 
+fn live_heartbeat(jobs: &mut [Job]) -> Result<&mut Job, String> {
+    jobs.iter_mut()
+        .find(|job| job.is_live_heartbeat())
+        .ok_or_else(|| "no heartbeat is set".to_string())
+}
+
 fn find_mut<'a>(jobs: &'a mut [Job], id: &str) -> Result<&'a mut Job, String> {
     jobs.iter_mut()
         .find(|job| job.id == id || job.id.starts_with(id))
         .ok_or_else(|| format!("no job {id}"))
 }
 
-fn new_id() -> String {
-    short_id()
+fn load_jobs(path: Option<&Path>) -> Vec<Job> {
+    crate::persist::load_json(path).unwrap_or_default()
 }
 
 #[must_use]
