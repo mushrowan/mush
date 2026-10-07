@@ -325,7 +325,7 @@ class BashHandle:
         return self._pid
 
     async def _job(self) -> dict:
-        await self._started
+        await asyncio.shield(self._started)
         return {"job_id": self._job_id}
 
     def __await__(self):

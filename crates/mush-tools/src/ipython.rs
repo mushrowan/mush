@@ -1138,6 +1138,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_wait_cancelled_before_the_job_starts_leaves_the_handle_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = tool(dir.path());
+
+        let result = tool
+            .execute(json!({
+                "code": "h = bash('exit 4')\nwaiting = asyncio.ensure_future(h.running())\nawait asyncio.sleep(0)\nwaiting.cancel()\n(await h).exit_code"
+            }))
+            .await;
+
+        assert_eq!(extract_text(&result), "4", "{}", extract_text(&result));
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn a_background_handle_outlives_a_cancelled_wait_and_still_sends_its_notice() {
         let dir = tempfile::tempdir().unwrap();
         let host = MushHost::new(dir.path().into());
