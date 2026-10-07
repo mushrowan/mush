@@ -26,23 +26,12 @@ pub async fn resolve_auth(
         return oauth_auth(oauth_id, account).await;
     }
 
-    if let Some(key) = env_api_key(provider) {
+    let key = env_api_key(provider)
+        .or_else(|| config_api_keys.get(config_key(provider)).cloned())
+        .or_else(|| credential_store.get(config_key(provider)).ok().flatten());
+    if key.is_some() {
         return ResolvedAuth {
-            api_key: Some(key),
-            account_id: None,
-        };
-    }
-
-    if let Some(key) = config_api_keys.get(config_key(provider)) {
-        return ResolvedAuth {
-            api_key: Some(key.clone()),
-            account_id: None,
-        };
-    }
-
-    if let Ok(Some(key)) = credential_store.get(config_key(provider)) {
-        return ResolvedAuth {
-            api_key: Some(key),
+            api_key: key,
             account_id: None,
         };
     }
