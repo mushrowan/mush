@@ -343,7 +343,7 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn fixture() -> (tempfile::TempDir, Inbox) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let inbox = Inbox::register(
             &dir.path().join("inbox"),
             Binding {
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn fifo_inputs_do_not_wait_for_a_writer() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let path = dir.path().join("fifo");
         assert!(
             std::process::Command::new("mkfifo")

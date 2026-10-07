@@ -144,7 +144,7 @@ fn now() -> DateTime<Utc> {
 }
 
 fn fixture() -> (tempfile::TempDir, Registration) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let root = dir.path().join("run");
     fs::create_dir(&root).unwrap();
     fs::create_dir(root.join("one")).unwrap();
@@ -861,7 +861,7 @@ fn review_cache_expires_on_every_registration_identity_change() {
 
 #[test]
 fn shared_queue_is_read_once_and_historical_roots_remain_bounded() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let store =
         RegistrationStore::new(dir.path().into(), "history".into(), dir.path().into()).unwrap();
     let queue = dir.path().join("queue.json");

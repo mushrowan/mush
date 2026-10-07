@@ -61,7 +61,7 @@ impl Fixture {
     }
 
     fn new_worker(resume: bool, parent: bool, outcome: &str, before_resume: &str) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::tempdir().unwrap();
         let base = root.path();
         for name in ["run", "work", "review", "review-work", "pool", "bin"] {
             directory(&base.join(name));

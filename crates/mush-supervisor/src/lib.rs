@@ -95,6 +95,15 @@ pub fn classify(error: &str) -> Failure {
 }
 
 #[cfg(test)]
+pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    if cfg!(target_os = "macos") {
+        tempfile::tempdir_in("/private/tmp")
+    } else {
+        tempfile::tempdir()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

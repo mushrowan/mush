@@ -38,7 +38,7 @@ struct Fixture {
 #[expect(clippy::unwrap_used)]
 impl Fixture {
     fn new(script: &str) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir().unwrap();
         let run = dir.path().join("run");
         fs::DirBuilder::new().mode(0o700).create(&run).unwrap();
         let cwd = dir.path().join("worker");
