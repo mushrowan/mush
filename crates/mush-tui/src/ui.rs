@@ -15,10 +15,7 @@ impl<'a> Ui<'a> {
     }
 
     pub fn cursor_position(&self, area: Rect) -> (u16, u16) {
-        let input_h = input_height(&self.app.input, area.width);
-        let status_h = status_bar_height(self.app, area.width);
-        let prompt_h = crate::widgets::prompt_line::height(self.app);
-        let chunks = layout(area, prompt_h, input_h, status_h);
+        let chunks = app_layout(self.app, area);
         self.app.input.area.set(chunks.input);
         self.app
             .input
@@ -45,6 +42,13 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
 
     let layout = input.layout(content_width);
     (layout.total_lines + 2).min(12)
+}
+
+pub fn app_layout(app: &App, area: Rect) -> LayoutRegions {
+    let input_h = input_height(&app.input, area.width);
+    let status_h = status_bar_height(app, area.width);
+    let prompt_h = crate::widgets::prompt_line::height(app);
+    layout(area, prompt_h, input_h, status_h)
 }
 
 pub fn layout(area: Rect, prompt_h: u16, input_h: u16, status_h: u16) -> LayoutRegions {

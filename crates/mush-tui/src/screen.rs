@@ -9,7 +9,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use crate::app::App;
-use crate::ui::{input_height, layout, status_bar_height};
+use crate::ui::app_layout;
 use crate::widgets::input_box::InputBox;
 use crate::widgets::message_list::{Transcript, TranscriptChunk, transcript_guards};
 use crate::widgets::status_bar::StatusBar;
@@ -67,7 +67,7 @@ impl Default for Viewport {
 impl Viewport {
     pub(crate) fn place(&self, transcript: &Transcript<'_>, area: Rect) -> Range<usize> {
         self.area.set(area);
-        self.remap(&transcript.chunks);
+        self.remap_chunks(&transcript.chunks);
         let window = self.window(transcript.len(), usize::from(area.height));
         self.widths.replace(
             transcript[window.clone()]
@@ -84,15 +84,9 @@ impl Viewport {
         window
     }
 
-    fn remap(&self, chunks: &[TranscriptChunk]) {
-        self.remap_chunks(chunks);
-    }
-
     pub(crate) fn remap_chunks(&self, chunks: &[TranscriptChunk]) {
-        let previous = self.chunks.borrow();
+        let previous = self.chunks.replace(chunks.to_vec());
         if previous.is_empty() || self.following.get() {
-            drop(previous);
-            self.chunks.replace(chunks.to_vec());
             return;
         }
         let map = |line| remap_line(line, &previous, chunks);
@@ -103,8 +97,6 @@ impl Viewport {
         if let Some((line, column)) = self.anchor.get() {
             self.anchor.set(Some((map(line), column)));
         }
-        drop(previous);
-        self.chunks.replace(chunks.to_vec());
     }
 
     pub fn window(&self, total: usize, height: usize) -> Range<usize> {
@@ -380,10 +372,7 @@ impl Screen {
         if !app.interaction.focus.is_log() || app.interaction.mode == crate::app::AppMode::Insert {
             return None;
         }
-        let input_h = input_height(&app.input, area.width);
-        let status_h = status_bar_height(app, area.width);
-        let prompt_h = crate::widgets::prompt_line::height(app);
-        let window = layout(area, prompt_h, input_h, status_h).messages;
+        let window = app_layout(app, area).messages;
         let column = u16::try_from(app.viewport.cursor().column).unwrap_or(u16::MAX);
         Some((
             window.x + column.min(window.width.saturating_sub(1)),
@@ -396,10 +385,7 @@ impl Screen {
     }
 
     pub fn render(&mut self, app: &App, area: Rect, buf: &mut Buffer) {
-        let input_h = input_height(&app.input, area.width);
-        let status_h = status_bar_height(app, area.width);
-        let prompt_h = crate::widgets::prompt_line::height(app);
-        let regions = layout(area, prompt_h, input_h, status_h);
+        let regions = app_layout(app, area);
         app.input.area.set(regions.input);
 
         let transcript = transcript_guards(app, area.width);
@@ -455,6 +441,14 @@ impl Screen {
 mod tests {
     use super::*;
 
+    fn chunk(message: usize, start: usize, end: usize) -> TranscriptChunk {
+        TranscriptChunk {
+            id: crate::widgets::message_list::TranscriptChunkId::Message(message),
+            start,
+            end,
+        }
+    }
+
     fn log_area(height: u16) -> Rect {
         Rect::new(0, 0, 80, height)
     }
@@ -477,30 +471,8 @@ mod tests {
     #[test]
     fn resize_remaps_the_cursor_and_selection_anchor() {
         let viewport = Viewport::default();
-        let previous = vec![
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-                start: 0,
-                end: 10,
-            },
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
-                start: 10,
-                end: 20,
-            },
-        ];
-        let current = vec![
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-                start: 0,
-                end: 100,
-            },
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
-                start: 100,
-                end: 120,
-            },
-        ];
+        let previous = vec![chunk(0, 0, 10), chunk(1, 10, 20)];
+        let current = vec![chunk(0, 0, 100), chunk(1, 100, 120)];
         viewport.window(20, 5);
         viewport.pause();
         viewport.scroll_by(-2);
@@ -517,46 +489,16 @@ mod tests {
 
     #[test]
     fn wrapped_lines_remap_to_the_same_message() {
-        let previous = [
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-                start: 0,
-                end: 10,
-            },
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
-                start: 10,
-                end: 20,
-            },
-        ];
-        let current = [
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-                start: 0,
-                end: 100,
-            },
-            TranscriptChunk {
-                id: crate::widgets::message_list::TranscriptChunkId::Message(1),
-                start: 100,
-                end: 120,
-            },
-        ];
+        let previous = [chunk(0, 0, 10), chunk(1, 10, 20)];
+        let current = [chunk(0, 0, 100), chunk(1, 100, 120)];
 
         assert_eq!(remap_line(13, &previous, &current), 103);
     }
 
     #[test]
     fn wrapped_line_offsets_clamp_inside_the_message() {
-        let previous = [TranscriptChunk {
-            id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-            start: 0,
-            end: 20,
-        }];
-        let current = [TranscriptChunk {
-            id: crate::widgets::message_list::TranscriptChunkId::Message(0),
-            start: 0,
-            end: 5,
-        }];
+        let previous = [chunk(0, 0, 20)];
+        let current = [chunk(0, 0, 5)];
 
         assert_eq!(remap_line(13, &previous, &current), 4);
     }
