@@ -18,7 +18,6 @@ pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
 const MAX_AGENT_EVENTS_PER_FRAME: usize = 32;
 const MAX_AGENT_EVENT_DRAIN: std::time::Duration = std::time::Duration::from_millis(8);
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_loop_iteration(
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
@@ -82,7 +81,6 @@ fn input_parts<'a>(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_streaming_iteration(
     stream_state: &mut StreamState,
     runtime: &mut RunnerRuntime,
@@ -94,7 +92,6 @@ async fn handle_streaming_iteration(
     tokio::pin!(tick);
     let mut saw_agent_event = false;
     let mut saw_settling_agent_event = false;
-    let terminal_action;
     let mut tick_changed = false;
 
     tokio::select! {
@@ -109,33 +106,16 @@ async fn handle_streaming_iteration(
             }
 
             let mut drained_events = 0usize;
-            loop {
-                if !should_continue_agent_drain(
-                    drained_events,
-                    drain_started,
-                    std::time::Instant::now(),
-                ) {
-                    break;
-                }
-                match runtime.session.connection.try_next_event() {
-                    Some(event) => {
-                        saw_agent_event = true;
-                        saw_settling_agent_event |= is_settling_client_event(&event);
-                        drained_events += 1;
-                        dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
-                        trace_draw_reason("agent_event_drain");
-                        runtime.tick_streaming_text_panes();
-                    }
-                    None => break,
-                }
+            while should_continue_agent_drain(drained_events, drain_started, std::time::Instant::now())
+                && let Some(event) = runtime.session.connection.try_next_event()
+            {
+                saw_agent_event = true;
+                saw_settling_agent_event |= is_settling_client_event(&event);
+                drained_events += 1;
+                dispatch_client_event(event, stream_state, runtime, tui_config, image_picker).await;
+                trace_draw_reason("agent_event_drain");
+                runtime.tick_streaming_text_panes();
             }
-
-            let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
-            let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
-            if matches!(action, LoopAction::Quit) {
-                return Ok(LoopAction::Quit);
-            }
-            terminal_action = action;
         }
         _ = tick => {
             if runtime.tick_animation_panes() {
@@ -159,14 +139,14 @@ async fn handle_streaming_iteration(
                 tick_changed = true;
                 trace_draw_reason("browser_login");
             }
-
-            let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
-            let action = handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
-            if matches!(action, LoopAction::Quit) {
-                return Ok(LoopAction::Quit);
-            }
-            terminal_action = action;
         }
+    }
+
+    let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
+    let terminal_action =
+        handle_streaming_terminal_events(session, stream_state, &mut deps).await?;
+    if matches!(terminal_action, LoopAction::Quit) {
+        return Ok(LoopAction::Quit);
     }
 
     Ok(streaming_iteration_action(
@@ -245,15 +225,6 @@ pub(super) async fn dispatch_client_event(
         ClientEvent::Agent { event, applied, .. } => {
             dispatch_agent_event(pane_id, event, applied, runtime, tui_config, image_picker).await;
         }
-        ClientEvent::TurnStarted => {
-            let app = &mut runtime.session.app;
-            app.active_tools.clear();
-            app.promote_queued_messages();
-            app.begin_turn();
-            if !app.stream.active {
-                app.start_streaming();
-            }
-        }
         ClientEvent::TurnEnded { cancelled } => {
             runtime.session.app.end_turn();
             let automatic_continuation =
@@ -328,11 +299,10 @@ pub(super) async fn apply_command_events(
                 queued,
             } => {
                 let images: Vec<Vec<u8>> = images.into_iter().map(|image| image.data).collect();
-                match (queued, images.is_empty()) {
-                    (true, true) => session.app.push_queued_message(text),
-                    (true, false) => session.app.push_queued_message_with_images(text, images),
-                    (false, true) => session.app.push_user_message(text),
-                    (false, false) => session.app.push_user_message_with_images(text, images),
+                if queued {
+                    session.app.push_queued_message_with_images(text, images);
+                } else {
+                    session.app.push_user_message_with_images(text, images);
                 }
             }
             ClientEvent::SteerRetracted { text } => session.app.retract_queued_message(&text),
@@ -451,7 +421,6 @@ fn drain_session_picker(session: &mut crate::session::Session) -> bool {
         .is_some_and(|picker| picker.drain_incoming())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn note_closed_connection(runtime: &mut RunnerRuntime) -> bool {
     if runtime.connection_closed || !runtime.session.connection.closed() {
         return false;
