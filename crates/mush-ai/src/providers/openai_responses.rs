@@ -1,16 +1,15 @@
-use base64::Engine;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
 
 use crate::env::env_api_key;
+use crate::oauth::openai_codex::{extract_account_id, jwt_payload};
 use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
 const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
-const OPENAI_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 
 pub struct OpenaiResponsesProvider {
     pub client: crate::http::HttpClient,
@@ -37,7 +36,7 @@ impl ApiProvider for OpenaiResponsesProvider {
             })?;
 
         let is_codex = is_codex_provider(model);
-        let codex_oauth = is_codex && decode_jwt_payload(api_key.expose()).is_some();
+        let codex_oauth = is_codex && jwt_payload(api_key.expose()).is_some();
         if codex_oauth
             && let Ok(Some(fresh)) =
                 crate::oauth::get_openai_codex_oauth_token(options.oauth_account.as_ref()).await
@@ -587,42 +586,6 @@ fn build_headers(
     }
 
     Ok(headers)
-}
-
-fn extract_account_id(token: &str) -> Option<String> {
-    let payload = decode_jwt_payload(token)?;
-
-    payload
-        .get("chatgpt_account_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            payload
-                .get(OPENAI_AUTH_CLAIM_PATH)
-                .and_then(|v| v.get("chatgpt_account_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            payload
-                .get("organizations")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|org| org.get("id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-}
-
-fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
-    let payload_b64 = token.split('.').nth(1)?;
-
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
-        .ok()?;
-
-    serde_json::from_slice::<serde_json::Value>(&decoded).ok()
 }
 
 #[derive(serde::Deserialize)]
@@ -1235,6 +1198,8 @@ pub fn benchmark_tool_call_deltas(chunk_count: usize, arg_bytes: usize) -> usize
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+
     use super::*;
 
     fn fake_jwt(subject: &str) -> String {

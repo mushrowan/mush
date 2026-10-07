@@ -250,32 +250,33 @@ fn parse_authorization_input(input: &str) -> ParsedInput {
     }
 }
 
-fn extract_account_id(token: &str) -> Option<String> {
+pub(crate) fn jwt_payload(token: &str) -> Option<serde_json::Value> {
     let payload_b64 = token.split('.').nth(1)?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
         .ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
 
-    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-
-    json.get("chatgpt_account_id")
-        .and_then(|v| v.as_str())
+pub(crate) fn account_id_claim(payload: &serde_json::Value) -> Option<String> {
+    [Some(payload), payload.get(CLAIM_PATH)]
+        .into_iter()
+        .find_map(|claims| claims?.get("chatgpt_account_id")?.as_str())
         .map(str::to_string)
-        .or_else(|| {
-            json.get(CLAIM_PATH)
-                .and_then(|v| v.get("chatgpt_account_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            json.get("organizations")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|org| org.get("id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
+}
+
+pub(crate) fn extract_account_id(token: &str) -> Option<String> {
+    let payload = jwt_payload(token)?;
+    account_id_claim(&payload).or_else(|| {
+        payload
+            .get("organizations")?
+            .as_array()?
+            .first()?
+            .get("id")?
+            .as_str()
+            .map(str::to_string)
+    })
 }
 
 #[derive(Deserialize)]

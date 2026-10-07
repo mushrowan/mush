@@ -4,6 +4,7 @@ use semver::Version;
 use serde::Deserialize;
 
 use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use crate::oauth::openai_codex::{account_id_claim, jwt_payload};
 use crate::types::{
     Api, ApiKey, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount,
 };
@@ -73,10 +74,10 @@ impl ModelDiscovery for CodexDiscovery {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {}", self.access_token.expose()),
         );
-        let account_id = self
-            .account_id
-            .clone()
-            .or_else(|| extract_account_id(self.access_token.expose()));
+        let account_id = self.account_id.clone().or_else(|| {
+            let payload = jwt_payload(self.access_token.expose())?;
+            account_id_claim(&payload)
+        });
         if let Some(account_id) = account_id {
             req = req.header("chatgpt-account-id", account_id);
         }
@@ -174,28 +175,6 @@ fn entry_to_model(entry: CodexModelEntry) -> Model {
         supported_thinking_levels,
         default_thinking_level,
     }
-}
-
-fn extract_account_id(token: &str) -> Option<String> {
-    use base64::Engine;
-    let payload_b64 = token.split('.').nth(1)?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
-        .ok()?;
-    let payload: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-
-    payload
-        .get("chatgpt_account_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            payload
-                .get("https://api.openai.com/auth")
-                .and_then(|v| v.get("chatgpt_account_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
 }
 
 #[derive(Deserialize, Debug)]
