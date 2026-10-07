@@ -39,6 +39,21 @@ pub struct JobState {
 }
 
 impl JobState {
+    pub fn running(id: String, command: String, cwd: Arc<Path>, started: Instant) -> Self {
+        Self {
+            id,
+            command,
+            status: JobStatus::Running,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_consumed_bytes: 0,
+            stderr_consumed_bytes: 0,
+            started,
+            finished: None,
+            cwd,
+        }
+    }
+
     pub fn finish(&mut self, status: JobStatus) {
         debug_assert!(
             !status.is_running(),
@@ -56,7 +71,7 @@ impl JobState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BackgroundJobRegistry {
     jobs: Arc<RwLock<HashMap<String, Arc<RwLock<JobState>>>>>,
     kill_handles: Arc<RwLock<HashMap<String, JobKillHandle>>>,
@@ -86,11 +101,7 @@ impl JobKillHandle {
 
 impl BackgroundJobRegistry {
     pub fn new() -> Self {
-        Self {
-            jobs: Arc::new(RwLock::new(HashMap::new())),
-            kill_handles: Arc::new(RwLock::new(HashMap::new())),
-            counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        }
+        Self::default()
     }
 
     pub fn next_id(&self) -> String {
@@ -154,12 +165,11 @@ impl BackgroundJobRegistry {
 
     pub async fn kill(&self, id: &str) -> bool {
         let kill_handle = self.kill_handles.write().await.remove(id);
-        if let Some(kill_handle) = kill_handle {
-            kill_handle.kill();
-            true
-        } else {
-            false
-        }
+        let Some(kill_handle) = kill_handle else {
+            return false;
+        };
+        kill_handle.kill();
+        true
     }
 
     pub async fn clear_kill_handle(&self, id: &str) {
@@ -195,29 +205,17 @@ impl BackgroundJobRegistry {
     }
 }
 
-impl Default for BackgroundJobRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn make_job(id: &str, command: &str) -> JobState {
-        JobState {
-            id: id.to_string(),
-            command: command.to_string(),
-            status: JobStatus::Running,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_consumed_bytes: 0,
-            stderr_consumed_bytes: 0,
-            started: Instant::now(),
-            finished: None,
-            cwd: Arc::from(Path::new(".")),
-        }
+        JobState::running(
+            id.to_string(),
+            command.to_string(),
+            Arc::from(Path::new(".")),
+            Instant::now(),
+        )
     }
 
     #[tokio::test]

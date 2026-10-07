@@ -352,29 +352,18 @@ impl AgentTool for BashTool {
         }
 
         let line_sink = self.line_sink_for_current_exec();
-        match self.bg_registry.as_ref() {
-            Some(registry) => {
-                run_command_with_timeout_adoption(
-                    &self.cwd,
-                    &args.command,
-                    args.effective_timeout(),
-                    line_sink.as_ref(),
-                    args.output.is_json(),
-                    Some(registry),
-                )
-                .await
-            }
-            None => {
-                run_command(
-                    &self.cwd,
-                    &args.command,
-                    args.effective_timeout(),
-                    line_sink.as_ref(),
-                    args.output.is_json(),
-                )
-                .await
-            }
-        }
+        run_foreground(
+            &self.cwd,
+            &args.command,
+            ForegroundLimits {
+                timeout_secs: args.effective_timeout(),
+                no_output_timeout_secs: NO_OUTPUT_TIMEOUT_SECS,
+            },
+            line_sink.as_ref(),
+            args.output.is_json(),
+            self.bg_registry.as_ref(),
+        )
+        .await
     }
 }
 
@@ -386,17 +375,12 @@ impl BashTool {
             std::sync::Arc::new(move |line: &str| sink(&exec_id, line)) as LineSink
         })
     }
-}
 
-impl BashTool {
     async fn execute_background(&self, args: BashArgs) -> ToolResult {
-        let registry = match &self.bg_registry {
-            Some(r) => r,
-            None => {
-                return ToolResult::error(
-                    "background execution not available (no job registry configured)",
-                );
-            }
+        let Some(registry) = &self.bg_registry else {
+            return ToolResult::error(
+                "background execution not available (no job registry configured)",
+            );
         };
 
         if let Err(msg) = registry.check_can_start(args.concurrent).await {
@@ -404,18 +388,12 @@ impl BashTool {
         }
 
         let id = registry.next_id();
-        let state = crate::background::JobState {
-            id: id.clone(),
-            command: args.command.clone(),
-            status: crate::background::JobStatus::Running,
-            stdout: String::new(),
-            stderr: String::new(),
-            stdout_consumed_bytes: 0,
-            stderr_consumed_bytes: 0,
-            started: std::time::Instant::now(),
-            finished: None,
-            cwd: self.cwd.clone(),
-        };
+        let state = crate::background::JobState::running(
+            id.clone(),
+            args.command.clone(),
+            self.cwd.clone(),
+            std::time::Instant::now(),
+        );
 
         let handle = registry.insert(state).await;
         let command = args.command.clone();
@@ -462,24 +440,7 @@ async fn run_background_command(
     command: &str,
     spawn_ready: tokio::sync::oneshot::Sender<()>,
 ) {
-    let mut cmd = tokio::process::Command::new("bash");
-    mush_agent::exec_context::apply_control_environment(&mut cmd);
-    let wrapped_command = command_with_direnv(command);
-    cmd.arg("-c")
-        .arg(wrapped_command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    for var in ["EDITOR", "VISUAL", "GIT_EDITOR", "JJ_EDITOR"] {
-        cmd.env(var, "false");
-    }
-
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = match cmd.spawn() {
+    let mut child = match bash_command(cwd, command).spawn() {
         Ok(c) => c,
         Err(e) => {
             let mut state = handle.write().await;
@@ -497,117 +458,57 @@ async fn run_background_command(
     }
     let _ = spawn_ready.send(());
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
+    let stdout_handle = tokio::spawn(stream_pipe(child.stdout.take(), None, None));
+    let stderr_handle = tokio::spawn(stream_pipe(child.stderr.take(), None, None));
 
-    let stdout_handle = tokio::spawn(stream_pipe(stdout_pipe, None, None));
-    let stderr_handle = tokio::spawn(stream_pipe(stderr_pipe, None, None));
-
-    let status = match child.wait().await {
-        Ok(status) => status,
-        Err(e) => {
-            pg_guard.disarm();
-            let stdout = stdout_handle.await.unwrap_or_default();
-            let stderr = stderr_handle.await.unwrap_or_default();
-            let mut state = handle.write().await;
-            state.stdout = stdout;
-            state.stderr = stderr;
-            if state.status.is_running() {
-                state.finish(crate::background::JobStatus::Failed(format!(
-                    "command failed: {e}"
-                )));
-            }
-            registry.clear_kill_handle(&job_id).await;
-            return;
-        }
-    };
-
+    let status = child.wait().await;
     pg_guard.disarm();
+    finish_background_job(
+        &handle,
+        &registry,
+        &job_id,
+        stdout_handle,
+        stderr_handle,
+        status,
+    )
+    .await;
+}
+
+async fn finish_background_job(
+    handle: &tokio::sync::RwLock<crate::background::JobState>,
+    registry: &crate::background::BackgroundJobRegistry,
+    job_id: &str,
+    stdout_handle: tokio::task::JoinHandle<String>,
+    stderr_handle: tokio::task::JoinHandle<String>,
+    status: std::io::Result<std::process::ExitStatus>,
+) {
     let stdout = stdout_handle.await.unwrap_or_default();
     let stderr = stderr_handle.await.unwrap_or_default();
-    let exit_code = status.code().unwrap_or(-1);
 
     let mut state = handle.write().await;
     state.stdout = stdout;
     state.stderr = stderr;
     if state.status.is_running() {
-        state.finish(crate::background::JobStatus::Done { exit_code });
+        state.finish(match status {
+            Ok(status) => crate::background::JobStatus::Done {
+                exit_code: status.code().unwrap_or(-1),
+            },
+            Err(error) => crate::background::JobStatus::Failed(format!("command failed: {error}")),
+        });
     }
     drop(state);
-    registry.clear_kill_handle(&job_id).await;
+    registry.clear_kill_handle(job_id).await;
 }
 
-async fn run_command(
-    cwd: &std::path::Path,
-    command: &str,
-    timeout_secs: u64,
-    output_sink: Option<&LineSink>,
-    json_output: bool,
-) -> ToolResult {
-    run_command_with_timeout_adoption(cwd, command, timeout_secs, output_sink, json_output, None)
-        .await
-}
-
-async fn run_command_with_timeout_adoption(
-    cwd: &std::path::Path,
-    command: &str,
-    timeout_secs: u64,
-    output_sink: Option<&LineSink>,
-    json_output: bool,
-    timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
-) -> ToolResult {
-    run_command_with_no_output_timeout_and_adoption(
-        cwd,
-        command,
-        timeout_secs,
-        output_sink,
-        json_output,
-        NO_OUTPUT_TIMEOUT_SECS,
-        timeout_adoption,
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn run_command_with_no_output_timeout(
-    cwd: &std::path::Path,
-    command: &str,
-    timeout_secs: u64,
-    output_sink: Option<&LineSink>,
-    json_output: bool,
-    no_output_timeout_secs: u64,
-) -> ToolResult {
-    run_command_with_no_output_timeout_and_adoption(
-        cwd,
-        command,
-        timeout_secs,
-        output_sink,
-        json_output,
-        no_output_timeout_secs,
-        None,
-    )
-    .await
-}
-
-async fn run_command_with_no_output_timeout_and_adoption(
-    cwd: &std::path::Path,
-    command: &str,
-    timeout_secs: u64,
-    output_sink: Option<&LineSink>,
-    json_output: bool,
-    no_output_timeout_secs: u64,
-    timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
-) -> ToolResult {
+fn bash_command(cwd: &std::path::Path, command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("bash");
     mush_agent::exec_context::apply_control_environment(&mut cmd);
-    let wrapped_command = command_with_direnv(command);
     cmd.arg("-c")
-        .arg(wrapped_command)
+        .arg(command_with_direnv(command))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(Stdio::piped());
 
     for var in ["EDITOR", "VISUAL", "GIT_EDITOR", "JJ_EDITOR"] {
         cmd.env(var, "false");
@@ -615,8 +516,28 @@ async fn run_command_with_no_output_timeout_and_adoption(
 
     #[cfg(unix)]
     cmd.process_group(0);
+    cmd
+}
 
-    let mut child = match cmd.spawn() {
+#[derive(Clone, Copy)]
+struct ForegroundLimits {
+    timeout_secs: u64,
+    no_output_timeout_secs: u64,
+}
+
+async fn run_foreground(
+    cwd: &std::path::Path,
+    command: &str,
+    limits: ForegroundLimits,
+    output_sink: Option<&LineSink>,
+    json_output: bool,
+    timeout_adoption: Option<&crate::background::BackgroundJobRegistry>,
+) -> ToolResult {
+    let ForegroundLimits {
+        timeout_secs,
+        no_output_timeout_secs,
+    } = limits;
+    let mut child = match bash_command(cwd, command).kill_on_drop(true).spawn() {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("failed to spawn command: {e}")),
     };
@@ -629,16 +550,13 @@ async fn run_command_with_no_output_timeout_and_adoption(
 
     let has_output = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
     let stdout_handle = tokio::spawn(stream_pipe(
-        stdout_pipe,
+        child.stdout.take(),
         output_sink.cloned(),
         Some(has_output.clone()),
     ));
     let stderr_handle = tokio::spawn(stream_pipe(
-        stderr_pipe,
+        child.stderr.take(),
         output_sink.cloned(),
         Some(has_output.clone()),
     ));
@@ -649,13 +567,12 @@ async fn run_command_with_no_output_timeout_and_adoption(
         NoOutput,
     }
 
-    let has_output_ref = has_output.clone();
     let result = tokio::select! {
         status = child.wait() => WaitResult::Exited(status),
         () = tokio::time::sleep(timeout) => WaitResult::TimedOut,
         () = async {
             tokio::time::sleep(no_output_timeout).await;
-            if has_output_ref.load(std::sync::atomic::Ordering::Relaxed) {
+            if has_output.load(std::sync::atomic::Ordering::Relaxed) {
                 std::future::pending::<()>().await;
             }
         } => WaitResult::NoOutput,
@@ -739,24 +656,18 @@ async fn continue_in_background_after_timeout(
     let id = registry.next_id();
     let duration = running.duration;
     let kill_handle = crate::background::JobKillHandle::from_child(&running.child);
-    let state = crate::background::JobState {
-        id: id.clone(),
-        command: command.to_string(),
-        status: crate::background::JobStatus::Running,
-        stdout: String::new(),
-        stderr: String::new(),
-        stdout_consumed_bytes: 0,
-        stderr_consumed_bytes: 0,
-        started: std::time::Instant::now() - duration,
-        finished: None,
-        cwd: Arc::from(cwd),
-    };
+    let state = crate::background::JobState::running(
+        id.clone(),
+        command.to_string(),
+        Arc::from(cwd),
+        std::time::Instant::now() - duration,
+    );
     let handle = registry.insert(state).await;
     if let Some(kill_handle) = kill_handle {
         registry.set_kill_handle(&id, kill_handle).await;
     }
-    let registry_for_task = registry.clone();
-    let id_for_task = id.clone();
+    let registry = registry.clone();
+    let job_id = id.clone();
 
     tokio::spawn(async move {
         let TimedOutCommand {
@@ -768,25 +679,15 @@ async fn continue_in_background_after_timeout(
         } = running;
         let status = child.wait().await;
         pg_guard.disarm();
-
-        let stdout = stdout_handle.await.unwrap_or_default();
-        let stderr = stderr_handle.await.unwrap_or_default();
-
-        let mut state = handle.write().await;
-        state.stdout = stdout;
-        state.stderr = stderr;
-        if state.status.is_running() {
-            match status {
-                Ok(status) => state.finish(crate::background::JobStatus::Done {
-                    exit_code: status.code().unwrap_or(-1),
-                }),
-                Err(error) => state.finish(crate::background::JobStatus::Failed(format!(
-                    "command failed: {error}"
-                ))),
-            }
-        }
-        drop(state);
-        registry_for_task.clear_kill_handle(&id_for_task).await;
+        finish_background_job(
+            &handle,
+            &registry,
+            &job_id,
+            stdout_handle,
+            stderr_handle,
+            status,
+        )
+        .await;
     });
 
     format_backgrounded_timeout_result(&id, command, timeout_secs, duration, json_output)
@@ -799,7 +700,7 @@ fn format_backgrounded_timeout_result(
     duration: std::time::Duration,
     json_output: bool,
 ) -> ToolResult {
-    let duration_secs = (duration.as_secs_f32() * 10.0).round() / 10.0;
+    let duration_secs = tenths_of_seconds(duration);
     let message = format!(
         "exceeded tool timeout after {timeout_secs}s, continuing in the background. check bash_status with job_id: {id} to monitor"
     );
@@ -830,7 +731,7 @@ fn format_result(
     duration: std::time::Duration,
     json_output: bool,
 ) -> ToolResult {
-    let duration_secs = (duration.as_secs_f32() * 10.0).round() / 10.0;
+    let duration_secs = tenths_of_seconds(duration);
     let status = command_status(exit_code, timed_out);
 
     if json_output {
@@ -847,15 +748,7 @@ fn format_result(
             "stderr_bytes": stderr.len(),
         });
         if exit_code != 0 || timed_out {
-            ToolResult {
-                content: vec![mush_ai::types::ToolResultContentPart::Text(
-                    mush_ai::types::TextContent {
-                        text: json.to_string(),
-                    },
-                )],
-                outcome: mush_ai::types::ToolOutcome::Error,
-                details: None,
-            }
+            ToolResult::error(json.to_string())
         } else {
             ToolResult::text(json.to_string())
         }
@@ -883,18 +776,15 @@ fn format_result(
         );
 
         if exit_code != 0 || timed_out {
-            let text = format!("{preamble}{output}");
-            ToolResult {
-                content: vec![mush_ai::types::ToolResultContentPart::Text(
-                    mush_ai::types::TextContent { text },
-                )],
-                outcome: mush_ai::types::ToolOutcome::Error,
-                details: None,
-            }
+            ToolResult::error(format!("{preamble}{output}"))
         } else {
             ToolResult::text(format!("{preamble}{output}"))
         }
     }
+}
+
+fn tenths_of_seconds(duration: std::time::Duration) -> f32 {
+    (duration.as_secs_f32() * 10.0).round() / 10.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -971,6 +861,39 @@ async fn stream_pipe<R: tokio::io::AsyncRead + Unpin>(
 mod tests {
     use super::*;
     use crate::util::extract_text;
+
+    async fn run_command(
+        cwd: &std::path::Path,
+        command: &str,
+        timeout_secs: u64,
+        output_sink: Option<&LineSink>,
+        json_output: bool,
+    ) -> ToolResult {
+        run_command_with_no_output_timeout(
+            cwd,
+            command,
+            timeout_secs,
+            output_sink,
+            json_output,
+            NO_OUTPUT_TIMEOUT_SECS,
+        )
+        .await
+    }
+
+    async fn run_command_with_no_output_timeout(
+        cwd: &std::path::Path,
+        command: &str,
+        timeout_secs: u64,
+        output_sink: Option<&LineSink>,
+        json_output: bool,
+        no_output_timeout_secs: u64,
+    ) -> ToolResult {
+        let limits = ForegroundLimits {
+            timeout_secs,
+            no_output_timeout_secs,
+        };
+        run_foreground(cwd, command, limits, output_sink, json_output, None).await
+    }
 
     #[tokio::test]
     async fn control_environment_is_isolated_for_foreground_background_and_batch() {
