@@ -103,7 +103,9 @@ impl DiscoveryRunSummary {
 pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunSummary {
     let mut results = Vec::new();
 
-    let anthropic_key = discovery_auth(&Provider::Anthropic).await.api_key;
+    let anthropic_key = resolve_auth_from_default_sources(&Provider::Anthropic)
+        .await
+        .api_key;
     results.push(
         run_one(Provider::Anthropic, anthropic_key, |key| {
             let d = AnthropicDiscovery::new(client.clone(), "", key);
@@ -161,16 +163,6 @@ pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunS
     );
 
     DiscoveryRunSummary { results }
-}
-
-async fn discovery_auth(provider: &Provider) -> crate::auth::ResolvedAuth {
-    match provider {
-        Provider::OpenRouter => crate::auth::ResolvedAuth {
-            api_key: env::env_api_key(provider),
-            account_id: None,
-        },
-        _ => resolve_auth_from_default_sources(provider).await,
-    }
 }
 
 async fn run_one<F, Fut>(
@@ -322,12 +314,6 @@ mod tests {
             DiscoveryOutcome::Failed(_) => {}
             other => panic!("expected Failed, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn discovery_auth_uses_shared_resolution_for_anthropic() {
-        let auth = discovery_auth(&Provider::Anthropic).await;
-        assert!(auth.api_key.is_some() || auth.account_id.is_none());
     }
 
     fn sample_model(id: &str) -> Model {

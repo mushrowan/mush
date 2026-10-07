@@ -110,15 +110,13 @@ fn default_credentials_path() -> PathBuf {
 }
 
 #[derive(Debug, Clone)]
-pub struct KeyringCredentialStore {
-    service: &'static str,
-}
+pub struct KeyringCredentialStore;
 
 impl KeyringCredentialStore {
     pub const SERVICE: &'static str = "mush";
 
     fn entry(&self, provider_id: &str) -> Result<keyring_core::Entry, CredentialError> {
-        keyring_core::Entry::new(self.service, provider_id)
+        keyring_core::Entry::new(Self::SERVICE, provider_id)
             .map_err(|e| CredentialError::Keyring(e.to_string()))
     }
 }
@@ -204,9 +202,7 @@ pub fn default_store() -> Arc<dyn CredentialStore> {
     DEFAULT_STORE
         .get_or_init(|| {
             if try_init_keyring() {
-                Arc::new(KeyringCredentialStore {
-                    service: KeyringCredentialStore::SERVICE,
-                })
+                Arc::new(KeyringCredentialStore)
             } else {
                 Arc::new(FileCredentialStore::default())
             }

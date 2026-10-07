@@ -40,7 +40,7 @@ pub async fn resolve_auth(
         };
     }
 
-    if let Ok(Some(key)) = credential_store.get(storage_key(provider)) {
+    if let Ok(Some(key)) = credential_store.get(config_key(provider)) {
         return ResolvedAuth {
             api_key: Some(key),
             account_id: None,
@@ -81,7 +81,7 @@ pub fn load_config_api_keys() -> HashMap<String, ApiKey> {
     };
 
     toml::from_str::<ConfigFile>(&content)
-        .map(|cfg| cfg.api_keys.into_map())
+        .map(|cfg| cfg.api_keys)
         .unwrap_or_default()
 }
 
@@ -130,10 +130,6 @@ fn config_key(provider: &Provider) -> &str {
     }
 }
 
-fn storage_key(provider: &Provider) -> &str {
-    config_key(provider)
-}
-
 fn config_path() -> PathBuf {
     crate::dirs::config_dir().join("config.toml")
 }
@@ -141,33 +137,7 @@ fn config_path() -> PathBuf {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct ConfigFile {
-    api_keys: ConfigApiKeys,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-struct ConfigApiKeys {
-    anthropic: Option<ApiKey>,
-    openrouter: Option<ApiKey>,
-    openai: Option<ApiKey>,
-    #[serde(flatten)]
-    other: HashMap<String, ApiKey>,
-}
-
-impl ConfigApiKeys {
-    fn into_map(self) -> HashMap<String, ApiKey> {
-        let mut map = self.other;
-        if let Some(key) = self.anthropic {
-            map.insert("anthropic".into(), key);
-        }
-        if let Some(key) = self.openrouter {
-            map.insert("openrouter".into(), key);
-        }
-        if let Some(key) = self.openai {
-            map.insert("openai".into(), key);
-        }
-        map
-    }
+    api_keys: HashMap<String, ApiKey>,
 }
 
 #[cfg(test)]
