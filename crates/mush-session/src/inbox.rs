@@ -16,8 +16,12 @@ pub struct Consumer {
     binding: Binding,
 }
 
+fn receipt_id(event_id: &str) -> PromptId {
+    PromptId::from(format!("orchestrator-event-{event_id}"))
+}
+
 pub fn contains(conversation: &ConversationState, event_id: &str) -> bool {
-    let prompt_id = PromptId::from(format!("orchestrator-event-{event_id}"));
+    let prompt_id = receipt_id(event_id);
     conversation
         .entries()
         .iter()
@@ -55,7 +59,7 @@ pub fn message(event: &Event) -> io::Result<EventMessage> {
         timestamp_ms,
         kind: EventKind::WorkerCompletion,
         receipts: vec![EventReceipt {
-            id: format!("orchestrator-event-{}", event.event_id).into(),
+            id: receipt_id(&event.event_id),
             timestamp_ms,
             kind: EventKind::WorkerCompletion,
             origin: EventOrigin::Inbox {

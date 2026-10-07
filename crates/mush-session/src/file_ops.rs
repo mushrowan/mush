@@ -45,12 +45,7 @@ impl FileOperations {
         for message in messages {
             ops.absorb(message);
         }
-        ops.read = ops
-            .read
-            .iter()
-            .filter(|path| !ops.modified.contains(*path))
-            .cloned()
-            .collect();
+        ops.read.retain(|path| !ops.modified.contains(path));
         ops
     }
 
