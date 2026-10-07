@@ -44,7 +44,7 @@ fn cross_process_saved_prefix_and_acknowledgment() {
         }
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut session = Session::new("fixture-model", &dir.path().display().to_string());
     session.system_prompt = Some("saved system prefix".into());
     session.push_message(Message::User(
@@ -130,7 +130,7 @@ fn cross_process_saved_prefix_and_acknowledgment() {
 
 #[test]
 fn event_receipt_survives_compaction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut session = Session::new("fixture", "/tmp");
     let event = event(dir.path());
     assert!(append(&mut session.conversation, &event).unwrap());
@@ -140,7 +140,7 @@ fn event_receipt_survives_compaction() {
 
 #[test]
 fn review_payload_survives_parent_reconnect_before_ack() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let mut session = Session::new("fixture", &dir.path().display().to_string());
     let id = session.meta.id.clone();
     let store = SessionStore::new(dir.path().join("sessions"));
@@ -203,7 +203,7 @@ fn review_payload_survives_parent_reconnect_before_ack() {
 
 #[test]
 fn supervised_session_lease_excludes_another_launcher() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     std::fs::set_permissions(
         dir.path(),
         std::os::unix::fs::PermissionsExt::from_mode(0o700),
@@ -227,7 +227,7 @@ fn supervised_session_lease_excludes_another_launcher() {
 
 #[test]
 fn a_fresh_session_is_not_leased_until_someone_holds_it() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::tempdir().unwrap();
     let store = SessionStore::new(dir.path().to_owned());
     let id = mush_ai::types::SessionId::new();
     assert!(!store.is_leased(&id));
