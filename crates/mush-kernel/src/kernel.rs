@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -170,7 +170,7 @@ struct Shared {
     stderr_tail: Mutex<VecDeque<String>>,
     handler: Arc<dyn HostRequestHandler>,
     requests: Mutex<HashMap<String, tokio::task::AbortHandle>>,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdin: tokio::sync::Mutex<ChildStdin>,
     child: Mutex<Option<Child>>,
     broken: Mutex<Option<String>>,
 }
@@ -179,7 +179,7 @@ pub struct Kernel {
     shared: Arc<Shared>,
     exec_lock: tokio::sync::Mutex<()>,
     next_id: AtomicU64,
-    reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    reader: tokio::task::JoinHandle<()>,
     _shim_dir: tempfile::TempDir,
     busy_wait: Duration,
     pub python: PathBuf,
@@ -244,7 +244,7 @@ impl Kernel {
             stderr_tail: Mutex::new(VecDeque::new()),
             handler,
             requests: Mutex::new(HashMap::new()),
-            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            stdin: tokio::sync::Mutex::new(stdin),
             child: Mutex::new(None),
             broken: Mutex::new(None),
         });
@@ -252,46 +252,16 @@ impl Kernel {
         tokio::spawn(tail_stderr(stderr, shared.clone()));
 
         let mut frames = Frames::new(stdout);
-        let ready = tokio::time::timeout(config.ready_timeout, frames.next()).await;
-        let python_version = match ready {
-            Ok(Ok(Some(Frame::Oversized))) => {
-                return Err(KernelError::Protocol(
-                    "first line was larger than a protocol frame".into(),
-                ));
-            }
-            Ok(Ok(Some(Frame::Line(line)))) => match serde_json::from_str::<Event>(&line) {
-                Ok(Event::Ready { protocol, python }) if protocol == PROTOCOL_VERSION => python,
-                Ok(Event::Ready { protocol, .. }) => {
-                    return Err(KernelError::Protocol(format!(
-                        "kernel speaks protocol {protocol}, host speaks {PROTOCOL_VERSION}"
-                    )));
-                }
-                Ok(other) => {
-                    return Err(KernelError::Protocol(format!(
-                        "expected ready, got {other:?}"
-                    )));
-                }
-                Err(error) => {
-                    return Err(KernelError::Protocol(format!(
-                        "first line was not an event: {error}: {line}"
-                    )));
-                }
-            },
-            Ok(Ok(None)) => {
-                return Err(KernelError::Exited(shared.stderr_tail_text()));
-            }
-            Ok(Err(error)) => return Err(error.into()),
-            Err(_) => return Err(KernelError::ReadyTimeout(config.ready_timeout)),
-        };
+        let python_version = await_ready(&mut frames, config.ready_timeout, &shared).await?;
 
-        *shared.child.lock().unwrap_or_else(PoisonError::into_inner) = Some(child);
+        *lock(&shared.child) = Some(child);
         let reader = tokio::spawn(read_events(frames, shared.clone()));
 
         Ok(Self {
             shared,
             exec_lock: tokio::sync::Mutex::new(()),
             next_id: AtomicU64::new(1),
-            reader: Mutex::new(Some(reader)),
+            reader,
             _shim_dir: shim_dir,
             busy_wait: config.busy_wait,
             python,
@@ -301,12 +271,7 @@ impl Kernel {
 
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
-        self.shared
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .and_then(Child::id)
+        lock(&self.shared.child).as_ref().and_then(Child::id)
     }
 
     #[must_use]
@@ -373,9 +338,9 @@ impl Kernel {
                 Event::Result { text, .. } => {
                     output.result = Some(capped(text, DEFAULT_MAX_OUTPUT_CHARS));
                 }
-                Event::Display { data, .. } => {
-                    if let Some(payload) = data.get(ATTACHMENT_MIME) {
-                        match serde_json::from_value::<Attachment>(payload.clone()) {
+                Event::Display { mut data, .. } => {
+                    if let Some(payload) = data.remove(ATTACHMENT_MIME) {
+                        match serde_json::from_value::<Attachment>(payload) {
                             Ok(attachment) if attachment.data.len() > MAX_ATTACHMENT_CHARS => {
                                 stderr.push(
                                     "attachment dropped: larger than the host accepts\n",
@@ -452,22 +417,8 @@ impl Kernel {
     }
 
     pub async fn kill(self) {
-        let child = self
-            .shared
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(mut child) = child {
+        if let Some(mut child) = self.shared.take_child() {
             let _ = child.kill().await;
-        }
-        if let Some(reader) = self
-            .reader
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            reader.abort();
         }
     }
 
@@ -526,27 +477,12 @@ impl Kernel {
 
     pub async fn shutdown(self) -> Result<(), KernelError> {
         let _ = self.send(&Request::Shutdown).await;
-        let child = self
-            .shared
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(mut child) = child {
-            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(_) => {}
-                Err(_) => {
-                    let _ = child.kill().await;
-                }
-            }
-        }
-        if let Some(reader) = self
-            .reader
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        if let Some(mut child) = self.shared.take_child()
+            && tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .is_err()
         {
-            reader.abort();
+            let _ = child.kill().await;
         }
         Ok(())
     }
@@ -603,19 +539,8 @@ impl Kernel {
 
 impl Drop for Kernel {
     fn drop(&mut self) {
-        self.shared
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(reader) = self
-            .reader
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            reader.abort();
-        }
+        self.shared.take_child();
+        self.reader.abort();
     }
 }
 
@@ -650,23 +575,24 @@ pub const RESTORED_TAG: &str = "[python-state-restored]";
 
 #[must_use]
 pub fn restore_notice_text(outcome: &Result<RestoreReport, String>) -> Option<String> {
-    let mut lines = vec![RESTORED_TAG.to_string(), String::new()];
-    let failed = match outcome {
+    let (restored, failed): (&[String], &[String]) = match outcome {
         Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
-        Ok(report) => &report.failed[..],
-        Err(_) => &[],
+        Ok(report) => (&report.restored, &report.failed),
+        Err(_) => (&[], &[]),
     };
-    match outcome {
-        Ok(report) if !report.restored.is_empty() => lines.push(format!(
-            "Your Python kernel state was revived from your previous session. These names are \
-             available again: {}.",
-            report.restored.join(", ")
-        )),
-        Ok(_) | Err(_) => lines.push(
+    let mut lines = vec![RESTORED_TAG.to_string(), String::new()];
+    if restored.is_empty() {
+        lines.push(
             "Your previous Python kernel state could not be revived; the kernel is starting \
              fresh, so re-create any variables, imports, or loaded data you need."
                 .to_string(),
-        ),
+        );
+    } else {
+        lines.push(format!(
+            "Your Python kernel state was revived from your previous session. These names are \
+             available again: {}.",
+            restored.join(", ")
+        ));
     }
     if !failed.is_empty() {
         lines.push(format!(
@@ -704,43 +630,38 @@ async fn write_request(
 }
 
 impl Shared {
+    fn take_child(&self) -> Option<Child> {
+        lock(&self.child).take()
+    }
+
     fn register(&self, id: &str) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.cells
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id.to_string(), tx);
+        lock(&self.cells).insert(id.to_string(), tx);
         rx
     }
 
     fn unregister(&self, id: &str) {
-        self.cells
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(id);
-        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        lock(&self.cells).remove(id);
+        let mut current = lock(&self.current);
         if current.as_deref() == Some(id) {
             *current = None;
         }
     }
 
     fn set_current(&self, id: Option<String>) {
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = id;
+        *lock(&self.current) = id;
     }
 
     fn running(&self) -> Option<String> {
-        self.running
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.running).clone()
     }
 
     fn set_running(&self, id: Option<String>) {
-        *self.running.lock().unwrap_or_else(PoisonError::into_inner) = id;
+        *lock(&self.running) = id;
     }
 
     fn finish_running(&self, id: &str) {
-        let mut running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut running = lock(&self.running);
         if running.as_deref() == Some(id) {
             *running = None;
             self.idle.notify_waiters();
@@ -748,29 +669,16 @@ impl Shared {
     }
 
     fn owns(&self, id: Option<&str>) -> bool {
-        id.is_some_and(|id| {
-            self.cells
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(id)
-        })
+        id.is_some_and(|id| lock(&self.cells).contains_key(id))
     }
 
     fn push_background(&self, text: &str) {
-        self.background
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(text, MAX_BACKGROUND_OUTPUT_CHARS);
+        lock(&self.background).push(text, MAX_BACKGROUND_OUTPUT_CHARS);
     }
 
     fn take_background(&self) -> String {
-        std::mem::take(
-            &mut *self
-                .background
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-        .finish("background output", MAX_BACKGROUND_OUTPUT_CHARS)
+        std::mem::take(&mut *lock(&self.background))
+            .finish("background output", MAX_BACKGROUND_OUTPUT_CHARS)
     }
 
     fn route(&self, event: Event) {
@@ -788,22 +696,15 @@ impl Shared {
             }
             other => other,
         };
-        let target = event.cell_id().map(str::to_string).or_else(|| {
-            self.current
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone()
-        });
+        let target = event
+            .cell_id()
+            .map(str::to_string)
+            .or_else(|| lock(&self.current).clone());
         let Some(target) = target else {
             tracing::debug!(?event, "kernel event with no cell to deliver to");
             return;
         };
-        let sender = self
-            .cells
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&target)
-            .cloned();
+        let sender = lock(&self.cells).get(&target).cloned();
         match sender {
             Some(sender) => {
                 let _ = sender.send(event);
@@ -814,25 +715,14 @@ impl Shared {
 
     fn corrupt(&self, reason: String) {
         tracing::warn!(reason, "bad kernel protocol frame, killing the kernel");
-        self.broken
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_or_insert(reason);
-        if let Some(child) = self
-            .child
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_mut()
-        {
+        lock(&self.broken).get_or_insert(reason);
+        if let Some(child) = lock(&self.child).as_mut() {
             let _ = child.start_kill();
         }
     }
 
     fn protocol_failure(&self) -> Option<String> {
-        self.broken
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        lock(&self.broken).clone()
     }
 
     fn gone(&self) -> KernelError {
@@ -843,11 +733,9 @@ impl Shared {
     }
 
     fn stderr_tail_text(&self) -> String {
-        self.stderr_tail
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        lock(&self.stderr_tail)
             .iter()
-            .cloned()
+            .map(String::as_str)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -934,53 +822,39 @@ async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Ar
                 break;
             }
         };
-        if let Event::HostCancel { id } = &event {
-            let request = shared
-                .requests
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(id);
-            if let Some(request) = request {
-                request.abort();
-            }
-            continue;
-        }
-        if let Event::HostRequest {
-            id, kind, payload, ..
-        } = event
-        {
-            let cancellable = shared.handler.cancellable(&kind);
-            let mut requests = shared
-                .requests
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let task = tokio::spawn({
-                let shared = shared.clone();
-                let id = id.clone();
-                async move {
-                    let reply = shared.handler.handle(&kind, payload).await;
-                    shared
-                        .requests
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&id);
-                    reply_to_host(&shared, id, reply).await;
+        match event {
+            Event::HostCancel { id } => {
+                let request = lock(&shared.requests).remove(&id);
+                if let Some(request) = request {
+                    request.abort();
                 }
-            });
-            if cancellable {
-                requests.insert(id, task.abort_handle());
             }
-            continue;
+            Event::HostRequest {
+                id, kind, payload, ..
+            } => spawn_host_request(&shared, id, kind, payload),
+            other => shared.route(other),
         }
-        shared.route(event);
     }
-    shared
-        .cells
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clear();
+    lock(&shared.cells).clear();
     shared.set_running(None);
     shared.idle.notify_waiters();
+}
+
+fn spawn_host_request(shared: &Arc<Shared>, id: String, kind: String, payload: Value) {
+    let cancellable = shared.handler.cancellable(&kind);
+    let mut requests = lock(&shared.requests);
+    let task = tokio::spawn({
+        let shared = shared.clone();
+        let id = id.clone();
+        async move {
+            let reply = shared.handler.handle(&kind, payload).await;
+            lock(&shared.requests).remove(&id);
+            reply_to_host(&shared, id, reply).await;
+        }
+    });
+    if cancellable {
+        requests.insert(id, task.abort_handle());
+    }
 }
 
 async fn reply_to_host(shared: &Shared, id: String, reply: Result<Value, HostError>) {
@@ -1003,13 +877,44 @@ async fn reply_to_host(shared: &Shared, id: String, reply: Result<Value, HostErr
     }
 }
 
+async fn await_ready<R: tokio::io::AsyncRead + Unpin>(
+    frames: &mut Frames<R>,
+    timeout: Duration,
+    shared: &Shared,
+) -> Result<String, KernelError> {
+    let line = match tokio::time::timeout(timeout, frames.next()).await {
+        Ok(Ok(Some(Frame::Line(line)))) => line,
+        Ok(Ok(Some(Frame::Oversized))) => {
+            return Err(KernelError::Protocol(
+                "first line was larger than a protocol frame".into(),
+            ));
+        }
+        Ok(Ok(None)) => return Err(KernelError::Exited(shared.stderr_tail_text())),
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => return Err(KernelError::ReadyTimeout(timeout)),
+    };
+    match serde_json::from_str::<Event>(&line) {
+        Ok(Event::Ready { protocol, python }) if protocol == PROTOCOL_VERSION => Ok(python),
+        Ok(Event::Ready { protocol, .. }) => Err(KernelError::Protocol(format!(
+            "kernel speaks protocol {protocol}, host speaks {PROTOCOL_VERSION}"
+        ))),
+        Ok(other) => Err(KernelError::Protocol(format!(
+            "expected ready, got {other:?}"
+        ))),
+        Err(error) => Err(KernelError::Protocol(format!(
+            "first line was not an event: {error}: {line}"
+        ))),
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let mut tail = shared
-            .stderr_tail
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut tail = lock(&shared.stderr_tail);
         if tail.len() >= STDERR_TAIL_LINES {
             tail.pop_front();
         }
