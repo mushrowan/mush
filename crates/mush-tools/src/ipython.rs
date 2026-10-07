@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 use mush_agent::tool::{AgentTool, OutputLimit, ToolResult, parse_tool_args};
 use mush_kernel::{CellOutput, HostError, HostRequestHandler, Kernel, KernelConfig, KernelError};
@@ -93,10 +96,10 @@ pub struct MushHost {
     cwd: Arc<Path>,
     jobs: crate::kernel_jobs::KernelJobs,
     edit: Arc<dyn AgentTool>,
-    web_search: std::sync::RwLock<Option<Arc<dyn AgentTool>>>,
-    diffs: std::sync::Mutex<std::collections::HashMap<String, Vec<CellDiff>>>,
-    sent: std::sync::Mutex<std::collections::HashMap<String, Vec<SentMessage>>>,
-    extension: std::sync::RwLock<Option<Arc<dyn HostRequestHandler>>>,
+    web_search: RwLock<Option<Arc<dyn AgentTool>>>,
+    diffs: Mutex<HashMap<String, Vec<CellDiff>>>,
+    sent: Mutex<HashMap<String, Vec<SentMessage>>>,
+    extension: RwLock<Option<Arc<dyn HostRequestHandler>>>,
 }
 
 impl MushHost {
@@ -108,11 +111,11 @@ impl MushHost {
                 cwd.clone(),
             ),
             jobs: crate::kernel_jobs::KernelJobs::default(),
-            web_search: std::sync::RwLock::new(None),
+            web_search: RwLock::new(None),
             cwd,
-            diffs: std::sync::Mutex::new(std::collections::HashMap::new()),
-            sent: std::sync::Mutex::new(std::collections::HashMap::new()),
-            extension: std::sync::RwLock::new(None),
+            diffs: Mutex::new(HashMap::new()),
+            sent: Mutex::new(HashMap::new()),
+            extension: RwLock::new(None),
         }
     }
 
@@ -227,7 +230,7 @@ impl HostRequestHandler for MushHost {
                         value
                             .as_f64()
                             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-                            .map(std::time::Duration::from_secs_f64)
+                            .map(Duration::from_secs_f64)
                             .ok_or("timeout must be a positive number of seconds")?,
                     ),
                 };
@@ -365,21 +368,21 @@ struct CellRun {
 
 pub struct IpythonTool {
     config: KernelConfig,
-    session: std::sync::Mutex<Option<mush_kernel::KernelSession>>,
+    session: Mutex<Option<mush_kernel::KernelSession>>,
     host: Arc<dyn HostRequestHandler>,
     mush_host: Option<Arc<MushHost>>,
     kernel: Arc<tokio::sync::Mutex<Option<Kernel>>>,
     output_sink: Option<crate::bash::OutputSink>,
     busy_prompt: Option<BusyKernelPrompt>,
-    repair_notice: std::sync::Mutex<Option<String>>,
-    snapshot_generation: Arc<std::sync::atomic::AtomicU64>,
-    snapshot_debounce: std::time::Duration,
-    model: std::sync::Mutex<Option<(String, bool)>>,
+    repair_notice: Mutex<Option<String>>,
+    snapshot_generation: Arc<AtomicU64>,
+    snapshot_debounce: Duration,
+    model: Mutex<Option<(String, bool)>>,
 }
 
-const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1500);
+const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(1500);
 
-const LIVE_OUTPUT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const LIVE_OUTPUT_INTERVAL: Duration = Duration::from_millis(100);
 const LIVE_OUTPUT_CAP_BYTES: usize = 2 * mush_kernel::DEFAULT_MAX_OUTPUT_CHARS;
 
 impl IpythonTool {
@@ -400,21 +403,21 @@ impl IpythonTool {
                 cwd: cwd.to_path_buf(),
                 ..KernelConfig::default()
             },
-            session: std::sync::Mutex::new(None),
+            session: Mutex::new(None),
             host,
             mush_host: None,
             kernel: Arc::new(tokio::sync::Mutex::new(None)),
             output_sink: None,
             busy_prompt: None,
-            repair_notice: std::sync::Mutex::new(None),
-            snapshot_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            repair_notice: Mutex::new(None),
+            snapshot_generation: Arc::new(AtomicU64::new(0)),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
-            model: std::sync::Mutex::new(None),
+            model: Mutex::new(None),
         }
     }
 
     #[must_use]
-    pub fn with_snapshot_debounce(mut self, debounce: std::time::Duration) -> Self {
+    pub fn with_snapshot_debounce(mut self, debounce: Duration) -> Self {
         self.snapshot_debounce = debounce;
         self
     }
@@ -426,16 +429,13 @@ impl IpythonTool {
         else {
             return;
         };
-        let generation = self
-            .snapshot_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
+        let generation = self.snapshot_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let current = self.snapshot_generation.clone();
         let kernel = self.kernel.clone();
         let debounce = self.snapshot_debounce;
         tokio::spawn(async move {
             tokio::time::sleep(debounce).await;
-            let still_latest = || current.load(std::sync::atomic::Ordering::SeqCst) == generation;
+            let still_latest = || current.load(Ordering::SeqCst) == generation;
             if !still_latest() {
                 return;
             }
@@ -711,16 +711,14 @@ impl mush_kernel::KernelState for IpythonTool {
     }
 
     async fn reset(&self) {
-        self.snapshot_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(kernel) = self.kernel.lock().await.take() {
             self.retire(kernel).await;
         }
     }
 
     fn attach_session(&self, session: mush_kernel::KernelSession) {
-        self.snapshot_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
         *lock(&self.session) = Some(session);
     }
 

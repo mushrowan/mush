@@ -94,7 +94,7 @@ fn format_skill_tool_description(skills: &[SkillInfo]) -> String {
             .into();
     }
 
-    let mut listed = skills.to_vec();
+    let mut listed: Vec<&SkillInfo> = skills.iter().collect();
     listed.sort_by(|left, right| left.name.cmp(&right.name));
 
     let mut description = String::from(

@@ -40,6 +40,13 @@ struct RepoMapState {
     _watcher: Option<mush_treesitter::RepoMapWatcher>,
 }
 
+impl RepoMapState {
+    fn fail(&mut self, message: &str) -> RepoMapEnsureError {
+        self.build_error = Some(message.into());
+        RepoMapEnsureError::Failed(message.into())
+    }
+}
+
 #[derive(Debug, Error)]
 enum RepoMapEnsureError {
     #[error("repo map build is still running")]
@@ -50,24 +57,20 @@ enum RepoMapEnsureError {
 
 impl RepoMapShared {
     pub fn eager(map: SharedRepoMap, budget_tokens: usize) -> Self {
-        Self {
-            map: Arc::new(RwLock::new(map)),
-            state: Arc::new(RwLock::new(RepoMapState {
-                root: PathBuf::new(),
-                started: true,
-                build_error: None,
-                _watcher: None,
-            })),
-            budget_tokens,
-        }
+        Self::with_state(map, PathBuf::new(), true, budget_tokens)
     }
 
     pub fn lazy(root: impl Into<PathBuf>, budget_tokens: usize) -> Self {
+        let empty = Arc::new(RwLock::new(RepoMap::default()));
+        Self::with_state(empty, root.into(), false, budget_tokens)
+    }
+
+    fn with_state(map: SharedRepoMap, root: PathBuf, started: bool, budget_tokens: usize) -> Self {
         Self {
-            map: Arc::new(RwLock::new(Arc::new(RwLock::new(RepoMap::default())))),
+            map: Arc::new(RwLock::new(map)),
             state: Arc::new(RwLock::new(RepoMapState {
-                root: root.into(),
-                started: false,
+                root,
+                started,
                 build_error: None,
                 _watcher: None,
             })),
@@ -95,24 +98,14 @@ impl RepoMapShared {
         if !state.started {
             state.started = true;
             if !mush_treesitter::is_inside_repo(&state.root) {
-                state.build_error = Some("not inside a git/jj repository".into());
-                return Err(RepoMapEnsureError::Failed(
-                    "not inside a git/jj repository".into(),
-                ));
+                return Err(state.fail("not inside a git/jj repository"));
             }
 
-            match mush_treesitter::RepoMapWatcher::start(&state.root) {
-                Some(watcher) => {
-                    self.swap_map(watcher.map().clone())?;
-                    state._watcher = Some(watcher);
-                }
-                None => {
-                    state.build_error = Some("failed to start repo map watcher".into());
-                    return Err(RepoMapEnsureError::Failed(
-                        "failed to start repo map watcher".into(),
-                    ));
-                }
-            }
+            let Some(watcher) = mush_treesitter::RepoMapWatcher::start(&state.root) else {
+                return Err(state.fail("failed to start repo map watcher"));
+            };
+            self.swap_map(watcher.map().clone())?;
+            state._watcher = Some(watcher);
         }
 
         let map_is_empty = self
