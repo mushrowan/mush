@@ -122,6 +122,16 @@ impl ModelPickerState {
     }
 }
 
+impl crate::filtered_list::FilteredList for ModelPickerState {
+    fn filter_and_selected(&mut self) -> (&mut String, &mut usize) {
+        (&mut self.filter, &mut self.selected)
+    }
+
+    fn visible_len(&self) -> usize {
+        filtered_models(self).len()
+    }
+}
+
 #[must_use]
 pub fn filtered_models(picker: &ModelPickerState) -> Vec<&ModelCompletion> {
     let tab_filtered: Vec<&ModelCompletion> = match picker.tab {

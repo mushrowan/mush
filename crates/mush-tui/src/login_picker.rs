@@ -200,6 +200,16 @@ impl LoginPickerState {
     }
 }
 
+impl crate::filtered_list::FilteredList for LoginPickerState {
+    fn filter_and_selected(&mut self) -> (&mut String, &mut usize) {
+        (&mut self.filter, &mut self.selected)
+    }
+
+    fn visible_len(&self) -> usize {
+        filtered_entries(self).len()
+    }
+}
+
 #[must_use]
 pub fn filtered_entries(picker: &LoginPickerState) -> Vec<&LoginEntry> {
     if picker.filter.is_empty() {

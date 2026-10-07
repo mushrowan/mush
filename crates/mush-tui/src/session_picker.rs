@@ -157,6 +157,16 @@ pub fn listed(meta: &SessionMeta) -> bool {
     meta.parent.is_none() && meta.lifecycle.is_live()
 }
 
+impl crate::filtered_list::FilteredList for SessionPickerState {
+    fn filter_and_selected(&mut self) -> (&mut String, &mut usize) {
+        (&mut self.filter, &mut self.selected)
+    }
+
+    fn visible_len(&self) -> usize {
+        filtered_sessions(self).len()
+    }
+}
+
 #[must_use]
 pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
     let scope_filtered: Vec<&SessionMeta> = match picker.scope {

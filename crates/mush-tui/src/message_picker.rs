@@ -95,29 +95,19 @@ impl MessagePickerState {
         filtered_items(self).get(self.selected).copied()
     }
 
-    pub fn select_previous(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn select_next(&mut self) {
-        if self.selected + 1 < filtered_items(self).len() {
-            self.selected += 1;
-        }
-    }
-
-    pub fn push_filter(&mut self, c: char) {
-        self.filter.push(c);
-        self.selected = 0;
-    }
-
-    pub fn pop_filter(&mut self) {
-        self.filter.pop();
-        self.selected = 0;
-    }
-
     pub fn clear_filter(&mut self) {
         self.filter.clear();
         self.selected = 0;
+    }
+}
+
+impl crate::filtered_list::FilteredList for MessagePickerState {
+    fn filter_and_selected(&mut self) -> (&mut String, &mut usize) {
+        (&mut self.filter, &mut self.selected)
+    }
+
+    fn visible_len(&self) -> usize {
+        filtered_items(self).len()
     }
 }
 
@@ -178,6 +168,7 @@ pub fn branch_items(rows: &[mush_session::tree::TreeSummaryRow]) -> Vec<MessageP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filtered_list::FilteredList;
     use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
 
     fn user(text: &str) -> Message {
