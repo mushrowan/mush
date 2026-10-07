@@ -276,78 +276,46 @@ pub fn parse_autonomous_options(
     let mut named_budget = false;
     let mut overrides = mush_runtime::AutonomousOverrides::default();
     let mut budget = mush_runtime::Limits::unlimited();
-    let mut index = 0;
-    while index < words.len() {
-        let word = words[index].as_str();
-        let (flag, inline) = match word.split_once('=') {
-            Some((flag, value)) => (flag, Some(value.to_string())),
-            None => (word, None),
+    let mut words = words.iter().map(String::as_str);
+    while let Some(word) = words.next() {
+        let (flag, value) = match word.split_once('=') {
+            Some((flag, value)) => (flag, Some(value)),
+            None => (word, words.next()),
         };
-        let flag = flag
+        let name = flag
             .strip_prefix("--autonomous-")
-            .map(|rest| format!("--{rest}"))
-            .unwrap_or_else(|| flag.to_string());
-        let value = match &inline {
-            Some(inline) => Some(inline.clone()),
-            None => words.get(index + 1).cloned(),
-        };
-        let mut take = |what: &mut dyn FnMut(&str) -> Result<(), SlashParseError>| {
-            let value = value.clone().ok_or(SlashParseError::AutonomousUsage)?;
-            what(&value)?;
-            if inline.is_none() {
-                index += 1;
-            }
-            Ok::<(), SlashParseError>(())
-        };
-        match flag.as_str() {
-            "--max-continuations" => {
-                take(&mut |v| {
-                    budget.max_continuations = parse_budget_number(v)?.map(|n| n as u32);
-                    Ok(())
-                })?;
+            .or_else(|| flag.strip_prefix("--"));
+        let value = value.ok_or(SlashParseError::AutonomousUsage)?;
+        match name {
+            Some("max-continuations") => {
+                budget.max_continuations = parse_budget_number(value)?.map(|n| n as u32);
                 named_budget = true;
             }
-            "--max-turns" => {
-                take(&mut |v| {
-                    budget.max_turns = parse_budget_number(v)?.map(|n| n as u32);
-                    Ok(())
-                })?;
+            Some("max-turns") => {
+                budget.max_turns = parse_budget_number(value)?.map(|n| n as u32);
                 named_budget = true;
             }
-            "--max-tokens" => {
-                take(&mut |v| {
-                    budget.max_tokens = parse_budget_number(v)?;
-                    Ok(())
-                })?;
+            Some("max-tokens") => {
+                budget.max_tokens = parse_budget_number(value)?;
                 named_budget = true;
             }
-            "--timeout-ms" => {
-                take(&mut |v| {
-                    budget.timeout_ms = parse_budget_number(v)?;
-                    Ok(())
-                })?;
+            Some("timeout-ms") => {
+                budget.timeout_ms = parse_budget_number(value)?;
                 named_budget = true;
             }
-            "--gate" => take(&mut |v| {
-                overrides.gates.push(v.to_string());
-                Ok(())
-            })?,
-            "--gate-retries" => take(&mut |v| {
+            Some("gate") => overrides.gates.push(value.to_string()),
+            Some("gate-retries") => {
                 overrides.gate_retries =
-                    Some(parse_budget_number(v)?.map_or(u32::MAX, |n| n as u32));
-                Ok(())
-            })?,
-            "--gate-timeout-ms" => take(&mut |v| {
-                overrides.gate_timeout_ms = Some(parse_budget_number(v)?.unwrap_or(u64::MAX));
-                Ok(())
-            })?,
-            "--subagent-keep-alive-ms" => take(&mut |v| {
-                overrides.subagent_keep_alive_ms = Some(parse_budget_number(v)?.unwrap_or(0));
-                Ok(())
-            })?,
+                    Some(parse_budget_number(value)?.map_or(u32::MAX, |n| n as u32));
+            }
+            Some("gate-timeout-ms") => {
+                overrides.gate_timeout_ms = Some(parse_budget_number(value)?.unwrap_or(u64::MAX));
+            }
+            Some("subagent-keep-alive-ms") => {
+                overrides.subagent_keep_alive_ms = Some(parse_budget_number(value)?.unwrap_or(0));
+            }
             _ => return Err(SlashParseError::AutonomousUsage),
         }
-        index += 1;
     }
     if named_budget {
         overrides.limits = Some(budget);
@@ -408,14 +376,10 @@ fn parse_heartbeat(args: &str) -> Result<HeartbeatAction, SlashParseError> {
     let mut expression = "every 5m".to_string();
     let mut follow_up = false;
     loop {
-        if let Some(after) = rest.strip_prefix("--every") {
-            let after = after.trim_start();
-            let (amount, tail) = after
-                .split_once(char::is_whitespace)
-                .ok_or(SlashParseError::HeartbeatUsage)?;
-            expression = format!("every {amount}");
-            rest = tail.trim();
-        } else if let Some(after) = rest.strip_prefix("every ") {
+        if let Some(after) = rest
+            .strip_prefix("--every")
+            .or_else(|| rest.strip_prefix("every "))
+        {
             let after = after.trim_start();
             let (amount, tail) = after
                 .split_once(char::is_whitespace)
@@ -800,15 +764,11 @@ pub(crate) fn split_name_and_args(command: &str) -> (&str, &str) {
 fn parse_refine(args: &str) -> Result<mush_session::refine::RefineRequest, SlashParseError> {
     let mut rest = args.trim();
     let mut global = false;
-    if let Some(after) = rest.strip_prefix("--global")
-        && (after.is_empty() || after.starts_with(char::is_whitespace))
-    {
+    if let Some(after) = strip_flag(rest, "--global") {
         global = true;
         rest = after.trim();
     }
-    if let Some(after) = rest.strip_prefix("rollback")
-        && (after.is_empty() || after.starts_with(char::is_whitespace))
-    {
+    if let Some(after) = strip_flag(rest, "rollback") {
         let mut id = after.trim();
         if let Some(before) = id.strip_suffix("--global") {
             global = true;
@@ -840,13 +800,9 @@ fn parse_compact_focus(
 ) -> Result<mush_session::compact::CompactionFocus, SlashParseError> {
     let mut rest = args.trim();
     let mut context_budget = None;
-    while let Some(flag_rest) = rest
-        .strip_prefix("--context-budget")
-        .or_else(|| rest.strip_prefix("-b"))
+    while let Some(flag_rest) =
+        strip_flag(rest, "--context-budget").or_else(|| strip_flag(rest, "-b"))
     {
-        if !flag_rest.is_empty() && !flag_rest.starts_with(char::is_whitespace) {
-            break;
-        }
         let mut tokens = flag_rest.trim_start().splitn(2, char::is_whitespace);
         let value = tokens
             .next()
