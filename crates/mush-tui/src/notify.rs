@@ -6,7 +6,6 @@ static DELIVERY_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_ne
 pub enum Sound {
     Complete,
     Attention,
-    Error,
 }
 
 impl Sound {
@@ -14,13 +13,8 @@ impl Sound {
         match self {
             Self::Complete => "message",
             Self::Attention => "dialog-information",
-            Self::Error => "dialog-warning",
         }
     }
-}
-
-pub fn send(summary: &str, body: &str) {
-    send_with_sound(summary, body, None);
 }
 
 pub fn send_with_sound(summary: &str, body: &str, sound: Option<Sound>) {

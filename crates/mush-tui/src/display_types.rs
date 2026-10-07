@@ -3,26 +3,6 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use std::cell::RefCell;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeBlock {
-    pub msg_idx: usize,
-    pub content: String,
-    pub lang: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlockKind {
-    Paragraph,
-    Fenced { lang: Option<String> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Block {
-    pub msg_idx: usize,
-    pub content: String,
-    pub kind: BlockKind,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Messages(Vec<DisplayMessage>);
 
@@ -321,11 +301,4 @@ pub struct ImageRenderArea {
     pub msg_idx: usize,
     pub tc_idx: usize,
     pub area: Rect,
-}
-
-#[derive(Debug, Clone)]
-pub struct MessageRowRange {
-    pub msg_idx: usize,
-    pub start: u16,
-    pub end: u16,
 }
