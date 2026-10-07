@@ -356,6 +356,17 @@ pub fn matching<'a>(
     Ok(first)
 }
 
+pub fn sole_match(workers: Vec<WorkerDescriptor>, selector: &str) -> Result<WorkerDescriptor> {
+    let mut found = workers
+        .into_iter()
+        .filter(|worker| worker.session_id.starts_with(selector));
+    match (found.next(), found.next()) {
+        (Some(worker), None) => Ok(worker),
+        (None, _) => Err(eyre!("no live agent matches {selector}")),
+        (Some(_), Some(_)) => Err(eyre!("{selector} matches more than one agent")),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Selected<'a> {
     Root(&'a WorkerDescriptor),

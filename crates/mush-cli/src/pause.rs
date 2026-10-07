@@ -12,17 +12,7 @@ async fn targets(selector: Option<&str>, all: bool) -> Result<Vec<WorkerDescript
         (Some(_), true) => Err(eyre!("pass an agent or --all, not both")),
         (None, false) => Err(eyre!("name an agent, or pass --all")),
         (None, true) => Ok(workers),
-        (Some(selector), false) => {
-            let matched: Vec<_> = workers
-                .into_iter()
-                .filter(|worker| worker.session_id.starts_with(selector))
-                .collect();
-            match matched.len() {
-                0 => Err(eyre!("no live agent matches {selector}")),
-                1 => Ok(matched),
-                _ => Err(eyre!("{selector} matches more than one agent")),
-            }
-        }
+        (Some(selector), false) => Ok(vec![agents::sole_match(workers, selector)?]),
     }
 }
 

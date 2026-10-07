@@ -73,17 +73,9 @@ fn row(worker: &WorkerDescriptor, job: &Job) -> JobRow {
 
 async fn selected(selector: Option<&str>) -> Result<Vec<WorkerDescriptor>> {
     let workers = agents::live().await?;
-    let Some(selector) = selector else {
-        return Ok(workers);
-    };
-    let matched: Vec<_> = workers
-        .into_iter()
-        .filter(|worker| worker.session_id.starts_with(selector))
-        .collect();
-    match matched.len() {
-        0 => Err(eyre!("no live agent matches {selector}")),
-        1 => Ok(matched),
-        _ => Err(eyre!("{selector} matches more than one agent")),
+    match selector {
+        Some(selector) => Ok(vec![agents::sole_match(workers, selector)?]),
+        None => Ok(workers),
     }
 }
 
@@ -168,9 +160,8 @@ pub async fn add(selector: &str, expression: &str, message: &str) -> Result<()> 
     if message.is_empty() {
         return Err(eyre!("a scheduled prompt needs text"));
     }
-    let workers = selected(Some(selector)).await?;
-    let worker = &workers[0];
-    let mut connection = agents::connect(worker).await?;
+    let worker = agents::sole_match(agents::live().await?, selector)?;
+    let mut connection = agents::connect(&worker).await?;
     let events = connection
         .send(ClientCommand::Schedule(ScheduleCommand::Add {
             expression: expression.to_string(),
