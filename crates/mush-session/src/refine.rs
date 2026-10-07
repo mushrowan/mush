@@ -1,10 +1,9 @@
 use mush_ai::registry::{ApiRegistry, LlmContext};
-use mush_ai::types::{
-    Message, Model, StreamOptions, ThinkingLevel, Timestamp, TokenCount, UserContent, UserMessage,
-};
+use mush_ai::types::{Message, Model, StreamOptions, ThinkingLevel, Timestamp, TokenCount};
 
 use crate::compact::{complete_text, serialize_conversation};
 use crate::harness::{self, Proposal, RefinementResult, RefinementSource, Scope, State};
+use crate::user_text::user_text;
 
 const MAX_OUTPUT_TOKENS: u64 = 32_000;
 const CONVERSATION_CHARS: usize = 80_000;
@@ -173,21 +172,16 @@ pub async fn plan(
     }
     let conversation = tail(&serialize_conversation(messages), CONVERSATION_CHARS);
     let prompt = user_prompt(&conversation, merged, history, request, model);
-    let context = LlmContext {
-        system_prompt: Some(SYSTEM_PROMPT.to_string()),
-        messages: vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(prompt))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )],
-        tools: Vec::new(),
-    };
-    let mut options = options.clone();
-    let thinking = auxiliary_thinking(model, session_thinking);
-    options.max_tokens = Some(output_budget(model, thinking.as_ref(), MAX_OUTPUT_TOKENS));
-    options.thinking = thinking;
-    let text = complete_text(registry, model, &context, &options).await?;
+    let text = complete_auxiliary(
+        registry,
+        model,
+        options,
+        session_thinking,
+        SYSTEM_PROMPT,
+        prompt,
+        MAX_OUTPUT_TOKENS,
+    )
+    .await?;
     let proposal = Proposal::parse(&text)?;
     Ok(Plan {
         id,
@@ -371,26 +365,40 @@ pub async fn review(
             .to_string(),
     ]
     .join("\n\n");
+    let text = complete_auxiliary(
+        registry,
+        model,
+        options,
+        session_thinking,
+        REVIEW_SYSTEM_PROMPT,
+        prompt,
+        REVIEW_MAX_OUTPUT_TOKENS,
+    )
+    .await?;
+    AutoRefineReview::parse(&text)
+}
+
+async fn complete_auxiliary(
+    registry: &ApiRegistry,
+    model: &Model,
+    options: &StreamOptions,
+    session_thinking: &ThinkingLevel,
+    system_prompt: &str,
+    prompt: String,
+    max_output_tokens: u64,
+) -> Result<String, String> {
     let context = LlmContext {
-        system_prompt: Some(REVIEW_SYSTEM_PROMPT.to_string()),
-        messages: vec![Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(prompt))
-                .timestamp_ms(Timestamp::now())
-                .build(),
-        )],
+        system_prompt: Some(system_prompt.to_string()),
+        messages: vec![user_text(prompt, Timestamp::now())],
         tools: Vec::new(),
     };
-    let mut options = options.clone();
     let thinking = auxiliary_thinking(model, session_thinking);
-    options.max_tokens = Some(output_budget(
-        model,
-        thinking.as_ref(),
-        REVIEW_MAX_OUTPUT_TOKENS,
-    ));
-    options.thinking = thinking;
-    let text = complete_text(registry, model, &context, &options).await?;
-    AutoRefineReview::parse(&text)
+    let options = StreamOptions {
+        max_tokens: Some(output_budget(model, thinking.as_ref(), max_output_tokens)),
+        thinking,
+        ..options.clone()
+    };
+    complete_text(registry, model, &context, &options).await
 }
 
 fn tail(text: &str, max_chars: usize) -> String {
