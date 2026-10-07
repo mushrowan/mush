@@ -415,7 +415,7 @@ enum ThinkingConfig {
 
 #[derive(Serialize)]
 struct RequestMessage {
-    role: String,
+    role: &'static str,
     content: serde_json::Value,
 }
 
@@ -992,7 +992,7 @@ impl MessageVisitor for AnthropicVisitor {
             }
         };
         self.result.push(RequestMessage {
-            role: "user".into(),
+            role: "user",
             content,
         });
     }
@@ -1068,7 +1068,7 @@ impl MessageVisitor for AnthropicVisitor {
 
         if !blocks.is_empty() {
             self.result.push(RequestMessage {
-                role: "assistant".into(),
+                role: "assistant",
                 content: serde_json::Value::Array(blocks),
             });
         }
@@ -1088,7 +1088,7 @@ impl MessageVisitor for AnthropicVisitor {
             "is_error": tr.outcome.is_error(),
         }]);
         self.result.push(RequestMessage {
-            role: "user".into(),
+            role: "user",
             content,
         });
     }
@@ -1162,73 +1162,60 @@ fn anthropic_tool_id(id: &str) -> String {
 }
 
 fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage> {
-    let mut result: Vec<RequestMessage> = Vec::new();
-    let mut pending_tool_ids: Vec<String> = Vec::new();
-    let mut seen_result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result = Vec::with_capacity(messages.len());
+    let mut pending_ids = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     for msg in messages {
-        if msg.role == "assistant" {
-            inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
-            pending_tool_ids.clear();
-            seen_result_ids.clear();
-
-            if let serde_json::Value::Array(ref blocks) = msg.content {
-                for block in blocks {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                        && let Some(id) = block.get("id").and_then(|i| i.as_str())
-                    {
-                        pending_tool_ids.push(id.to_string());
-                    }
-                }
-            }
-            result.push(msg);
-        } else if msg.role == "user" {
-            let is_tool_result = msg
-                .content
-                .as_array()
-                .map(|blocks| {
+        let blocks = msg
+            .content
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let is_tool_result = blocks
+            .iter()
+            .any(|block| block_type(block) == Some("tool_result"));
+        match msg.role {
+            "assistant" => {
+                inject_synthetic_results(&mut result, &mut pending_ids, &mut seen_ids);
+                pending_ids.extend(
                     blocks
                         .iter()
-                        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                })
-                .unwrap_or(false);
-
-            if is_tool_result {
-                if let Some(id) = msg
-                    .content
-                    .as_array()
-                    .and_then(|blocks| blocks.first())
-                    .and_then(|b| b.get("tool_use_id"))
-                    .and_then(|i| i.as_str())
-                {
-                    if pending_tool_ids.iter().any(|pending| pending == id) {
-                        seen_result_ids.insert(id.to_string());
-                        result.push(msg);
-                    } else {
+                        .filter(|block| block_type(block) == Some("tool_use"))
+                        .filter_map(|block| block.get("id")?.as_str())
+                        .map(str::to_string),
+                );
+            }
+            "user" if is_tool_result => {
+                let id = blocks
+                    .first()
+                    .and_then(|block| block.get("tool_use_id")?.as_str());
+                match id {
+                    Some(id) if pending_ids.iter().any(|pending| pending == id) => {
+                        seen_ids.insert(id.to_string());
+                    }
+                    Some(id) => {
                         tracing::warn!(
                             tool_use_id = id,
                             "stripping orphaned tool_result (no matching tool_use)"
                         );
+                        continue;
                     }
-                } else {
-                    result.push(msg);
+                    None => {}
                 }
-            } else {
-                if !pending_tool_ids.is_empty() {
-                    inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
-                    pending_tool_ids.clear();
-                    seen_result_ids.clear();
-                }
-                result.push(msg);
             }
-        } else {
-            result.push(msg);
+            "user" => inject_synthetic_results(&mut result, &mut pending_ids, &mut seen_ids),
+            _ => {}
         }
+        result.push(msg);
     }
 
-    inject_synthetic_results(&mut result, &pending_tool_ids, &seen_result_ids);
-
+    inject_synthetic_results(&mut result, &mut pending_ids, &mut seen_ids);
     result
+}
+
+fn block_type(block: &serde_json::Value) -> Option<&str> {
+    block.get("type")?.as_str()
 }
 
 fn apply_cache_control_to_last_cacheable_message(
@@ -1281,13 +1268,13 @@ fn is_cacheable_message_block(obj: &serde_json::Map<String, serde_json::Value>) 
 
 fn inject_synthetic_results(
     result: &mut Vec<RequestMessage>,
-    pending_ids: &[String],
-    seen_ids: &std::collections::HashSet<String>,
+    pending_ids: &mut Vec<String>,
+    seen_ids: &mut std::collections::HashSet<String>,
 ) {
-    for id in pending_ids {
-        if !seen_ids.contains(id) {
+    for id in pending_ids.drain(..) {
+        if !seen_ids.contains(&id) {
             result.push(RequestMessage {
-                role: "user".into(),
+                role: "user",
                 content: serde_json::json!([{
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -1297,6 +1284,7 @@ fn inject_synthetic_results(
             });
         }
     }
+    seen_ids.clear();
 }
 
 #[derive(Debug, Deserialize)]
@@ -4583,7 +4571,7 @@ mod tests {
                     for block in content.as_array_mut().unwrap() {
                         block.as_object_mut().unwrap().remove("cache_control");
                     }
-                    (message.role.clone(), content)
+                    (message.role, content)
                 };
                 assert_eq!(strip(a), strip(b));
             }
