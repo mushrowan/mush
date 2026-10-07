@@ -183,7 +183,7 @@ fn redact_assignment(caps: &Captures<'_>) -> Option<String> {
     };
     if inner.len() < MIN_SECRET_LEN
         || inner.starts_with("ENC[")
-        || inner.starts_with("[REDACTED")
+        || inner.starts_with(MARKER_PREFIX)
         || inner.contains("${")
         || inner.contains("$(")
         || inner.starts_with('$')

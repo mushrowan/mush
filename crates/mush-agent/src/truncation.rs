@@ -102,14 +102,7 @@ pub fn apply_for_tool(
     if let Some(details) = result.details.as_mut() {
         mush_ai::types::cap_detail_text(details, mush_ai::types::DETAIL_TEXT_LIMIT);
     }
-    match limit {
-        OutputLimit::Head => {
-            truncate_for_tool(result, MAX_LINES, MAX_BYTES, OutputLimit::Head, tool_name)
-        }
-        OutputLimit::Tail => {
-            truncate_for_tool(result, MAX_LINES, MAX_BYTES, OutputLimit::Tail, tool_name)
-        }
-    }
+    truncate_for_tool(result, MAX_LINES, MAX_BYTES, limit, tool_name)
 }
 
 pub fn truncate(
@@ -166,7 +159,7 @@ fn truncate_for_tool(
 
     let truncated_text = match direction {
         OutputLimit::Head => {
-            let (kept, _hit_bytes) = collect_head(&lines, max_lines, max_bytes);
+            let kept = collect_head(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = if kept.is_empty() && !lines.is_empty() {
                 let sample = sample_line_head(lines[0], max_bytes);
@@ -178,7 +171,7 @@ fn truncate_for_tool(
             format!("[…{omitted} lines truncated ({total} total). {hint}]\n\n{preview}")
         }
         OutputLimit::Tail => {
-            let (kept, _hit_bytes) = collect_tail(&lines, max_lines, max_bytes);
+            let kept = collect_tail(&lines, max_lines, max_bytes);
             let omitted = total - kept.len();
             let preview = if kept.is_empty() && !lines.is_empty() {
                 let sample = sample_line_tail(lines[lines.len() - 1], max_bytes);
@@ -204,40 +197,35 @@ fn truncate_for_tool(
     result
 }
 
-fn collect_head<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
-    let mut kept = Vec::new();
-    let mut bytes = 0;
-    for line in lines {
-        if kept.len() >= max_lines {
-            break;
-        }
-        let size = line.len() + if kept.is_empty() { 0 } else { 1 };
-        if bytes + size > max_bytes {
-            return (kept, true);
-        }
-        kept.push(*line);
-        bytes += size;
-    }
-    (kept, false)
+fn collect_head<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> Vec<&'a str> {
+    collect_within(lines.iter(), max_lines, max_bytes)
 }
 
-fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> (Vec<&'a str>, bool) {
+fn collect_tail<'a>(lines: &[&'a str], max_lines: usize, max_bytes: usize) -> Vec<&'a str> {
+    let mut kept = collect_within(lines.iter().rev(), max_lines, max_bytes);
+    kept.reverse();
+    kept
+}
+
+fn collect_within<'a, 'b>(
+    lines: impl Iterator<Item = &'b &'a str>,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Vec<&'a str>
+where
+    'a: 'b,
+{
     let mut kept = Vec::new();
     let mut bytes = 0;
-    for line in lines.iter().rev() {
-        if kept.len() >= max_lines {
-            break;
-        }
-        let size = line.len() + if kept.is_empty() { 0 } else { 1 };
+    for line in lines.take(max_lines) {
+        let size = line.len() + usize::from(!kept.is_empty());
         if bytes + size > max_bytes {
-            kept.reverse();
-            return (kept, true);
+            break;
         }
         kept.push(*line);
         bytes += size;
     }
-    kept.reverse();
-    (kept, false)
+    kept
 }
 
 fn actionable_hint(saved_path: &Option<PathBuf>, tool_name: Option<&str>) -> String {
@@ -261,25 +249,11 @@ fn actionable_hint(saved_path: &Option<PathBuf>, tool_name: Option<&str>) -> Str
 }
 
 fn sample_line_head(line: &str, max_bytes: usize) -> &str {
-    if line.len() <= max_bytes {
-        return line;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    &line[..end]
+    &line[..line.floor_char_boundary(max_bytes)]
 }
 
 fn sample_line_tail(line: &str, max_bytes: usize) -> &str {
-    if line.len() <= max_bytes {
-        return line;
-    }
-    let mut start = line.len() - max_bytes;
-    while start < line.len() && !line.is_char_boundary(start) {
-        start += 1;
-    }
-    &line[start..]
+    &line[line.ceil_char_boundary(line.len().saturating_sub(max_bytes))..]
 }
 
 #[cfg(test)]
