@@ -37,48 +37,23 @@ pub struct UpdateChunk {
     pub is_eof: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PatchError {
+    #[error("invalid patch format: missing Begin/End markers")]
     MissingMarkers,
-    ContextNotFound {
-        context: String,
-        path: String,
-    },
-    LinesNotFound {
-        path: String,
-        lines: String,
-    },
+    #[error("failed to find context '{context}' in {path}")]
+    ContextNotFound { context: String, path: String },
+    #[error("failed to find expected lines in {path}:\n{lines}")]
+    LinesNotFound { path: String, lines: String },
+    #[error("failed to read {path}: {source}")]
     ReadFile {
         path: String,
         source: std::io::Error,
     },
+    #[error("no hunks found in patch")]
     EmptyPatch,
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for PatchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingMarkers => write!(f, "invalid patch format: missing Begin/End markers"),
-            Self::ContextNotFound { context, path } => {
-                write!(f, "failed to find context '{context}' in {path}")
-            }
-            Self::LinesNotFound { path, lines } => {
-                write!(f, "failed to find expected lines in {path}:\n{lines}")
-            }
-            Self::ReadFile { path, source } => write!(f, "failed to read {path}: {source}"),
-            Self::EmptyPatch => write!(f, "no hunks found in patch"),
-            Self::Io(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl std::error::Error for PatchError {}
-
-impl From<std::io::Error> for PatchError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
-    }
+    #[error("{0}")]
+    Io(#[from] std::io::Error),
 }
 
 fn strip_heredoc(input: &str) -> &str {
@@ -151,61 +126,27 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
             let path = path.trim().to_string();
             i += 1;
 
-            let move_path = if i < end && lines[i].starts_with("*** Move to:") {
-                let mp = lines[i]
-                    .strip_prefix("*** Move to:")
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                i += 1;
-                Some(mp)
-            } else {
-                None
+            let move_path = match lines[i..end]
+                .first()
+                .and_then(|l| l.strip_prefix("*** Move to:"))
+            {
+                Some(move_path) => {
+                    i += 1;
+                    Some(move_path.trim().to_string())
+                }
+                None => None,
             };
 
             let mut chunks = Vec::new();
             while i < end && !lines[i].starts_with("*** ") {
-                if lines[i].starts_with("@@") {
-                    let context_line = lines[i][2..].trim();
-                    let context = if context_line.is_empty() {
-                        None
-                    } else {
-                        Some(context_line.to_string())
-                    };
-                    i += 1;
-
-                    let mut old_lines = Vec::new();
-                    let mut new_lines = Vec::new();
-                    let mut is_eof = false;
-
-                    while i < end
-                        && !lines[i].starts_with("@@")
-                        && (!lines[i].starts_with("*** ") || lines[i] == "*** End of File")
-                    {
-                        if lines[i] == "*** End of File" {
-                            is_eof = true;
-                            i += 1;
-                            break;
-                        }
-                        if let Some(rest) = lines[i].strip_prefix(' ') {
-                            old_lines.push(rest.to_string());
-                            new_lines.push(rest.to_string());
-                        } else if let Some(rest) = lines[i].strip_prefix('-') {
-                            old_lines.push(rest.to_string());
-                        } else if let Some(rest) = lines[i].strip_prefix('+') {
-                            new_lines.push(rest.to_string());
-                        }
-                        i += 1;
-                    }
-
-                    chunks.push(UpdateChunk {
-                        old_lines,
-                        new_lines,
-                        context,
-                        is_eof,
-                    });
-                } else {
-                    i += 1;
+                i += 1;
+                if let Some(context) = lines[i - 1].strip_prefix("@@") {
+                    let context = Some(context.trim())
+                        .filter(|context| !context.is_empty())
+                        .map(str::to_string);
+                    let (chunk, consumed) = parse_chunk(context, &lines[i..end]);
+                    chunks.push(chunk);
+                    i += consumed;
                 }
             }
 
@@ -226,19 +167,50 @@ pub fn parse_patch(patch_text: &str) -> Result<Vec<Hunk>, PatchError> {
     Ok(hunks)
 }
 
+const END_OF_FILE: &str = "*** End of File";
+
+fn parse_chunk(context: Option<String>, body: &[&str]) -> (UpdateChunk, usize) {
+    let mut chunk = UpdateChunk {
+        old_lines: Vec::new(),
+        new_lines: Vec::new(),
+        context,
+        is_eof: false,
+    };
+    let mut consumed = 0;
+    for &line in body {
+        if line.starts_with("@@") || (line.starts_with("*** ") && line != END_OF_FILE) {
+            break;
+        }
+        consumed += 1;
+        if line == END_OF_FILE {
+            chunk.is_eof = true;
+            break;
+        }
+        if let Some(rest) = line.strip_prefix(' ') {
+            chunk.old_lines.push(rest.to_string());
+            chunk.new_lines.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix('-') {
+            chunk.old_lines.push(rest.to_string());
+        } else if let Some(rest) = line.strip_prefix('+') {
+            chunk.new_lines.push(rest.to_string());
+        }
+    }
+    (chunk, consumed)
+}
+
 fn seek_sequence(lines: &[&str], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
     if pattern.is_empty() || lines.len() < pattern.len() {
         return None;
     }
 
-    let comparators: Vec<fn(&str, &str) -> bool> = vec![
+    const COMPARATORS: [fn(&str, &str) -> bool; 4] = [
         |a, b| a == b,
         |a, b| a.trim_end() == b.trim_end(),
         |a, b| a.trim() == b.trim(),
         |a, b| normalise_unicode(a.trim()) == normalise_unicode(b.trim()),
     ];
 
-    for cmp in &comparators {
+    for cmp in COMPARATORS {
         if eof && lines.len() >= pattern.len() {
             let from_end = lines.len() - pattern.len();
             if from_end >= start
@@ -287,9 +259,8 @@ fn compute_replacements(
     let mut line_idx = 0;
 
     for chunk in chunks {
-        if let Some(ref ctx) = chunk.context {
-            let ctx_vec = vec![ctx.clone()];
-            match seek_sequence(original_lines, &ctx_vec, line_idx, false) {
+        if let Some(ctx) = &chunk.context {
+            match seek_sequence(original_lines, std::slice::from_ref(ctx), line_idx, false) {
                 Some(idx) => line_idx = idx + 1,
                 None => {
                     return Err(PatchError::ContextNotFound {
