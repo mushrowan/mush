@@ -1434,7 +1434,7 @@ impl Family {
             node.summary.progress_note = Some(text.to_string());
             node.summary.updated_at = Timestamp::now();
         }
-        self.persist();
+        self.persist_soon();
         Ok(None)
     }
 
