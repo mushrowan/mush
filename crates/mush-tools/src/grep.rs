@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{BinaryDetection, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::WalkBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
@@ -59,6 +59,7 @@ const fn default_true() -> bool {
 }
 
 const MAX_MATCHES_PER_FILE: u64 = 50;
+const NO_MATCHES: &str = "No matches found.";
 
 pub struct GrepTool {
     cwd: Arc<Path>,
@@ -210,7 +211,7 @@ fn run_search(search_path: &Path, args: &GrepArgs) -> ToolResult {
     };
 
     if files.is_empty() {
-        return ToolResult::text("No matches found.");
+        return ToolResult::text(NO_MATCHES);
     }
 
     match args.output {
@@ -293,6 +294,15 @@ fn display_path(path: &Path, search_root: &Path) -> String {
         .to_string()
 }
 
+fn searcher(ctx_before: usize, ctx_after: usize) -> Searcher {
+    SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(0))
+        .line_number(true)
+        .before_context(ctx_before)
+        .after_context(ctx_after)
+        .build()
+}
+
 fn search_lines(
     matcher: &grep_regex::RegexMatcher,
     files: &[PathBuf],
@@ -300,12 +310,7 @@ fn search_lines(
     ctx_before: usize,
     ctx_after: usize,
 ) -> ToolResult {
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(0))
-        .line_number(true)
-        .before_context(ctx_before)
-        .after_context(ctx_after)
-        .build();
+    let mut searcher = searcher(ctx_before, ctx_after);
 
     let mut output_lines: Vec<String> = Vec::new();
 
@@ -315,14 +320,13 @@ fn search_lines(
             path: &rel,
             lines: &mut output_lines,
             match_count: 0,
-            max_matches: MAX_MATCHES_PER_FILE,
             needs_separator: false,
         };
         let _ = searcher.search_path(matcher, file, &mut sink);
     }
 
     if output_lines.is_empty() {
-        return ToolResult::text("No matches found.");
+        return ToolResult::text(NO_MATCHES);
     }
 
     let lines_ref: Vec<&str> = output_lines.iter().map(String::as_str).collect();
@@ -333,52 +337,43 @@ struct LineSink<'a> {
     path: &'a str,
     lines: &'a mut Vec<String>,
     match_count: u64,
-    max_matches: u64,
     needs_separator: bool,
+}
+
+impl LineSink<'_> {
+    fn push_line(&mut self, separator: char, line_number: Option<u64>, bytes: &[u8]) {
+        let text = std::str::from_utf8(bytes)
+            .unwrap_or("<binary>")
+            .trim_end_matches('\n')
+            .trim_end_matches('\r');
+        self.lines.push(format!(
+            "{}{separator}{}{separator}{text}",
+            self.path,
+            line_number.unwrap_or(0)
+        ));
+    }
 }
 
 impl Sink for LineSink<'_> {
     type Error = io::Error;
 
-    fn matched(
-        &mut self,
-        _searcher: &grep_searcher::Searcher,
-        mat: &SinkMatch<'_>,
-    ) -> Result<bool, io::Error> {
-        if self.match_count >= self.max_matches {
+    fn matched(&mut self, _searcher: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
+        if self.match_count >= MAX_MATCHES_PER_FILE {
             return Ok(false);
         }
         self.match_count += 1;
 
-        let line_num = mat.line_number().unwrap_or(0);
-        let text = std::str::from_utf8(mat.bytes())
-            .unwrap_or("<binary>")
-            .trim_end_matches('\n')
-            .trim_end_matches('\r');
-
-        self.lines
-            .push(format!("{}:{}:{}", self.path, line_num, text));
+        self.push_line(':', mat.line_number(), mat.bytes());
         self.needs_separator = true;
         Ok(true)
     }
 
-    fn context(
-        &mut self,
-        _searcher: &grep_searcher::Searcher,
-        ctx: &SinkContext<'_>,
-    ) -> Result<bool, io::Error> {
-        let line_num = ctx.line_number().unwrap_or(0);
-        let text = std::str::from_utf8(ctx.bytes())
-            .unwrap_or("<binary>")
-            .trim_end_matches('\n')
-            .trim_end_matches('\r');
-
-        self.lines
-            .push(format!("{}-{}-{}", self.path, line_num, text));
+    fn context(&mut self, _searcher: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, io::Error> {
+        self.push_line('-', ctx.line_number(), ctx.bytes());
         Ok(true)
     }
 
-    fn context_break(&mut self, _searcher: &grep_searcher::Searcher) -> Result<bool, io::Error> {
+    fn context_break(&mut self, _searcher: &Searcher) -> Result<bool, io::Error> {
         if self.needs_separator {
             self.lines.push("--".to_string());
             self.needs_separator = false;
@@ -395,10 +390,7 @@ fn search_count(
     max_results: Option<usize>,
     top_n: Option<usize>,
 ) -> ToolResult {
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(0))
-        .line_number(true)
-        .build();
+    let mut searcher = searcher(0, 0);
 
     let mut counts: Vec<(String, u64)> = Vec::new();
 
@@ -419,7 +411,7 @@ fn search_count(
     }
 
     if counts.is_empty() {
-        return ToolResult::text("No matches found.");
+        return ToolResult::text(NO_MATCHES);
     }
 
     counts.sort_by_key(|e| std::cmp::Reverse(e.1));
@@ -462,10 +454,7 @@ fn search_files(
     search_root: &Path,
     max_results: Option<usize>,
 ) -> ToolResult {
-    let mut searcher = SearcherBuilder::new()
-        .binary_detection(BinaryDetection::quit(0))
-        .line_number(true)
-        .build();
+    let mut searcher = searcher(0, 0);
 
     let mut matching_files: Vec<String> = Vec::new();
 
@@ -485,7 +474,7 @@ fn search_files(
     }
 
     if matching_files.is_empty() {
-        return ToolResult::text("No matches found.");
+        return ToolResult::text(NO_MATCHES);
     }
 
     matching_files.sort();
