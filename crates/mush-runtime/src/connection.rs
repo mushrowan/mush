@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use futures::FutureExt;
 use tokio::task::{JoinError, JoinHandle};
@@ -12,8 +13,15 @@ use mush_ai::types::{
 use mush_session::compact::CompactionFocus;
 
 use crate::Applied;
+use crate::autonomous::Autonomous;
 use crate::commands::{SessionCommand, SessionEvent};
 use crate::compaction::{AppliedCompaction, CompactionTaskResult};
+use crate::family::{AgentInbox, ChildId, ChildSummary, Family, ObserveInbox};
+use crate::goal::{Goal, GoalStore};
+use crate::inbox::OrchestratorInbox;
+use crate::kernel_channels::KernelSignals;
+use crate::notes::Notes;
+use crate::schedule::{Job, Scheduler};
 use crate::session::{
     PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime, StreamGeneration,
 };
@@ -125,9 +133,9 @@ pub enum ClientEvent {
         question: String,
         answer: Result<String, String>,
     },
-    ChildUpdated(Box<crate::family::ChildSummary>),
-    GoalChanged(Option<Box<crate::goal::Goal>>),
-    ScheduleChanged(Vec<crate::schedule::Job>),
+    ChildUpdated(Box<ChildSummary>),
+    GoalChanged(Option<Box<Goal>>),
+    ScheduleChanged(Vec<Job>),
     ProgressNote(String),
     PausedChanged(Option<mush_session::Pause>),
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
@@ -228,30 +236,27 @@ pub struct InProcessConnection {
     last_auto_review: Option<std::time::Instant>,
     compact_refine_pending: bool,
     title: Option<tokio::task::JoinHandle<Option<String>>>,
-    inbox: Option<crate::inbox::OrchestratorInbox>,
-    kernel: Option<crate::kernel_channels::KernelSignals>,
+    inbox: Option<OrchestratorInbox>,
+    kernel: Option<KernelSignals>,
     busy_reply: Option<tokio::sync::oneshot::Sender<mush_tools::ipython::BusyKernelChoice>>,
     side_questions: Vec<(String, tokio::task::JoinHandle<Result<String, String>>)>,
     system_prompt_builder: Option<SystemPromptBuilder>,
-    agent_inbox: Option<crate::family::AgentInbox>,
-    observe_inbox: Option<crate::family::ObserveInbox>,
+    agent_inbox: Option<AgentInbox>,
+    observe_inbox: Option<ObserveInbox>,
     deferred_deliveries: VecDeque<crate::family::Delivery>,
-    family: Option<std::sync::Arc<crate::family::Family>>,
-    family_member: Option<(
-        std::sync::Arc<crate::family::Family>,
-        crate::family::ChildId,
-    )>,
+    family: Option<Arc<Family>>,
+    family_member: Option<(Arc<Family>, ChildId)>,
     turn_error: Option<String>,
-    known_children: std::collections::HashMap<crate::family::ChildId, crate::family::ChildSummary>,
-    goal: Option<std::sync::Arc<crate::goal::GoalStore>>,
-    known_goal: Option<crate::goal::Goal>,
-    scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>,
-    known_jobs: Vec<crate::schedule::Job>,
+    known_children: HashMap<ChildId, ChildSummary>,
+    goal: Option<Arc<GoalStore>>,
+    known_goal: Option<Goal>,
+    scheduler: Option<Arc<Scheduler>>,
+    known_jobs: Vec<Job>,
     deferred_jobs: VecDeque<String>,
-    notes: Option<std::sync::Arc<crate::notes::Notes>>,
-    autonomous: Option<std::sync::Arc<crate::autonomous::Autonomous>>,
+    notes: Option<Arc<Notes>>,
+    autonomous: Option<Arc<Autonomous>>,
     gate_task: Option<tokio::task::JoinHandle<Vec<crate::autonomous::GateRun>>>,
-    host_commands: Option<std::sync::Arc<HostCommands>>,
+    host_commands: Option<Arc<HostCommands>>,
     closed: bool,
 }
 
@@ -321,7 +326,7 @@ impl HostCommands {
     }
 }
 
-pub type SystemPromptBuilder = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
+pub type SystemPromptBuilder = Arc<dyn Fn() -> String + Send + Sync>;
 
 fn take_finished<T>(slot: &mut Option<JoinHandle<T>>) -> Option<Result<T, JoinError>> {
     let result = slot
@@ -385,7 +390,7 @@ impl InProcessConnection {
             family: None,
             family_member: None,
             turn_error: None,
-            known_children: std::collections::HashMap::new(),
+            known_children: HashMap::new(),
             goal: None,
             known_goal: None,
             scheduler: None,
@@ -399,7 +404,7 @@ impl InProcessConnection {
         }
     }
 
-    pub fn set_host_commands(&mut self, commands: Option<std::sync::Arc<HostCommands>>) {
+    pub fn set_host_commands(&mut self, commands: Option<Arc<HostCommands>>) {
         self.host_commands = commands;
     }
 
@@ -430,10 +435,7 @@ impl InProcessConnection {
         }
     }
 
-    pub fn set_autonomous(
-        &mut self,
-        autonomous: Option<std::sync::Arc<crate::autonomous::Autonomous>>,
-    ) {
+    pub fn set_autonomous(&mut self, autonomous: Option<Arc<Autonomous>>) {
         self.autonomous = autonomous;
     }
 
@@ -489,7 +491,7 @@ impl InProcessConnection {
         }
     }
 
-    pub fn set_notes(&mut self, notes: Option<std::sync::Arc<crate::notes::Notes>>) {
+    pub fn set_notes(&mut self, notes: Option<Arc<Notes>>) {
         self.runtime.notes = notes.clone();
         self.notes = notes;
     }
@@ -501,16 +503,21 @@ impl InProcessConnection {
         {
             family.set_max_depth(depth);
         }
-        if could_spawn != (self.runtime.rlm_depth < depth)
-            && let Some(build) = &self.system_prompt_builder
-        {
-            let prompt = build();
-            self.runtime.system_prompt = Some(prompt.clone());
-            self.queued
-                .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
-                    Some(prompt),
-                )));
+        if could_spawn != (self.runtime.rlm_depth < depth) {
+            self.rebuild_system_prompt();
         }
+    }
+
+    fn rebuild_system_prompt(&mut self) {
+        let Some(build) = &self.system_prompt_builder else {
+            return;
+        };
+        let prompt = build();
+        self.runtime.system_prompt = Some(prompt.clone());
+        self.queued
+            .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
+                Some(prompt),
+            )));
     }
 
     fn rebind_artifacts(&mut self) {
@@ -537,7 +544,7 @@ impl InProcessConnection {
         self.known_children.clear();
     }
 
-    pub fn set_scheduler(&mut self, scheduler: Option<std::sync::Arc<crate::schedule::Scheduler>>) {
+    pub fn set_scheduler(&mut self, scheduler: Option<Arc<Scheduler>>) {
         self.known_jobs = scheduler
             .as_ref()
             .map(|scheduler| scheduler.jobs())
@@ -585,7 +592,7 @@ impl InProcessConnection {
         }
     }
 
-    pub fn set_goal_store(&mut self, goal: Option<std::sync::Arc<crate::goal::GoalStore>>) {
+    pub fn set_goal_store(&mut self, goal: Option<Arc<GoalStore>>) {
         self.known_goal = goal.as_ref().and_then(|goal| goal.get());
         self.goal = goal;
     }
@@ -654,7 +661,7 @@ impl InProcessConnection {
         None
     }
 
-    pub fn set_family(&mut self, family: Option<std::sync::Arc<crate::family::Family>>) {
+    pub fn set_family(&mut self, family: Option<Arc<Family>>) {
         self.family = family;
     }
 
@@ -666,26 +673,20 @@ impl InProcessConnection {
         }
     }
 
-    pub fn set_family_member(
-        &mut self,
-        member: Option<(
-            std::sync::Arc<crate::family::Family>,
-            crate::family::ChildId,
-        )>,
-    ) {
+    pub fn set_family_member(&mut self, member: Option<(Arc<Family>, ChildId)>) {
         self.family_member = member;
     }
 
     #[must_use]
-    pub fn family(&self) -> Option<&std::sync::Arc<crate::family::Family>> {
+    pub fn family(&self) -> Option<&Arc<Family>> {
         self.family.as_ref()
     }
 
-    pub fn attach_agent_inbox(&mut self, inbox: crate::family::AgentInbox) {
+    pub fn attach_agent_inbox(&mut self, inbox: AgentInbox) {
         self.agent_inbox = Some(inbox);
     }
 
-    pub fn attach_observe_inbox(&mut self, inbox: crate::family::ObserveInbox) {
+    pub fn attach_observe_inbox(&mut self, inbox: ObserveInbox) {
         self.observe_inbox = Some(inbox);
     }
 
@@ -749,7 +750,7 @@ impl InProcessConnection {
         self.system_prompt_builder = builder;
     }
 
-    pub fn attach_kernel(&mut self, signals: Option<crate::kernel_channels::KernelSignals>) {
+    pub fn attach_kernel(&mut self, signals: Option<KernelSignals>) {
         self.kernel = signals;
     }
 
@@ -767,7 +768,7 @@ impl InProcessConnection {
                 default_model,
                 options: mush_ai::types::StreamOptions::default(),
                 max_turns: 1,
-                provider_api_keys: std::collections::HashMap::new(),
+                provider_api_keys: HashMap::new(),
                 confirm_tools: false,
                 auto_compact: false,
                 compaction: Default::default(),
@@ -810,7 +811,7 @@ impl InProcessConnection {
         self.runtime.control_socket = Some(socket);
     }
 
-    pub fn attach_inbox(&mut self, inbox: crate::inbox::OrchestratorInbox) {
+    pub fn attach_inbox(&mut self, inbox: OrchestratorInbox) {
         self.inbox = Some(inbox);
     }
 
@@ -821,7 +822,7 @@ impl InProcessConnection {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        match crate::inbox::OrchestratorInbox::from_env(&self.runtime, &cwd) {
+        match OrchestratorInbox::from_env(&self.runtime, &cwd) {
             Ok(Some(inbox)) => self.inbox = Some(inbox),
             Ok(None) => {}
             Err(error) => self.report_inbox_disabled(&error),
@@ -829,11 +830,11 @@ impl InProcessConnection {
     }
 
     #[must_use]
-    pub fn inbox(&self) -> Option<&crate::inbox::OrchestratorInbox> {
+    pub fn inbox(&self) -> Option<&OrchestratorInbox> {
         self.inbox.as_ref()
     }
 
-    pub fn inbox_mut(&mut self) -> Option<&mut crate::inbox::OrchestratorInbox> {
+    pub fn inbox_mut(&mut self) -> Option<&mut OrchestratorInbox> {
         self.inbox.as_mut()
     }
 
@@ -1539,6 +1540,43 @@ impl InProcessConnection {
         true
     }
 
+    async fn prompt(&mut self, text: String, images: Vec<PendingImage>) {
+        if self.runtime.paused.take().is_some() {
+            self.runtime.save_now_and_settle();
+            self.queued.push_back(ClientEvent::PausedChanged(None));
+        }
+        if self.turn_active() {
+            self.steer(text, images).await;
+        } else {
+            self.queue_prompt(&text, images);
+            self.start_pending_prompt().await;
+        }
+    }
+
+    async fn handle_session(&mut self, command: SessionCommand) {
+        let before = self.runtime.session_id.clone();
+        let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
+        let events = self.runtime.handle(command).await;
+        self.sync_control_target();
+        if self.runtime.session_id != before {
+            self.rebind_artifacts();
+        }
+        self.runtime.save_now_and_settle();
+        self.queued
+            .extend(events.into_iter().map(ClientEvent::Session));
+        self.follow_rlm_max_depth(could_spawn);
+    }
+
+    async fn shutdown(&mut self) {
+        if let Some(family) = self.family.clone() {
+            family.shutdown().await;
+        }
+        self.abort().await;
+        self.runtime.snapshot_kernel(&self.runtime.session_id).await;
+        self.runtime.save_now_and_settle();
+        self.closed = true;
+    }
+
     fn queue_prompt(&mut self, text: &str, images: Vec<PendingImage>) {
         match &mut self.runtime.pending_prompt {
             Some(pending) => pending.merge(text, images),
@@ -1795,18 +1833,7 @@ impl AgentConnection for InProcessConnection {
         }
         let before = self.queued.len();
         match command {
-            ClientCommand::Prompt { text, images } => {
-                if self.runtime.paused.take().is_some() {
-                    self.runtime.save_now_and_settle();
-                    self.queued.push_back(ClientEvent::PausedChanged(None));
-                }
-                if self.turn_active() {
-                    self.steer(text, images).await;
-                } else {
-                    self.queue_prompt(&text, images);
-                    self.start_pending_prompt().await;
-                }
-            }
+            ClientCommand::Prompt { text, images } => self.prompt(text, images).await,
             ClientCommand::QueuePrompt { text, images } => self.queue_prompt(&text, images),
             ClientCommand::Steer { text, images } => self.steer(text, images).await,
             ClientCommand::RetractSteer { text } => {
@@ -1899,33 +1926,12 @@ impl AgentConnection for InProcessConnection {
                 self.follow_rlm_max_depth(could_spawn);
             }
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
-            ClientCommand::ReloadSystemPrompt => {
-                if let Some(build) = &self.system_prompt_builder {
-                    let prompt = build();
-                    self.runtime.system_prompt = Some(prompt.clone());
-                    self.queued
-                        .push_back(ClientEvent::Session(SessionEvent::SystemPromptChanged(
-                            Some(prompt),
-                        )));
-                }
-            }
+            ClientCommand::ReloadSystemPrompt => self.rebuild_system_prompt(),
             ClientCommand::SetStreamOptions(options) => self.config.options = *options,
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);
             }
-            ClientCommand::Session(command) => {
-                let before = self.runtime.session_id.clone();
-                let could_spawn = self.runtime.rlm_depth < self.runtime.rlm_max_depth;
-                let events = self.runtime.handle(command).await;
-                self.sync_control_target();
-                if self.runtime.session_id != before {
-                    self.rebind_artifacts();
-                }
-                self.runtime.save_now_and_settle();
-                self.queued
-                    .extend(events.into_iter().map(ClientEvent::Session));
-                self.follow_rlm_max_depth(could_spawn);
-            }
+            ClientCommand::Session(command) => self.handle_session(command).await,
             ClientCommand::SummariseAndNavigate { entry_id } => {
                 self.summarise_and_navigate(entry_id).await;
             }
@@ -1944,16 +1950,7 @@ impl AgentConnection for InProcessConnection {
                     .stop_session(&session_id)
                     .map_err(ConnectionError::Refused)?;
             }
-            ClientCommand::Shutdown => {
-                if let Some(family) = self.family.clone() {
-                    family.shutdown().await;
-                }
-                self.abort().await;
-                let id = self.runtime.session_id.clone();
-                self.runtime.snapshot_kernel(&id).await;
-                self.runtime.save_now_and_settle();
-                self.closed = true;
-            }
+            ClientCommand::Shutdown => self.shutdown().await,
         }
         Ok(self.queued.drain(before..).collect())
     }
