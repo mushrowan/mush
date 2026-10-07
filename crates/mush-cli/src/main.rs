@@ -231,6 +231,22 @@ impl Cli {
         }
     }
 
+    fn setup_args(&self, model: Option<String>, kernel_sinks: setup::KernelSinks) -> SetupArgs {
+        SetupArgs {
+            client: setup::ClientArgs {
+                model,
+                ..self.client_args()
+            },
+            max_turns: self.max_turns,
+            system: self.system.clone(),
+            no_tools: self.no_tools,
+            tools: self.tools.clone(),
+            append_system: self.append_system.clone(),
+            kernel_sinks,
+            timer: self.profile_startup.then(timing::PhaseTimer::new),
+        }
+    }
+
     fn worker_args(&self) -> Vec<String> {
         let mut args = Vec::new();
         let mut flag = |name: &str, on: bool| {
@@ -434,7 +450,8 @@ async fn run() -> Result<()> {
         .install()?;
     let mut cli = Cli::parse();
     cli.absorb_attach();
-    if let Some(Command::Control(args)) = cli.command {
+    let command = cli.command.take();
+    if let Some(Command::Control(args)) = command {
         return mush_cli::control::run(args).await;
     }
     let cfg = config::load_config_with(&cli.option)?;
@@ -443,110 +460,73 @@ async fn run() -> Result<()> {
 
     mush_agent::truncation::cleanup();
 
-    if let Some(Command::Worker {
-        socket,
-        descriptor,
-        daemon_socket,
-    }) = &cli.command
-    {
-        let socket = socket.clone();
-        let descriptor = descriptor.clone();
-        let daemon_socket = daemon_socket.clone();
-        return worker_mode(cli, socket, descriptor, daemon_socket).await;
-    }
-    if let Some(Command::Daemon { socket }) = &cli.command {
-        let socket = socket
-            .clone()
-            .unwrap_or_else(mush_daemon::daemon_socket_path);
-        return daemon_mode(&socket).await;
-    }
-    match cli.command {
-        Some(
-            Command::Control(_)
-            | Command::Worker { .. }
-            | Command::Daemon { .. }
-            | Command::Agents
-            | Command::Attach { .. },
-        ) => unreachable!(),
-        Some(Command::List { all, json }) => return agents::list(all, json).await,
-        Some(Command::Rename { agent, name, json }) => {
-            return agents::rename(&agent, &name.join(" "), json).await;
+    let Some(command) = command else {
+        return prompt_or_tui(cli, log_buffer).await;
+    };
+    match command {
+        Command::Control(_) | Command::Agents | Command::Attach { .. } => unreachable!(),
+        Command::Worker {
+            socket,
+            descriptor,
+            daemon_socket,
+        } => worker_mode(cli, socket, descriptor, daemon_socket).await,
+        Command::Daemon { socket } => {
+            daemon_mode(&socket.unwrap_or_else(mush_daemon::daemon_socket_path)).await
         }
-        Some(Command::Pause { agent, all, reason }) => {
-            return mush_cli::pause::pause(agent.as_deref(), all, reason.as_deref()).await;
+        Command::List { all, json } => agents::list(all, json).await,
+        Command::Rename { agent, name, json } => {
+            agents::rename(&agent, &name.join(" "), json).await
         }
-        Some(Command::Unpause { agent, all }) => {
-            return mush_cli::pause::resume(agent.as_deref(), all).await;
+        Command::Pause { agent, all, reason } => {
+            mush_cli::pause::pause(agent.as_deref(), all, reason.as_deref()).await
         }
-        Some(Command::Schedule { command }) => {
-            return match command {
-                ScheduleCommand::List { agent, all, json } => {
-                    schedule::list(agent.as_deref(), all, json).await
-                }
-                ScheduleCommand::Add {
-                    agent,
-                    expression,
-                    message,
-                } => schedule::add(&agent, &expression, &message.join(" ")).await,
-                ScheduleCommand::Cancel { job } => schedule::cancel(&job).await,
-            };
-        }
-        Some(Command::Stop { id, json }) => return daemon::stop(&id, json).await,
-        Some(Command::Send { session, text }) => {
-            return daemon::send(&session, &text.join(" ")).await;
-        }
-        Some(Command::Shutdown { force, json }) => return daemon::shutdown(force, json).await,
-        Some(Command::Doctor { fix, json }) => return doctor::doctor(fix, json).await,
-        Some(Command::Login { provider, account }) => {
-            return commands::login(provider, account).await;
-        }
-        Some(Command::Logout { provider, account }) => {
-            return commands::logout(provider, account.as_ref());
-        }
-        Some(Command::Accounts { provider, default }) => {
-            return commands::accounts(provider, default.as_ref());
-        }
-        Some(Command::Models) => return commands::list_models(),
-        Some(Command::Status) => return commands::status(cli.terminal_policy_overrides()).await,
-        Some(Command::Delete { id }) => return commands::delete_session(&id),
-        Some(Command::Slim {
+        Command::Unpause { agent, all } => mush_cli::pause::resume(agent.as_deref(), all).await,
+        Command::Schedule { command } => match command {
+            ScheduleCommand::List { agent, all, json } => {
+                schedule::list(agent.as_deref(), all, json).await
+            }
+            ScheduleCommand::Add {
+                agent,
+                expression,
+                message,
+            } => schedule::add(&agent, &expression, &message.join(" ")).await,
+            ScheduleCommand::Cancel { job } => schedule::cancel(&job).await,
+        },
+        Command::Stop { id, json } => daemon::stop(&id, json).await,
+        Command::Send { session, text } => daemon::send(&session, &text.join(" ")).await,
+        Command::Shutdown { force, json } => daemon::shutdown(force, json).await,
+        Command::Doctor { fix, json } => doctor::doctor(fix, json).await,
+        Command::Login { provider, account } => commands::login(provider, account).await,
+        Command::Logout { provider, account } => commands::logout(provider, account.as_ref()),
+        Command::Accounts { provider, default } => commands::accounts(provider, default.as_ref()),
+        Command::Models => commands::list_models(),
+        Command::Status => commands::status(cli.terminal_policy_overrides()).await,
+        Command::Delete { id } => commands::delete_session(&id),
+        Command::Slim {
             session,
             all,
             apply,
-        }) => return commands::slim_sessions(session.as_deref(), all, apply),
-        Some(Command::Config) => return commands::open_config(),
-        None => {}
+        } => commands::slim_sessions(session.as_deref(), all, apply),
+        Command::Config => commands::open_config(),
     }
+}
 
-    let stdin_prompt = if cli.prompt.is_empty()
-        && !cli.resumes_a_session()
+async fn prompt_or_tui(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
+    let prompt = if !cli.prompt.is_empty() {
+        Some(cli.prompt.join(" "))
+    } else if !cli.resumes_a_session()
         && cli.status_file.is_none()
         && !atty::is(atty::Stream::Stdin)
     {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-        if buf.is_empty() { None } else { Some(buf) }
+        (!buf.is_empty()).then_some(buf)
     } else {
         None
-    };
-
-    let cli_prompt = if cli.prompt.is_empty() {
-        None
-    } else {
-        Some(cli.prompt.join(" "))
-    };
-    let prompt = match (cli_prompt, stdin_prompt) {
-        (Some(p), Some(stdin)) => Some(format!("{p}\n\n{stdin}")),
-        (Some(p), None) => Some(p),
-        (None, Some(stdin)) => Some(stdin),
-        (None, None) => None,
     };
 
     match prompt {
-        Some(prompt) => {
-            let prompt = expand_template(&prompt);
-            print_mode(cli, prompt).await
-        }
+        Some(prompt) => print_mode(cli, expand_template(&prompt)).await,
         None if cli.status_file.is_some() => print_mode(cli, String::new()).await,
         None => tui_mode(cli, log_buffer).await,
     }
@@ -635,26 +615,10 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     }
     status.write()?;
     let mut shutdown = std::pin::pin!(headless::shutdown_signal());
-    let timer = if cli.profile_startup {
-        Some(timing::PhaseTimer::new())
-    } else {
-        None
-    };
-    let init = AppSetup::init(SetupArgs {
-        client: setup::ClientArgs {
-            model: Some(session.meta.model_id.to_string()),
-            ..cli.client_args()
-        },
-        max_turns: cli.max_turns,
-        system: cli.system.clone(),
-        no_tools: cli.no_tools,
-        tools: cli.tools.clone(),
-        append_system: cli.append_system.clone(),
-        output_sink: None,
-        kernel_notice_sink: None,
-        kernel_busy_prompt: None,
-        timer,
-    });
+    let init = AppSetup::init(cli.setup_args(
+        Some(session.meta.model_id.to_string()),
+        setup::KernelSinks::default(),
+    ));
     let (mut setup, startup_report) = tokio::select! {
         biased;
         result = &mut shutdown => {
@@ -1120,7 +1084,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
     match cli.no_session {
         false => {
             let mut timer = cli.profile_startup.then(timing::PhaseTimer::new);
-            let client = setup::ClientSetup::init(cli.client_args(), timer.as_mut()).await?;
+            let client = setup::ClientSetup::init(cli.client_args(), &mut timer).await?;
             if let Some(report) = timer.map(timing::PhaseTimer::finish) {
                 eprintln!("{report}");
             }
@@ -1207,26 +1171,10 @@ fn resumed_model(cli: &Cli) -> Option<String> {
 
 async fn prepare(cli: &Cli) -> Result<Prepared> {
     let (sinks, kernel_signals) = mush_runtime::kernel_channels();
-    let timer = if cli.profile_startup {
-        Some(timing::PhaseTimer::new())
-    } else {
-        None
-    };
-    let (setup, startup_report) = AppSetup::init(SetupArgs {
-        client: setup::ClientArgs {
-            model: cli.model.clone().or_else(|| resumed_model(cli)),
-            ..cli.client_args()
-        },
-        max_turns: cli.max_turns,
-        system: cli.system.clone(),
-        no_tools: cli.no_tools,
-        tools: cli.tools.clone(),
-        append_system: cli.append_system.clone(),
-        output_sink: Some(sinks.output),
-        kernel_notice_sink: Some(sinks.notices),
-        kernel_busy_prompt: Some(sinks.busy_prompt),
-        timer,
-    })
+    let (setup, startup_report) = AppSetup::init(cli.setup_args(
+        cli.model.clone().or_else(|| resumed_model(cli)),
+        sinks.into(),
+    ))
     .await?;
 
     if let Some(report) = startup_report {
@@ -1411,11 +1359,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 &cfg,
                 &seed.cwd,
                 &project.skills,
-                setup::KernelSinks {
-                    output: Some(sinks.output),
-                    notices: Some(sinks.notices),
-                    busy_prompt: Some(sinks.busy_prompt),
-                },
+                sinks.into(),
                 None,
             ));
             let identity = mush_runtime::Identity {

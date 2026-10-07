@@ -54,6 +54,16 @@ pub struct KernelSinks {
     pub busy_prompt: Option<mush_tools::ipython::BusyKernelPrompt>,
 }
 
+impl From<mush_runtime::KernelSinks> for KernelSinks {
+    fn from(sinks: mush_runtime::KernelSinks) -> Self {
+        Self {
+            output: Some(sinks.output),
+            notices: Some(sinks.notices),
+            busy_prompt: Some(sinks.busy_prompt),
+        }
+    }
+}
+
 #[must_use]
 pub fn env_depth(name: &str) -> Option<u32> {
     std::env::var(name).ok()?.trim().parse().ok()
@@ -157,23 +167,18 @@ pub struct SetupArgs {
     pub no_tools: bool,
     pub tools: Option<Vec<String>>,
     pub append_system: Option<String>,
-    pub output_sink: Option<mush_tools::bash::OutputSink>,
-    pub kernel_notice_sink: Option<mush_tools::kernel_jobs::NoticeSink>,
-    pub kernel_busy_prompt: Option<mush_tools::ipython::BusyKernelPrompt>,
+    pub kernel_sinks: KernelSinks,
     pub timer: Option<crate::timing::PhaseTimer>,
 }
 
 impl ClientSetup {
     pub async fn init(
         args: ClientArgs,
-        timer: Option<&mut crate::timing::PhaseTimer>,
+        timer: &mut Option<crate::timing::PhaseTimer>,
     ) -> Result<Self> {
-        let mut timer = timer;
         let cfg = config::load_config_with(&args.config_overrides)?;
         let debug_cache = args.debug_cache || cfg.debug_cache;
-        if let Some(t) = &mut timer {
-            t.phase("config");
-        }
+        crate::timing::mark(timer, "config");
 
         let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
 
@@ -196,25 +201,19 @@ impl ClientSetup {
                 .build()
                 .expect("failed to build http client"),
         );
-        if let Some(t) = &mut timer {
-            t.phase("model + http");
-        }
+        crate::timing::mark(timer, "model + http");
 
         let project_context = loader::discover_project_context_with(&cwd, &args.discovery);
         for diagnostic in &project_context.skill_diagnostics {
             tracing::warn!("skill: {diagnostic}");
         }
-        if let Some(t) = &mut timer {
-            t.phase("project context");
-        }
+        crate::timing::mark(timer, "project context");
 
         let thinking_level = resolve_thinking(args.thinking, &model, &cfg);
         let mut options = stream_options_from_config(&cfg, Some(thinking_level), args.max_tokens);
         resolve_api_key(&mut options, &model, &cfg).await;
         let compaction_model = init_compaction_model(&cfg, &model, &options).await;
-        if let Some(t) = &mut timer {
-            t.phase("api keys");
-        }
+        crate::timing::mark(timer, "api keys");
 
         Ok(Self {
             rlm: cfg.rlm,
@@ -242,7 +241,7 @@ impl AppSetup {
     #[tracing::instrument(name = "startup", skip_all)]
     pub async fn init(args: SetupArgs) -> Result<(Self, Option<crate::timing::StartupReport>)> {
         let mut timer = args.timer;
-        let mut client = ClientSetup::init(args.client, timer.as_mut()).await?;
+        let mut client = ClientSetup::init(args.client, &mut timer).await?;
         apply_prompt_overrides(
             &mut client.project_context,
             args.system
@@ -284,11 +283,7 @@ impl AppSetup {
                 cfg,
                 cwd,
                 &project_context.skills,
-                KernelSinks {
-                    output: args.output_sink.clone(),
-                    notices: args.kernel_notice_sink.clone(),
-                    busy_prompt: args.kernel_busy_prompt.clone(),
-                },
+                args.kernel_sinks,
                 Some(orphans),
             ));
             kernel_state = Some(ipython.clone());
@@ -300,7 +295,7 @@ impl AppSetup {
             init_builtin_tools(
                 model,
                 cwd,
-                args.output_sink,
+                args.kernel_sinks.output,
                 args.no_tools,
                 http_client,
                 mush_tools::forbidden_chars::ForbiddenChars::with_classes(
@@ -311,14 +306,10 @@ impl AppSetup {
                 cfg.web_search.clone(),
             )
         };
-        if let Some(t) = &mut timer {
-            t.phase("builtin tools");
-        }
+        crate::timing::mark(&mut timer, "builtin tools");
 
         let mcp = init_mcp(cfg, !classic_tools, &mut tools).await;
-        if let Some(t) = &mut timer {
-            t.phase("mcp");
-        }
+        crate::timing::mark(&mut timer, "mcp");
 
         init_skill_tools(project_context, !classic_tools, &mut tools);
 
@@ -332,9 +323,7 @@ impl AppSetup {
         } else {
             build_system_prompt_from_context(project_context, cwd)
         };
-        if let Some(t) = &mut timer {
-            t.phase("system prompt");
-        }
+        crate::timing::mark(&mut timer, "system prompt");
 
         let max_turns = args
             .max_turns
@@ -343,18 +332,13 @@ impl AppSetup {
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
         init_repo_map(cfg, cwd, !classic_tools, &mut tools);
-        if let Some(t) = &mut timer {
-            t.phase("repo map");
-        }
+        crate::timing::mark(&mut timer, "repo map");
 
         let file_rules = build_file_rules(cwd);
         let lsp_diagnostics = init_lsp(cfg, cwd, !classic_tools, &mut tools);
-        if let Some(t) = &mut timer {
-            t.phase("lsp + rules");
-        }
+        crate::timing::mark(&mut timer, "lsp + rules");
 
-        if !classic_tools || model.supports_native_parallel_calls() {
-        } else {
+        if classic_tools && !model.supports_native_parallel_calls() {
             mush_tools::add_batch_tool(&mut tools);
         }
         if let Some(allowed) = &args.tools {

@@ -45,6 +45,12 @@ impl PhaseTimer {
     }
 }
 
+pub fn mark(timer: &mut Option<PhaseTimer>, name: &str) {
+    if let Some(timer) = timer {
+        timer.phase(name);
+    }
+}
+
 impl StartupReport {
     #[allow(dead_code)]
     pub fn phases(&self) -> &[(String, Duration)] {
