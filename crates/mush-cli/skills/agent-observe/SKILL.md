@@ -31,7 +31,8 @@ if child is not None:
   list: self, parent, siblings, and direct children, active or not. Each agent
   carries `name`, `relationship` (`self`/`parent`/`sibling`/`child`),
   `session_id`, `rlm_child_id` for a subagent, `status`
-  (`running`/`idle`/`inactive`), `observable` (whether it has a live session
+  (`running`/`idle`/`inactive`), `state` (`working`/`napping`/`hibernating`;
+  `agent_message.send("all", ...)` skips hibernating members), `observable` (whether it has a live session
   that can be read), and the live detail known for it: `model_id`,
   `progress_note`, `streaming`, `tool_running`, `awaiting_confirmation`, and
   `children_running`. Address a member with `agent_message.send` using its

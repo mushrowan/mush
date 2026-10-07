@@ -682,8 +682,10 @@ more instructions. `receiver_role` is required: `\"parent\"`, `\"sibling\"` or `
 `receiver_name` for siblings and children. A busy agent sees the message during its turn; an \
 idle one wakes into a new turn in its own context. It returns a receipt whose \
 `deliveryStatus` is `delivered` (an idle agent got it) or `queued` (it waits on current \
-work). `await agent_message.send(\"all\", text)` broadcasts to your whole family and returns \
-`{receipts: [...]}`, with an `error` entry for any member it could not reach.\n\
+work). `await agent_message.send(\"all\", text)` broadcasts to every family member that is \
+working or napping and returns `{receipts: [...], skipped_hibernating: N}`, with an `error` \
+entry for any member it could not reach. A child hibernates after 30 minutes idle or once it \
+failed, was cancelled or was interrupted; message it by name to wake it.\n\
 - Give a child one clear task with the context it needs; it starts from an empty conversation.\n\
 - `await rlm.create_session(prompt, name=...)` starts a separate top-level session in its own \
 worker for work that should outlive this conversation; it runs on its own and reports \

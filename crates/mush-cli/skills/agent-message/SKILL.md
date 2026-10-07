@@ -37,9 +37,13 @@ if child is not None:
   The child remains available only until its parent session closes. The daemon
   resolves `receiver_role` within the current agent family; `receiver_name` is
   required for siblings and children and omitted for the unique parent.
-  `send("all", message)` broadcasts only to the family roster and returns
-  `{receipts: [...]}` in roster order; successful entries are ordinary receipts
-  and failed entries contain the target id and a short `error`. One failed delivery
+  `send("all", message)` broadcasts to the family roster members that are
+  working or napping and returns `{receipts: [...], skipped_hibernating: N}`
+  with receipts in roster order; successful entries are ordinary receipts
+  and failed entries contain the target id and a short `error`. A member
+  hibernates once it has been idle for 30 minutes, or has failed, been
+  cancelled or been interrupted; `all` skips it and only counts it in
+  `skipped_hibernating`. A direct message by name still wakes it. One failed delivery
   does not reject successful deliveries. Messages always use steering delivery so
   a busy target sees them during its active run. Returns a receipt with a
   `deliveryStatus` field: `"delivered"` means the message reached an idle target's
