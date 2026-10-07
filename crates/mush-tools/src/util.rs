@@ -49,6 +49,14 @@ pub(crate) fn with_property(
     schema
 }
 
+pub(crate) async fn run_blocking(
+    work: impl FnOnce() -> mush_agent::tool::ToolResult + Send + 'static,
+) -> mush_agent::tool::ToolResult {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|e| mush_agent::tool::ToolResult::error(format!("task join error: {e}")))
+}
+
 #[cfg(unix)]
 pub(crate) fn signal_group(pgid: i32, signal: libc::c_int) -> bool {
     // SAFETY: negating the process group id targets the whole group.

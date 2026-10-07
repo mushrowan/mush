@@ -4,7 +4,7 @@ use std::sync::Arc;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::resolve_path;
+use crate::util::{resolve_path, run_blocking};
 
 const MAX_ENTRIES: usize = 500;
 
@@ -66,9 +66,7 @@ impl AgentTool for LsTool {
             .map(|path| resolve_path(&self.cwd, path))
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
-        tokio::task::spawn_blocking(move || list_dir(&path))
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
+        run_blocking(move || list_dir(&path)).await
     }
 }
 

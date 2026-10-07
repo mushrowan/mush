@@ -8,7 +8,7 @@ use ignore::WalkBuilder;
 use mush_agent::tool::{AgentTool, ToolResult, parse_tool_args};
 use serde::Deserialize;
 
-use crate::util::{clean_regex_pattern, inject_note, resolve_path, truncate_lines};
+use crate::util::{clean_regex_pattern, inject_note, resolve_path, run_blocking, truncate_lines};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,9 +172,7 @@ impl AgentTool for GrepTool {
         let mut args = args;
         args.pattern = cleaned.pattern;
 
-        let result = tokio::task::spawn_blocking(move || run_search(&search_path, &args))
-            .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")));
+        let result = run_blocking(move || run_search(&search_path, &args)).await;
         inject_note(result, cleaned.note)
     }
 }

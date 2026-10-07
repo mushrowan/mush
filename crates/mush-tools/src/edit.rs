@@ -8,7 +8,7 @@ use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::util::resolve_path;
+use crate::util::{resolve_path, run_blocking};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -239,7 +239,7 @@ impl AgentTool for EditTool {
 
         crate::file_mutation_queue::with_file_mutation_queue(&path, async {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || {
+            run_blocking(move || {
                 if let Some(ledger) = &ledger
                     && let Err(stale) = ledger.check(&path)
                 {
@@ -254,7 +254,6 @@ impl AgentTool for EditTool {
                 result
             })
             .await
-            .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
         })
         .await
     }

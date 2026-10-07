@@ -6,7 +6,7 @@ use mush_ai::types::Api;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::util::resolve_path;
+use crate::util::{resolve_path, run_blocking};
 
 use mush_agent::truncation::{MAX_BYTES, MAX_LINES};
 
@@ -332,7 +332,7 @@ impl AgentTool for ReadTool {
         let max_image_bytes = self.max_image_bytes;
         let ledger = self.ledger.clone();
 
-        tokio::task::spawn_blocking(move || {
+        run_blocking(move || {
             let result = read_file(&path, args.offset, args.limit, json_output, max_image_bytes);
             if result.outcome.is_success() {
                 ledger.record(&path);
@@ -340,7 +340,6 @@ impl AgentTool for ReadTool {
             result
         })
         .await
-        .unwrap_or_else(|e| ToolResult::error(format!("task join error: {e}")))
     }
 }
 
