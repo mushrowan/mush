@@ -1,7 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
 use mush_agent::AgentEvent;
@@ -44,26 +44,21 @@ pub struct StreamMeta {
 pub struct TurnEvents {
     tx: mpsc::Sender<TurnEvent>,
     rx: mpsc::Receiver<TurnEvent>,
-    active: Arc<AtomicUsize>,
-    active_tx: watch::Sender<usize>,
-    active_rx: watch::Receiver<usize>,
-    metas: std::collections::HashMap<PaneId, StreamMeta>,
-    generations: std::collections::HashMap<PaneId, StreamGeneration>,
+    active: watch::Sender<usize>,
+    metas: HashMap<PaneId, StreamMeta>,
+    generations: HashMap<PaneId, StreamGeneration>,
     next_generation: u64,
 }
 
 impl Default for TurnEvents {
     fn default() -> Self {
         let (tx, rx) = mpsc::channel(TURN_EVENT_BUFFER);
-        let (active_tx, active_rx) = watch::channel(0);
         Self {
             tx,
             rx,
-            active: Arc::new(AtomicUsize::new(0)),
-            active_tx,
-            active_rx,
-            metas: std::collections::HashMap::new(),
-            generations: std::collections::HashMap::new(),
+            active: watch::Sender::new(0),
+            metas: HashMap::new(),
+            generations: HashMap::new(),
             next_generation: 0,
         }
     }
@@ -111,12 +106,12 @@ impl TurnEvents {
 
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::SeqCst) > 0 || !self.rx.is_empty()
+        self.active_turns() > 0 || !self.rx.is_empty()
     }
 
     #[must_use]
     pub fn active_turns(&self) -> usize {
-        self.active.load(Ordering::SeqCst)
+        *self.active.borrow()
     }
 
     pub fn try_next(&mut self) -> Option<TurnEvent> {
@@ -127,7 +122,7 @@ impl TurnEvents {
         if !self.is_active() {
             return None;
         }
-        let mut idle = self.active_rx.clone();
+        let mut idle = self.active.subscribe();
         tokio::select! {
             event = self.rx.recv() => event,
             _ = idle.wait_for(|active| *active == 0) => self.rx.try_recv().ok(),
@@ -140,9 +135,7 @@ impl TurnEvents {
     {
         let tx = self.tx.clone();
         let active = self.active.clone();
-        let active_tx = self.active_tx.clone();
-        let count = active.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = active_tx.send(count);
+        active.send_modify(|count| *count += 1);
         tokio::spawn(async move {
             let mut stream = build(&registry);
             while let Some(event) = stream.next().await {
@@ -150,8 +143,7 @@ impl TurnEvents {
                     break;
                 }
             }
-            let count = active.fetch_sub(1, Ordering::SeqCst) - 1;
-            let _ = active_tx.send(count);
+            active.send_modify(|count| *count -= 1);
         });
     }
 }
@@ -172,10 +164,13 @@ pub struct PendingPrompt {
 
 impl PendingPrompt {
     pub fn text(text: impl Into<String>) -> Self {
+        Self::with_images(text, Vec::new())
+    }
+
+    pub fn persisted(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            images: Vec::new(),
-            persisted: false,
+            persisted: true,
+            ..Self::text(text)
         }
     }
 
@@ -377,31 +372,29 @@ impl SessionRuntime {
     }
 
     pub fn accept_event(&mut self, event: mush_ai::types::EventMessage) {
-        let mut prompt = PendingPrompt::text(event.text());
-        prompt.mark_persisted();
+        self.pending_prompt = Some(PendingPrompt::persisted(event.text()));
         self.conversation.append_message(Message::Event(event));
-        self.pending_prompt = Some(prompt);
     }
 
-    pub fn apply_event(&mut self, event: &mush_agent::AgentEvent) -> crate::Applied {
+    pub fn apply_event(&mut self, event: &AgentEvent) -> crate::Applied {
         let applied = crate::apply_agent_event(&mut self.conversation, event);
         match event {
-            mush_agent::AgentEvent::MessageStart { message } => {
+            AgentEvent::MessageStart { message } => {
                 self.streaming = Some(mush_ai::stream::PartialMessage::new(message.clone()));
             }
-            mush_agent::AgentEvent::StreamEvent { event } => {
+            AgentEvent::StreamEvent { event } => {
                 if let Some(partial) = &mut self.streaming {
                     partial.apply(event);
                 }
             }
-            mush_agent::AgentEvent::PartialDiscarded { .. }
-            | mush_agent::AgentEvent::Error { .. }
-            | mush_agent::AgentEvent::AgentEnd => self.streaming = None,
-            mush_agent::AgentEvent::MessageEnd { message } => {
+            AgentEvent::PartialDiscarded { .. }
+            | AgentEvent::Error { .. }
+            | AgentEvent::AgentEnd => self.streaming = None,
+            AgentEvent::MessageEnd { message } => {
                 self.streaming = None;
                 self.context_tokens = message.usage.total_input_tokens();
             }
-            mush_agent::AgentEvent::ContextCompacted { compaction, .. } => {
+            AgentEvent::ContextCompacted { compaction, .. } => {
                 let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
                 self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
                 self.harness_digest_pending = true;
@@ -512,6 +505,7 @@ impl Default for SessionRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn accept_event_persists_the_event_and_queues_a_persisted_prompt() {

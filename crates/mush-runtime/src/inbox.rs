@@ -129,9 +129,7 @@ impl OrchestratorInbox {
                     .any(|r| r.id.starts_with("orchestrator-event-"))
                 && !event.kind.is_summary()
             {
-                let mut prompt = PendingPrompt::text(event.text());
-                prompt.mark_persisted();
-                runtime.pending_prompt = Some(prompt);
+                runtime.pending_prompt = Some(PendingPrompt::persisted(event.text()));
                 return Ok(Delivered::Ready);
             }
         }

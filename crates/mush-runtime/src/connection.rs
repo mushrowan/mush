@@ -1444,9 +1444,7 @@ impl InProcessConnection {
             self.runtime.conversation.append_message(steer);
         }
         if self.runtime.pending_prompt.is_none() {
-            let mut prompt = PendingPrompt::text("");
-            prompt.mark_persisted();
-            self.runtime.pending_prompt = Some(prompt);
+            self.runtime.pending_prompt = Some(PendingPrompt::persisted(""));
         }
         self.start_pending_prompt().await;
     }
