@@ -25,23 +25,6 @@ impl FuzzyFilter {
         }
     }
 
-    pub fn score(&mut self, haystack: &str, query: &str) -> Option<u32> {
-        if query.is_empty() {
-            return Some(0);
-        }
-        let mut haystack_buf = Vec::new();
-        let haystack = Utf32Str::new(haystack, &mut haystack_buf);
-        let pattern = Pattern::new(
-            query,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
-        pattern
-            .score(haystack, &mut self.matcher)
-            .filter(|&s| s != 0)
-    }
-
     pub fn filter<T, F>(&mut self, items: &[T], query: &str, key: F) -> Vec<usize>
     where
         F: Fn(&T) -> &str,
@@ -49,10 +32,23 @@ impl FuzzyFilter {
         if query.is_empty() {
             return (0..items.len()).collect();
         }
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+        let mut haystack_buf = Vec::new();
         let mut scored: Vec<(usize, u32)> = items
             .iter()
             .enumerate()
-            .filter_map(|(i, item)| self.score(key(item), query).map(|s| (i, s)))
+            .filter_map(|(i, item)| {
+                let haystack = Utf32Str::new(key(item), &mut haystack_buf);
+                pattern
+                    .score(haystack, &mut self.matcher)
+                    .filter(|&s| s != 0)
+                    .map(|s| (i, s))
+            })
             .collect();
         scored.sort_by_key(|b| std::cmp::Reverse(b.1));
         scored.into_iter().map(|(i, _)| i).collect()

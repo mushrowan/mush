@@ -29,15 +29,23 @@ pub fn render(source: &str, theme: &Theme) -> Text<'static> {
 }
 
 pub fn render_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
-    render_with_options(source, theme, width, CodeHighlighting::Enabled, Breaks::Soft)
+    render_with_options(
+        source,
+        theme,
+        width,
+        CodeHighlighting::Enabled,
+        Breaks::Soft,
+    )
 }
 
-pub fn render_lines_with_width(
-    source: &str,
-    theme: &Theme,
-    width: Option<usize>,
-) -> Text<'static> {
-    render_with_options(source, theme, width, CodeHighlighting::Enabled, Breaks::Hard)
+pub fn render_lines_with_width(source: &str, theme: &Theme, width: Option<usize>) -> Text<'static> {
+    render_with_options(
+        source,
+        theme,
+        width,
+        CodeHighlighting::Enabled,
+        Breaks::Hard,
+    )
 }
 
 pub(crate) fn render_streaming_with_width(
@@ -45,7 +53,13 @@ pub(crate) fn render_streaming_with_width(
     theme: &Theme,
     width: Option<usize>,
 ) -> Text<'static> {
-    render_with_options(source, theme, width, CodeHighlighting::Disabled, Breaks::Soft)
+    render_with_options(
+        source,
+        theme,
+        width,
+        CodeHighlighting::Disabled,
+        Breaks::Soft,
+    )
 }
 
 fn render_with_options(
@@ -65,7 +79,13 @@ fn render_with_options(
         return render_plain_text(source);
     }
 
-    Text::from(render_pulldown(source, theme, width, code_highlighting, breaks))
+    Text::from(render_pulldown(
+        source,
+        theme,
+        width,
+        code_highlighting,
+        breaks,
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,17 +134,18 @@ fn render_pulldown(
 }
 
 fn normalise_thematic_breaks(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            if matches!(line.trim(), "---" | "***" | "___") {
-                "\n---\n".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut normalised = String::with_capacity(source.len());
+    for (index, line) in source.lines().enumerate() {
+        if index > 0 {
+            normalised.push('\n');
+        }
+        if matches!(line.trim(), "---" | "***" | "___") {
+            normalised.push_str("\n---\n");
+        } else {
+            normalised.push_str(line);
+        }
+    }
+    normalised
 }
 
 struct MarkdownRenderer<'a> {
@@ -288,7 +309,7 @@ impl<'a> MarkdownRenderer<'a> {
             }
             TagEnd::CodeBlock => {
                 if let Some((lang, text)) = self.code_block.take() {
-                    let lines = text.lines().map(str::to_string).collect::<Vec<_>>();
+                    let lines = text.lines().collect::<Vec<_>>();
                     self.lines.extend(render_code_block(
                         &lines,
                         &lang,
@@ -496,7 +517,7 @@ fn source_table_line(line: &str, theme: &Theme, header: bool) -> Line<'static> {
 }
 
 fn render_code_block(
-    code_lines: &[String],
+    code_lines: &[&str],
     lang: &str,
     theme: &Theme,
     code_highlighting: CodeHighlighting,
@@ -516,19 +537,21 @@ fn render_code_block(
 }
 
 fn code_block_syntax<'a>(ps: &'a SyntaxSet, lang: &str) -> Option<&'a SyntaxReference> {
-    (!lang.is_empty()).then_some(())?;
+    if lang.is_empty() {
+        return None;
+    }
     ps.find_syntax_by_token(lang)
 }
 
 pub(crate) const CODE_BLOCK_INDENT: &str = "  ";
 
-fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
+fn render_plain_code_block(code_lines: &[&str]) -> Vec<Line<'static>> {
     let lines: Vec<Line<'static>> = code_lines
         .iter()
         .map(|code_line| {
             Line::from(vec![
                 Span::raw(CODE_BLOCK_INDENT),
-                Span::styled(code_line.clone(), Style::default()),
+                Span::raw(code_line.to_string()),
             ])
         })
         .collect();
@@ -540,7 +563,7 @@ fn render_plain_code_block(code_lines: &[String]) -> Vec<Line<'static>> {
 }
 
 fn highlight_code_block(
-    code_lines: &[String],
+    code_lines: &[&str],
     syntax: &SyntaxReference,
     ps: &SyntaxSet,
     ui_theme: &Theme,
@@ -572,7 +595,7 @@ fn highlight_code_block(
             Err(_) => {
                 lines.push(Line::from(vec![
                     Span::raw(CODE_BLOCK_INDENT),
-                    Span::styled(code_line.clone(), ui_theme.code_block),
+                    Span::styled(code_line.to_string(), ui_theme.code_block),
                 ]));
             }
         }
