@@ -222,15 +222,23 @@ fn field_extractor(field: &'static str) -> forbidden_chars::ContentExtractor {
 }
 
 fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
+    fn new_text(args: &serde_json::Value) -> Option<&str> {
+        ["newText", "new_string"]
+            .iter()
+            .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
+    }
     Arc::new(|args: &serde_json::Value| {
-        let top = args.get("newText").and_then(|v| v.as_str());
         let batch = args
             .get("edits")
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
-            .filter_map(|edit| edit.get("newText").and_then(|v| v.as_str()));
-        top.into_iter().chain(batch).map(str::to_string).collect()
+            .filter_map(new_text);
+        new_text(args)
+            .into_iter()
+            .chain(batch)
+            .map(str::to_string)
+            .collect()
     })
 }
 
@@ -375,6 +383,31 @@ mod tests {
             !result.outcome.is_success(),
             "edit should be blocked by the guard before reaching the file"
         );
+    }
+
+    #[tokio::test]
+    async fn edit_is_guarded_under_claude_code_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "one\ntwo\n").unwrap();
+        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
+        let edit = registry.get("edit").expect("edit tool registered");
+
+        for args in [
+            serde_json::json!({
+                "file_path": target.to_str().unwrap(),
+                "old_string": "one",
+                "new_string": "one — dash",
+            }),
+            serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "edits": [{"old_string": "two", "new_string": "two — dash"}],
+            }),
+        ] {
+            let result = edit.execute(args).await;
+            assert!(!result.outcome.is_success(), "{result:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "one\ntwo\n");
     }
 
     #[tokio::test]
