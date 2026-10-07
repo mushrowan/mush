@@ -438,9 +438,7 @@ impl InProcessConnection {
 
     fn follow_rlm_max_depth(&mut self, could_spawn: bool) {
         let depth = self.runtime.rlm_max_depth;
-        if self.family_member.is_none()
-            && let Some(family) = &self.family
-        {
+        if let Some(family) = self.root_family() {
             family.set_max_depth(depth);
         }
         if could_spawn != (self.runtime.rlm_depth < depth) {
@@ -605,10 +603,14 @@ impl InProcessConnection {
         self.family = family;
     }
 
+    fn root_family(&self) -> Option<&Arc<Family>> {
+        self.family
+            .as_ref()
+            .filter(|_| self.family_member.is_none())
+    }
+
     fn mark_root_running(&self, running: bool) {
-        if self.family_member.is_none()
-            && let Some(family) = &self.family
-        {
+        if let Some(family) = self.root_family() {
             family.set_root_running(running);
         }
     }
@@ -634,11 +636,7 @@ impl InProcessConnection {
         let Some(inbox) = self.observe_inbox.as_mut() else {
             return;
         };
-        let mut requests = Vec::new();
         while let Ok(request) = inbox.try_recv() {
-            requests.push(request);
-        }
-        for request in requests {
             let messages = self.runtime.conversation.display_history();
             let _ = request.reply.send(crate::family::preview_messages(
                 &messages,
