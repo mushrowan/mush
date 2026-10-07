@@ -99,10 +99,6 @@ impl NormalTarget for LogTarget<'_> {
     }
 }
 
-pub(crate) trait EditTarget: NormalTarget {
-    fn delete_selection(&mut self);
-}
-
 pub(crate) struct ComposerTarget<'a> {
     rows: Vec<String>,
     input: &'a mut crate::input_buffer::InputBuffer,
@@ -168,8 +164,8 @@ impl NormalTarget for ComposerTarget<'_> {
     }
 }
 
-impl EditTarget for ComposerTarget<'_> {
-    fn delete_selection(&mut self) {
+impl ComposerTarget<'_> {
+    pub(crate) fn delete_selection(&mut self) {
         let Some(selected) = self.input.selected_bytes() else {
             return;
         };
@@ -177,9 +173,7 @@ impl EditTarget for ComposerTarget<'_> {
         self.input.cursor = selected.start;
         self.input.anchor = None;
     }
-}
 
-impl ComposerTarget<'_> {
     pub(crate) fn select_all(&mut self) {
         self.input.anchor = Some(0);
         self.input.selection_kind = crate::screen::SelectionKind::Line;
