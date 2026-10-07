@@ -26,6 +26,7 @@ const JOURNAL: usize = 256;
 pub struct Descriptor {
     path: std::path::PathBuf,
     written: WorkerDescriptor,
+    writing: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Descriptor {
@@ -50,6 +51,7 @@ impl Descriptor {
                 heard_at: started_at,
                 ..WorkerDescriptor::default()
             },
+            writing: None,
         }
     }
 
@@ -68,6 +70,13 @@ impl Descriptor {
         children: Vec<ChildDescriptor>,
         now: u64,
     ) {
+        if self
+            .writing
+            .as_ref()
+            .is_some_and(|writing| !writing.is_finished())
+        {
+            return;
+        }
         let next = WorkerDescriptor {
             session_id: state.session_id.to_string(),
             model_id: state.model_id.clone(),
@@ -90,11 +99,21 @@ impl Descriptor {
             ..next
         };
         if let Ok(bytes) = serde_json::to_vec(&self.written) {
-            let _ = mush_ai::private_io::write_private(&self.path, bytes);
+            let path = self.path.clone();
+            self.writing = Some(tokio::task::spawn_blocking(move || {
+                let _ = mush_ai::private_io::write_private(&path, bytes);
+            }));
         }
     }
 
-    fn remove(&self) {
+    async fn written(&mut self) {
+        if let Some(writing) = self.writing.take() {
+            let _ = writing.await;
+        }
+    }
+
+    async fn remove(mut self) {
+        self.written().await;
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -348,8 +367,8 @@ pub async fn serve(
             descriptor.as_mut(),
         )
         .await;
-    if let Some(descriptor) = &descriptor {
-        descriptor.remove();
+    if let Some(descriptor) = descriptor {
+        descriptor.remove().await;
     }
     served
 }
@@ -703,28 +722,32 @@ mod tests {
         (hub, key, outgoing, received)
     }
 
-    #[test]
-    fn the_descriptor_is_rewritten_as_a_heartbeat_without_bumping_activity() {
+    #[tokio::test]
+    async fn the_descriptor_is_rewritten_as_a_heartbeat_without_bumping_activity() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.json");
         let mut descriptor = Descriptor::new(path.clone(), dir.path().join("w.sock"), "/".into());
         let state = state();
         descriptor.refresh_at(&state, 0, Vec::new(), 100);
+        descriptor.written().await;
         let first: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((first.heard_at, first.updated_at), (100, 100));
 
         descriptor.refresh_at(&state, 0, Vec::new(), 114);
+        descriptor.written().await;
         let quiet: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(quiet.heard_at, 100);
 
         descriptor.refresh_at(&state, 0, Vec::new(), 115);
+        descriptor.written().await;
         let beat: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((beat.heard_at, beat.updated_at), (115, 100));
 
         descriptor.refresh_at(&state, 1, Vec::new(), 120);
+        descriptor.written().await;
         let attached: WorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!((attached.heard_at, attached.updated_at), (120, 120));
