@@ -30,3 +30,11 @@ pub(crate) fn draw_to_buffer(
     terminal.draw(draw).expect("draw");
     terminal.backend().buffer().clone()
 }
+
+pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
+    if cfg!(target_os = "macos") {
+        tempfile::tempdir_in("/private/tmp")
+    } else {
+        tempfile::tempdir()
+    }
+}

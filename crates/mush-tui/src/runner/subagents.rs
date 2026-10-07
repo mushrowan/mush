@@ -146,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_commands_persist_with_spaces_and_remove() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         let store =
             RegistrationStore::new(dir.path().into(), "synthetic".into(), dir.path().into())
                 .unwrap();

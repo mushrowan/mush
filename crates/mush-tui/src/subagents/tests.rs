@@ -103,7 +103,7 @@ async fn settle(panel: &mut SubagentPanel, store: &RegistrationStore, now: Insta
 }
 
 fn fixture() -> (tempfile::TempDir, RegistrationStore) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::tempdir().unwrap();
     let root = dir.path().join("run");
     std::fs::create_dir(&root).unwrap();
     std::fs::create_dir(root.join("worker")).unwrap();

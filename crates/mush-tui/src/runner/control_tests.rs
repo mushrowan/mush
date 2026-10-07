@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 async fn reviewer_cli_socket_drives_serial_provider_turns_and_preserves_authority() {
     let binary = std::env::var("MUSH_REVIEW_CLI_BIN").expect("set MUSH_REVIEW_CLI_BIN");
     let (mut runtime, mut config, control) = fixture();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = mush_agent::ipc::IpcListener::start_control(
         dir.path().join("review.sock"),
@@ -538,7 +538,7 @@ async fn control_pty_child() {
 async fn control_pty_lifecycle_delivers_once() {
     use tokio::io::AsyncWriteExt;
     let binary = std::env::current_exe().unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = crate::test_support::tempdir().unwrap();
     let mut command = tokio::process::Command::new("script");
     command
         .env_clear()
@@ -765,7 +765,7 @@ async fn dispatch(
 async fn idle_event_runs_through_production_prompt_and_fake_provider_once() {
     for fail in [false, true] {
         let (mut runtime, mut config, control) = fixture();
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let listener = mush_agent::ipc::IpcListener::start_control(
             dir.path().join("control.sock"),
