@@ -14,27 +14,14 @@ pub struct ServingProviderCache {
 #[must_use]
 pub fn serving_provider_cache(name: &str) -> Option<ServingProviderCache> {
     match canonical_name(name).as_str() {
-        "anthropic" => Some(ServingProviderCache {
-            ttl_secs: 300,
-            mode: CacheMode::Explicit,
-            min_tokens: 1024,
-        }),
-        "amazonbedrock" | "bedrock" => Some(ServingProviderCache {
-            ttl_secs: 300,
-            mode: CacheMode::Explicit,
-            min_tokens: 1024,
-        }),
-        "googlevertex" | "vertex" => Some(ServingProviderCache {
-            ttl_secs: 300,
-            mode: CacheMode::Explicit,
-            min_tokens: 1024,
-        }),
-        "openai" => Some(ServingProviderCache {
-            ttl_secs: 600,
-            mode: CacheMode::Implicit,
-            min_tokens: 1024,
-        }),
-        "azure" => Some(ServingProviderCache {
+        "anthropic" | "amazonbedrock" | "bedrock" | "googlevertex" | "vertex" => {
+            Some(ServingProviderCache {
+                ttl_secs: 300,
+                mode: CacheMode::Explicit,
+                min_tokens: 1024,
+            })
+        }
+        "openai" | "azure" => Some(ServingProviderCache {
             ttl_secs: 600,
             mode: CacheMode::Implicit,
             min_tokens: 1024,

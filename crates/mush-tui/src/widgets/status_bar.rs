@@ -145,29 +145,18 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
     }
 
     if app.interaction.show_token_counters {
-        if app.stats.input_tokens > TokenCount::ZERO {
-            b.push_inline(Span::styled(
-                format!(" ↑{}", format_tokens(app.stats.input_tokens)),
-                dim,
-            ));
-        }
-        if app.stats.output_tokens > TokenCount::ZERO {
-            b.push_inline(Span::styled(
-                format!(" ↓{}", format_tokens(app.stats.output_tokens)),
-                dim,
-            ));
-        }
-        if app.stats.cache_read_tokens > TokenCount::ZERO {
-            b.push_inline(Span::styled(
-                format!(" R{}", format_tokens(app.stats.cache_read_tokens)),
-                dim,
-            ));
-        }
-        if app.stats.cache_write_tokens > TokenCount::ZERO {
-            b.push_inline(Span::styled(
-                format!(" W{}", format_tokens(app.stats.cache_write_tokens)),
-                dim,
-            ));
+        for (marker, tokens) in [
+            ("↑", app.stats.input_tokens),
+            ("↓", app.stats.output_tokens),
+            ("R", app.stats.cache_read_tokens),
+            ("W", app.stats.cache_write_tokens),
+        ] {
+            if tokens > TokenCount::ZERO {
+                b.push_inline(Span::styled(
+                    format!(" {marker}{}", format_tokens(tokens)),
+                    dim,
+                ));
+            }
         }
     }
 
@@ -217,21 +206,23 @@ fn left_status(app: &App, width: u16) -> LeftStatus {
         && let Some(ref usage) = app.oauth_usage
     {
         let bar_w = usage_bar_width(width);
-        if let Some(ref w) = usage.five_hour {
-            let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR);
+        let windows = [
+            (
+                "5h",
+                &usage.five_hour,
+                mush_ai::oauth::usage::OAuthUsage::FIVE_HOUR,
+            ),
+            (
+                "7d",
+                &usage.seven_day,
+                mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY,
+            ),
+        ];
+        for (label, window, length) in windows {
+            let Some(w) = window else { continue };
+            let pace = w.pace(length);
             b.section_break();
-            b.push_inline(Span::styled("5h ", dim));
-            b.extend_inline(super::usage_bar::render_usage_bar_width(
-                w.utilization,
-                pace,
-                bar_w,
-            ));
-            b.push_inline(Span::styled(format!(" {}%", w.utilization as u32), dim));
-        }
-        if let Some(ref w) = usage.seven_day {
-            let pace = w.pace(mush_ai::oauth::usage::OAuthUsage::SEVEN_DAY);
-            b.section_break();
-            b.push_inline(Span::styled("7d ", dim));
+            b.push_inline(Span::styled(format!("{label} "), dim));
             b.extend_inline(super::usage_bar::render_usage_bar_width(
                 w.utilization,
                 pace,
@@ -423,9 +414,10 @@ fn ensure_status_bar_cache(app: &App, width: u16) {
         }
     }
 
-    let left_status = left_status(app, width);
-    let spans = left_status.spans;
-    let cache_timer_text = left_status.cache_timer_text;
+    let LeftStatus {
+        spans,
+        cache_timer_text,
+    } = left_status(app, width);
     let right_text = if app.interaction.status_bar.show_cwd {
         format!("{} ", truncate_path(&app.cwd, 30))
     } else {
@@ -502,30 +494,23 @@ impl Widget for StatusBar<'_> {
 }
 
 fn mark_cache_timer_cells(timer: Option<&str>, area: Rect, buf: &mut Buffer) {
-    let Some(timer) = timer else {
+    let Some(timer) = timer.filter(|timer| !timer.is_empty()) else {
         return;
     };
-    mark_text_cells(area, buf, timer, CellDiffOption::AlwaysUpdate);
-}
-
-fn mark_text_cells(area: Rect, buf: &mut Buffer, needle: &str, diff_option: CellDiffOption) {
-    if needle.is_empty() {
-        return;
-    }
-    let symbols: Vec<String> = needle.chars().map(|ch| ch.to_string()).collect();
+    let symbols: Vec<char> = timer.chars().collect();
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if x as usize + symbols.len() > area.right() as usize {
                 break;
             }
-            if symbols
-                .iter()
-                .enumerate()
-                .all(|(offset, symbol)| buf[(x + offset as u16, y)].symbol() == symbol)
-            {
+            let matches = symbols.iter().enumerate().all(|(offset, ch)| {
+                let mut utf8 = [0; 4];
+                buf[(x + offset as u16, y)].symbol() == ch.encode_utf8(&mut utf8)
+            });
+            if matches {
                 for offset in 0..symbols.len() {
                     if let Some(cell) = buf.cell_mut((x + offset as u16, y)) {
-                        cell.set_diff_option(diff_option);
+                        cell.set_diff_option(CellDiffOption::AlwaysUpdate);
                     }
                 }
                 return;

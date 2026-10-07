@@ -1,6 +1,6 @@
 use crate::turn_activity::StreamPart;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamingState {
     pub text: String,
     pub thinking: String,
@@ -61,16 +61,7 @@ impl TypewriterState {
 impl StreamingState {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            text: String::new(),
-            thinking: String::new(),
-            active: false,
-            tool_args: String::new(),
-            last_part: None,
-            streamed_chars: 0,
-            text_tw: TypewriterState::default(),
-            think_tw: TypewriterState::default(),
-        }
+        Self::default()
     }
 
     pub fn start(&mut self) {
@@ -147,12 +138,6 @@ impl StreamingState {
         self.text_tw.reset();
         self.think_tw.reset();
         (text, thinking)
-    }
-}
-
-impl Default for StreamingState {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

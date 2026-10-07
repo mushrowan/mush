@@ -30,17 +30,10 @@ pub fn is_hidden_visibility(model: &ModelCompletion) -> bool {
 }
 
 pub fn sort_codex_priority(items: &mut [ModelCompletion]) {
-    let mut i = 0;
-    while i < items.len() {
-        if items[i].provider == CODEX_PROVIDER {
-            let mut j = i + 1;
-            while j < items.len() && items[j].provider == CODEX_PROVIDER {
-                j += 1;
-            }
-            items[i..j].sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
-            i = j;
-        } else {
-            i += 1;
+    let is_codex = |model: &ModelCompletion| model.provider == CODEX_PROVIDER;
+    for run in items.chunk_by_mut(|a, b| is_codex(a) == is_codex(b)) {
+        if is_codex(&run[0]) {
+            run.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.id.cmp(&b.id)));
         }
     }
 }
@@ -79,6 +72,77 @@ impl SlashMenuState {
             matches,
             selected: 0,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TabState {
+    pub(crate) matches: Vec<String>,
+    pub(crate) index: usize,
+}
+
+#[must_use]
+pub(crate) fn argument_prefix(text: &str) -> Option<(&str, &str)> {
+    let (command, rest) = text.strip_prefix('/')?.split_once(' ')?;
+    (!rest.contains(' ')).then_some((command, rest))
+}
+
+#[must_use]
+pub(crate) fn thinking_level_description(level: &str) -> &'static str {
+    match level {
+        "off" => "No reasoning",
+        "minimal" => "Very brief reasoning",
+        "low" => "Light reasoning",
+        "medium" => "Moderate reasoning",
+        "high" => "Deep reasoning",
+        "xhigh" => "Very deep reasoning",
+        "max" => "Maximum reasoning",
+        _ => "",
+    }
+}
+
+#[must_use]
+pub(crate) fn filter_command_matches(commands: &[SlashCommand], prefix: &str) -> Vec<SlashCommand> {
+    commands
+        .iter()
+        .filter(|cmd| match prefix.strip_prefix('/') {
+            Some(rest) => cmd.name.starts_with(rest),
+            None => prefix.is_empty(),
+        })
+        .cloned()
+        .collect()
+}
+
+#[must_use]
+pub fn model_completion_from_merged(entry: &mush_ai::discovery::MergedModel) -> ModelCompletion {
+    let stale = matches!(
+        entry.source,
+        mush_ai::discovery::ModelSource::DiscoveredStale
+    );
+    let extras = if matches!(&entry.model.provider, mush_ai::types::Provider::Custom(name) if name == CODEX_PROVIDER)
+    {
+        mush_ai::discovery::codex::extras(entry.raw.as_ref())
+    } else {
+        None
+    };
+    let (description, speed_tiers, priority, visibility) = match extras {
+        Some(extras) => (
+            extras.description,
+            extras.additional_speed_tiers,
+            extras.priority,
+            extras.visibility,
+        ),
+        None => (None, Vec::new(), 0, None),
+    };
+    ModelCompletion {
+        id: entry.model.id.to_string(),
+        name: entry.model.name.clone(),
+        provider: entry.model.provider.to_string(),
+        stale,
+        description,
+        speed_tiers,
+        priority,
+        visibility,
     }
 }
 
@@ -178,76 +242,5 @@ mod picker_ordering_tests {
         anthropic.visibility = Some("internal".into());
         let prepared = prepare_picker_models(&[anthropic], false);
         assert_eq!(prepared.len(), 1, "non-codex models bypass the filter");
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TabState {
-    pub(crate) matches: Vec<String>,
-    pub(crate) index: usize,
-}
-
-#[must_use]
-pub(crate) fn argument_prefix(text: &str) -> Option<(&str, &str)> {
-    let (command, rest) = text.strip_prefix('/')?.split_once(' ')?;
-    (!rest.contains(' ')).then_some((command, rest))
-}
-
-#[must_use]
-pub(crate) fn thinking_level_description(level: &str) -> &'static str {
-    match level {
-        "off" => "No reasoning",
-        "minimal" => "Very brief reasoning",
-        "low" => "Light reasoning",
-        "medium" => "Moderate reasoning",
-        "high" => "Deep reasoning",
-        "xhigh" => "Very deep reasoning",
-        "max" => "Maximum reasoning",
-        _ => "",
-    }
-}
-
-#[must_use]
-pub(crate) fn filter_command_matches(commands: &[SlashCommand], prefix: &str) -> Vec<SlashCommand> {
-    commands
-        .iter()
-        .filter(|cmd| {
-            let full = format!("/{}", cmd.name);
-            full.starts_with(prefix)
-        })
-        .cloned()
-        .collect()
-}
-
-#[must_use]
-pub fn model_completion_from_merged(entry: &mush_ai::discovery::MergedModel) -> ModelCompletion {
-    let stale = matches!(
-        entry.source,
-        mush_ai::discovery::ModelSource::DiscoveredStale
-    );
-    let extras = if matches!(&entry.model.provider, mush_ai::types::Provider::Custom(name) if name == CODEX_PROVIDER)
-    {
-        mush_ai::discovery::codex::extras(entry.raw.as_ref())
-    } else {
-        None
-    };
-    let (description, speed_tiers, priority, visibility) = match extras {
-        Some(extras) => (
-            extras.description,
-            extras.additional_speed_tiers,
-            extras.priority,
-            extras.visibility,
-        ),
-        None => (None, Vec::new(), 0, None),
-    };
-    ModelCompletion {
-        id: entry.model.id.to_string(),
-        name: entry.model.name.clone(),
-        provider: entry.model.provider.to_string(),
-        stale,
-        description,
-        speed_tiers,
-        priority,
-        visibility,
     }
 }

@@ -73,18 +73,9 @@ impl SessionPickerState {
     #[must_use]
     pub fn new_streaming(incoming: mpsc::Receiver<SessionMeta>, cwd: String) -> Self {
         Self {
-            sessions: Vec::new(),
-            selected: 0,
-            filter: String::new(),
-            scope: SessionScope::ThisDir,
-            cwd,
             loading: true,
-            confirm_delete: None,
-            toast: None,
-            live: HashMap::new(),
             incoming: Some(incoming),
-            roster: None,
-            matcher: RefCell::new(FuzzyFilter::new()),
+            ..Self::new(Vec::new(), cwd)
         }
     }
 

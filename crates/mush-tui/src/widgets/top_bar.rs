@@ -21,10 +21,8 @@ impl<'a> TopBar<'a> {
 }
 
 pub fn sanitise_title(raw: &str) -> String {
-    raw.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .split_whitespace()
+    raw.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }

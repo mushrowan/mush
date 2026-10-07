@@ -454,7 +454,7 @@ impl Widget for InputBox<'_> {
             let mut spans: Vec<Span<'_>> = Vec::new();
 
             if line.show_prompt {
-                spans.push(Span::styled(prompt.to_string(), prompt_style));
+                spans.push(Span::styled(prompt, prompt_style));
             }
 
             let seg_text = &layout.expanded.text[line.start..line.end];
@@ -496,13 +496,13 @@ impl Widget for InputBox<'_> {
     }
 }
 
-fn styled_with_images(
-    seg_text: &str,
+fn styled_with_images<'a>(
+    seg_text: &'a str,
     seg_global_start: usize,
     image_spans: &[(usize, usize)],
     text_style: Style,
     image_style: Style,
-) -> Vec<Span<'static>> {
+) -> Vec<Span<'a>> {
     let seg_global_end = seg_global_start + seg_text.len();
 
     let has_overlap = image_spans
@@ -510,7 +510,7 @@ fn styled_with_images(
         .any(|(s, e)| *e > seg_global_start && *s < seg_global_end);
 
     if !has_overlap {
-        return vec![Span::styled(seg_text.to_string(), text_style)];
+        return vec![Span::styled(seg_text, text_style)];
     }
 
     let mut spans = Vec::new();
@@ -526,24 +526,18 @@ fn styled_with_images(
         let local_end = (img_end - seg_global_start).min(seg_text.len());
 
         if local_start > pos {
-            spans.push(Span::styled(
-                seg_text[pos..local_start].to_string(),
-                text_style,
-            ));
+            spans.push(Span::styled(&seg_text[pos..local_start], text_style));
         }
         if local_end > local_start {
-            spans.push(Span::styled(
-                seg_text[local_start..local_end].to_string(),
-                image_style,
-            ));
+            spans.push(Span::styled(&seg_text[local_start..local_end], image_style));
         }
         pos = local_end;
     }
     if pos < seg_text.len() {
-        spans.push(Span::styled(seg_text[pos..].to_string(), text_style));
+        spans.push(Span::styled(&seg_text[pos..], text_style));
     }
     if spans.is_empty() {
-        spans.push(Span::styled(seg_text.to_string(), text_style));
+        spans.push(Span::styled(seg_text, text_style));
     }
     spans
 }
