@@ -2854,6 +2854,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_spawned_child_runs_its_task_and_collect_reports_the_answer() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let family = family(Arc::clone(&requests), 2, None);
         let root = Identity::root("root");
@@ -3019,6 +3020,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_parent_reads_its_child_transcript_and_nothing_else() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let family = family(Arc::clone(&requests), 2, None);
         let root = Identity::root("root");
