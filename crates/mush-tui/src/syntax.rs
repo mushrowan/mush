@@ -6,8 +6,13 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{self, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+pub(crate) static SYNTAX_SET: LazyLock<SyntaxSet> =
+    LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+pub(crate) fn code_theme() -> &'static highlighting::Theme {
+    &THEME_SET.themes["base16-ocean.dark"]
+}
 
 #[must_use]
 pub fn lang_from_path(path: &str) -> Option<&'static str> {
@@ -41,8 +46,7 @@ pub fn lang_from_path(path: &str) -> Option<&'static str> {
 pub fn highlight_line(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
     let ps = &*SYNTAX_SET;
     let syntax = ps.find_syntax_by_token(lang)?;
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
-    let mut h = HighlightLines::new(syntax, theme);
+    let mut h = HighlightLines::new(syntax, code_theme());
     let mut line_with_nl = String::with_capacity(line.len() + 1);
     line_with_nl.push_str(line);
     line_with_nl.push('\n');
@@ -61,7 +65,7 @@ pub fn highlight_line(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
     Some(spans)
 }
 
-fn syntect_to_style(style: highlighting::Style) -> Style {
+pub(crate) fn syntect_to_style(style: highlighting::Style) -> Style {
     let mut s = Style::default();
     if style.foreground.a > 0 {
         s = s.fg(Color::Rgb(

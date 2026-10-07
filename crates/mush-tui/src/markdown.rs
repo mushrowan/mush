@@ -1,18 +1,14 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use std::sync::LazyLock;
 
+use crate::syntax::{SYNTAX_SET, code_theme, syntect_to_style};
 use crate::theme::Theme;
 
 #[cfg(test)]
 use std::cell::Cell;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{self, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
-
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 const MAX_HIGHLIGHTED_CODE_BLOCK_LINES: usize = 64;
 
@@ -571,8 +567,7 @@ fn highlight_code_block(
     #[cfg(test)]
     HIGHLIGHT_CODE_BLOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
-    let mut h = HighlightLines::new(syntax, theme);
+    let mut h = HighlightLines::new(syntax, code_theme());
     let mut lines = Vec::with_capacity(code_lines.len());
     let mut line_with_nl = String::new();
 
@@ -604,28 +599,6 @@ fn highlight_code_block(
         lines.push(Line::from(CODE_BLOCK_INDENT));
     }
     lines
-}
-
-fn syntect_to_style(style: highlighting::Style) -> Style {
-    let mut s = Style::default();
-    if style.foreground.a > 0 {
-        s = s.fg(Color::Rgb(
-            style.foreground.r,
-            style.foreground.g,
-            style.foreground.b,
-        ));
-    }
-    let fs = style.font_style;
-    if fs.contains(highlighting::FontStyle::BOLD) {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if fs.contains(highlighting::FontStyle::ITALIC) {
-        s = s.add_modifier(Modifier::ITALIC);
-    }
-    if fs.contains(highlighting::FontStyle::UNDERLINE) {
-        s = s.add_modifier(Modifier::UNDERLINED);
-    }
-    s
 }
 
 #[cfg(test)]
