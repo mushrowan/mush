@@ -556,8 +556,14 @@ mod tests {
             )
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let mid = jobs.snapshot(&id).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mid = loop {
+            let mid = jobs.snapshot(&id).await.unwrap();
+            if !mid.output.is_empty() || std::time::Instant::now() > deadline {
+                break mid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         jobs.kill(&id).await.unwrap();
         let done = tokio::time::timeout(Duration::from_secs(5), jobs.wait(&id))
             .await

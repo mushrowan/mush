@@ -1366,6 +1366,18 @@ exit 64
         assert!(result.outcome.is_error());
     }
 
+    async fn finished_job(
+        registry: &crate::background::BackgroundJobRegistry,
+        id: &str,
+    ) -> Arc<tokio::sync::RwLock<crate::background::JobState>> {
+        let handle = registry.get(id).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while handle.read().await.status.is_running() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle
+    }
+
     #[tokio::test]
     async fn background_job_completes() {
         let registry = crate::background::BackgroundJobRegistry::new();
@@ -1383,9 +1395,7 @@ exit 64
             "background spawn should succeed"
         );
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-        let handle = registry.get("bg_0").await.unwrap();
+        let handle = finished_job(&registry, "bg_0").await;
         let state = handle.read().await;
         assert!(
             !state.status.is_running(),
@@ -1414,9 +1424,7 @@ exit 64
             .await;
         assert!(result.outcome.is_success());
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(2_500)).await;
-
-        let handle = registry.get("bg_0").await.unwrap();
+        let handle = finished_job(&registry, "bg_0").await;
         let state = handle.read().await;
         assert_eq!(
             state.status,
@@ -1453,29 +1461,8 @@ exit 64
             "result should explain how to poll the background job: {text}"
         );
 
-        let handle = registry
-            .get("bg_0")
-            .await
-            .expect("timed-out foreground command should be registered");
-
-        let mut finished = false;
-        for _ in 0..10 {
-            {
-                let state = handle.read().await;
-                if !state.status.is_running() {
-                    finished = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        }
-
+        let handle = finished_job(&registry, "bg_0").await;
         let state = handle.read().await;
-        assert!(
-            finished,
-            "backgrounded command should finish: {:?}",
-            state.status
-        );
         assert_eq!(
             state.status,
             crate::background::JobStatus::Done { exit_code: 0 }

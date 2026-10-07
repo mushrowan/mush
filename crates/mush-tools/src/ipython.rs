@@ -1000,7 +1000,7 @@ mod tests {
             .await;
         let polled = tool
             .execute(json!({
-                "code": "import asyncio\nawait asyncio.sleep(0.3)\n(await h.running(), await h.tail(1), h.pid is not None)"
+                "code": "import asyncio\nfor _ in range(500):\n    if await h.tail(1):\n        break\n    await asyncio.sleep(0.02)\n(await h.running(), await h.tail(1), h.pid is not None)"
             }))
             .await;
         let killed = tool
@@ -1046,7 +1046,10 @@ mod tests {
             .await;
 
         assert!(result.outcome.is_success(), "{}", extract_text(&result));
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while notices.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         let notices = notices.lock().unwrap().clone();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert_eq!(notices[0].done.command, "exit 5");
@@ -1111,7 +1114,7 @@ mod tests {
             );
             tokio::spawn(async move { tool.execute(json!({ "code": code })).await })
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !pidfile.exists() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
@@ -1147,12 +1150,14 @@ mod tests {
         });
         let tool = IpythonTool::with_mush_host(host, dir.path().into());
 
-        let result = tool
-            .execute(json!({
-                "code": "h = bash('sleep 0.4; exit 3')\nh.pid\ntry:\n    await asyncio.wait_for(h, 0.1)\nexcept TimeoutError:\n    pass\nawait h.running()"
-            }))
-            .await;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let release = dir.path().join("release");
+        let code = format!(
+            "h = bash('while [ ! -e {} ]; do sleep 0.02; done; exit 3')\nh.pid\ntry:\n    await asyncio.wait_for(h, 0.1)\nexcept TimeoutError:\n    pass\nawait h.running()",
+            release.display()
+        );
+        let result = tool.execute(json!({ "code": code })).await;
+        std::fs::write(&release, "").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while notices.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
