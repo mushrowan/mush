@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+use futures::FutureExt;
+use tokio::task::{JoinError, JoinHandle};
+
 use mush_agent::AgentEvent;
 use mush_agent::tool::ToolRegistry;
 use mush_ai::registry::ApiRegistry;
@@ -320,6 +323,23 @@ impl HostCommands {
 
 pub type SystemPromptBuilder = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
 
+fn take_finished<T>(slot: &mut Option<JoinHandle<T>>) -> Option<Result<T, JoinError>> {
+    let result = slot
+        .as_mut()
+        .filter(|task| task.is_finished())?
+        .now_or_never()?;
+    *slot = None;
+    Some(result)
+}
+
+fn take_finished_keyed<K, T>(
+    slot: &mut Option<(K, JoinHandle<T>)>,
+) -> Option<(K, Result<T, JoinError>)> {
+    let (_, task) = slot.as_mut().filter(|(_, task)| task.is_finished())?;
+    let result = task.now_or_never()?;
+    slot.take().map(|(key, _)| (key, result))
+}
+
 struct FailedCompaction {
     failure: mush_session::compact::CompactionFailureReport,
     tokens_before: usize,
@@ -450,16 +470,7 @@ impl InProcessConnection {
     }
 
     fn try_poll_autonomous(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        let finished = self
-            .gate_task
-            .as_ref()
-            .is_some_and(|task| task.is_finished());
-        if !finished {
-            return None;
-        }
-        let task = self.gate_task.take()?;
-        let runs = task.now_or_never()?.unwrap_or_default();
+        let runs = take_finished(&mut self.gate_task)?.unwrap_or_default();
         let autonomous = self.autonomous.clone()?;
         self.apply_autonomous_decision(autonomous.decide(runs));
         self.queued.pop_front()
@@ -966,46 +977,21 @@ impl InProcessConnection {
     }
 
     fn poll_background(&mut self) -> Option<ClientEvent> {
-        if let Some(event) = self.queued.pop_front() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_confirm() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_title() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_kernel() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_kernel_restore() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_side_questions() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_branch_summary() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_refine() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_auto_review() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_family() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_goal() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_schedule() {
-            return Some(event);
-        }
-        if let Some(event) = self.try_poll_autonomous() {
-            return Some(event);
-        }
-        self.try_poll_compaction()
+        self.queued
+            .pop_front()
+            .or_else(|| self.try_poll_confirm())
+            .or_else(|| self.try_poll_title())
+            .or_else(|| self.try_poll_kernel())
+            .or_else(|| self.try_poll_kernel_restore())
+            .or_else(|| self.try_poll_side_questions())
+            .or_else(|| self.try_poll_branch_summary())
+            .or_else(|| self.try_poll_refine())
+            .or_else(|| self.try_poll_auto_review())
+            .or_else(|| self.try_poll_family())
+            .or_else(|| self.try_poll_goal())
+            .or_else(|| self.try_poll_schedule())
+            .or_else(|| self.try_poll_autonomous())
+            .or_else(|| self.try_poll_compaction())
     }
 
     async fn summarise_and_navigate(&mut self, entry_id: mush_session::tree::EntryId) {
@@ -1054,16 +1040,8 @@ impl InProcessConnection {
     }
 
     fn try_poll_branch_summary(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        if !self
-            .branch_summary
-            .as_ref()
-            .is_some_and(|(_, task)| task.is_finished())
-        {
-            return None;
-        }
-        let (entry_id, task) = self.branch_summary.take()?;
-        let outcome = match task.now_or_never()? {
+        let (entry_id, outcome) = take_finished_keyed(&mut self.branch_summary)?;
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => Err(format!("branch summary task failed: {error}")),
         };
@@ -1182,16 +1160,8 @@ impl InProcessConnection {
     }
 
     fn try_poll_auto_review(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        if !self
-            .auto_review
-            .as_ref()
-            .is_some_and(|(_, task)| task.is_finished())
-        {
-            return None;
-        }
-        let (reason, task) = self.auto_review.take()?;
-        let review = match task.now_or_never()? {
+        let (reason, review) = take_finished_keyed(&mut self.auto_review)?;
+        let review = match review {
             Ok(Ok(review)) => review,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "auto-refine review failed");
@@ -1216,12 +1186,10 @@ impl InProcessConnection {
     }
 
     fn try_poll_refine(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        if self.turn_active() || !self.refine.as_ref().is_some_and(|task| task.is_finished()) {
+        if self.turn_active() {
             return None;
         }
-        let task = self.refine.take()?;
-        let outcome = match task.now_or_never()? {
+        let outcome = match take_finished(&mut self.refine)? {
             Ok(outcome) => outcome,
             Err(error) => Err(format!("refine task failed: {error}")),
         };
@@ -1242,13 +1210,13 @@ impl InProcessConnection {
     }
 
     fn try_poll_side_questions(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
         let index = self
             .side_questions
             .iter()
             .position(|(_, task)| task.is_finished())?;
-        let (question, task) = self.side_questions.remove(index);
-        let answer = match task.now_or_never()? {
+        let answer = (&mut self.side_questions[index].1).now_or_never()?;
+        let (question, _) = self.side_questions.remove(index);
+        let answer = match answer {
             Ok(answer) => answer,
             Err(error) => Err(format!("side question task failed: {error}")),
         };
@@ -1325,14 +1293,7 @@ impl InProcessConnection {
     }
 
     fn try_poll_title(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        let task = self.title.as_mut()?;
-        if !task.is_finished() {
-            return None;
-        }
-        let title = task.now_or_never()?;
-        self.title = None;
-        let title = title.ok().flatten()?;
+        let title = take_finished(&mut self.title)?.ok().flatten()?;
         self.runtime.title = Some(title.clone());
         self.runtime.save_debounced();
         Some(ClientEvent::Session(SessionEvent::Title(Some(title))))
@@ -1474,14 +1435,7 @@ impl InProcessConnection {
     }
 
     fn try_poll_compaction(&mut self) -> Option<ClientEvent> {
-        use futures::FutureExt;
-        let task = self.compaction.as_mut()?;
-        if !task.is_finished() {
-            return None;
-        }
-        let result = task.now_or_never()?;
-        self.compaction = None;
-        let result = result.ok()?;
+        let result = take_finished(&mut self.compaction)?.ok()?;
         if self.compaction_auto
             && let CompactionTaskResult::Failed {
                 failure,
