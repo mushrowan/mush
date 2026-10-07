@@ -425,9 +425,14 @@ impl Bucket {
 }
 
 pub struct Family {
+    me: std::sync::Weak<Family>,
     inner: Mutex<Inner>,
     factory: Option<ChildFactory>,
     registry_path: Mutex<Option<PathBuf>>,
+    // held from snapshot to write and over a rebind, so the file never goes back in time
+    // or pairs one session's path with another's children
+    persisting: Mutex<()>,
+    persist_scheduled: std::sync::atomic::AtomicBool,
     max_depth: std::sync::atomic::AtomicU32,
     waking: tokio::sync::Mutex<()>,
 }
@@ -479,7 +484,8 @@ impl Family {
         registry_path: Option<PathBuf>,
     ) -> Arc<Self> {
         let children = load_registry(registry_path.as_deref());
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             inner: Mutex::new(Inner {
                 root,
                 root_session_id,
@@ -494,6 +500,8 @@ impl Family {
             }),
             factory,
             registry_path: Mutex::new(registry_path),
+            persisting: Mutex::new(()),
+            persist_scheduled: std::sync::atomic::AtomicBool::new(false),
             max_depth: std::sync::atomic::AtomicU32::new(max_depth),
             waking: tokio::sync::Mutex::new(()),
         })
@@ -532,6 +540,10 @@ impl Family {
         }
         self.persist();
         let children = load_registry(registry_path.as_deref());
+        let _persisting = self
+            .persisting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut inner = self.lock();
             inner.root_session_id = session_id;
@@ -550,6 +562,10 @@ impl Family {
     }
 
     fn persist(&self) {
+        let _persisting = self
+            .persisting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = self
             .registry_path
             .lock()
@@ -572,6 +588,24 @@ impl Family {
         if let Ok(bytes) = serde_json::to_vec_pretty(&registry) {
             let _ = mush_ai::private_io::write_private(&path, bytes);
         }
+    }
+
+    fn persist_soon(&self) {
+        use std::sync::atomic::Ordering;
+        if self.persist_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let (Ok(runtime), Some(family)) =
+            (tokio::runtime::Handle::try_current(), self.me.upgrade())
+        else {
+            self.persist_scheduled.store(false, Ordering::Release);
+            self.persist();
+            return;
+        };
+        runtime.spawn_blocking(move || {
+            family.persist_scheduled.store(false, Ordering::Release);
+            family.persist();
+        });
     }
 
     #[must_use]
@@ -1087,6 +1121,14 @@ impl Family {
     }
 
     fn update(&self, id: &str, apply: impl FnOnce(&mut ChildSummary)) {
+        self.update_then(id, apply, Self::persist);
+    }
+
+    fn record_update(&self, id: &str, apply: impl FnOnce(&mut ChildSummary)) {
+        self.update_then(id, apply, Self::persist_soon);
+    }
+
+    fn update_then(&self, id: &str, apply: impl FnOnce(&mut ChildSummary), persist: fn(&Self)) {
         let settled_parent = {
             let mut inner = self.lock();
             let Some(node) = inner.children.get_mut(id) else {
@@ -1104,7 +1146,7 @@ impl Family {
                 .then(|| node.summary.parent.clone())
                 .flatten()
         };
-        self.persist();
+        persist(self);
         if let Some(parent) = settled_parent {
             self.settle_if_quiet(&parent);
         }
@@ -1137,7 +1179,7 @@ impl Family {
                 if let Some(node) = self.lock().children.get_mut(id) {
                     node.awaiting_quiet = false;
                 }
-                self.update(id, |child| {
+                self.record_update(id, |child| {
                     child.status = ChildStatus::Running;
                     child.turns += 1;
                 });
@@ -1145,7 +1187,7 @@ impl Family {
             ClientEvent::Agent {
                 event: AgentEvent::MessageStart { .. },
                 ..
-            } => self.update(id, |child| child.streaming = true),
+            } => self.record_update(id, |child| child.streaming = true),
             ClientEvent::Agent {
                 event:
                     AgentEvent::ToolExecStart {
@@ -1154,7 +1196,7 @@ impl Family {
                 ..
             } => {
                 let label = tool_label(tool_name, args);
-                self.update(id, |child| {
+                self.record_update(id, |child| {
                     child.awaiting_confirmation = None;
                     child.tool_running = Some(label);
                 });
@@ -1162,12 +1204,12 @@ impl Family {
             ClientEvent::Agent {
                 event: AgentEvent::ToolExecEnd { .. },
                 ..
-            } => self.update(id, |child| child.tool_running = None),
+            } => self.record_update(id, |child| child.tool_running = None),
             ClientEvent::ConfirmRequest { prompt, .. } => {
                 let prompt = prompt.clone();
-                self.update(id, |child| child.awaiting_confirmation = Some(prompt));
+                self.record_update(id, |child| child.awaiting_confirmation = Some(prompt));
             }
-            ClientEvent::ToolsCancelled(_) => self.update(id, |child| {
+            ClientEvent::ToolsCancelled(_) => self.record_update(id, |child| {
                 child.tool_running = None;
                 child.awaiting_confirmation = None;
             }),
@@ -1178,7 +1220,7 @@ impl Family {
                 let text = message.text();
                 let usage = message.usage;
                 let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
-                self.update(id, |child| {
+                self.record_update(id, |child| {
                     child.streaming = false;
                     if !text.trim().is_empty() {
                         child.answer = Some(text);
@@ -1199,7 +1241,7 @@ impl Family {
                 event: AgentEvent::Error { error },
                 ..
             } => {
-                self.update(id, |child| {
+                self.record_update(id, |child| {
                     child.status = ChildStatus::Failed;
                     child.error = Some(error.clone());
                 });
@@ -1208,7 +1250,7 @@ impl Family {
             ClientEvent::TurnEnded { cancelled } => {
                 let busy = subtree_busy(&self.lock(), id);
                 let mut ended = None;
-                self.update(id, |child| {
+                self.record_update(id, |child| {
                     child.streaming = false;
                     child.tool_running = None;
                     child.awaiting_confirmation = None;
@@ -4193,6 +4235,41 @@ mod tests {
             awaiting_confirmation: None,
             paused: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_of_child_events_reaches_the_registry_off_the_event_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let children = (0..3)
+            .map(|i| saved_child(&format!("sub-{i}"), &format!("n{i}")))
+            .collect();
+        std::fs::write(&path, serde_json::to_vec(&Registry { children }).unwrap()).unwrap();
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            None,
+            Some(path.clone()),
+        );
+
+        for _ in 0..50 {
+            family.record("sub-1", &ClientEvent::TurnStarted, None);
+        }
+
+        let turns = || {
+            serde_json::from_slice::<Registry>(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .children
+                .into_iter()
+                .find(|child| child.id == "sub-1")
+                .map(|child| child.turns)
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while turns() != Some(51) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(turns(), Some(51));
     }
 
     #[test]
