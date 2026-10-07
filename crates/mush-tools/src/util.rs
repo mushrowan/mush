@@ -49,6 +49,12 @@ pub(crate) fn with_property(
     schema
 }
 
+#[cfg(unix)]
+pub(crate) fn signal_group(pgid: i32, signal: libc::c_int) -> bool {
+    // SAFETY: negating the process group id targets the whole group.
+    unsafe { libc::kill(-pgid, signal) == 0 }
+}
+
 pub fn gitignore_hint(path: &Path) -> Option<String> {
     let parent = path.parent()?;
     let status = Command::new("git")

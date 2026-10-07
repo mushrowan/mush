@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
@@ -165,8 +166,8 @@ pub struct KernelJobs {
 #[derive(Default)]
 struct Inner {
     jobs: Mutex<HashMap<String, Arc<JobCell>>>,
-    counter: std::sync::atomic::AtomicU64,
-    live: std::sync::atomic::AtomicUsize,
+    counter: AtomicU64,
+    live: AtomicUsize,
     notice: std::sync::Mutex<Option<NoticeSink>>,
     orphans: std::sync::Mutex<Option<crate::orphans::OrphanJournal>>,
 }
@@ -174,24 +175,21 @@ struct Inner {
 struct JobCell {
     state: Mutex<Job>,
     done: Notify,
-    waiting: std::sync::atomic::AtomicUsize,
+    waiting: AtomicUsize,
 }
 
 struct Waiting<'a>(&'a JobCell);
 
 impl<'a> Waiting<'a> {
     fn new(cell: &'a JobCell) -> Self {
-        cell.waiting
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        cell.waiting.fetch_add(1, Ordering::SeqCst);
         Self(cell)
     }
 }
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        self.0
-            .waiting
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.waiting.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -221,10 +219,7 @@ impl KernelJobs {
     ) -> Result<(String, Option<u32>), String> {
         let id = format!(
             "job-{}",
-            self.inner
-                .counter
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1
+            self.inner.counter.fetch_add(1, Ordering::Relaxed) + 1
         );
         let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
         let stderr = writer.try_clone().map_err(|e| format!("pipe: {e}"))?;
@@ -253,9 +248,7 @@ impl KernelJobs {
         cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|e| format!("failed to spawn: {e}"))?;
-        self.inner
-            .live
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.live.fetch_add(1, Ordering::SeqCst);
         let pid = child.id();
         self.journal(pid, true);
         let cell = Arc::new(JobCell {
@@ -271,7 +264,7 @@ impl KernelJobs {
                 pgid: pid.and_then(|p| i32::try_from(p).ok()),
             }),
             done: Notify::new(),
-            waiting: std::sync::atomic::AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
         });
         self.inner
             .jobs
@@ -325,10 +318,8 @@ impl KernelJobs {
                 let mut job = cell.state.lock().await;
                 job.end = Some(end.clone());
                 job.finished = Some(Instant::now());
-                jobs.inner
-                    .live
-                    .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                if cell.waiting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                jobs.inner.live.fetch_sub(1, Ordering::SeqCst);
+                if cell.waiting.load(Ordering::SeqCst) > 0 {
                     job.read = true;
                 }
                 (!job.read).then(|| JobNotice {
@@ -352,7 +343,7 @@ impl KernelJobs {
 
     #[must_use]
     pub fn any_running(&self) -> bool {
-        self.inner.live.load(std::sync::atomic::Ordering::SeqCst) > 0
+        self.inner.live.load(Ordering::SeqCst) > 0
     }
 
     async fn emit_notice(&self, job_id: &str, notice: JobNotice) {
@@ -476,18 +467,14 @@ fn snapshot_of(job_id: &str, job: &Job) -> JobSnapshot {
 #[cfg(unix)]
 fn terminate_group(pgid: Option<i32>) {
     if let Some(pgid) = pgid {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-        }
+        crate::util::signal_group(pgid, libc::SIGTERM);
     }
 }
 
 #[cfg(unix)]
 fn kill_group(pgid: Option<i32>) {
     if let Some(pgid) = pgid {
-        unsafe {
-            libc::kill(-pgid, libc::SIGKILL);
-        }
+        crate::util::signal_group(pgid, libc::SIGKILL);
     }
 }
 
@@ -504,7 +491,7 @@ async fn group_exits_within(pgid: Option<i32>, limit: Duration) -> bool {
 
 #[cfg(unix)]
 fn group_alive(pgid: Option<i32>) -> bool {
-    pgid.is_some_and(|pgid| unsafe { libc::kill(-pgid, 0) } == 0)
+    pgid.is_some_and(|pgid| crate::util::signal_group(pgid, 0))
 }
 
 #[cfg(not(unix))]

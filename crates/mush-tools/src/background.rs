@@ -92,10 +92,7 @@ impl JobKillHandle {
 
     pub fn kill(self) {
         #[cfg(unix)]
-        unsafe {
-            // SAFETY: negating the process group id targets the whole group.
-            libc::kill(-self.process_group_id, libc::SIGKILL);
-        }
+        crate::util::signal_group(self.process_group_id, libc::SIGKILL);
     }
 }
 

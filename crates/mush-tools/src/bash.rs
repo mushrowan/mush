@@ -25,9 +25,7 @@ impl ProcessGroupKillOnDrop {
 
     fn kill_now(&mut self) {
         if let Some(pgid) = self.pgid.take() {
-            unsafe {
-                libc::kill(-pgid, libc::SIGKILL);
-            }
+            crate::util::signal_group(pgid, libc::SIGKILL);
         }
     }
 
