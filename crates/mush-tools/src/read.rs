@@ -111,14 +111,19 @@ impl ReadWindow {
             Self::ExactSpan {
                 start_line,
                 end_line,
-            } => (Some(start_line), Some(end_line - start_line + 1)),
+            } => (
+                Some(start_line),
+                Some((end_line - start_line).saturating_add(1)),
+            ),
             Self::Around {
                 around_line,
                 context_before,
                 context_after,
             } => {
                 let start = around_line.saturating_sub(context_before).max(1);
-                let window = context_before + 1 + context_after;
+                let window = context_before
+                    .saturating_add(1)
+                    .saturating_add(context_after);
                 (Some(start), Some(window))
             }
         }
@@ -159,7 +164,7 @@ impl ReadArgs {
                 end_line,
             },
             (Some(start_line), None, _) => ReadWindow::Span {
-                start_line: start_line + self.offset.unwrap_or(0),
+                start_line: start_line.saturating_add(self.offset.unwrap_or(0)),
                 limit: self.limit,
             },
             (None, Some(_), _) => return Err(ReadArgsError::EndLineRequiresStartLine),
@@ -914,6 +919,23 @@ mod tests {
         assert!(text.contains("L8: line 8"));
         assert!(!text.contains("L4:"));
         assert!(!text.contains("L9:"));
+    }
+
+    #[tokio::test]
+    async fn read_windows_past_the_largest_line_number_do_not_panic() {
+        let dir = temp_dir();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "one\ntwo\n").unwrap();
+        let tool = super::ReadTool::new(dir.path().into());
+        let path = file.to_str().unwrap();
+
+        for args in [
+            serde_json::json!({"path": path, "start_line": 2, "offset": usize::MAX}),
+            serde_json::json!({"path": path, "start_line": 1, "end_line": usize::MAX}),
+            serde_json::json!({"path": path, "around_line": 1, "context_after": usize::MAX}),
+        ] {
+            let _ = tool.execute(args).await;
+        }
     }
 
     #[tokio::test]
