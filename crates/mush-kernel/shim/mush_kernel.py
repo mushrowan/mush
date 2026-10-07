@@ -6,6 +6,7 @@ import contextvars
 import inspect
 import io
 import json
+import linecache
 import os
 import pickle
 import signal
@@ -57,6 +58,15 @@ def emit(event: dict) -> None:
     line = json.dumps(event, ensure_ascii=False, default=str)
     with _proto_lock:
         _proto.write(line + "\n")
+
+
+def _emit_error(cell_id, ename: str, evalue: str, traceback_lines=()) -> None:
+    emit({"type": "error", "id": cell_id, "ename": ename, "evalue": evalue, "traceback": list(traceback_lines)})
+
+
+def _with_optional(payload: dict, **values) -> dict:
+    payload.update((key, value) for key, value in values.items() if value is not None)
+    return payload
 
 
 _STREAM_FRAME_TEXT_CAP = 64 * 1024
@@ -185,15 +195,15 @@ class _Pump:
         self._emit(data)
 
     def _emit(self, data: bytes) -> None:
-        if not data:
-            return
-        text = self._decoder.decode(data)
-        if text:
-            emit({"type": self._stream, "id": None, "text": text})
+        if data:
+            self._emit_text(self._decoder.decode(data))
 
     def _finish_decode(self) -> None:
         text = self._decoder.decode(b"", final=True)
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._emit_text(text)
+
+    def _emit_text(self, text: str) -> None:
         if text:
             emit({"type": self._stream, "id": None, "text": text})
 
@@ -292,11 +302,11 @@ class BashHandle:
         self._job_id: str | None = None
         self._pid: int | None = None
         self._released = False
-        payload = {"command": command, "cwd": os.getcwd(), "env": dict(os.environ)}
-        if timeout is not None:
-            payload["timeout"] = timeout
-        if _current_origin.get() is not None:
-            payload["origin"] = _current_origin.get()
+        payload = _with_optional(
+            {"command": command, "cwd": os.getcwd(), "env": dict(os.environ)},
+            timeout=timeout,
+            origin=_current_origin.get(),
+        )
         self._started = asyncio.ensure_future(self._start(payload))
 
     async def _start(self, payload: dict) -> None:
@@ -433,28 +443,18 @@ def _child_targets(targets) -> list:
 
 class _Rlm:
     async def spawn(self, prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> ChildHandle:
-        payload = {"prompt": prompt, "name": name}
-        if model is not None:
-            payload["model"] = model
-        if thinking is not None:
-            payload["thinking"] = thinking
+        payload = _with_optional({"prompt": prompt, "name": name}, model=model, thinking=thinking)
         return ChildHandle(await host_request("rlm.spawn", payload))
 
     async def list_subagents(self) -> list:
         return [ChildSummary(entry) for entry in await host_request("rlm.list_subagents", {})]
 
     async def collect(self, targets=None, *, timeout_ms: int = 0) -> list:
-        if targets is None:
-            targets = []
-        elif isinstance(targets, (str, ChildHandle, ChildSummary)):
-            targets = [targets]
-        payload = {"targets": [_child_target(t) for t in targets], "timeout_ms": int(timeout_ms)}
+        payload = {"targets": _child_targets(targets), "timeout_ms": int(timeout_ms)}
         return [ChildSummary(entry) for entry in await host_request("rlm.collect", payload)]
 
     async def pause_subagents(self, targets=None, *, reason: str | None = None) -> list:
-        payload = {"targets": _child_targets(targets)}
-        if reason is not None:
-            payload["reason"] = reason
+        payload = _with_optional({"targets": _child_targets(targets)}, reason=reason)
         return [ChildSummary(entry) for entry in await host_request("rlm.pause_subagents", payload)]
 
     async def resume_subagents(self, targets=None) -> list:
@@ -476,10 +476,7 @@ class _Rlm:
         thinking: str | None = None,
         cwd: str | None = None,
     ) -> dict:
-        payload = {"prompt": prompt}
-        for key, value in (("name", name), ("model", model), ("thinking", thinking), ("cwd", cwd)):
-            if value is not None:
-                payload[key] = value
+        payload = _with_optional({"prompt": prompt}, name=name, model=model, thinking=thinking, cwd=cwd)
         return await host_request("rlm.create_session", payload)
 
     async def note(self, text: str) -> str:
@@ -510,12 +507,8 @@ class _AgentMessage:
                     raise ValueError("receiver_name must be omitted for parent messages")
             elif not isinstance(receiver_name, str) or not receiver_name.strip():
                 raise ValueError("receiver_name is required for sibling and child messages")
-            payload = {"message": message, "receiver_role": receiver_role}
-            if receiver_name is not None:
-                payload["receiver_name"] = receiver_name
-        if _current_origin.get() is not None:
-            payload["origin"] = _current_origin.get()
-        return await host_request("agent_message.send", payload)
+            payload = _with_optional({"message": message, "receiver_role": receiver_role}, receiver_name=receiver_name)
+        return await host_request("agent_message.send", _with_optional(payload, origin=_current_origin.get()))
 
 
 class _Goal:
@@ -529,10 +522,7 @@ class _Goal:
         return await host_request("goal.create", payload)
 
     async def complete(self, summary: str | None = None) -> dict:
-        payload = {}
-        if summary is not None:
-            payload["summary"] = summary
-        return await host_request("goal.complete", payload)
+        return await host_request("goal.complete", _with_optional({}, summary=summary))
 
 
 class _Compact:
@@ -542,10 +532,7 @@ class _Compact:
     async def run(self, instructions: str | None = None) -> dict:
         if instructions is not None and not isinstance(instructions, str):
             raise TypeError(f"instructions must be str or None, got {type(instructions).__name__}")
-        payload = {}
-        if instructions is not None:
-            payload["instructions"] = instructions
-        return await host_request("compact.run", payload)
+        return await host_request("compact.run", _with_optional({}, instructions=instructions))
 
 
 class _AgentObserve:
@@ -570,9 +557,7 @@ class _Refine:
         return await host_request("refine.status", {})
 
     async def run(self, instructions: str | None = None, global_: bool = False) -> dict:
-        payload = {}
-        if instructions is not None:
-            payload["instructions"] = instructions
+        payload = _with_optional({}, instructions=instructions)
         if global_:
             payload["global"] = True
         return await host_request("refine.run", payload)
@@ -580,10 +565,7 @@ class _Refine:
 
 class _Harness:
     async def list(self, kind: str | None = None, *, global_: bool = False) -> list:
-        payload = {"global": global_}
-        if kind is not None:
-            payload["kind"] = kind
-        reply = await host_request("harness.list", payload)
+        reply = await host_request("harness.list", _with_optional({"global": global_}, kind=kind))
         return reply.get("entries", [])
 
     async def get(self, kind: str, id: str, *, global_: bool = False) -> dict | None:
@@ -591,9 +573,7 @@ class _Harness:
         return reply.get("entry")
 
     async def search(self, query: str, kind: str | None = None, limit: int = 10, *, global_: bool = False) -> list:
-        payload = {"query": query, "limit": int(limit), "global": global_}
-        if kind is not None:
-            payload["kind"] = kind
+        payload = _with_optional({"query": query, "limit": int(limit), "global": global_}, kind=kind)
         reply = await host_request("harness.search", payload)
         return reply.get("entries", [])
 
@@ -614,21 +594,13 @@ class _Harness:
         metadata: dict | None = None,
         global_: bool = False,
     ) -> dict:
-        payload = {
-            "kind": kind,
-            "title": title,
-            "content": content,
-            "path": path,
-            "global": global_,
-        }
-        for key, value in (
-            ("id", id),
-            ("reference", reference),
-            ("arguments", arguments),
-            ("metadata", metadata),
-        ):
-            if value is not None:
-                payload[key] = value
+        payload = _with_optional(
+            {"kind": kind, "title": title, "content": content, "path": path, "global": global_},
+            id=id,
+            reference=reference,
+            arguments=arguments,
+            metadata=metadata,
+        )
         reply = await host_request("harness.create", payload)
         return reply.get("entry", {})
 
@@ -645,17 +617,15 @@ class _Harness:
         metadata: dict | None = None,
         global_: bool = False,
     ) -> dict:
-        payload = {"kind": kind, "id": id, "global": global_}
-        for key, value in (
-            ("title", title),
-            ("content", content),
-            ("path", path),
-            ("reference", reference),
-            ("arguments", arguments),
-            ("metadata", metadata),
-        ):
-            if value is not None:
-                payload[key] = value
+        payload = _with_optional(
+            {"kind": kind, "id": id, "global": global_},
+            title=title,
+            content=content,
+            path=path,
+            reference=reference,
+            arguments=arguments,
+            metadata=metadata,
+        )
         reply = await host_request("harness.update", payload)
         return reply.get("entry", {})
 
@@ -700,9 +670,10 @@ class _Harness:
         return await self.delete("subagent", id, global_=global_)
 
     async def record_refinement(self, trigger: str, changes, *, evidence: str = "", outcome: str = "", id: str | None = None, global_: bool = False) -> dict:
-        payload = {"trigger": trigger, "changes": changes, "evidence": evidence, "outcome": outcome, "global": global_}
-        if id is not None:
-            payload["id"] = id
+        payload = _with_optional(
+            {"trigger": trigger, "changes": changes, "evidence": evidence, "outcome": outcome, "global": global_},
+            id=id,
+        )
         reply = await host_request("harness.record_refinement", payload)
         return reply.get("refinement", {})
 
@@ -715,10 +686,7 @@ class _RlmHeartbeat:
         label: str | None = None,
         delivery_mode: str | None = None,
     ) -> dict:
-        payload = {"instruction": instruction}
-        for key, value in (("interval", interval), ("label", label), ("delivery_mode", delivery_mode)):
-            if value is not None:
-                payload[key] = value
+        payload = _with_optional({"instruction": instruction}, interval=interval, label=label, delivery_mode=delivery_mode)
         return await host_request("rlm_heartbeat.create", payload)
 
     async def list(self, include_inactive: bool = False) -> list:
@@ -733,16 +701,14 @@ class _RlmHeartbeat:
         status: str | None = None,
         delivery_mode: str | None = None,
     ) -> dict:
-        payload = {"id": id}
-        for key, value in (
-            ("instruction", instruction),
-            ("interval", interval),
-            ("label", label),
-            ("status", status),
-            ("delivery_mode", delivery_mode),
-        ):
-            if value is not None:
-                payload[key] = value
+        payload = _with_optional(
+            {"id": id},
+            instruction=instruction,
+            interval=interval,
+            label=label,
+            status=status,
+            delivery_mode=delivery_mode,
+        )
         return await host_request("rlm_heartbeat.update", payload)
 
     async def delete(self, id: str) -> dict:
@@ -768,9 +734,7 @@ async def edit(path: str, old_str: str | None = None, new_str: str | None = None
     payload = {"path": os.path.abspath(os.path.expanduser(os.fspath(path))), "old": old, "new": new}
     if allow_redaction_marker:
         payload["allow_redaction_marker"] = True
-    if _current_origin.get() is not None:
-        payload["origin"] = _current_origin.get()
-    reply = await host_request("edit", payload)
+    reply = await host_request("edit", _with_optional(payload, origin=_current_origin.get()))
     return str(reply.get("summary", ""))
 
 
@@ -828,10 +792,7 @@ def attach_image(*paths: str) -> str:
 
 
 async def websearch(query: str, num_results: int | None = None) -> str:
-    payload = {"query": query}
-    if num_results is not None:
-        payload["num_results"] = num_results
-    reply = await host_request("websearch", payload)
+    reply = await host_request("websearch", _with_optional({"query": query}, num_results=num_results))
     return str(reply.get("text", ""))
 
 
@@ -946,8 +907,6 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
     global _cell_count
     _cell_count += 1
     filename = f"<cell-{_cell_count}>"
-    import linecache
-
     linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
     token = _current_cell.set(cell_id)
     origin_token = _current_origin.set(origin)
@@ -978,25 +937,14 @@ async def _run_cell(cell_id: str, code: str, origin: str | None) -> None:
                 emit({"type": "result", "id": cell_id, "text": _cap_text(repr(value))})
     except (KeyboardInterrupt, asyncio.CancelledError):
         ok = False
-        emit(
-            {
-                "type": "error",
-                "id": cell_id,
-                "ename": "KeyboardInterrupt",
-                "evalue": "interrupted",
-                "traceback": [],
-            }
-        )
+        _emit_error(cell_id, "KeyboardInterrupt", "interrupted")
     except BaseException as exc:  # noqa: BLE001
         ok = False
-        emit(
-            {
-                "type": "error",
-                "id": cell_id,
-                "ename": type(exc).__name__,
-                "evalue": _cap_text(_safe_str(exc)),
-                "traceback": [_cap_text(line) for line in _format_traceback(exc)],
-            }
+        _emit_error(
+            cell_id,
+            type(exc).__name__,
+            _cap_text(_safe_str(exc)),
+            (_cap_text(line) for line in _format_traceback(exc)),
         )
     finally:
         with _interrupt_lock:
@@ -1071,7 +1019,7 @@ def _snapshot(request: dict) -> None:
     payload = {}
     total = 0
     for name, value in list(_namespace.items()):
-        if name.startswith("_") or name in _PRELOADED:
+        if not _is_user_name(name):
             continue
         budget = _SNAPSHOT_MAX_BYTES - total
         buffer = io.BytesIO()
@@ -1115,8 +1063,12 @@ def _restore(request: dict) -> None:
     emit({"type": "done", "id": cell_id, "ok": True, "restored": restored, "failed": failed})
 
 
+def _is_user_name(name) -> bool:
+    return isinstance(name, str) and not name.startswith("_") and name not in _PRELOADED
+
+
 def _list_names(request: dict) -> None:
-    names = sorted(name for name in _namespace if isinstance(name, str) and not name.startswith("_") and name not in _PRELOADED)
+    names = sorted(name for name in _namespace if _is_user_name(name))
     emit({"type": "done", "id": request["id"], "ok": True, "names": names})
 
 
@@ -1176,7 +1128,7 @@ def _reader(queue: asyncio.Queue) -> None:
         try:
             request = json.loads(line)
         except json.JSONDecodeError as exc:
-            emit({"type": "error", "id": None, "ename": "ProtocolError", "evalue": str(exc), "traceback": []})
+            _emit_error(None, "ProtocolError", str(exc))
             continue
         kind = request.get("type")
         if kind == "execute" and request.get("id") is not None:
@@ -1281,15 +1233,7 @@ async def _serve() -> None:
         elif kind == "list_names":
             _list_names(request)
         else:
-            emit(
-                {
-                    "type": "error",
-                    "id": request.get("id"),
-                    "ename": "ProtocolError",
-                    "evalue": f"unknown request type {kind!r}",
-                    "traceback": [],
-                }
-            )
+            _emit_error(request.get("id"), "ProtocolError", f"unknown request type {kind!r}")
             if request.get("id") is not None:
                 emit({"type": "done", "id": request["id"], "ok": False})
 
