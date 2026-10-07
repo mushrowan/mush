@@ -694,10 +694,12 @@ async fn control_pty_lifecycle_delivers_once() {
     let store = mush_session::SessionStore::new(dir.path().join("sessions"));
     let path = std::fs::read_dir(dir.path().join("sessions"))
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
     let session: mush_session::Session =
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert!(matches!(
