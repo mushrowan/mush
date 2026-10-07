@@ -264,41 +264,47 @@ pub(crate) fn write_decode_snapshot(
     provider: &str,
     bytes: &[u8],
 ) -> Option<String> {
+    write_decode_snapshot_in(
+        &crate::dirs::data_dir().join("stream-errors"),
+        model_id,
+        provider,
+        bytes,
+    )
+}
+
+fn write_decode_snapshot_in(
+    dir: &std::path::Path,
+    model_id: &str,
+    provider: &str,
+    bytes: &[u8],
+) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
-
-    let mut dir = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-            let mut p = std::path::PathBuf::from(home);
-            p.push(".local/share");
-            p
-        });
-    dir.push("mush");
-    dir.push("stream-errors");
-
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
+    std::fs::create_dir_all(dir).ok()?;
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let file = format!("decode-{provider}-{model_id}-{ts}.bin");
-    let path = dir.join(file);
-    if crate::private_io::write_private(&path, bytes).is_ok() {
-        Some(path.display().to_string())
-    } else {
-        None
-    }
+    let model = model_id.replace(['/', '\\'], "_");
+    let path = dir.join(format!("decode-{provider}-{model}-{ts}.bin"));
+    crate::private_io::write_private(&path, bytes).ok()?;
+    Some(path.display().to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decode_snapshot_for_a_namespaced_model_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_decode_snapshot_in(dir.path(), "openai/gpt-5", "openrouter", b"\xff")
+            .expect("snapshot written");
+        assert_eq!(std::path::Path::new(&path).parent(), Some(dir.path()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"\xff");
+    }
 
     #[test]
     fn basic_event() {
