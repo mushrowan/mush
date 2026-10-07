@@ -37,7 +37,7 @@ struct RepoMapState {
     root: PathBuf,
     started: bool,
     build_error: Option<String>,
-    _watcher: Option<mush_treesitter::RepoMapWatcher>,
+    watcher: Option<mush_treesitter::RepoMapWatcher>,
 }
 
 impl RepoMapState {
@@ -72,7 +72,7 @@ impl RepoMapShared {
                 root,
                 started,
                 build_error: None,
-                _watcher: None,
+                watcher: None,
             })),
             budget_tokens,
         }
@@ -105,16 +105,20 @@ impl RepoMapShared {
                 return Err(state.fail("failed to start repo map watcher"));
             };
             self.swap_map(watcher.map().clone())?;
-            state._watcher = Some(watcher);
+            state.watcher = Some(watcher);
         }
 
+        let first_build_running = state
+            .watcher
+            .as_ref()
+            .is_some_and(|watcher| !watcher.is_ready());
         let map_is_empty = self
             .map()
             .read()
             .map_err(|_| RepoMapEnsureError::Failed("failed to read repo map".into()))?
             .files
             .is_empty();
-        if map_is_empty {
+        if first_build_running && map_is_empty {
             return Err(RepoMapEnsureError::Building);
         }
 
@@ -315,6 +319,25 @@ mod tests {
         assert_eq!(
             schema["properties"]["wait_timeout"]["default"],
             crate::DEFAULT_TOOL_TIMEOUT_SECS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repo_with_nothing_to_parse_answers_without_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join("README"), "words only\n").unwrap();
+        let tool = RepoMapTool::new(RepoMapShared::lazy(dir.path(), 8192));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            tool.execute(serde_json::json!({"wait_timeout": 600})),
+        )
+        .await
+        .expect("an empty map should not wait out the timeout");
+        assert!(
+            crate::util::extract_text(&result).contains("no parseable files"),
+            "{result:?}"
         );
     }
 
