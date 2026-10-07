@@ -505,9 +505,16 @@ pub enum OverrideError {
     Invalid { key: String, error: String },
 }
 
+fn warn(message: std::fmt::Arguments<'_>) {
+    eprintln!(
+        "{}",
+        Style::Yellow.stderr(format_args!("warning: {message}"))
+    );
+}
+
 pub fn load_config() -> Config {
     load_config_with(&[]).unwrap_or_else(|error| {
-        eprintln!("{}", Style::Yellow.stderr(format_args!("warning: {error}")));
+        warn(format_args!("{error}"));
         Config::default()
     })
 }
@@ -521,18 +528,12 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
             Ok(content) => match toml::from_str::<toml::Table>(&content) {
                 Ok(table) => table,
                 Err(e) => {
-                    eprintln!(
-                        "{}",
-                        Style::Yellow.stderr(format_args!("warning: failed to parse config: {e}"))
-                    );
+                    warn(format_args!("failed to parse config: {e}"));
                     toml::Table::new()
                 }
             },
             Err(e) => {
-                eprintln!(
-                    "{}",
-                    Style::Yellow.stderr(format_args!("warning: failed to read config: {e}"))
-                );
+                warn(format_args!("failed to read config: {e}"));
                 toml::Table::new()
             }
         }
@@ -544,10 +545,7 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
     let mut config: Config = match table.try_into() {
         Ok(config) => config,
         Err(e) if overrides.is_empty() => {
-            eprintln!(
-                "{}",
-                Style::Yellow.stderr(format_args!("warning: failed to parse config: {e}"))
-            );
+            warn(format_args!("failed to parse config: {e}"));
             Config::default()
         }
         Err(e) => {
@@ -663,13 +661,7 @@ fn try_load_persisted_settings(
     match toml::from_str(&content) {
         Ok(p) => Some(p),
         Err(e) => {
-            eprintln!(
-                "{}",
-                Style::Yellow.stderr(format_args!(
-                    "warning: failed to parse {}: {e}",
-                    path.display()
-                ))
-            );
+            warn(format_args!("failed to parse {}: {e}", path.display()));
             None
         }
     }
@@ -679,27 +671,38 @@ fn last_model_path() -> PathBuf {
     mush_session::data_dir().join("last-model.json")
 }
 
-pub fn load_last_models() -> mush_tui::LastModels {
-    let path = last_model_path();
-    if !path.exists() {
-        return mush_tui::LastModels::default();
+fn load_json<T: serde::de::DeserializeOwned + Default>(path: &std::path::Path) -> T {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_json(path: &std::path::Path, value: &impl Serialize) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    let mut last = match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str::<mush_tui::LastModels>(&content).unwrap_or_default(),
-        Err(_) => mush_tui::LastModels::default(),
-    };
+    if let Ok(json) = serde_json::to_string_pretty(value) {
+        let _ = mush_ai::private_io::write_atomic(path, json);
+    }
+}
+
+pub fn load_last_models() -> mush_tui::LastModels {
+    let mut last: mush_tui::LastModels = load_json(&last_model_path());
     last.prune_missing_dirs();
     last
 }
 
 pub fn save_last_models(last: &mush_tui::LastModels) {
-    let path = last_model_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(last) {
-        let _ = mush_ai::private_io::write_atomic(&path, json);
-    }
+    save_json(&last_model_path(), last);
+}
+
+pub(crate) fn load_model_list(path: &std::path::Path) -> Vec<String> {
+    load_json(path)
+}
+
+pub(crate) fn save_model_list(path: &std::path::Path, models: &[String]) {
+    save_json(path, &models);
 }
 
 fn favourite_models_path() -> PathBuf {
@@ -707,30 +710,11 @@ fn favourite_models_path() -> PathBuf {
 }
 
 pub fn load_favourite_models() -> Vec<String> {
-    load_favourite_models_from(&favourite_models_path())
-}
-
-pub(crate) fn load_favourite_models_from(path: &std::path::Path) -> Vec<String> {
-    if !path.exists() {
-        return Vec::new();
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default()
+    load_model_list(&favourite_models_path())
 }
 
 pub fn save_favourite_models(models: &[String]) {
-    save_favourite_models_to(&favourite_models_path(), models);
-}
-
-pub(crate) fn save_favourite_models_to(path: &std::path::Path, models: &[String]) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(models) {
-        let _ = mush_ai::private_io::write_atomic(path, json);
-    }
+    save_model_list(&favourite_models_path(), models);
 }
 
 #[must_use]
@@ -747,30 +731,11 @@ fn recent_models_path() -> PathBuf {
 }
 
 pub fn load_recent_models() -> Vec<String> {
-    load_recent_models_from(&recent_models_path())
-}
-
-pub(crate) fn load_recent_models_from(path: &std::path::Path) -> Vec<String> {
-    if !path.exists() {
-        return Vec::new();
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .unwrap_or_default()
+    load_model_list(&recent_models_path())
 }
 
 pub fn save_recent_models(models: &[String]) {
-    save_recent_models_to(&recent_models_path(), models);
-}
-
-pub(crate) fn save_recent_models_to(path: &std::path::Path, models: &[String]) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(models) {
-        let _ = mush_ai::private_io::write_atomic(path, json);
-    }
+    save_model_list(&recent_models_path(), models);
 }
 
 #[cfg(test)]
@@ -1396,8 +1361,8 @@ strong = "claude-opus-4-7"
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("favourite-models.json");
         let favs = vec!["a".to_string(), "b".to_string()];
-        save_favourite_models_to(&path, &favs);
-        let loaded = load_favourite_models_from(&path);
+        save_model_list(&path, &favs);
+        let loaded = load_model_list(&path);
         assert_eq!(loaded, favs);
     }
 
@@ -1405,7 +1370,7 @@ strong = "claude-opus-4-7"
     fn load_favourite_models_returns_empty_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("favourite-models.json");
-        let loaded = load_favourite_models_from(&path);
+        let loaded = load_model_list(&path);
         assert!(loaded.is_empty());
     }
 
@@ -1414,15 +1379,15 @@ strong = "claude-opus-4-7"
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("recent-models.json");
         let recent = vec!["claude-opus-4-7".to_string(), "gpt-5".to_string()];
-        save_recent_models_to(&path, &recent);
-        assert_eq!(load_recent_models_from(&path), recent);
+        save_model_list(&path, &recent);
+        assert_eq!(load_model_list(&path), recent);
     }
 
     #[test]
     fn load_recent_models_returns_empty_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("recent-models.json");
-        assert!(load_recent_models_from(&path).is_empty());
+        assert!(load_model_list(&path).is_empty());
     }
 
     #[test]
