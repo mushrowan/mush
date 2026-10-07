@@ -385,10 +385,20 @@ struct RequestBody {
 #[derive(Serialize)]
 struct SystemBlock {
     #[serde(rename = "type")]
-    block_type: String,
+    block_type: &'static str,
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    fn text(text: String, cache_control: Option<CacheControl>) -> Self {
+        Self {
+            block_type: "text",
+            text,
+            cache_control,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,58 +497,30 @@ fn build_request_body(
     let cache_control =
         anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth);
 
-    let global_system_cache_control = cache_control.clone().map(|mut cc| {
+    let system_prompt_cache_control = cache_control.clone().map(|mut cc| {
         if is_oauth {
             cc.scope = Some("global".into());
         }
         cc
     });
 
-    let user_system_cache_control = if is_oauth {
-        global_system_cache_control.clone()
-    } else {
-        cache_control.clone()
-    };
-
-    let system = if is_oauth {
-        let mut blocks = vec![
-            SystemBlock {
-                block_type: "text".into(),
-                text: claude_code_billing_header(messages),
-                cache_control: None,
-            },
-            SystemBlock {
-                block_type: "text".into(),
-                text: CLAUDE_CODE_IDENTITY.into(),
-                cache_control: None,
-            },
-        ];
-        if let Some(prompt) = system_prompt {
-            blocks.push(SystemBlock {
-                block_type: "text".into(),
-                text: prompt.clone(),
-                cache_control: user_system_cache_control.clone(),
-            });
-        }
-        Some(blocks)
-    } else {
-        let mut blocks = Vec::new();
-        if model.base_url.contains(ANTHROPIC_DIRECT_API) {
-            blocks.push(SystemBlock {
-                block_type: "text".into(),
-                text: claude_code_billing_header(messages),
-                cache_control: None,
-            });
-        }
-        if let Some(prompt) = system_prompt {
-            blocks.push(SystemBlock {
-                block_type: "text".into(),
-                text: prompt.clone(),
-                cache_control: user_system_cache_control.clone(),
-            });
-        }
-        (!blocks.is_empty()).then_some(blocks)
-    };
+    let mut system_blocks = Vec::new();
+    if is_oauth || model.base_url.contains(ANTHROPIC_DIRECT_API) {
+        system_blocks.push(SystemBlock::text(
+            claude_code_billing_header(messages),
+            None,
+        ));
+    }
+    if is_oauth {
+        system_blocks.push(SystemBlock::text(CLAUDE_CODE_IDENTITY.into(), None));
+    }
+    if let Some(prompt) = system_prompt {
+        system_blocks.push(SystemBlock::text(
+            prompt.clone(),
+            system_prompt_cache_control,
+        ));
+    }
+    let system = (!system_blocks.is_empty()).then_some(system_blocks);
 
     let trimming = if cache_control.is_some() {
         ToolResultTrimming::Preserve
@@ -600,7 +582,7 @@ fn build_request_body(
     };
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
-    let context_management = oauth_context_management(model, options, is_oauth, thinking.is_some());
+    let context_management = oauth_context_management(options, is_oauth, thinking.is_some());
     let diagnostics = is_oauth.then(|| Diagnostics {
         previous_message_id: messages.iter().rev().find_map(|message| match message {
             Message::Assistant(assistant) => assistant.generation_id.clone(),
@@ -717,30 +699,23 @@ fn thinking_display(options: &StreamOptions, is_oauth: bool) -> &'static str {
 }
 
 fn oauth_context_management(
-    model: &Model,
     options: &StreamOptions,
     is_oauth: bool,
     has_thinking: bool,
 ) -> Option<ContextManagement> {
-    let betas = options
+    let enabled = options
         .anthropic_betas
-        .clone()
-        .unwrap_or_default()
-        .gated_for_context_window(model.context_window);
-    if !is_oauth || !betas.context_management {
+        .as_ref()
+        .is_none_or(|betas| betas.context_management);
+    if !is_oauth || !enabled || !has_thinking {
         return None;
     }
-
-    if !has_thinking {
-        return None;
-    }
-
-    let edits = vec![ContextManagementEdit {
-        edit_type: "clear_thinking_20251015",
-        keep: "all",
-    }];
-
-    Some(ContextManagement { edits })
+    Some(ContextManagement {
+        edits: vec![ContextManagementEdit {
+            edit_type: "clear_thinking_20251015",
+            keep: "all",
+        }],
+    })
 }
 
 fn convert_tools(
@@ -807,8 +782,11 @@ fn oauth_advisor_model(
     if !is_oauth {
         return None;
     }
-    let betas = options.anthropic_betas.clone().unwrap_or_default();
-    if !betas.advisor {
+    if !options
+        .anthropic_betas
+        .as_ref()
+        .is_none_or(|betas| betas.advisor)
+    {
         return None;
     }
     let has_advisor_transcript = messages_contain_advisor_blocks(messages);
@@ -1191,12 +1169,8 @@ fn anthropic_tool_id(id: &str) -> String {
     }
 
     if changed {
-        use sha2::{Digest, Sha256};
-        let digest = Sha256::digest(id.as_bytes());
         out.push('_');
-        for byte in &digest[..4] {
-            out.push_str(&format!("{byte:02x}"));
-        }
+        out.push_str(&lower_hex(&Sha256::digest(id.as_bytes())[..4]));
     }
 
     out
@@ -1242,7 +1216,7 @@ fn fix_orphaned_tool_calls(messages: Vec<RequestMessage>) -> Vec<RequestMessage>
                     .and_then(|b| b.get("tool_use_id"))
                     .and_then(|i| i.as_str())
                 {
-                    if pending_tool_ids.contains(&id.to_string()) {
+                    if pending_tool_ids.iter().any(|pending| pending == id) {
                         seen_result_ids.insert(id.to_string());
                         result.push(msg);
                     } else {
@@ -1587,9 +1561,10 @@ fn process_sse_event(
             }
             let output_index = output.content.len();
             let block = &mut blocks[index];
+            block.output_index =
+                (!matches!(content_block, ContentBlockData::Unknown)).then_some(output_index);
             match content_block {
                 ContentBlockData::Text { text } => {
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::Text { text: text.clone() };
                     output
                         .content
@@ -1599,7 +1574,6 @@ fn process_sse_event(
                     });
                 }
                 ContentBlockData::Thinking { thinking } => {
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::Thinking {
                         text: thinking.clone(),
                         signature: None,
@@ -1615,7 +1589,6 @@ fn process_sse_event(
                     });
                 }
                 ContentBlockData::RedactedThinking { data } => {
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::Thinking {
                         text: "[reasoning redacted]".into(),
                         signature: Some(data.clone()),
@@ -1633,7 +1606,6 @@ fn process_sse_event(
                     } else {
                         name.clone()
                     };
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::ToolCall {
                         id: id.clone(),
                         name: resolved_name.clone(),
@@ -1651,7 +1623,6 @@ fn process_sse_event(
                     });
                 }
                 ContentBlockData::ServerToolUse { id, name, input } => {
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::ServerSideTranscript;
                     output
                         .content
@@ -1665,7 +1636,6 @@ fn process_sse_event(
                     tool_use_id,
                     content,
                 } => {
-                    block.output_index = Some(output_index);
                     block.block = StreamBlock::ServerSideTranscript;
                     output.content.push(AssistantContentPart::AdvisorToolResult(
                         AdvisorToolResult {
@@ -1675,7 +1645,6 @@ fn process_sse_event(
                     ));
                 }
                 ContentBlockData::Unknown => {
-                    block.output_index = None;
                     block.block = StreamBlock::ServerSideTranscript;
                 }
             }
