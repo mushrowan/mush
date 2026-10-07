@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -49,6 +50,12 @@ pub struct Replacement {
 enum Matches {
     Exactly(usize),
     All,
+}
+
+impl Default for Matches {
+    fn default() -> Self {
+        Self::Exactly(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -253,21 +260,11 @@ impl AgentTool for EditTool {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct EditOpts {
     matches: Matches,
     start_line: Option<usize>,
     end_line: Option<usize>,
-}
-
-impl Default for EditOpts {
-    fn default() -> Self {
-        Self {
-            matches: Matches::Exactly(1),
-            start_line: None,
-            end_line: None,
-        }
-    }
 }
 
 fn match_candidates(content: &str, old_text: &str, new_text: &str) -> Vec<(String, String)> {
@@ -416,40 +413,30 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         Err(e) => return ToolResult::error(format!("failed to read file: {e}")),
     };
 
-    let has_bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
-    let text_bytes = if has_bom { &bytes[3..] } else { &bytes[..] };
-    let content = match std::str::from_utf8(text_bytes) {
+    let text_bytes = bytes.strip_prefix(UTF8_BOM);
+    let has_bom = text_bytes.is_some();
+    let content = match std::str::from_utf8(text_bytes.unwrap_or(&bytes)) {
         Ok(s) => s,
         Err(e) => return ToolResult::error(format!("failed to read file as utf-8 text: {e}")),
     };
 
-    let (search_content, region_start_byte) = if let Some(start) = opts.start_line {
-        let lines: Vec<&str> = content.split_inclusive('\n').collect();
-        let start_idx = start.saturating_sub(1).min(lines.len());
-        let end_idx = opts.end_line.unwrap_or(lines.len()).min(lines.len());
-        let prefix_bytes: usize = lines[..start_idx].iter().map(|l| l.len()).sum();
-        let region: String = lines[start_idx..end_idx].concat();
-        (region, prefix_bytes)
-    } else {
-        (content.to_string(), 0)
+    let (region, region_start) = match opts.start_line {
+        Some(start_line) => line_region(content, start_line, opts.end_line),
+        None => (content, 0),
     };
 
-    let range_label = if opts.start_line.is_some() {
-        format!(
-            " (lines {}-{})",
-            opts.start_line.unwrap_or(1),
+    let range_label = match opts.start_line {
+        Some(start_line) => format!(
+            " (lines {start_line}-{})",
             opts.end_line.unwrap_or_else(|| content.lines().count())
-        )
-    } else {
-        String::new()
+        ),
+        None => String::new(),
     };
-
-    let candidates = match_candidates(&search_content, old_text, new_text);
 
     let mut mismatch_count: Option<usize> = None;
 
-    for (match_old, match_new) in candidates {
-        let count = search_content.matches(&match_old).count();
+    for (match_old, match_new) in match_candidates(region, old_text, new_text) {
+        let count = region.matches(&match_old).count();
         if count == 0 {
             continue;
         }
@@ -460,74 +447,26 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
             continue;
         }
 
-        let replaced_region = search_content.replace(&match_old, &match_new);
-
+        let replaced_region = region.replace(&match_old, &match_new);
         let replaced = if opts.start_line.is_some() {
-            let mut full = String::with_capacity(content.len() + replaced_region.len());
-            full.push_str(&content[..region_start_byte]);
-            full.push_str(&replaced_region);
-            full.push_str(&content[region_start_byte + search_content.len()..]);
-            full
+            [
+                &content[..region_start],
+                replaced_region.as_str(),
+                &content[region_start + region.len()..],
+            ]
+            .concat()
         } else {
             replaced_region
         };
 
-        let write_result = if has_bom {
-            let mut out = vec![0xEF, 0xBB, 0xBF];
-            out.extend_from_slice(replaced.as_bytes());
-            mush_ai::private_io::write_atomic(path, out)
-        } else {
-            mush_ai::private_io::write_atomic(path, replaced.as_bytes())
-        };
-
-        return match write_result {
-            Ok(()) => {
-                let diff = format_edit_diff(old_text, new_text);
-                let count_note = if count > 1 {
-                    format!(" ({count} replacements)")
-                } else {
-                    String::new()
-                };
-                let mut text = format!("edited {}{count_note}\n{diff}", path.display());
-                if let Some(hint) = crate::util::gitignore_hint(path) {
-                    text.push_str("\n\n");
-                    text.push_str(&hint);
-                }
-                ToolResult::text(text)
-            }
+        return match write_preserving_bom(path, has_bom, &replaced) {
+            Ok(()) => edited_message(path, old_text, new_text, count),
             Err(e) => ToolResult::error(format!("failed to write file: {e}")),
         };
     }
 
     if let (Some(found), Matches::Exactly(want)) = (mismatch_count, opts.matches) {
-        let first_line = old_text.lines().next().unwrap_or(old_text);
-        let match_lines: Vec<usize> = content
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains(first_line.trim()))
-            .map(|(i, _)| i + 1)
-            .collect();
-        let locations = if match_lines.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nmatches near lines: {}",
-                match_lines
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-        let hint = if found > want {
-            "\nhint: add more context in oldText to uniquify, set replace_all, or use start_line/end_line to restrict"
-        } else {
-            ""
-        };
-        return ToolResult::error(format!(
-            "expected {want} match(es) but found {found} in {}{range_label}{locations}{hint}",
-            path.display(),
-        ));
+        return mismatch_error(path, content, old_text, found, want, &range_label);
     }
 
     if opts.start_line.is_some() && content.contains(old_text) {
@@ -538,11 +477,85 @@ fn edit_file(path: &Path, old_text: &str, new_text: &str, opts: &EditOpts) -> To
         ));
     }
 
-    let hint = find_near_miss(&search_content, old_text);
-    let line_offset = opts.start_line.unwrap_or(1) - 1;
+    not_found_error(path, region, old_text, opts.start_line, &range_label)
+}
+
+const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+fn line_region(content: &str, start_line: usize, end_line: Option<usize>) -> (&str, usize) {
+    let lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let start_idx = start_line.saturating_sub(1).min(lines.len());
+    let end_idx = end_line.unwrap_or(lines.len()).min(lines.len());
+    let start: usize = lines[..start_idx].iter().map(|l| l.len()).sum();
+    let len: usize = lines[start_idx..end_idx].iter().map(|l| l.len()).sum();
+    (&content[start..start + len], start)
+}
+
+fn write_preserving_bom(path: &Path, has_bom: bool, text: &str) -> std::io::Result<()> {
+    if has_bom {
+        mush_ai::private_io::write_atomic(path, [UTF8_BOM, text.as_bytes()].concat())
+    } else {
+        mush_ai::private_io::write_atomic(path, text.as_bytes())
+    }
+}
+
+fn edited_message(path: &Path, old_text: &str, new_text: &str, count: usize) -> ToolResult {
+    let diff = format_edit_diff(old_text, new_text);
+    let count_note = if count > 1 {
+        format!(" ({count} replacements)")
+    } else {
+        String::new()
+    };
+    let mut text = format!("edited {}{count_note}\n{diff}", path.display());
+    if let Some(hint) = crate::util::gitignore_hint(path) {
+        text.push_str("\n\n");
+        text.push_str(&hint);
+    }
+    ToolResult::text(text)
+}
+
+fn mismatch_error(
+    path: &Path,
+    content: &str,
+    old_text: &str,
+    found: usize,
+    want: usize,
+    range_label: &str,
+) -> ToolResult {
+    let first_line = old_text.lines().next().unwrap_or(old_text).trim();
+    let match_lines: Vec<String> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(first_line))
+        .map(|(i, _)| (i + 1).to_string())
+        .collect();
+    let locations = if match_lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nmatches near lines: {}", match_lines.join(", "))
+    };
+    let hint = if found > want {
+        "\nhint: add more context in oldText to uniquify, set replace_all, or use start_line/end_line to restrict"
+    } else {
+        ""
+    };
+    ToolResult::error(format!(
+        "expected {want} match(es) but found {found} in {}{range_label}{locations}{hint}",
+        path.display(),
+    ))
+}
+
+fn not_found_error(
+    path: &Path,
+    region: &str,
+    old_text: &str,
+    start_line: Option<usize>,
+    range_label: &str,
+) -> ToolResult {
+    let line_offset = start_line.unwrap_or(1) - 1;
     let display = path.display();
 
-    match hint {
+    match find_near_miss(region, old_text) {
         NearMiss::WhitespaceDifference(line_num) => ToolResult::error(format!(
             "oldText not found in {display}{range_label}\n\
              near-miss: whitespace-normalised match near line {}\n\
@@ -684,13 +697,11 @@ fn find_near_miss(content: &str, old_text: &str) -> NearMiss {
     if !norm_old.is_empty() {
         let norm_content = normalise(content);
         if norm_content.contains(&norm_old) {
+            let norm_first = normalise(old_text.lines().next().unwrap_or(""));
             let line_num = content
                 .lines()
                 .enumerate()
-                .find(|(_, line)| {
-                    normalise(line)
-                        .contains(normalise(old_text.lines().next().unwrap_or("")).as_str())
-                })
+                .find(|(_, line)| normalise(line).contains(norm_first.as_str()))
                 .map(|(i, _)| i + 1)
                 .unwrap_or(1);
             return NearMiss::WhitespaceDifference(line_num);
@@ -784,19 +795,14 @@ fn dedent_pair(old_text: &str, new_text: &str) -> (String, String) {
 fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     let (old_text, new_text) = dedent_pair(old_text, new_text);
 
-    if let Some(added) = new_text.strip_prefix(old_text.as_str())
-        && !added.trim().is_empty()
-    {
-        return added
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| format!("+ {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    if let Some(added) = new_text.strip_suffix(old_text.as_str())
-        && !added.trim().is_empty()
-    {
+    let pure_addition = [
+        new_text.strip_prefix(old_text.as_str()),
+        new_text.strip_suffix(old_text.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|added| !added.trim().is_empty());
+    if let Some(added) = pure_addition {
         return added
             .lines()
             .filter(|l| !l.is_empty())
@@ -813,38 +819,31 @@ fn format_edit_diff(old_text: &str, new_text: &str) -> String {
     let changes: Vec<_> = diff.iter_all_changes().collect();
 
     const CONTEXT: usize = 2;
-    let mut dominated = vec![false; changes.len()];
+    let mut near_change = vec![false; changes.len()];
     for (i, change) in changes.iter().enumerate() {
         if change.tag() != ChangeTag::Equal {
             let start = i.saturating_sub(CONTEXT);
             let end = (i + CONTEXT + 1).min(changes.len());
-            for slot in &mut dominated[start..end] {
-                *slot = true;
-            }
+            near_change[start..end].fill(true);
         }
     }
 
     let mut last_was_gap = false;
     for (i, change) in changes.iter().enumerate() {
-        match change.tag() {
-            ChangeTag::Equal => {
-                if dominated[i] {
-                    result.push_str(&format!("  {}", change));
-                    last_was_gap = false;
-                } else if !last_was_gap && i > 0 && i < changes.len() - 1 {
+        let marker = match change.tag() {
+            ChangeTag::Equal if !near_change[i] => {
+                if !last_was_gap && i > 0 && i < changes.len() - 1 {
                     result.push_str("  …\n");
                     last_was_gap = true;
                 }
+                continue;
             }
-            ChangeTag::Delete => {
-                result.push_str(&format!("- {}", change));
-                last_was_gap = false;
-            }
-            ChangeTag::Insert => {
-                result.push_str(&format!("+ {}", change));
-                last_was_gap = false;
-            }
-        }
+            ChangeTag::Equal => ' ',
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+        };
+        let _ = write!(result, "{marker} {change}");
+        last_was_gap = false;
     }
 
     result.trim_end().to_string()
