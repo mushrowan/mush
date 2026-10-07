@@ -532,7 +532,7 @@ impl super::MessageVisitor for OpenaiVisitor<'_> {
             .iter()
             .any(|part| matches!(part, ToolResultContentPart::Image(_)));
         let text = if raw_text.is_empty() && has_images {
-            "(see attached image)".to_string()
+            std::borrow::Cow::Borrowed("(see attached image)")
         } else {
             super::maybe_trim_tool_output(&raw_text, is_old_turn, self.trimming)
         };

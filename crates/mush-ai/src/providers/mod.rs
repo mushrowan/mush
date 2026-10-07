@@ -129,11 +129,11 @@ pub(crate) fn maybe_trim_tool_output(
     text: &str,
     is_old_turn: bool,
     trimming: ToolResultTrimming,
-) -> String {
+) -> Cow<'_, str> {
     if is_old_turn && trimming == ToolResultTrimming::SlidingWindow {
-        trim_tool_output(text)
+        Cow::Owned(trim_tool_output(text))
     } else {
-        text.to_string()
+        Cow::Borrowed(text)
     }
 }
 

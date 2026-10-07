@@ -1116,9 +1116,9 @@ fn claude_code_tool_result_content(
 ) -> serde_json::Value {
     match tr.content.as_slice() {
         [] => serde_json::Value::String(String::new()),
-        [ToolResultContentPart::Text(text)] => {
-            serde_json::Value::String(maybe_trim_tool_output(&text.text, is_old_turn, trimming))
-        }
+        [ToolResultContentPart::Text(text)] => serde_json::Value::String(
+            maybe_trim_tool_output(&text.text, is_old_turn, trimming).into_owned(),
+        ),
         parts => tool_result_blocks(parts, is_old_turn, trimming),
     }
 }

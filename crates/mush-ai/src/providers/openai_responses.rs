@@ -452,7 +452,7 @@ impl MessageVisitor for OpenaiResponsesVisitor<'_> {
             "type": "function_call_output",
             "call_id": normalized_call_id(tr.tool_call_id.as_str()),
             "output": if text.is_empty() && has_images {
-                "(see attached image)".to_string()
+                std::borrow::Cow::Borrowed("(see attached image)")
             } else {
                 text
             },
