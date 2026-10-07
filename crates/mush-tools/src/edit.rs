@@ -552,7 +552,7 @@ fn not_found_error(
     start_line: Option<usize>,
     range_label: &str,
 ) -> ToolResult {
-    let line_offset = start_line.unwrap_or(1) - 1;
+    let line_offset = start_line.unwrap_or(1).saturating_sub(1);
     let display = path.display();
 
     match find_near_miss(region, old_text) {
@@ -1253,6 +1253,27 @@ mod tests {
             text.contains("line 21"),
             "near-miss line should be a file line, got: {text}"
         );
+    }
+
+    #[test]
+    fn a_near_miss_from_line_zero_counts_from_the_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero.rs");
+        fs::write(&path, "let  x  =  1;\n").unwrap();
+
+        let result = edit_file(
+            &path,
+            "let x = 1;",
+            "let x = 2;",
+            &EditOpts {
+                start_line: Some(0),
+                ..EditOpts::default()
+            },
+        );
+
+        let text = extract_text(&result);
+        assert!(text.contains("near-miss"), "expected a near-miss: {text}");
+        assert!(text.contains("line 1\n"), "got: {text}");
     }
 
     #[test]
