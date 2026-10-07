@@ -288,15 +288,31 @@ fn safe_name(name: &str) -> bool {
 }
 
 fn validate(manifest: &Manifest) -> Result<()> {
-    if manifest.concurrency == 0
-        || manifest.concurrency > 8
-        || manifest.max_rounds == 0
-        || manifest.attempt_seconds == 0
-        || manifest.silence_seconds == 0
-        || manifest.until <= Utc::now()
-        || manifest.until > Utc::now() + chrono::Duration::hours(24)
-    {
-        return Err("invalid run limits".into());
+    let now = Utc::now();
+    let broken_limit = [
+        (
+            manifest.concurrency == 0 || manifest.concurrency > 8,
+            "concurrency must be 1 to 8",
+        ),
+        (manifest.max_rounds == 0, "max_rounds must be at least 1"),
+        (
+            manifest.attempt_seconds == 0,
+            "attempt_seconds must be at least 1",
+        ),
+        (
+            manifest.silence_seconds == 0,
+            "silence_seconds must be at least 1",
+        ),
+        (manifest.until <= now, "until has already passed"),
+        (
+            manifest.until > now + chrono::Duration::hours(24),
+            "until is more than 24 hours away",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(broken, reason)| broken.then_some(reason));
+    if let Some(reason) = broken_limit {
+        return Err(format!("invalid run limits: {reason}").into());
     }
     let mut names = HashSet::new();
     let mut dirs = HashSet::new();
@@ -1193,6 +1209,34 @@ mod tests {
             assert!(!safe_name(name));
         }
         assert!(safe_name("worker-1"));
+    }
+
+    #[test]
+    fn invalid_run_limits_say_which_limit() {
+        let manifest = |until: DateTime<Utc>, concurrency: usize| -> Manifest {
+            serde_json::from_value(json!({
+                "directory": "/run", "executable": "/mush", "until": until,
+                "concurrency": concurrency, "attempt_seconds": 15, "silence_seconds": 10,
+                "max_rounds": 4, "model": "m", "fallback_model": "f", "workers": []
+            }))
+            .unwrap()
+        };
+        let error = |manifest: Manifest| validate(&manifest).unwrap_err().to_string();
+
+        let hour = chrono::Duration::hours(1);
+        assert_eq!(
+            error(manifest(Utc::now() - hour, 1)),
+            "invalid run limits: until has already passed"
+        );
+        assert_eq!(
+            error(manifest(Utc::now() + hour * 25, 1)),
+            "invalid run limits: until is more than 24 hours away"
+        );
+        assert_eq!(
+            error(manifest(Utc::now() + hour, 9)),
+            "invalid run limits: concurrency must be 1 to 8"
+        );
+        assert!(validate(&manifest(Utc::now() + hour, 1)).is_ok());
     }
 
     #[test]
