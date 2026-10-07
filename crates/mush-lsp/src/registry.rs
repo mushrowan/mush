@@ -1,6 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use lsp_types::Diagnostic;
 use mush_treesitter::Language;
@@ -14,7 +14,7 @@ const DIAGNOSTIC_WAIT: std::time::Duration = std::time::Duration::from_millis(50
 
 pub struct LspRegistry {
     root: PathBuf,
-    clients: Arc<Mutex<HashMap<Language, LspClient>>>,
+    clients: Mutex<HashMap<Language, LspClient>>,
     overrides: HashMap<Language, ServerConfig>,
 }
 
@@ -22,7 +22,7 @@ impl LspRegistry {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients: Mutex::new(HashMap::new()),
             overrides: HashMap::new(),
         }
     }
@@ -43,7 +43,7 @@ impl LspRegistry {
         let client = self.ensure_client_locked(&mut clients, language).await?;
 
         let send_result = client.did_open(path, &text).await;
-        self.send_or_evict(&mut clients, language, send_result)?;
+        evict_if_exited(&mut clients, language, send_result)?;
         drop(clients);
 
         self.wait_and_get_diagnostics(language, path).await
@@ -54,9 +54,8 @@ impl LspRegistry {
         path: &Path,
         text: &str,
     ) -> Result<Vec<Diagnostic>, LspError> {
-        let language = match Language::detect(path) {
-            Some(l) => l,
-            None => return Ok(vec![]),
+        let Some(language) = Language::detect(path) else {
+            return Ok(vec![]);
         };
 
         let mut clients = self.clients.lock().await;
@@ -65,7 +64,7 @@ impl LspRegistry {
         };
 
         let send_result = client.did_change(path, text, 2).await;
-        self.send_or_evict(&mut clients, language, send_result)?;
+        evict_if_exited(&mut clients, language, send_result)?;
         drop(clients);
 
         self.wait_and_get_diagnostics(language, path).await
@@ -76,8 +75,7 @@ impl LspRegistry {
     }
 
     pub async fn shutdown_all(self) {
-        let mut clients = self.clients.lock().await;
-        for (lang, client) in clients.drain() {
+        for (lang, client) in self.clients.into_inner() {
             if let Err(e) = client.shutdown().await {
                 tracing::warn!("failed to shut down {lang:?} LSP server: {e}");
             }
@@ -98,42 +96,39 @@ impl LspRegistry {
         }
     }
 
-    fn send_or_evict(
-        &self,
-        clients: &mut HashMap<Language, LspClient>,
-        language: Language,
-        result: Result<(), LspError>,
-    ) -> Result<(), LspError> {
-        if let Err(ref e @ LspError::ServerExited) = result {
-            tracing::warn!(language = ?language, error = %e, "LSP server crashed, removing");
-            clients.remove(&language);
-        }
-        result
-    }
-
     async fn ensure_client_locked<'a>(
         &self,
         clients: &'a mut HashMap<Language, LspClient>,
         language: Language,
     ) -> Result<&'a LspClient, LspError> {
-        use std::collections::hash_map::Entry;
+        match clients.entry(language) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let config = self
+                    .overrides
+                    .get(&language)
+                    .cloned()
+                    .or_else(|| discovery::discover_for_language(language))
+                    .ok_or_else(|| LspError::NoServer(format!("{language:?}")))?;
 
-        if let Entry::Vacant(entry) = clients.entry(language) {
-            let config = self
-                .overrides
-                .get(&language)
-                .cloned()
-                .or_else(|| discovery::discover_for_language(language))
-                .ok_or_else(|| LspError::NoServer(format!("{language:?}")))?;
-
-            tracing::info!(language = ?language, command = %config.command, "starting LSP server");
-            let client = LspClient::start(&config, &self.root).await?;
-            entry.insert(client);
+                tracing::info!(language = ?language, command = %config.command, "starting LSP server");
+                let client = LspClient::start(&config, &self.root).await?;
+                Ok(entry.insert(client))
+            }
         }
-
-        #[expect(clippy::expect_used, reason = "entry was just inserted above")]
-        Ok(clients.get(&language).expect("just ensured"))
     }
+}
+
+fn evict_if_exited(
+    clients: &mut HashMap<Language, LspClient>,
+    language: Language,
+    result: Result<(), LspError>,
+) -> Result<(), LspError> {
+    if let Err(ref e @ LspError::ServerExited) = result {
+        tracing::warn!(language = ?language, error = %e, "LSP server crashed, removing");
+        clients.remove(&language);
+    }
+    result
 }
 
 #[cfg(test)]

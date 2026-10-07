@@ -16,12 +16,15 @@ use crate::transport;
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+type PendingRequests = Mutex<HashMap<i64, oneshot::Sender<Value>>>;
+type DiagnosticsByUri = Mutex<HashMap<Uri, Vec<Diagnostic>>>;
+
 pub struct LspClient {
     _process: Child,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Mutex<ChildStdin>,
     next_id: AtomicI64,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    diagnostics: Arc<Mutex<HashMap<Uri, Vec<Diagnostic>>>>,
+    pending: Arc<PendingRequests>,
+    diagnostics: Arc<DiagnosticsByUri>,
     root_uri: Uri,
     _reader_task: tokio::task::JoinHandle<()>,
 }
@@ -48,17 +51,14 @@ impl LspClient {
             .take()
             .ok_or_else(|| LspError::SpawnFailed("failed to capture server stdout".into()))?;
 
-        let writer = Arc::new(Mutex::new(stdin));
-        let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let diagnostics: Arc<Mutex<HashMap<Uri, Vec<Diagnostic>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending = Arc::new(PendingRequests::default());
+        let diagnostics = Arc::new(DiagnosticsByUri::default());
 
         let reader_task = spawn_reader(stdout, Arc::clone(&pending), Arc::clone(&diagnostics));
 
-        let mut client = Self {
+        let client = Self {
             _process: process,
-            writer,
+            writer: Mutex::new(stdin),
             next_id: AtomicI64::new(1),
             pending,
             diagnostics,
@@ -116,7 +116,7 @@ impl LspClient {
         transport::write_message(&mut writer, &message).await
     }
 
-    async fn initialize(&mut self) -> Result<(), LspError> {
+    async fn initialize(&self) -> Result<(), LspError> {
         let params = json!({
             "processId": std::process::id(),
             "rootUri": self.root_uri.as_str(),
@@ -137,7 +137,7 @@ impl LspClient {
             }]
         });
 
-        let _result = self.request("initialize", params).await?;
+        self.request("initialize", params).await?;
         self.notify("initialized", json!({})).await?;
         Ok(())
     }
@@ -216,8 +216,8 @@ pub fn format_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> String {
 
 fn spawn_reader(
     stdout: ChildStdout,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
-    diagnostics: Arc<Mutex<HashMap<Uri, Vec<Diagnostic>>>>,
+    pending: Arc<PendingRequests>,
+    diagnostics: Arc<DiagnosticsByUri>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -231,21 +231,16 @@ fn spawn_reader(
                 }
             }
         }
-        let mut guard = pending.lock().await;
-        guard.clear();
+        pending.lock().await.clear();
     })
 }
 
-async fn dispatch_message(
-    msg: Value,
-    pending: &Mutex<HashMap<i64, oneshot::Sender<Value>>>,
-    diagnostics: &Mutex<HashMap<Uri, Vec<Diagnostic>>>,
-) {
+async fn dispatch_message(msg: Value, pending: &PendingRequests, diagnostics: &DiagnosticsByUri) {
     if let Some(id) = msg.get("id").and_then(|v| v.as_i64())
         && msg.get("method").is_none()
     {
-        let mut guard = pending.lock().await;
-        if let Some(tx) = guard.remove(&id) {
+        let tx = pending.lock().await.remove(&id);
+        if let Some(tx) = tx {
             let _ = tx.send(msg);
         }
         return;
@@ -258,8 +253,10 @@ async fn dispatch_message(
                     && let Ok(diag_params) =
                         serde_json::from_value::<PublishDiagnosticsParams>(params.clone())
                 {
-                    let mut guard = diagnostics.lock().await;
-                    guard.insert(diag_params.uri, diag_params.diagnostics);
+                    diagnostics
+                        .lock()
+                        .await
+                        .insert(diag_params.uri, diag_params.diagnostics);
                 }
             }
             "window/logMessage" | "window/showMessage" => {
@@ -292,25 +289,25 @@ fn path_to_uri(path: &Path) -> Result<Uri, LspError> {
 }
 
 fn language_id_for_path(path: &Path) -> &'static str {
-    match mush_treesitter::Language::detect(path) {
-        Some(mush_treesitter::Language::Rust) => "rust",
-        Some(mush_treesitter::Language::Python) => "python",
-        Some(mush_treesitter::Language::JavaScript) => "javascript",
-        Some(mush_treesitter::Language::TypeScript | mush_treesitter::Language::Tsx) => {
-            "typescript"
-        }
-        Some(mush_treesitter::Language::Go) => "go",
-        Some(mush_treesitter::Language::C) => "c",
-        Some(mush_treesitter::Language::Cpp) => "cpp",
-        Some(mush_treesitter::Language::Java) => "java",
-        Some(mush_treesitter::Language::Bash) => "shellscript",
-        Some(mush_treesitter::Language::Nix) => "nix",
-        Some(mush_treesitter::Language::Json) => "json",
-        Some(mush_treesitter::Language::Toml) => "toml",
-        Some(mush_treesitter::Language::Yaml) => "yaml",
-        Some(mush_treesitter::Language::Markdown) => "markdown",
-        Some(mush_treesitter::Language::Html) => "html",
-        Some(mush_treesitter::Language::Css) => "css",
+    use mush_treesitter::Language;
+
+    match Language::detect(path) {
+        Some(Language::Rust) => "rust",
+        Some(Language::Python) => "python",
+        Some(Language::JavaScript) => "javascript",
+        Some(Language::TypeScript | Language::Tsx) => "typescript",
+        Some(Language::Go) => "go",
+        Some(Language::C) => "c",
+        Some(Language::Cpp) => "cpp",
+        Some(Language::Java) => "java",
+        Some(Language::Bash) => "shellscript",
+        Some(Language::Nix) => "nix",
+        Some(Language::Json) => "json",
+        Some(Language::Toml) => "toml",
+        Some(Language::Yaml) => "yaml",
+        Some(Language::Markdown) => "markdown",
+        Some(Language::Html) => "html",
+        Some(Language::Css) => "css",
         None => "plaintext",
     }
 }
