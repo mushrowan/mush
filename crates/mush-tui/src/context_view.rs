@@ -260,6 +260,7 @@ mod tests {
             status,
             spawned_at: Timestamp::zero(),
             updated_at: Timestamp::zero(),
+            idle_since: Timestamp::zero(),
             answer: None,
             error: None,
             progress_note: None,

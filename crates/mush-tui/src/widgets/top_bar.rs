@@ -96,6 +96,7 @@ mod tests {
             status: mush_runtime::ChildStatus::Idle,
             spawned_at: mush_ai::types::Timestamp::zero(),
             updated_at: mush_ai::types::Timestamp::zero(),
+            idle_since: mush_ai::types::Timestamp::zero(),
             answer: None,
             error: None,
             progress_note: None,

@@ -742,6 +742,7 @@ mod tests {
             status,
             spawned_at: mush_ai::types::Timestamp::zero(),
             updated_at: mush_ai::types::Timestamp::from_ms(5_000),
+            idle_since: mush_ai::types::Timestamp::from_ms(5_000),
             answer: None,
             error: None,
             progress_note: None,

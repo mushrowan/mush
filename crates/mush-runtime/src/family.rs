@@ -30,6 +30,7 @@ const DELETED_REASON: &str = "Deleted by parent orchestrator";
 const STOPPED_REASON: &str = "Stopped by the user";
 const TICK: Duration = Duration::from_millis(50);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const HIBERNATE_AFTER: Duration = Duration::from_secs(30 * 60);
 
 pub type ChildId = String;
 
@@ -119,6 +120,14 @@ impl ChildStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Activity {
+    Working,
+    Napping,
+    Hibernating,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChildSummary {
     pub id: ChildId,
@@ -132,6 +141,8 @@ pub struct ChildSummary {
     pub status: ChildStatus,
     pub spawned_at: Timestamp,
     pub updated_at: Timestamp,
+    #[serde(default)]
+    pub idle_since: Timestamp,
     pub answer: Option<String>,
     pub error: Option<String>,
     pub progress_note: Option<String>,
@@ -146,6 +157,24 @@ pub struct ChildSummary {
     pub awaiting_confirmation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<mush_session::Pause>,
+}
+
+impl ChildSummary {
+    #[must_use]
+    pub fn activity(&self, now: Timestamp) -> Activity {
+        let idle_for = now.as_ms().saturating_sub(self.idle_since.as_ms());
+        match self.status {
+            ChildStatus::Starting | ChildStatus::Running => Activity::Working,
+            ChildStatus::Idle if u128::from(idle_for) < HIBERNATE_AFTER.as_millis() => {
+                Activity::Napping
+            }
+            ChildStatus::Idle
+            | ChildStatus::Failed
+            | ChildStatus::Cancelled
+            | ChildStatus::Interrupted
+            | ChildStatus::Deleted => Activity::Hibernating,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +241,11 @@ struct Target {
     child: Option<ChildId>,
     endpoint: MessageTarget,
     sender: String,
+}
+
+pub struct Broadcast {
+    pub receipts: Vec<(MessageTarget, Result<MessageReceipt, String>)>,
+    pub hibernating: usize,
 }
 
 pub struct Delivery {
@@ -323,6 +357,7 @@ pub struct AgentView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_child_id: Option<ChildId>,
     pub status: String,
+    pub state: Activity,
     pub observable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
@@ -596,6 +631,7 @@ impl Family {
                 session_id: inner.root_session_id.clone(),
                 rlm_child_id: None,
                 status: root_status(&inner).into(),
+                state: root_activity(&inner),
                 observable: false,
                 model_id: None,
                 progress_note: inner.root_note.clone(),
@@ -622,6 +658,7 @@ impl Family {
                         session_id: inner.root_session_id.clone(),
                         rlm_child_id: None,
                         status: root_status(&inner).into(),
+                        state: root_activity(&inner),
                         observable: inner.root_observe.is_some(),
                         model_id: None,
                         progress_note: inner.root_note.clone(),
@@ -893,6 +930,7 @@ impl Family {
             status: ChildStatus::Starting,
             spawned_at: now,
             updated_at: now,
+            idle_since: Timestamp::zero(),
             answer: None,
             error: None,
             progress_note: None,
@@ -1054,9 +1092,14 @@ impl Family {
             let Some(node) = inner.children.get_mut(id) else {
                 return;
             };
-            let was_settled = node.summary.status.settled();
+            let was = node.summary.status;
             apply(&mut node.summary);
-            node.summary.updated_at = Timestamp::now();
+            let now = Timestamp::now();
+            node.summary.updated_at = now;
+            if node.summary.status == ChildStatus::Idle && was != ChildStatus::Idle {
+                node.summary.idle_since = now;
+            }
+            let was_settled = was.settled();
             (!was_settled && node.summary.status.settled())
                 .then(|| node.summary.parent.clone())
                 .flatten()
@@ -1464,9 +1507,11 @@ impl Family {
         }
     }
 
-    fn broadcast_targets(&self, caller: &Identity) -> Result<Vec<Target>, String> {
+    fn broadcast_targets(&self, caller: &Identity) -> Result<(Vec<Target>, usize), String> {
+        let now = Timestamp::now();
         let mut inner = self.lock();
         let mut targets = Vec::new();
+        let mut hibernating = 0;
         if let Some(my_id) = caller.id.as_deref() {
             let node = inner
                 .children
@@ -1480,10 +1525,15 @@ impl Family {
                 sender: self.sender_label(caller, "child"),
             });
             for node in inner.children.values() {
-                if node.summary.parent == my_parent
-                    && node.summary.id != my_id
-                    && node.summary.status != ChildStatus::Deleted
+                if node.summary.parent != my_parent
+                    || node.summary.id == my_id
+                    || node.summary.status == ChildStatus::Deleted
                 {
+                    continue;
+                }
+                if node.summary.activity(now) == Activity::Hibernating {
+                    hibernating += 1;
+                } else {
                     targets.push(Target {
                         endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
                         child: Some(node.summary.id.clone()),
@@ -1493,7 +1543,12 @@ impl Family {
             }
         }
         for node in inner.children.values() {
-            if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
+            if node.summary.parent != caller.id || node.summary.status == ChildStatus::Deleted {
+                continue;
+            }
+            if node.summary.activity(now) == Activity::Hibernating {
+                hibernating += 1;
+            } else {
                 targets.push(Target {
                     endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
                     child: Some(node.summary.id.clone()),
@@ -1501,7 +1556,7 @@ impl Family {
                 });
             }
         }
-        Ok(targets)
+        Ok((targets, hibernating))
     }
 
     pub async fn send_message(
@@ -1522,18 +1577,21 @@ impl Family {
         caller: &Identity,
         text: &str,
         this: &Arc<Self>,
-    ) -> Result<Vec<(MessageTarget, Result<MessageReceipt, String>)>, String> {
+    ) -> Result<Broadcast, String> {
         let text = Self::checked_text(text)?;
-        let targets = self.broadcast_targets(caller)?;
+        let (targets, hibernating) = self.broadcast_targets(caller)?;
         let sends = targets
             .iter()
             .map(|target| self.deliver(caller, target, text, this));
         let results = futures::future::join_all(sends).await;
-        Ok(targets
-            .into_iter()
-            .map(|target| target.endpoint)
-            .zip(results)
-            .collect())
+        Ok(Broadcast {
+            receipts: targets
+                .into_iter()
+                .map(|target| target.endpoint)
+                .zip(results)
+                .collect(),
+            hibernating,
+        })
     }
 
     async fn deliver(
@@ -1789,6 +1847,7 @@ fn view_of(
         session_id: summary.session_id.clone(),
         rlm_child_id: Some(summary.id.clone()),
         status: family_status(summary.status, node.inbox.is_some()).into(),
+        state: summary.activity(Timestamp::now()),
         observable,
         model_id: Some(summary.model_id.clone()),
         progress_note: summary.progress_note.clone(),
@@ -1804,6 +1863,14 @@ fn root_status(inner: &Inner) -> &'static str {
         "running"
     } else {
         "idle"
+    }
+}
+
+fn root_activity(inner: &Inner) -> Activity {
+    if inner.root_running {
+        Activity::Working
+    } else {
+        Activity::Napping
     }
 }
 
@@ -2203,7 +2270,14 @@ fn requested_thinking(
 }
 
 fn summary_json(child: &ChildSummary) -> serde_json::Value {
-    serde_json::to_value(child).unwrap_or(serde_json::Value::Null)
+    let mut json = serde_json::to_value(child).unwrap_or(serde_json::Value::Null);
+    if let Some(fields) = json.as_object_mut() {
+        fields.insert(
+            "state".into(),
+            serde_json::json!(child.activity(Timestamp::now())),
+        );
+    }
+    json
 }
 
 #[async_trait::async_trait]
@@ -2336,13 +2410,15 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                                     .into(),
                             ));
                         }
-                        let receipts = self
+                        let broadcast = self
                             .family
                             .broadcast(&self.identity, &message, &self.family)
                             .await
                             .map_err(mush_kernel::HostError)?;
                         Ok(serde_json::json!({
-                            "receipts": receipts
+                            "skipped_hibernating": broadcast.hibernating,
+                            "receipts": broadcast
+                                .receipts
                                 .into_iter()
                                 .map(|(target, receipt)| match receipt {
                                     Ok(receipt) => serde_json::json!(receipt),
@@ -3343,7 +3419,8 @@ mod tests {
         let mut receipts = family
             .broadcast(&root, "status please", &family)
             .await
-            .unwrap();
+            .unwrap()
+            .receipts;
         receipts.sort_by(|a, b| a.0.session_name.cmp(&b.0.session_name));
         assert_eq!(receipts[0].0.session_name, "alpha");
         assert_eq!(
@@ -3352,6 +3429,144 @@ mod tests {
         );
         assert_eq!(receipts[1].0.session_name, "beta");
         assert!(receipts[1].1.is_err());
+    }
+
+    #[test]
+    fn activity_follows_status_and_time_since_the_last_turn() {
+        let now = Timestamp::from_ms(10 * HIBERNATE_AFTER.as_millis() as u64);
+        let child = |status, idle_since| ChildSummary {
+            status,
+            idle_since,
+            ..saved_child("sub-1", "left")
+        };
+        let recently = Timestamp::from_ms(now.as_ms() - 1_000);
+        let long_ago = Timestamp::from_ms(now.as_ms() - HIBERNATE_AFTER.as_millis() as u64);
+        assert_eq!(
+            child(ChildStatus::Running, long_ago).activity(now),
+            Activity::Working
+        );
+        assert_eq!(
+            child(ChildStatus::Starting, long_ago).activity(now),
+            Activity::Working
+        );
+        assert_eq!(
+            child(ChildStatus::Idle, recently).activity(now),
+            Activity::Napping
+        );
+        assert_eq!(
+            child(ChildStatus::Idle, long_ago).activity(now),
+            Activity::Hibernating
+        );
+        for status in [
+            ChildStatus::Failed,
+            ChildStatus::Cancelled,
+            ChildStatus::Interrupted,
+        ] {
+            assert_eq!(
+                child(status, recently).activity(now),
+                Activity::Hibernating,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_skips_hibernating_children_and_a_direct_message_wakes_one() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let root = Identity::root("root");
+        for name in ["alpha", "beta", "gamma"] {
+            family
+                .spawn(&root, "task".into(), name.into(), None, None, &family)
+                .await
+                .unwrap();
+        }
+        let children = settle(&family, &root).await;
+        assert!(children.iter().all(|child| child.idle_since.as_ms() > 0));
+        let id = |name: &str| {
+            children
+                .iter()
+                .find(|child| child.name == name)
+                .unwrap()
+                .id
+                .clone()
+        };
+        {
+            let mut inner = family.lock();
+            let beta = &mut inner.children.get_mut(&id("beta")).unwrap().summary;
+            beta.idle_since =
+                Timestamp::from_ms(beta.idle_since.as_ms() - HIBERNATE_AFTER.as_millis() as u64);
+            inner.children.get_mut(&id("gamma")).unwrap().summary.status = ChildStatus::Failed;
+        }
+
+        let states: Vec<_> = family
+            .roster(&root)
+            .into_iter()
+            .map(|view| (view.name, view.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("root".to_string(), Activity::Napping),
+                ("alpha".to_string(), Activity::Napping),
+                ("beta".to_string(), Activity::Hibernating),
+                ("gamma".to_string(), Activity::Hibernating),
+            ]
+        );
+        let handler = RlmHandler::new(Arc::clone(&family), root.clone());
+        let listed = handler
+            .handle("rlm.list_subagents", serde_json::json!({}))
+            .await
+            .unwrap();
+        let listed: Vec<_> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|child| (child["name"].clone(), child["state"].clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("alpha".into(), "napping".into()),
+                ("beta".into(), "hibernating".into()),
+                ("gamma".into(), "hibernating".into()),
+            ]
+        );
+
+        let broadcast = handler
+            .handle(
+                "agent_message.send",
+                serde_json::json!({ "message": "status?", "target": "all" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(broadcast["skipped_hibernating"], 2);
+        let receipts = broadcast["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["target"]["sessionName"], "alpha");
+
+        let receipt = family
+            .send_message(&root, "child", Some("beta"), "wake up", &family)
+            .await
+            .unwrap();
+        assert_eq!(receipt.delivery_status, Receipt::Delivered);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family
+            .children_of(&root)
+            .iter()
+            .find(|child| child.name == "beta")
+            .is_none_or(|child| child.turns < 2 || child.status != ChildStatus::Idle)
+        {
+            assert!(Instant::now() < deadline, "beta never took its turn");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let beta = family
+            .children_of(&root)
+            .into_iter()
+            .find(|child| child.name == "beta")
+            .unwrap();
+        assert_eq!(beta.activity(Timestamp::now()), Activity::Napping);
     }
 
     #[test]
@@ -3729,6 +3944,7 @@ mod tests {
                 status: ChildStatus::Running,
                 spawned_at: Timestamp::zero(),
                 updated_at: Timestamp::zero(),
+                idle_since: Timestamp::zero(),
                 answer: None,
                 error: None,
                 progress_note: None,
@@ -3965,6 +4181,7 @@ mod tests {
             status: ChildStatus::Idle,
             spawned_at: Timestamp::zero(),
             updated_at: Timestamp::zero(),
+            idle_since: Timestamp::zero(),
             answer: None,
             error: None,
             progress_note: None,
@@ -4156,6 +4373,7 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0]["target"]["sessionName"], "alpha");
         assert_eq!(receipts[0]["deliveryStatus"], "delivered");
+        assert_eq!(broadcast["skipped_hibernating"], 0);
     }
 
     #[tokio::test]

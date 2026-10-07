@@ -1326,6 +1326,7 @@ mod tests {
             status,
             spawned_at: mush_ai::types::Timestamp::zero(),
             updated_at: mush_ai::types::Timestamp::zero(),
+            idle_since: mush_ai::types::Timestamp::zero(),
             answer: Some("found two issues\nsecond line".into()),
             error: None,
             progress_note: Some("halfway".into()),

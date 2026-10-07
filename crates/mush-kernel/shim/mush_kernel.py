@@ -407,6 +407,7 @@ class ChildSummary:
         self.session_id = str(reply.get("session_id", ""))
         self.model = str(reply.get("model_id", ""))
         self.status = str(reply.get("status", ""))
+        self.state = str(reply.get("state", ""))
         self.answer = reply.get("answer")
         self.error = reply.get("error")
         self.progress_note = reply.get("progress_note")
@@ -424,7 +425,7 @@ class ChildSummary:
     def __repr__(self) -> str:
         note = f", note={self.progress_note!r}" if self.progress_note else ""
         paused = ", paused" if self.paused else ""
-        return f"ChildSummary(name={self.name!r}, status={self.status!r}, turns={self.turns}{note}{paused})"
+        return f"ChildSummary(name={self.name!r}, status={self.status!r}, state={self.state!r}, turns={self.turns}{note}{paused})"
 
 
 def _child_target(target) -> str:

@@ -35,7 +35,7 @@ pub use connection::{
     HostCommands, InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
 };
 pub use family::{
-    ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
+    Activity, ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
     CreateSessionRequest, CreatedSession, Family, Identity, MessageReceipt, MessageTarget, Receipt,
     RlmHandler, RuntimeKind, SessionSpawner,
 };
