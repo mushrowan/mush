@@ -38,9 +38,8 @@ impl ApiProvider for OpenaiResponsesProvider {
         let is_codex = is_codex_provider(model);
         let codex_oauth = is_codex && jwt_payload(api_key.expose()).is_some();
         if codex_oauth
-            && let Ok(Some(fresh)) =
-                crate::oauth::get_openai_codex_oauth_token(options.oauth_account.as_ref()).await
-            && let Some(fresh) = ApiKey::new(fresh)
+            && let Some(fresh) =
+                super::stored_oauth_key("openai-codex", options.oauth_account.as_ref()).await
         {
             api_key = fresh;
         }
@@ -64,25 +63,18 @@ impl ApiProvider for OpenaiResponsesProvider {
                 model = %model.id,
                 "codex returned 401 with oauth token, forcing refresh + single retry"
             );
-            match crate::oauth::force_refresh_oauth_token(
+            match super::refresh_rejected_oauth_key(
                 "openai-codex",
                 options.oauth_account.as_ref(),
-                api_key.expose(),
+                &api_key,
             )
             .await
             {
-                Ok(Some(fresh)) => match ApiKey::new(fresh) {
-                    Some(fresh) => {
-                        let headers = build_headers(&fresh, options, is_codex)?;
-                        super::post_json(&self.client, &url, headers, &body, call_id).await?
-                    }
-                    None => response,
-                },
-                Ok(None) => response,
-                Err(error) => {
-                    tracing::warn!(%error, "codex oauth force refresh failed");
-                    response
+                Some(fresh) => {
+                    let headers = build_headers(&fresh, options, is_codex)?;
+                    super::post_json(&self.client, &url, headers, &body, call_id).await?
                 }
+                None => response,
             }
         } else {
             response

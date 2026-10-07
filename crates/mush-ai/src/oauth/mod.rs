@@ -337,19 +337,6 @@ pub async fn get_anthropic_oauth_token(
     get_oauth_token("anthropic", account).await
 }
 
-pub async fn force_refresh_anthropic_oauth_token(
-    account: Option<&AccountLabel>,
-    rejected_token: &str,
-) -> Result<Option<String>, OAuthError> {
-    force_refresh_oauth_token("anthropic", account, rejected_token).await
-}
-
-pub async fn get_openai_codex_oauth_token(
-    account: Option<&AccountLabel>,
-) -> Result<Option<String>, OAuthError> {
-    get_oauth_token("openai-codex", account).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

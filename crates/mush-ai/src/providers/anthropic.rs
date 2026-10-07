@@ -205,11 +205,10 @@ impl ApiProvider for AnthropicProvider {
             })?;
 
         if api_key.is_oauth_token()
-            && let Ok(Some(fresh)) =
-                crate::oauth::get_anthropic_oauth_token(options.oauth_account.as_ref()).await
-            && let Some(fresh_key) = ApiKey::new(fresh)
+            && let Some(fresh) =
+                super::stored_oauth_key("anthropic", options.oauth_account.as_ref()).await
         {
-            api_key = fresh_key;
+            api_key = fresh;
         }
 
         let is_oauth = api_key.is_oauth_token();
@@ -249,31 +248,21 @@ impl ApiProvider for AnthropicProvider {
                 model = %model.id,
                 "anthropic returned 401 with oauth token, forcing refresh + single retry"
             );
-            match crate::oauth::force_refresh_anthropic_oauth_token(
+            match super::refresh_rejected_oauth_key(
+                "anthropic",
                 options.oauth_account.as_ref(),
-                api_key.expose(),
+                &api_key,
             )
             .await
             {
-                Ok(Some(fresh)) => {
-                    if let Some(fresh_key) = ApiKey::new(fresh) {
-                        if let Ok(auth) = super::bearer_header(fresh_key.expose()) {
-                            headers.insert("authorization", auth);
-                        }
-                        headers.insert("x-stainless-retry-count", HeaderValue::from_static("1"));
-                        super::post_json(&self.client, &url, headers, &body, call_id).await?
-                    } else {
-                        response
+                Some(fresh) => {
+                    if let Ok(auth) = super::bearer_header(fresh.expose()) {
+                        headers.insert("authorization", auth);
                     }
+                    headers.insert("x-stainless-retry-count", HeaderValue::from_static("1"));
+                    super::post_json(&self.client, &url, headers, &body, call_id).await?
                 }
-                Ok(None) => {
-                    tracing::warn!("force_refresh_anthropic_oauth_token returned None");
-                    response
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "force_refresh_anthropic_oauth_token failed");
-                    response
-                }
+                None => response,
             }
         } else {
             response

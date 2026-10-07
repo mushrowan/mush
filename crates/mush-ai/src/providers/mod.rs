@@ -8,8 +8,8 @@ use std::borrow::Cow;
 
 use crate::registry::ApiRegistry;
 use crate::types::{
-    AssistantContentPart, AssistantMessage, EffortLevel, ImageContent, Message, Model,
-    StreamOptions, TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage,
+    AccountLabel, ApiKey, AssistantContentPart, AssistantMessage, EffortLevel, ImageContent,
+    Message, Model, StreamOptions, TextContent, ThinkingContent, ThinkingLevel, ToolResultMessage,
     ToolResultTrimming, TurnPivot, UserMessage, find_recent_boundary,
 };
 
@@ -258,6 +258,38 @@ pub(crate) async fn post_json(
         .with_extension(crate::http::WireCallId(call_id))
         .send()
         .await?)
+}
+
+pub(crate) async fn stored_oauth_key(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Option<ApiKey> {
+    crate::oauth::get_oauth_token(provider_id, account)
+        .await
+        .ok()
+        .flatten()
+        .and_then(ApiKey::new)
+}
+
+pub(crate) async fn refresh_rejected_oauth_key(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+    rejected: &ApiKey,
+) -> Option<ApiKey> {
+    match crate::oauth::force_refresh_oauth_token(provider_id, account, rejected.expose()).await {
+        Ok(Some(fresh)) => ApiKey::new(fresh),
+        Ok(None) => {
+            tracing::warn!(
+                provider = provider_id,
+                "oauth force refresh found no credentials"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(provider = provider_id, %error, "oauth force refresh failed");
+            None
+        }
+    }
 }
 
 pub(crate) fn image_data_url(img: &ImageContent) -> String {
