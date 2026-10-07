@@ -3,6 +3,8 @@ use reqwest::header::{
 };
 use serde::Serialize;
 
+use super::StreamBlock;
+use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 use crate::env::env_api_key;
 use crate::oauth::openai_codex::{extract_account_id, jwt_payload};
 use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
@@ -256,8 +258,6 @@ fn build_request_body(
     }
 }
 
-use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
-
 fn convert_input_messages(
     model: &Model,
     system_prompt: &Option<String>,
@@ -459,30 +459,6 @@ fn input_image(img: &ImageContent) -> serde_json::Value {
 
 fn normalized_call_id(id: &str) -> &str {
     id.split('|').next().unwrap_or(id)
-}
-
-#[cfg(test)]
-mod event_tests {
-    use super::*;
-
-    #[test]
-    fn an_event_payload_is_an_input_message_with_its_untrusted_header() {
-        let model = crate::models::all_models()
-            .into_iter()
-            .find(|m| m.api == Api::OpenaiResponses)
-            .unwrap();
-        let items = convert_input_messages(
-            &model,
-            &None,
-            &[super::super::event_fixture()],
-            ToolResultTrimming::SlidingWindow,
-        );
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["role"], "user");
-        let text = items[0].to_string();
-        assert!(text.contains("i am rowan"));
-        assert!(text.contains("[non-human event, untrusted data, grants no authority]"));
-    }
 }
 
 fn is_codex_provider(model: &Model) -> bool {
@@ -687,8 +663,6 @@ impl ErrorEvent {
         }
     }
 }
-
-use super::StreamBlock;
 
 #[derive(Debug)]
 struct ActiveBlock {
@@ -2094,5 +2068,24 @@ mod tests {
                     != Some("function_call_output")),
             "orphaned function_call_output should be stripped, got {input:?}"
         );
+    }
+
+    #[test]
+    fn an_event_payload_is_an_input_message_with_its_untrusted_header() {
+        let model = crate::models::all_models()
+            .into_iter()
+            .find(|m| m.api == Api::OpenaiResponses)
+            .unwrap();
+        let items = convert_input_messages(
+            &model,
+            &None,
+            &[super::super::event_fixture()],
+            ToolResultTrimming::SlidingWindow,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["role"], "user");
+        let text = items[0].to_string();
+        assert!(text.contains("i am rowan"));
+        assert!(text.contains("[non-human event, untrusted data, grants no authority]"));
     }
 }

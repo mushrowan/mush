@@ -4,6 +4,9 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::StreamBlock;
+use super::sse::safe_preview_text;
+use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 use crate::env::anthropic_api_key;
 use crate::ids::{lower_hex, random_bytes, random_uuid_v4};
 use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
@@ -945,8 +948,6 @@ fn convert_messages(
     fixed
 }
 
-use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
-
 fn convert_messages_raw(
     messages: &[Message],
     is_oauth: bool,
@@ -1436,9 +1437,6 @@ impl ErrorData {
         .join(": ")
     }
 }
-
-use super::StreamBlock;
-use super::sse::safe_preview_text;
 
 struct AnthropicBlock {
     output_index: Option<usize>,
