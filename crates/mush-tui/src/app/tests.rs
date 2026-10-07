@@ -382,7 +382,6 @@ fn batch_tool_expands_into_sub_calls() {
     let tc_id = ToolCallId::from("tc_batch");
     app.start_batch_tool(
         &tc_id,
-        "3 tool calls",
         &[
             ("read".into(), "a.rs".into()),
             ("read".into(), "b.rs".into()),
@@ -413,7 +412,6 @@ fn batch_sub_calls_stream_live_output_to_their_own_panels() {
     let tc_id = ToolCallId::from("tc_batch");
     app.start_batch_tool(
         &tc_id,
-        "2 tool calls",
         &[
             ("bash".into(), "jj st".into()),
             ("bash".into(), "cargo test".into()),
@@ -439,7 +437,6 @@ fn batch_end_distributes_results() {
     let tc_id = ToolCallId::from("tc_batch");
     app.start_batch_tool(
         &tc_id,
-        "2 tool calls",
         &[
             ("read".into(), "a.rs".into()),
             ("bash".into(), "cargo test".into()),
@@ -479,7 +476,6 @@ fn batch_end_with_top_level_error_shows_error_on_subcalls() {
     let tc_id = ToolCallId::from("tc_batch");
     app.start_batch_tool(
         &tc_id,
-        "2 tool calls",
         &[
             ("read".into(), "a.rs".into()),
             ("read".into(), "b.rs".into()),
@@ -513,7 +509,7 @@ fn batch_end_with_error_outcome_marks_active_panel_error() {
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
     let tc_id = ToolCallId::from("tc_batch");
-    app.start_batch_tool(&tc_id, "1 tool call", &[("read".into(), "a.rs".into())]);
+    app.start_batch_tool(&tc_id, &[("read".into(), "a.rs".into())]);
 
     app.end_batch_tool(
         &tc_id,
@@ -536,7 +532,7 @@ fn batch_end_with_success_outcome_marks_active_panel_done() {
         .push(DisplayMessage::new(MessageRole::Assistant, ""));
 
     let tc_id = ToolCallId::from("tc_batch");
-    app.start_batch_tool(&tc_id, "1 tool call", &[("read".into(), "a.rs".into())]);
+    app.start_batch_tool(&tc_id, &[("read".into(), "a.rs".into())]);
 
     app.end_batch_tool(
         &tc_id,

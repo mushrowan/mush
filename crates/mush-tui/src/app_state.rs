@@ -2,7 +2,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use mush_ai::types::ToolCallId;
-use ratatui::layout::Rect;
 use ratatui::text::{Line, Text};
 use serde::{Deserialize, Serialize};
 
@@ -249,7 +248,6 @@ pub struct CachedStatusBar {
 
 #[derive(Debug)]
 pub struct RenderState {
-    pub message_area: Cell<Rect>,
     pub markdown_cache: RefCell<HashMap<String, Text<'static>>>,
     pub stream_markdown_cache: RefCell<Option<(usize, String, Text<'static>)>>,
     pub tool_box_cache: RefCell<Vec<Option<CachedToolBoxLines>>>,
@@ -261,7 +259,6 @@ impl RenderState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            message_area: Cell::new(Rect::default()),
             markdown_cache: RefCell::new(HashMap::new()),
             stream_markdown_cache: RefCell::new(None),
             tool_box_cache: RefCell::new(Vec::new()),

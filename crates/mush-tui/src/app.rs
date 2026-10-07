@@ -273,14 +273,6 @@ impl App {
         })
     }
 
-    #[must_use]
-    pub fn active_jobs(&self) -> usize {
-        self.jobs
-            .iter()
-            .filter(|job| job.status == mush_runtime::JobStatus::Active)
-            .count()
-    }
-
     pub fn note_goal(&mut self, goal: Option<mush_runtime::Goal>) {
         let before = self
             .goal
@@ -821,11 +813,6 @@ impl App {
         self.messages.clear();
         self.stream = StreamingState::new();
         self.input.images.clear();
-    }
-
-    pub fn clear_messages(&mut self) {
-        self.clear_display();
-        self.stats.reset();
     }
 
     pub fn push_system_message(&mut self, text: impl Into<String>) {

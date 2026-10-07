@@ -152,7 +152,6 @@ fn show_tool_start(
     args: &serde_json::Value,
 ) {
     if tool_name.eq_ignore_ascii_case("batch") {
-        let summary = summarise_tool_args("batch", args);
         let sub_calls: Vec<(String, String)> = args["tool_calls"]
             .as_array()
             .map(|calls| {
@@ -166,7 +165,7 @@ fn show_tool_start(
                     .collect()
             })
             .unwrap_or_default();
-        app.start_batch_tool(tool_call_id, &summary, &sub_calls);
+        app.start_batch_tool(tool_call_id, &sub_calls);
     } else {
         let summary = summarise_tool_args(tool_name, args);
         app.start_tool(tool_call_id, tool_name, &summary);
@@ -206,7 +205,7 @@ fn apply_message_end(app: &mut App, message: &AssistantMessage, model: &Model, d
     }
 }
 
-pub use mush_runtime::turn::{auto_compact, resolve_auth_for_model, resolve_auth_into_options};
+pub use mush_runtime::turn::resolve_auth_for_model;
 
 #[cfg(test)]
 mod tests {

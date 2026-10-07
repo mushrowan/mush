@@ -239,19 +239,6 @@ impl InputBuffer {
         self.ensure_cursor_visible();
     }
 
-    pub fn remove_last_image(&mut self) {
-        if self.images.pop().is_some()
-            && let Some(pos) = self.text.rfind(IMAGE_PLACEHOLDER)
-        {
-            let end = pos + IMAGE_PLACEHOLDER.len_utf8();
-            self.text.drain(pos..end);
-            if self.cursor > pos {
-                self.cursor = self.cursor.saturating_sub(IMAGE_PLACEHOLDER.len_utf8());
-            }
-            self.ensure_cursor_visible();
-        }
-    }
-
     pub fn ensure_cursor_visible(&self) {
         let content_width = self.area.get().width.saturating_sub(2);
         let visible = self.visible_lines.get();

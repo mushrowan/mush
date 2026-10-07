@@ -71,10 +71,6 @@ pub fn truncate_output_large(output: &str) -> String {
     truncate_output_with_cap(output, MAX_SINGLE_TOOL_LINES)
 }
 
-pub fn truncate_output_to(output: &str, max_lines: usize) -> String {
-    truncate_output_with_cap(output, max_lines)
-}
-
 fn truncate_output_with_cap(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let total = lines.len();

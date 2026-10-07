@@ -105,7 +105,6 @@ impl App {
     pub fn start_batch_tool(
         &mut self,
         tool_call_id: &ToolCallId,
-        _summary: &str,
         sub_calls: &[(String, String)],
     ) {
         self.current_tool_batch += 1;
@@ -229,10 +228,6 @@ impl App {
             tc.output = output.map(str::to_string);
             tc.image_data = image_data;
         }
-    }
-
-    pub fn push_tool_output(&mut self, tool_call_id: &ToolCallId, output: &str) -> bool {
-        self.push_tool_output_by_exec_id(tool_call_id.as_str(), output)
     }
 
     pub fn push_tool_output_by_exec_id(&mut self, exec_id: &str, output: &str) -> bool {
