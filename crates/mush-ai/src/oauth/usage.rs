@@ -115,20 +115,16 @@ impl UsagePoller {
                 }
                 Some(usage)
             }
-            Err(ref e) => {
+            Err(e) => {
                 tracing::debug!(%e, "usage fetch failed");
-                if let Ok(mut cache) = self.cached.lock() {
-                    let had_data = matches!(cache.as_ref(), Some(CachedResult::Ok { .. }));
-                    if !had_data {
-                        *cache = Some(CachedResult::Err {
-                            fetched_at: Instant::now(),
-                        });
-                    }
+                let mut cache = self.cached.lock().ok()?;
+                if let Some(CachedResult::Ok { data, .. }) = cache.as_ref() {
+                    return Some(data.clone());
                 }
-                self.cached.lock().ok().and_then(|c| match c.as_ref() {
-                    Some(CachedResult::Ok { data, .. }) => Some(data.clone()),
-                    _ => None,
-                })
+                *cache = Some(CachedResult::Err {
+                    fetched_at: Instant::now(),
+                });
+                None
             }
         }
     }
