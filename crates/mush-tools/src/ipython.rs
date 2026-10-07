@@ -211,6 +211,84 @@ fn job_id(payload: &Value) -> Result<&str, HostError> {
         .ok_or_else(|| HostError("job_id is required".into()))
 }
 
+fn origin(payload: &Value) -> Option<&str> {
+    payload.get("origin").and_then(Value::as_str)
+}
+
+async fn successful_text(tool: &dyn AgentTool, args: Value) -> Result<String, HostError> {
+    let result = tool.execute(args).await;
+    let text = extract_text(&result);
+    if result.outcome.is_success() {
+        Ok(text)
+    } else {
+        Err(HostError(text))
+    }
+}
+
+impl MushHost {
+    async fn start_bash(&self, payload: &Value) -> Result<Value, HostError> {
+        let command = payload
+            .get("command")
+            .and_then(Value::as_str)
+            .ok_or("bash needs a command")?;
+        let timeout = match payload.get("timeout") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(
+                value
+                    .as_f64()
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                    .map(Duration::from_secs_f64)
+                    .ok_or("timeout must be a positive number of seconds")?,
+            ),
+        };
+        let cwd = payload
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map_or_else(|| self.cwd.to_path_buf(), std::path::PathBuf::from);
+        let env: Option<Vec<(String, String)>> =
+            payload.get("env").and_then(Value::as_object).map(|env| {
+                env.iter()
+                    .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+                    .collect()
+            });
+        let (job_id, pid) = self
+            .jobs
+            .start(&cwd, command, timeout, origin(payload), env.as_deref())
+            .await
+            .map_err(HostError)?;
+        Ok(json!({ "job_id": job_id, "pid": pid }))
+    }
+
+    async fn search_web(&self, payload: Value) -> Result<Value, HostError> {
+        let tool = read_lock(&self.web_search)
+            .clone()
+            .ok_or_else(|| HostError("web search is not available here".into()))?;
+        let text = successful_text(tool.as_ref(), payload).await?;
+        Ok(json!({ "text": text }))
+    }
+
+    async fn apply_edit(&self, payload: &Value) -> Result<Value, HostError> {
+        let args = json!({
+            "path": payload.get("path").cloned().unwrap_or(Value::Null),
+            "oldText": payload.get("old").cloned().unwrap_or(Value::Null),
+            "newText": payload.get("new").cloned().unwrap_or(Value::Null),
+            crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY: payload
+                .get(crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY)
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+        });
+        let text = successful_text(self.edit.as_ref(), args).await?;
+        let (summary, diff) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+        let path = payload
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        self.record_diff(origin(payload), path, diff.to_string());
+        Ok(json!({ "summary": summary }))
+    }
+}
+
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
     fn cancellable(&self, kind: &str) -> bool {
@@ -219,41 +297,7 @@ impl HostRequestHandler for MushHost {
 
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
         match kind {
-            "bash.start" => {
-                let command = payload
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .ok_or("bash needs a command")?;
-                let timeout = match payload.get("timeout") {
-                    None | Some(Value::Null) => None,
-                    Some(value) => Some(
-                        value
-                            .as_f64()
-                            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-                            .map(Duration::from_secs_f64)
-                            .ok_or("timeout must be a positive number of seconds")?,
-                    ),
-                };
-                let origin = payload.get("origin").and_then(Value::as_str);
-                let cwd = payload
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| self.cwd.to_path_buf(), std::path::PathBuf::from);
-                let env: Option<Vec<(String, String)>> =
-                    payload.get("env").and_then(Value::as_object).map(|env| {
-                        env.iter()
-                            .filter_map(|(key, value)| {
-                                Some((key.clone(), value.as_str()?.to_string()))
-                            })
-                            .collect()
-                    });
-                let (job_id, pid) = self
-                    .jobs
-                    .start(&cwd, command, timeout, origin, env.as_deref())
-                    .await
-                    .map_err(HostError)?;
-                Ok(json!({ "job_id": job_id, "pid": pid }))
-            }
+            "bash.start" => self.start_bash(&payload).await,
             "bash.wait" => Ok(job_reply(
                 &self.jobs.wait(job_id(&payload)?).await.map_err(HostError)?,
             )),
@@ -282,54 +326,13 @@ impl HostRequestHandler for MushHost {
                 self.jobs.kill(job_id(&payload)?).await.map_err(HostError)?;
                 Ok(json!({}))
             }
-            "websearch" => {
-                let tool = read_lock(&self.web_search)
-                    .clone()
-                    .ok_or_else(|| HostError("web search is not available here".into()))?;
-                let result = tool.execute(payload).await;
-                let text = extract_text(&result);
-                if !result.outcome.is_success() {
-                    return Err(HostError(text));
-                }
-                Ok(json!({ "text": text }))
-            }
-            "edit" => {
-                let args = json!({
-                    "path": payload.get("path").cloned().unwrap_or(Value::Null),
-                    "oldText": payload.get("old").cloned().unwrap_or(Value::Null),
-                    "newText": payload.get("new").cloned().unwrap_or(Value::Null),
-                    crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY: payload
-                        .get(crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY)
-                        .cloned()
-                        .unwrap_or(Value::Bool(false)),
-                });
-                let result = self.edit.execute(args).await;
-                let text = extract_text(&result);
-                if !result.outcome.is_success() {
-                    return Err(HostError(text));
-                }
-                let (summary, diff) = text.split_once('\n').unwrap_or((text.as_str(), ""));
-                let path = payload
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                self.record_diff(
-                    payload.get("origin").and_then(Value::as_str),
-                    path,
-                    diff.to_string(),
-                );
-                Ok(json!({ "summary": summary }))
-            }
+            "websearch" => self.search_web(payload).await,
+            "edit" => self.apply_edit(&payload).await,
             other => match self.extension() {
                 Some(extension) => {
                     let reply = extension.handle(other, payload.clone()).await?;
                     if other == "agent_message.send" {
-                        self.record_sent(
-                            payload.get("origin").and_then(Value::as_str),
-                            &payload,
-                            &reply,
-                        );
+                        self.record_sent(origin(&payload), &payload, &reply);
                     }
                     Ok(reply)
                 }
