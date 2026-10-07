@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,72 +18,28 @@ pub struct Package {
     pub label: &'static str,
 }
 
+const fn package(spec: &'static str, import_name: &'static str, label: &'static str) -> Package {
+    Package {
+        spec,
+        import_name,
+        label,
+    }
+}
+
 pub const DEFAULT_PACKAGES: &[Package] = &[
-    Package {
-        spec: "requests",
-        import_name: "requests",
-        label: "requests",
-    },
-    Package {
-        spec: "httpx",
-        import_name: "httpx",
-        label: "httpx",
-    },
-    Package {
-        spec: "pyyaml",
-        import_name: "yaml",
-        label: "yaml (PyYAML)",
-    },
-    Package {
-        spec: "tomli",
-        import_name: "tomli",
-        label: "tomli",
-    },
-    Package {
-        spec: "python-dotenv",
-        import_name: "dotenv",
-        label: "dotenv (python-dotenv)",
-    },
-    Package {
-        spec: "pandas",
-        import_name: "pandas",
-        label: "pandas",
-    },
-    Package {
-        spec: "numpy",
-        import_name: "numpy",
-        label: "numpy",
-    },
-    Package {
-        spec: "scipy",
-        import_name: "scipy",
-        label: "scipy",
-    },
-    Package {
-        spec: "beautifulsoup4",
-        import_name: "bs4",
-        label: "bs4 (Beautiful Soup)",
-    },
-    Package {
-        spec: "lxml",
-        import_name: "lxml",
-        label: "lxml",
-    },
-    Package {
-        spec: "pydantic",
-        import_name: "pydantic",
-        label: "pydantic",
-    },
-    Package {
-        spec: "tyro",
-        import_name: "tyro",
-        label: "tyro",
-    },
-    Package {
-        spec: "dill",
-        import_name: "dill",
-        label: "dill",
-    },
+    package("requests", "requests", "requests"),
+    package("httpx", "httpx", "httpx"),
+    package("pyyaml", "yaml", "yaml (PyYAML)"),
+    package("tomli", "tomli", "tomli"),
+    package("python-dotenv", "dotenv", "dotenv (python-dotenv)"),
+    package("pandas", "pandas", "pandas"),
+    package("numpy", "numpy", "numpy"),
+    package("scipy", "scipy", "scipy"),
+    package("beautifulsoup4", "bs4", "bs4 (Beautiful Soup)"),
+    package("lxml", "lxml", "lxml"),
+    package("pydantic", "pydantic", "pydantic"),
+    package("tyro", "tyro", "tyro"),
+    package("dill", "dill", "dill"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,20 +193,12 @@ impl ManagedVenv {
             marker = Some(fresh);
         }
         let mut marker = marker.unwrap_or_else(|| self.base_marker());
-        let python = self.python_path().to_string_lossy().into_owned();
+        let python = self.python_path();
         for (skill, wanted) in self.stale_skills(Some(&marker)) {
             progress(&format!("installing python skill {}", skill.import_name));
-            let dir = skill.dir.to_string_lossy().into_owned();
-            let args = [
-                "pip",
-                "install",
-                "--quiet",
-                "--python",
-                &python,
-                "--editable",
-                &dir,
-            ];
-            if let Err(error) = run(&uv, &args, &self.dir).await {
+            let mut args = pip_install(&python);
+            args.extend([OsStr::new("--editable"), skill.dir.as_os_str()]);
+            if let Err(error) = run(&uv, &args).await {
                 progress(&format!(
                     "python skill {} failed to install and is unavailable: {error}",
                     skill.import_name
@@ -276,7 +225,13 @@ impl ManagedVenv {
                 self.python_version,
                 self.dir.display()
             ));
-            run(uv, &["venv", "--python", &self.python_version], &self.dir).await?;
+            let venv = [
+                OsStr::new("venv"),
+                OsStr::new("--python"),
+                OsStr::new(&self.python_version),
+                self.dir.as_os_str(),
+            ];
+            run(uv, &venv).await?;
         }
         if !self.packages.is_empty() {
             progress(&format!(
@@ -284,34 +239,38 @@ impl ManagedVenv {
                 self.packages.join(", ")
             ));
             let python = self.python_path();
-            let mut args: Vec<&str> = vec!["pip", "install", "--quiet", "--python"];
-            let python_str = python.to_string_lossy().into_owned();
-            args.push(&python_str);
-            args.extend(self.packages.iter().map(String::as_str));
-            run(uv, &args, &self.dir).await?;
+            let mut args = pip_install(&python);
+            args.extend(self.packages.iter().map(OsStr::new));
+            run(uv, &args).await?;
         }
         Ok(())
     }
 }
 
-async fn run(uv: &Path, args: &[&str], venv_dir: &Path) -> Result<(), KernelError> {
-    let mut command = tokio::process::Command::new(uv);
-    command
+fn pip_install(python: &Path) -> Vec<&OsStr> {
+    let mut args: Vec<&OsStr> = ["pip", "install", "--quiet", "--python"]
+        .map(OsStr::new)
+        .to_vec();
+    args.push(python.as_os_str());
+    args
+}
+
+async fn run(uv: &Path, args: &[&OsStr]) -> Result<(), KernelError> {
+    let output = tokio::process::Command::new(uv)
         .args(args)
         .env("UV_NO_PROGRESS", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    if args.first() == Some(&"venv") {
-        command.arg(venv_dir);
-    }
-    let output = command.output().await?;
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
     if output.status.success() {
         return Ok(());
     }
     Err(KernelError::Bootstrap(format!(
         "uv {} failed: {}",
-        args.first().unwrap_or(&""),
+        args.first()
+            .map_or_else(Default::default, |verb| verb.to_string_lossy()),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
 }
@@ -322,10 +281,7 @@ pub fn find_uv() -> Option<PathBuf> {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(if cfg!(windows) { "uv.exe" } else { "uv" }))
-        .find(|candidate| candidate.is_file())
+    crate::python::find_on_path(if cfg!(windows) { "uv.exe" } else { "uv" })
 }
 
 pub async fn available_imports(python: &Path, names: &[&str]) -> Vec<String> {

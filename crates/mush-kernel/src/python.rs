@@ -31,10 +31,7 @@ impl PythonPlan {
         managed: Option<&crate::venv::ManagedVenv>,
         uv_available: bool,
     ) -> Result<Self, KernelError> {
-        if let Some(path) = explicit {
-            return check(path).map(Self::Explicit);
-        }
-        if let Some(path) = environment {
+        if let Some(path) = explicit.or(environment) {
             return check(path).map(Self::Explicit);
         }
         if let Some(venv) = managed
@@ -42,7 +39,7 @@ impl PythonPlan {
         {
             return Ok(Self::Managed(venv.clone()));
         }
-        resolve_python(None).map(Self::System)
+        system_python().map(Self::System)
     }
 
     pub async fn realise(&self, progress: &(dyn Fn(&str) + Sync)) -> Result<PathBuf, KernelError> {
@@ -67,12 +64,14 @@ impl PythonPlan {
 }
 
 pub fn resolve_python(explicit: Option<&Path>) -> Result<PathBuf, KernelError> {
-    if let Some(path) = explicit {
-        return check(path);
+    let environment = std::env::var_os(PYTHON_ENV);
+    match explicit.or(environment.as_deref().map(Path::new)) {
+        Some(path) => check(path),
+        None => system_python(),
     }
-    if let Some(path) = std::env::var_os(PYTHON_ENV) {
-        return check(Path::new(&path));
-    }
+}
+
+fn system_python() -> Result<PathBuf, KernelError> {
     ["python3", "python"]
         .into_iter()
         .find_map(find_on_path)
@@ -91,7 +90,7 @@ fn check(path: &Path) -> Result<PathBuf, KernelError> {
     }
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join(name))
