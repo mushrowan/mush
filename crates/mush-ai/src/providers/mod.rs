@@ -288,6 +288,22 @@ pub(crate) async fn post_json(
         .await?)
 }
 
+pub(crate) async fn post_json_text(
+    client: &crate::http::HttpClient,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    body: String,
+    call_id: u64,
+) -> Result<reqwest::Response, crate::registry::ProviderError> {
+    Ok(client
+        .post(url)
+        .headers(headers)
+        .body(body)
+        .with_extension(crate::http::WireCallId(call_id))
+        .send()
+        .await?)
+}
+
 pub(crate) async fn stored_oauth_key(
     provider_id: &str,
     account: Option<&AccountLabel>,

@@ -79,12 +79,29 @@ impl RequestFingerprint {
     #[must_use]
     pub fn from_json_sections(system_json: &str, tools_json: &str, messages_json: &str) -> Self {
         let (prefix_json, last_user_json, tail_json) = split_last_user(messages_json);
+        Self::from_split_sections(
+            system_json,
+            tools_json,
+            &prefix_json,
+            &last_user_json,
+            &tail_json,
+        )
+    }
+
+    #[must_use]
+    pub fn from_split_sections(
+        system_json: &str,
+        tools_json: &str,
+        prefix_json: &str,
+        last_user_json: &str,
+        tail_json: &str,
+    ) -> Self {
         Self {
             system: hash_str(&system_without_billing_header(system_json)),
             tools: hash_str(tools_json),
-            messages_prefix: hash_str(&prefix_json),
-            last_user: hash_str(&last_user_json),
-            messages_tail: hash_str(&tail_json),
+            messages_prefix: hash_str(prefix_json),
+            last_user: hash_str(last_user_json),
+            messages_tail: hash_str(tail_json),
         }
     }
 }

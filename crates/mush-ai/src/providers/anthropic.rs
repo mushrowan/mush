@@ -239,12 +239,24 @@ impl ApiProvider for AnthropicProvider {
             url
         };
         let call_id = crate::wire_log::next_call_id();
-        record_request_snapshot(&body, &headers, model, options, is_oauth);
+        let body_json = serde_json::to_string(&body).ok();
+        if let Some(body_json) = &body_json {
+            record_request_snapshot(&body, body_json, &headers, model, options, is_oauth);
+        }
 
         tracing::debug!(model = %model.id, %url, oauth = is_oauth, "sending anthropic request");
 
-        let response =
-            super::post_json(&self.client, &url, headers.clone(), &body, call_id).await?;
+        let send = |headers| {
+            send_request(
+                &self.client,
+                &url,
+                headers,
+                &body,
+                body_json.as_deref(),
+                call_id,
+            )
+        };
+        let response = send(headers.clone()).await?;
 
         let response = if response.status().as_u16() == 401 && is_oauth {
             tracing::warn!(
@@ -263,7 +275,7 @@ impl ApiProvider for AnthropicProvider {
                         headers.insert("authorization", auth);
                     }
                     headers.insert("x-stainless-retry-count", HeaderValue::from_static("1"));
-                    super::post_json(&self.client, &url, headers, &body, call_id).await?
+                    send(headers).await?
                 }
                 None => response,
             }
@@ -284,16 +296,30 @@ impl ApiProvider for AnthropicProvider {
     }
 }
 
+async fn send_request(
+    client: &crate::http::HttpClient,
+    url: &str,
+    headers: HeaderMap,
+    body: &RequestBody,
+    body_json: Option<&str>,
+    call_id: u64,
+) -> Result<reqwest::Response, ProviderError> {
+    match body_json {
+        Some(body_json) => {
+            super::post_json_text(client, url, headers, body_json.to_owned(), call_id).await
+        }
+        None => super::post_json(client, url, headers, body, call_id).await,
+    }
+}
+
 fn record_request_snapshot(
     body: &RequestBody,
+    body_json: &str,
     headers: &HeaderMap,
     model: &Model,
     options: &StreamOptions,
     is_oauth: bool,
 ) {
-    let Ok(body_json) = serde_json::to_string(body) else {
-        return;
-    };
     let system_json = body
         .system
         .as_ref()
@@ -304,12 +330,7 @@ fn record_request_snapshot(
         .as_ref()
         .and_then(|t| serde_json::to_string(t).ok())
         .unwrap_or_default();
-    let messages_json = serde_json::to_string(&body.messages).unwrap_or_default();
-    let fp = crate::request_snapshot::RequestFingerprint::from_json_sections(
-        &system_json,
-        &tools_json,
-        &messages_json,
-    );
+    let fp = messages_fingerprint(&system_json, &tools_json, &body.messages);
     tracing::info!(
         system = fp.system,
         tools = fp.tools,
@@ -323,7 +344,7 @@ fn record_request_snapshot(
         "anthropic",
         session,
         &fp,
-        &body_json,
+        body_json,
         &crate::http::header_pairs(headers),
     );
     let ttl_secs =
@@ -416,6 +437,64 @@ enum ThinkingConfig {
         #[serde(skip_serializing_if = "String::is_empty")]
         display: String,
     },
+}
+
+fn messages_fingerprint(
+    system_json: &str,
+    tools_json: &str,
+    messages: &[RequestMessage],
+) -> crate::request_snapshot::RequestFingerprint {
+    fn json(messages: &[RequestMessage]) -> String {
+        let sorted: Vec<_> = messages
+            .iter()
+            .map(RequestMessage::with_sorted_keys)
+            .collect();
+        serde_json::to_string(&sorted).unwrap_or_default()
+    }
+    let (prefix, last_user, tail) = match messages.iter().rposition(RequestMessage::opens_user_turn)
+    {
+        Some(index) => (
+            json(&messages[..index]),
+            serde_json::to_string(&messages[index].with_sorted_keys()).unwrap_or_default(),
+            json(&messages[index + 1..]),
+        ),
+        None => (
+            serde_json::to_string(messages).unwrap_or_default(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    crate::request_snapshot::RequestFingerprint::from_split_sections(
+        system_json,
+        tools_json,
+        &prefix,
+        &last_user,
+        &tail,
+    )
+}
+
+#[derive(Serialize)]
+struct SortedRequestMessage<'a> {
+    content: &'a serde_json::Value,
+    role: &'static str,
+}
+
+impl RequestMessage {
+    fn with_sorted_keys(&self) -> SortedRequestMessage<'_> {
+        SortedRequestMessage {
+            content: &self.content,
+            role: self.role,
+        }
+    }
+
+    fn opens_user_turn(&self) -> bool {
+        self.role == "user"
+            && !self.content.as_array().is_some_and(|blocks| {
+                blocks.iter().any(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+                })
+            })
+    }
 }
 
 #[derive(Serialize)]
@@ -2422,6 +2501,47 @@ mod tests {
                     {"type": "text", "text": "private chain"},
                     {"type": "text", "text": "answer"},
                 ])
+            );
+        }
+    }
+
+    #[test]
+    fn the_messages_fingerprint_matches_hashing_the_serialised_messages() {
+        let messages = [
+            RequestMessage {
+                role: "user",
+                content: serde_json::json!("first question"),
+            },
+            RequestMessage {
+                role: "assistant",
+                content: serde_json::json!([
+                    {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls", "cwd": "/"}}
+                ]),
+            },
+            RequestMessage {
+                role: "user",
+                content: serde_json::json!([
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok \u{e9} \"quoted\""}
+                ]),
+            },
+            RequestMessage {
+                role: "user",
+                content: serde_json::json!([{"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}}]),
+            },
+            RequestMessage {
+                role: "assistant",
+                content: serde_json::json!([{"type": "text", "text": "answer"}]),
+            },
+        ];
+        for messages in [&messages[..], &messages[1..3], &[]] {
+            let serialised = serde_json::to_string(messages).unwrap();
+            assert_eq!(
+                messages_fingerprint("[]", "[]", messages),
+                crate::request_snapshot::RequestFingerprint::from_json_sections(
+                    "[]",
+                    "[]",
+                    &serialised
+                )
             );
         }
     }
