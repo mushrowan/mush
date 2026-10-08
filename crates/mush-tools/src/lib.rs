@@ -73,52 +73,6 @@ pub(crate) mod test_env {
     }
 }
 
-#[deprecated(note = "use Model::uses_patch_tool() instead")]
-pub fn uses_patch_tool(model_id: &str) -> bool {
-    model_id.contains("gpt-") && !model_id.contains("oss") && !model_id.contains("gpt-4")
-}
-
-#[deprecated(note = "use Model::supports_native_parallel_calls() instead")]
-pub fn supports_native_parallel_calls(model_id: &str) -> bool {
-    model_id.contains("gpt-")
-        || model_id.contains("codex")
-        || model_id.starts_with("o1")
-        || model_id.starts_with("o3")
-        || model_id.starts_with("o4")
-}
-
-pub fn builtin_tools(cwd: Arc<Path>, http_client: mush_ai::http::HttpClient) -> ToolRegistry {
-    let mut tools = builtin_tools_with_options(
-        cwd,
-        None,
-        false,
-        http_client,
-        Default::default(),
-        None,
-        Default::default(),
-    );
-    add_batch_tool(&mut tools);
-    tools
-}
-
-pub fn builtin_tools_with_sink(
-    cwd: Arc<Path>,
-    output_sink: Option<bash::OutputSink>,
-    http_client: mush_ai::http::HttpClient,
-) -> ToolRegistry {
-    let mut tools = builtin_tools_with_options(
-        cwd,
-        output_sink,
-        false,
-        http_client,
-        Default::default(),
-        None,
-        Default::default(),
-    );
-    add_batch_tool(&mut tools);
-    tools
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn builtin_tools_with_options(
     cwd: Arc<Path>,
