@@ -70,18 +70,6 @@ impl LspRegistry {
         self.wait_and_get_diagnostics(language, path).await
     }
 
-    pub async fn has_server_for(&self, language: Language) -> bool {
-        self.clients.lock().await.contains_key(&language)
-    }
-
-    pub async fn shutdown_all(self) {
-        for (lang, client) in self.clients.into_inner() {
-            if let Err(e) = client.shutdown().await {
-                tracing::warn!("failed to shut down {lang:?} LSP server: {e}");
-            }
-        }
-    }
-
     async fn wait_and_get_diagnostics(
         &self,
         language: Language,
@@ -136,12 +124,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_new() {
-        let reg = LspRegistry::new(PathBuf::from("/tmp"));
-        assert_eq!(reg.root, PathBuf::from("/tmp"));
-    }
-
-    #[test]
     fn add_override() {
         let mut reg = LspRegistry::new(PathBuf::from("/tmp"));
         reg.add_override(ServerConfig {
@@ -150,11 +132,5 @@ mod tests {
             args: vec![],
         });
         assert!(reg.overrides.contains_key(&Language::Rust));
-    }
-
-    #[tokio::test]
-    async fn has_server_for_initially_false() {
-        let reg = LspRegistry::new(PathBuf::from("/tmp"));
-        assert!(!reg.has_server_for(Language::Rust).await);
     }
 }

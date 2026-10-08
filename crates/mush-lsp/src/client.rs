@@ -179,12 +179,6 @@ impl LspClient {
         let diags = self.diagnostics.lock().await;
         Ok(diags.get(&uri).cloned().unwrap_or_default())
     }
-
-    pub async fn shutdown(self) -> Result<(), LspError> {
-        let _ = self.request("shutdown", Value::Null).await;
-        let _ = self.notify("exit", Value::Null).await;
-        Ok(())
-    }
 }
 
 pub fn format_diagnostics(path: &Path, diagnostics: &[Diagnostic]) -> String {

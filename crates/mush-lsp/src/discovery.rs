@@ -27,24 +27,6 @@ const KNOWN_SERVERS: &[(&str, Language, &[&str])] = &[
     ("bash-language-server", Language::Bash, &["start"]),
 ];
 
-pub fn discover() -> Vec<ServerConfig> {
-    let dirs = path_dirs();
-    let mut found: Vec<ServerConfig> = Vec::new();
-    let mut seen_languages = std::collections::HashSet::new();
-
-    for &(binary, language, args) in KNOWN_SERVERS {
-        if seen_languages.contains(&language) {
-            continue;
-        }
-        if is_in_path(binary, &dirs) {
-            seen_languages.insert(language);
-            found.push(ServerConfig::from_known(binary, language, args));
-        }
-    }
-
-    found
-}
-
 pub fn discover_for_language(language: Language) -> Option<ServerConfig> {
     let dirs = path_dirs();
 
@@ -87,21 +69,14 @@ mod tests {
     }
 
     #[test]
-    fn discover_returns_at_most_one_per_language() {
-        let servers = discover();
-        let mut seen = std::collections::HashSet::new();
-        for s in &servers {
-            assert!(
-                seen.insert(s.language),
-                "duplicate language: {:?}",
-                s.language
-            );
-        }
-    }
-
-    #[test]
-    fn is_in_path_works() {
-        let dirs = vec![PathBuf::from("/usr/bin")];
-        let _ = is_in_path("sh", &dirs);
+    fn is_in_path_finds_only_files() {
+        let exe = std::env::current_exe().unwrap();
+        let dir = exe.parent().unwrap();
+        let grandparent = dir.parent().unwrap();
+        let exe_name = exe.file_name().unwrap().to_str().unwrap();
+        let dir_name = dir.file_name().unwrap().to_str().unwrap();
+        assert!(is_in_path(exe_name, &[dir.to_path_buf()]));
+        assert!(!is_in_path(dir_name, &[grandparent.to_path_buf()]));
+        assert!(!is_in_path("no-such-lsp-server", &[dir.to_path_buf()]));
     }
 }
