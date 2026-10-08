@@ -87,7 +87,7 @@ printf '{"session_id":"fixture","state":"completed"}\n' >"$status"
 
 #[tokio::test]
 async fn restarting_preserves_exhausted_rate_limit_budget() {
-    let fixture = Fixture::new(&format!("{ARGUMENTS}\necho 'rate_limit' >&2\nexit 1"), 2);
+    let fixture = Fixture::new(&format!("{ARGUMENTS}\necho 'rate_limit' >&2\nexit 1"), 10);
     fs::create_dir_all(fixture.run.join("test")).unwrap();
     fs::write(
         fixture.run.join("test/state.json"),
