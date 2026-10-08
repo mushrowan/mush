@@ -96,13 +96,17 @@ impl AgentTool for FindTool {
             .map(|path| resolve_path(&self.cwd, path))
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
-        run_find(
-            &self.cwd,
-            &args.pattern,
-            &search_path,
-            args.type_filter,
-            args.include_ignored,
-        )
+        let cwd = Arc::clone(&self.cwd);
+        crate::util::run_blocking(move || {
+            run_find(
+                &cwd,
+                &args.pattern,
+                &search_path,
+                args.type_filter,
+                args.include_ignored,
+            )
+        })
+        .await
     }
 }
 
@@ -155,21 +159,16 @@ fn collect_matches(
     matcher: &grep_regex::RegexMatcher,
     include_ignored: bool,
 ) -> Vec<PathMatch> {
-    let mut matches = Vec::new();
-    for entry in walk::walk(search_path, include_ignored).filter_map(Result::ok) {
+    let mut matches = walk::collect(search_path, include_ignored, |entry| {
         if !matches_type(entry.file_type(), type_filter) {
-            continue;
+            return None;
         }
-
-        let Some(name) = entry.file_name().to_str() else {
-            continue;
-        };
+        let name = entry.file_name().to_str()?;
         if !grep_matcher::Matcher::is_match(matcher, name.as_bytes()).unwrap_or(false) {
-            continue;
+            return None;
         }
-
-        matches.push(PathMatch::new(cwd, search_path, entry.into_path()));
-    }
+        Some(PathMatch::new(cwd, search_path, entry.into_path()))
+    });
     matches.sort_by(|left, right| left.display.cmp(&right.display));
     matches
 }

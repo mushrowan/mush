@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ignore::{Walk, WalkBuilder};
+use std::sync::Mutex;
 
-use crate::util::truncate_lines;
+use ignore::{DirEntry, WalkBuilder, WalkState};
+
+use crate::util::{lock, truncate_lines};
 
 const MAX_IGNORED_SUMMARIES: usize = 20;
 const MAX_IGNORED_SUMMARY_MATCHES: usize = 500;
@@ -28,7 +30,12 @@ impl PathMatch {
     }
 }
 
-pub(crate) fn walk(search_dir: &Path, include_ignored: bool) -> Walk {
+pub(crate) fn collect<T: Send>(
+    search_dir: &Path,
+    include_ignored: bool,
+    visit: impl Fn(DirEntry) -> Option<T> + Sync,
+) -> Vec<T> {
+    let found = Mutex::new(Vec::new());
     WalkBuilder::new(search_dir)
         .hidden(!include_ignored)
         .ignore(!include_ignored)
@@ -37,7 +44,18 @@ pub(crate) fn walk(search_dir: &Path, include_ignored: bool) -> Walk {
         .git_global(!include_ignored)
         .parents(true)
         .require_git(false)
-        .build()
+        .build_parallel()
+        .run(|| {
+            Box::new(|entry| {
+                if let Some(item) = entry.ok().and_then(&visit) {
+                    lock(&found).push(item);
+                }
+                WalkState::Continue
+            })
+        });
+    found
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) fn render(

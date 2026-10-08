@@ -82,7 +82,11 @@ impl AgentTool for GlobTool {
             .map(|path| resolve_path(&self.cwd, path))
             .unwrap_or_else(|| self.cwd.to_path_buf());
 
-        run_glob(&self.cwd, &args.pattern, &search_dir, args.include_ignored)
+        let cwd = Arc::clone(&self.cwd);
+        crate::util::run_blocking(move || {
+            run_glob(&cwd, &args.pattern, &search_dir, args.include_ignored)
+        })
+        .await
     }
 }
 
@@ -116,29 +120,26 @@ fn collect_matches(
     glob: &globset::GlobMatcher,
     include_ignored: bool,
 ) -> Vec<PathMatch> {
-    let mut matches = Vec::new();
-    for entry in walk::walk(search_dir, include_ignored).filter_map(Result::ok) {
+    let mut matches = walk::collect(search_dir, include_ignored, |entry| {
         if !entry
             .file_type()
             .is_some_and(|file_type| file_type.is_file())
         {
-            continue;
+            return None;
         }
-
         let relative = entry
             .path()
             .strip_prefix(search_dir)
             .unwrap_or(entry.path());
         if !glob.is_match(relative) {
-            continue;
+            return None;
         }
-
         let modified = entry
             .metadata()
             .ok()
             .and_then(|metadata| metadata.modified().ok());
-        matches.push((modified, PathMatch::new(cwd, search_dir, entry.into_path())));
-    }
+        Some((modified, PathMatch::new(cwd, search_dir, entry.into_path())))
+    });
 
     matches.sort_by(|(left_modified, left), (right_modified, right)| {
         right_modified
