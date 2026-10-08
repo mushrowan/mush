@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -388,15 +389,8 @@ async fn sleep_or_stop(seconds: u64, stop: &mut watch::Receiver<bool>) {
     }
 }
 
-async fn worker(
-    manifest: Arc<Manifest>,
-    job: Worker,
-    permits: Arc<Semaphore>,
-    mut stop: watch::Receiver<bool>,
-) -> Result<()> {
-    let dir = manifest.directory.join(&job.name);
-    follow_up::recover(&manifest.directory, &job.name)?;
-    fs::create_dir_all(&dir)?;
+fn worker_data(manifest: &Manifest, dir: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(dir)?;
     let data = dir.join("mush-data");
     fs::create_dir_all(&data)?;
     if manifest.admission.is_some() {
@@ -408,6 +402,55 @@ async fn worker(
             fs::copy(discovery, data.join("discovered-models.json"))?;
         }
     }
+    Ok(data)
+}
+
+fn round_prompt(
+    manifest: &Manifest,
+    job: &Worker,
+    dir: &Path,
+    round: u32,
+    assignment: u32,
+) -> Result<(String, Vec<PathBuf>)> {
+    let base = fs::read_to_string(&job.prompt)?;
+    let mut prompt = prompts::assignment(&base, round, &job.report, manifest.until);
+    if manifest.journalled() {
+        prompt.push_str(&format!("\n\nwrite an owner-only json report at {} with these exact identity fields: {}. set state to working, done, blocked or awaiting_input. done means this assignment is complete. blocked means a prerequisite is unavailable. awaiting_input means a decision is needed.", job.report.display(), json!({"run_id": events::run_id(manifest)?, "worker_id":job.name, "assignment_id":assignment, "round":round})));
+    }
+    if let Some(follow_up) = follow_up::instructions(dir, round)? {
+        prompt.push_str("\n\nexplicit follow-up assignment. the previous completed task remains in history. work on this assignment within the existing permissions, then update your report:\n");
+        prompt.push_str(&follow_up);
+    }
+    let messages = poke::messages(&manifest.directory, &job.name)?;
+    for path in &messages {
+        prompt.push_str("\n\ncoordinator task update (within original scope only):\n");
+        prompt.push_str(&fs::read_to_string(path)?);
+    }
+    Ok((prompt, messages))
+}
+
+fn inherit_across_exec(cmd: &mut Command, fds: Vec<RawFd>) {
+    unsafe {
+        cmd.pre_exec(move || {
+            for fd in &fds {
+                if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+async fn worker(
+    manifest: Arc<Manifest>,
+    job: Worker,
+    permits: Arc<Semaphore>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<()> {
+    let dir = manifest.directory.join(&job.name);
+    follow_up::recover(&manifest.directory, &job.name)?;
+    let data = worker_data(&manifest, &dir)?;
     let state_path = dir.join("state.json");
     events::recover(&manifest, &job)?;
     let previous = read_json(&state_path);
@@ -570,20 +613,7 @@ async fn worker(
                 }
             }
         }
-        let base = fs::read_to_string(&job.prompt)?;
-        let mut prompt = prompts::assignment(&base, round, &job.report, manifest.until);
-        if manifest.journalled() {
-            prompt.push_str(&format!("\n\nwrite an owner-only json report at {} with these exact identity fields: {}. set state to working, done, blocked or awaiting_input. done means this assignment is complete. blocked means a prerequisite is unavailable. awaiting_input means a decision is needed.", job.report.display(), json!({"run_id": events::run_id(&manifest)?, "worker_id":job.name, "assignment_id":assignment, "round":round})));
-        }
-        if let Some(follow_up) = follow_up::instructions(&dir, round)? {
-            prompt.push_str("\n\nexplicit follow-up assignment. the previous completed task remains in history. work on this assignment within the existing permissions, then update your report:\n");
-            prompt.push_str(&follow_up);
-        }
-        let messages = poke::messages(&manifest.directory, &job.name)?;
-        for path in &messages {
-            prompt.push_str("\n\ncoordinator task update (within original scope only):\n");
-            prompt.push_str(&fs::read_to_string(path)?);
-        }
+        let (prompt, messages) = round_prompt(&manifest, &job, &dir, round, assignment)?;
         let log_path = dir.join(format!("round-{round:03}.log"));
         let headless_status = dir.join(format!("round-{round:03}.json"));
         if manifest.journalled() && headless_status.exists() {
@@ -625,17 +655,15 @@ async fn worker(
         } else {
             None
         };
-        use std::os::fd::AsRawFd;
-        let mut inherited_fds = Vec::new();
-        if let Some(file) = &execution {
-            inherited_fds.push(file.as_raw_fd());
-        }
-        if let Some(file) = &manifest.run_lease {
-            inherited_fds.push(file.as_raw_fd());
-        }
-        if let Some(file) = &claim_guard {
-            inherited_fds.push(file.as_raw_fd());
-        }
+        let mut inherited_fds: Vec<_> = [
+            execution.as_deref(),
+            manifest.run_lease.as_deref(),
+            claim_guard.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(AsRawFd::as_raw_fd)
+        .collect();
         match &session_lease {
             Some(lease) => {
                 let fd = lease.as_raw_fd();
@@ -646,16 +674,7 @@ async fn worker(
                 cmd.env_remove("MUSH_SESSION_LEASE_FD");
             }
         }
-        unsafe {
-            cmd.pre_exec(move || {
-                for fd in &inherited_fds {
-                    if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
+        inherit_across_exec(&mut cmd, inherited_fds);
         cmd.arg("-p").arg(prompt);
         save(&progress, "running", round, "", None)?;
         if manifest.journalled() {
@@ -861,8 +880,8 @@ async fn worker(
         if detail.is_empty() {
             detail = failure.map_or_else(String::new, |f| format!("{f:?}"));
         }
-        let reason = (action == Action::Stop).then(|| {
-            if timed_out {
+        if action == Action::Stop {
+            let reason = if timed_out {
                 TerminalReason::Timeout
             } else if child_survived {
                 TerminalReason::ChildSurvived
@@ -872,38 +891,24 @@ async fn worker(
                 TerminalReason::Failed
             } else {
                 events::saved_reason(state).unwrap_or(TerminalReason::Failed)
-            }
-        });
-        save(&progress, state, round, &detail, reason)?;
-        if action == Action::Stop {
+            };
+            save(&progress, state, round, &detail, Some(reason))?;
             return Ok(());
         }
-        sleep_or_stop(
-            if action == Action::Retry {
-                let seconds = if failure == Some(Failure::Transport) {
-                    2
-                } else {
-                    60
-                };
-                seconds * u64::from(progress.retries)
-            } else {
-                job.pause_seconds
-            },
-            &mut stop,
-        )
-        .await;
+        save(&progress, state, round, &detail, None)?;
+        let pause = match (action, failure) {
+            (Action::Retry, Some(Failure::Transport)) => 2 * u64::from(progress.retries),
+            (Action::Retry, _) => 60 * u64::from(progress.retries),
+            _ => job.pause_seconds,
+        };
+        sleep_or_stop(pause, &mut stop).await;
     }
-    let reason = if Utc::now() >= manifest.until {
-        TerminalReason::Deadline
+    let (reason, detail) = if Utc::now() >= manifest.until {
+        (TerminalReason::Deadline, "deadline")
     } else if *stop.borrow() {
-        TerminalReason::Cancelled
+        (TerminalReason::Cancelled, "cancelled")
     } else {
-        TerminalReason::RoundLimit
-    };
-    let detail = match reason {
-        TerminalReason::Deadline => "deadline",
-        TerminalReason::Cancelled => "cancelled",
-        _ => "round limit",
+        (TerminalReason::RoundLimit, "round limit")
     };
     save(&progress, "stopped", last_round, detail, Some(reason))?;
     Ok(())
