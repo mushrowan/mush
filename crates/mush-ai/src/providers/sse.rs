@@ -52,46 +52,56 @@ impl SseParser {
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SseRawEvent> {
-        self.chunk_buf.extend_from_slice(bytes);
+        let Self {
+            chunk_buf,
+            line_buf,
+            event_name,
+        } = self;
+        let mut search = chunk_buf.len();
+        chunk_buf.extend_from_slice(bytes);
         let mut events = Vec::new();
+        let mut start = 0;
 
-        while let Some(newline_pos) = self.chunk_buf.iter().position(|&b| b == b'\n') {
-            let line = String::from_utf8_lossy(&self.chunk_buf[..newline_pos]).to_string();
-            self.chunk_buf.drain(..=newline_pos);
+        while let Some(offset) = chunk_buf[search..].iter().position(|&b| b == b'\n') {
+            let end = search + offset;
+            let line = String::from_utf8_lossy(&chunk_buf[start..end]);
+            start = end + 1;
+            search = start;
             let line = line.trim_end_matches('\r');
 
             if line.is_empty() {
-                if !self.line_buf.is_empty() {
+                if !line_buf.is_empty() {
                     events.push(SseRawEvent {
-                        event: self.event_name.take(),
-                        data: std::mem::take(&mut self.line_buf),
+                        event: event_name.take(),
+                        data: std::mem::take(line_buf),
                     });
                 } else {
-                    self.event_name = None;
+                    *event_name = None;
                 }
                 continue;
             }
 
             if let Some(rest) = line.strip_prefix("event:") {
-                self.event_name = Some(rest.trim().to_string());
+                *event_name = Some(rest.trim().to_string());
                 continue;
             }
 
             if let Some(rest) = line.strip_prefix("data:") {
                 let data = rest.strip_prefix(' ').unwrap_or(rest);
-                if !self.line_buf.is_empty() {
-                    self.line_buf.push('\n');
+                if !line_buf.is_empty() {
+                    line_buf.push('\n');
                 }
-                self.line_buf.push_str(data);
+                line_buf.push_str(data);
                 continue;
             }
 
-            if !self.line_buf.is_empty() {
-                self.line_buf.push('\n');
+            if !line_buf.is_empty() {
+                line_buf.push('\n');
             }
-            self.line_buf.push_str(line);
+            line_buf.push_str(line);
         }
 
+        chunk_buf.drain(..start);
         events
     }
 
@@ -351,6 +361,28 @@ mod tests {
         let events = parser.push(b"data: hello\r\n\r\n");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "hello");
+    }
+
+    #[test]
+    fn byte_by_byte_delivery_matches_one_push() {
+        let stream = "event: a\ndata: h\u{e9}llo\r\n\ndata: one\ndata: two\n\nevent: b\ndata: tail\n\ndata: open";
+        let whole = SseParser::new().push(stream.as_bytes());
+        let mut parser = SseParser::new();
+        let split: Vec<_> = stream
+            .as_bytes()
+            .chunks(1)
+            .flat_map(|byte| parser.push(byte))
+            .collect();
+        let pairs = |events: &[SseRawEvent]| {
+            events
+                .iter()
+                .map(|event| (event.event.clone(), event.data.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairs(&split), pairs(&whole));
+        assert_eq!(whole.len(), 3);
+        assert_eq!(whole[0].data, "h\u{e9}llo");
+        assert_eq!(parser.buffered_bytes(), b"data: open");
     }
 
     #[test]
