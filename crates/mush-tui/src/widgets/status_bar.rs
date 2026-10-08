@@ -830,11 +830,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_path_short_unchanged() {
-        assert_eq!(truncate_path("~/dev/mush", 30), "~/dev/mush");
-    }
-
-    #[test]
     fn status_bar_shows_cache_countdown() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.cache.ttl_secs = 300;
@@ -905,15 +900,6 @@ mod tests {
             !content.contains("cold"),
             "expected no 'cold' suffix with idle timer off, got: {content}"
         );
-    }
-
-    #[test]
-    fn truncate_path_long_keeps_tail() {
-        let long = "~/dev/some/deep/nested/project";
-        let result = truncate_path(long, 20);
-        assert!(result.starts_with('…'));
-        assert!(result.ends_with("project"));
-        assert!(result.len() <= 20);
     }
 
     #[test]

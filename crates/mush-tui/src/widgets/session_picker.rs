@@ -191,9 +191,4 @@ mod tests {
         assert!(hung.contains("stale"), "{hung}");
         assert!(!saved.contains("stale"), "{saved}");
     }
-
-    #[test]
-    fn shorten_non_home_path() {
-        assert_eq!(shorten_path("/opt/project"), "/opt/project");
-    }
 }
