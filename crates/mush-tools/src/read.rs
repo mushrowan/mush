@@ -390,66 +390,97 @@ fn read_file(
     }
     let content_max = MAX_LINES - CONTENT_LINE_HEADROOM;
     let max_lines = limit.unwrap_or(content_max).min(content_max);
-
-    let mut result = String::new();
-    let mut bytes_written = 0;
-    let mut lines_written = 0;
-    let mut truncated = false;
-
-    for (i, line) in lines.iter().enumerate().skip(start) {
-        if lines_written >= max_lines || bytes_written >= MAX_BYTES {
-            truncated = true;
-            break;
-        }
-
-        if !result.is_empty() {
-            result.push('\n');
-            bytes_written += 1;
-        }
-
-        let line_num = i + 1;
-        let display_line = truncate_line(line, MAX_LINE_CHARS);
-        let formatted = format!("L{line_num}: {display_line}");
-        result.push_str(&formatted);
-        bytes_written += formatted.len();
-        lines_written += 1;
-    }
+    let Window {
+        mut text,
+        lines_written,
+        truncated,
+    } = numbered_window(&lines, start, max_lines);
+    let end_line = start + lines_written;
 
     if truncated {
-        let end_line = start + lines_written;
         let next_offset = end_line + 1;
         let remaining = total_lines - end_line;
-        result.push_str(&format!(
+        text.push_str(&format!(
             "\n\n[{remaining} more lines in file. Use offset={next_offset} to continue]",
         ));
     }
 
     if json_output {
-        let end_line = start + lines_written;
-        let meta = std::fs::metadata(path);
-        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let modified = meta
-            .as_ref()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
-        let mut json = serde_json::json!({
-            "path": path.display().to_string(),
-            "total_lines": total_lines,
-            "start_line": start + 1,
-            "end_line": end_line,
-            "truncated": truncated,
-            "size_bytes": size,
-            "content": result,
-        });
-        if let Some(mtime) = modified {
-            json["modified_epoch"] = serde_json::json!(mtime);
-        }
-        ToolResult::text(json.to_string())
+        ToolResult::text(
+            json_read(path, total_lines, start + 1, end_line, truncated, text).to_string(),
+        )
     } else {
-        ToolResult::text(result)
+        ToolResult::text(text)
     }
+}
+
+struct Window {
+    text: String,
+    lines_written: usize,
+    truncated: bool,
+}
+
+fn numbered_window(lines: &[&str], start: usize, max_lines: usize) -> Window {
+    let mut text = String::new();
+    let mut bytes_written = 0;
+    let mut lines_written = 0;
+
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        if lines_written >= max_lines || bytes_written >= MAX_BYTES {
+            return Window {
+                text,
+                lines_written,
+                truncated: true,
+            };
+        }
+
+        if !text.is_empty() {
+            text.push('\n');
+            bytes_written += 1;
+        }
+
+        let formatted = format!("L{}: {}", i + 1, truncate_line(line, MAX_LINE_CHARS));
+        text.push_str(&formatted);
+        bytes_written += formatted.len();
+        lines_written += 1;
+    }
+
+    Window {
+        text,
+        lines_written,
+        truncated: false,
+    }
+}
+
+fn json_read(
+    path: &Path,
+    total_lines: usize,
+    start_line: usize,
+    end_line: usize,
+    truncated: bool,
+    content: String,
+) -> serde_json::Value {
+    let meta = std::fs::metadata(path);
+    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = meta
+        .as_ref()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let mut json = serde_json::json!({
+        "path": path.display().to_string(),
+        "total_lines": total_lines,
+        "start_line": start_line,
+        "end_line": end_line,
+        "truncated": truncated,
+        "size_bytes": size,
+        "content": content,
+    });
+    if let Some(mtime) = modified {
+        json["modified_epoch"] = serde_json::json!(mtime);
+    }
+    json
 }
 
 pub(crate) const DEFAULT_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
