@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use super::cache::DiscoveryCache;
+use crate::models::FileStamp;
 use crate::types::{Model, ModelCost};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,29 +99,61 @@ fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost 
     }
 }
 
-#[must_use]
-pub fn merged_catalogue() -> Vec<MergedModel> {
+struct Catalogue {
+    stamps: (FileStamp, FileStamp),
+    models: Arc<[MergedModel]>,
+}
+
+static CATALOGUE: LazyLock<Mutex<Option<Catalogue>>> = LazyLock::new(|| Mutex::new(None));
+
+fn catalogue() -> Arc<[MergedModel]> {
+    let stamps = (
+        FileStamp::of(super::cache::cache_path()),
+        crate::models::user_models_stamp(),
+    );
+    if let Ok(cached) = CATALOGUE.lock()
+        && let Some(cached) = cached.as_ref()
+        && cached.stamps == stamps
+    {
+        return Arc::clone(&cached.models);
+    }
     let seed = crate::models::all_models();
     let overrides = crate::models::model_overrides();
-    let cache = DiscoveryCache::load(&super::cache::cache_path()).unwrap_or_default();
-    merge(seed, &cache, overrides)
+    let cache = DiscoveryCache::load(&stamps.0.path).unwrap_or_default();
+    let models: Arc<[MergedModel]> = merge(seed, &cache, overrides).into();
+    if let Ok(mut cached) = CATALOGUE.lock() {
+        *cached = Some(Catalogue {
+            stamps,
+            models: Arc::clone(&models),
+        });
+    }
+    models
+}
+
+#[must_use]
+pub fn merged_catalogue() -> Vec<MergedModel> {
+    catalogue().to_vec()
 }
 
 #[must_use]
 pub fn merged_models() -> Vec<Model> {
-    merged_catalogue().into_iter().map(|m| m.model).collect()
+    catalogue().iter().map(|m| m.model.clone()).collect()
 }
 
 #[must_use]
 pub fn find_merged_model_by_id(id: &str) -> Option<MergedModel> {
-    merged_catalogue()
-        .into_iter()
+    catalogue()
+        .iter()
         .find(|m| m.model.id.as_str() == id)
+        .cloned()
 }
 
 #[must_use]
 pub fn resolve_model_by_id(id: &str) -> Option<Model> {
-    find_merged_model_by_id(id).map(|m| m.model)
+    catalogue()
+        .iter()
+        .find(|m| m.model.id.as_str() == id)
+        .map(|m| m.model.clone())
 }
 
 #[cfg(test)]
@@ -337,5 +371,28 @@ mod tests {
         let merged = merge(vec![seed], &cache, vec![]);
         assert_eq!(merged[0].source, ModelSource::Discovered);
         assert_eq!(merged[0].model.context_window, TokenCount::new(1_000_000));
+    }
+
+    #[test]
+    fn resolving_a_model_follows_a_rewritten_discovery_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", dir.path());
+            std::env::set_var("MUSH_CONFIG_DIR", dir.path());
+        }
+        assert!(resolve_model_by_id("found-later").is_none());
+
+        let mut cache = DiscoveryCache::default();
+        cache.apply_report(DiscoveryReport {
+            provider: Provider::Anthropic,
+            fetched_at: SystemTime::UNIX_EPOCH + Duration::from_secs(100),
+            models: vec![anthropic_model("found-later", "Found Later", 1.0).into()],
+        });
+        cache.save(&super::super::cache::cache_path()).unwrap();
+
+        assert_eq!(
+            resolve_model_by_id("found-later").map(|model| model.name),
+            Some("Found Later".to_string())
+        );
     }
 }

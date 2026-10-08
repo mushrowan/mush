@@ -6,11 +6,29 @@ use crate::types::{
     Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage,
 };
 
-#[derive(Debug, Clone)]
-struct UserModelsCache {
-    path: PathBuf,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FileStamp {
+    pub(crate) path: PathBuf,
     modified: Option<SystemTime>,
     size: Option<u64>,
+}
+
+impl FileStamp {
+    pub(crate) fn of(path: PathBuf) -> Self {
+        let metadata = std::fs::metadata(&path).ok();
+        Self {
+            modified: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            size: metadata.as_ref().map(std::fs::Metadata::len),
+            path,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UserModelsCache {
+    stamp: FileStamp,
     models: Vec<Model>,
 }
 
@@ -517,37 +535,32 @@ pub fn find_model_by_id(id: &str) -> Option<Model> {
 }
 
 fn load_user_models() -> Vec<Model> {
-    let path = user_models_path();
-    let metadata = std::fs::metadata(&path).ok();
-    let modified = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.modified().ok());
-    let size = metadata.as_ref().map(std::fs::Metadata::len);
+    let stamp = user_models_stamp();
 
     if let Ok(cache) = USER_MODELS_CACHE.lock()
         && let Some(cached) = cache.as_ref()
-        && cached.path == path
-        && cached.modified == modified
-        && cached.size == size
+        && cached.stamp == stamp
     {
         return cached.models.clone();
     }
 
-    let models = std::fs::read_to_string(&path)
+    let models = std::fs::read_to_string(&stamp.path)
         .ok()
         .and_then(|content| serde_json::from_str::<Vec<Model>>(&content).ok())
         .unwrap_or_default();
 
     if let Ok(mut cache) = USER_MODELS_CACHE.lock() {
         *cache = Some(UserModelsCache {
-            path,
-            modified,
-            size,
+            stamp,
             models: models.clone(),
         });
     }
 
     models
+}
+
+pub(crate) fn user_models_stamp() -> FileStamp {
+    FileStamp::of(user_models_path())
 }
 
 fn user_models_path() -> std::path::PathBuf {
