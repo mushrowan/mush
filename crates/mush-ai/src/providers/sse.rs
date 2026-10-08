@@ -130,6 +130,18 @@ pub trait SseProcessor: Send + 'static {
 
 const MAX_CAPTURE_BYTES: usize = 128 * 1024;
 
+#[derive(Default)]
+struct RawCapture(Vec<u8>);
+
+impl RawCapture {
+    fn push(&mut self, chunk: &[u8]) {
+        let take = MAX_CAPTURE_BYTES
+            .saturating_sub(self.0.len())
+            .min(chunk.len());
+        self.0.extend_from_slice(&chunk[..take]);
+    }
+}
+
 pub fn run_sse_stream(
     response: reqwest::Response,
     model: &Model,
@@ -155,7 +167,7 @@ pub fn run_sse_stream(
             .build();
 
         let mut parser = SseParser::new();
-        let mut raw_capture: Vec<u8> = Vec::new();
+        let mut raw_capture = RawCapture::default();
         let mut sse_seq: u64 = 0;
 
         use futures::TryStreamExt;
@@ -168,11 +180,7 @@ pub fn run_sse_stream(
         loop {
             match byte_stream.try_next().await {
                 Ok(Some(chunk)) => {
-                    if raw_capture.len() < MAX_CAPTURE_BYTES {
-                        let remain = MAX_CAPTURE_BYTES - raw_capture.len();
-                        let take = remain.min(chunk.len());
-                        raw_capture.extend_from_slice(&chunk[..take]);
-                    }
+                    raw_capture.push(&chunk);
                     let chunk_len = chunk.len();
                     tracing::trace!(
                         target: "mush_ai::providers::sse::wire",
@@ -216,6 +224,7 @@ pub fn run_sse_stream(
                 }
                 Ok(None) => break,
                 Err(e) => {
+                    let raw_capture = raw_capture.0;
                     let capture_path = write_decode_snapshot(
                         &model_id.to_string(),
                         &provider_name.to_string(),
