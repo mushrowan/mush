@@ -559,11 +559,13 @@ fn print_failure(message: String) -> color_eyre::Report {
     headless::PrintExit { code: 1, message }.into()
 }
 
-async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
-    let store = SessionStore::new(SessionStore::default_dir());
-    let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
-    let cfg = config::load_config_with(&cli.option)?;
-    let mut session = match cli.session_target()? {
+fn print_session(
+    cli: &Cli,
+    store: &SessionStore,
+    cwd: &std::path::Path,
+    cfg: &config::Config,
+) -> Result<Session> {
+    Ok(match cli.session_target()? {
         SessionTarget::Resume(id) => {
             let meta = store.resolve(&id)?;
             store.load(&meta.id)?
@@ -576,11 +578,18 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         SessionTarget::New => {
             let model_id = match cli.model.clone() {
                 Some(model) => model,
-                None => setup::default_model_id(&cfg, &cwd),
+                None => setup::default_model_id(cfg, cwd),
             };
             Session::new(&model_id, &cwd.display().to_string())
         }
-    };
+    })
+}
+
+async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Status) -> Result<()> {
+    let store = SessionStore::new(SessionStore::default_dir());
+    let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
+    let cfg = config::load_config_with(&cli.option)?;
+    let mut session = print_session(&cli, &store, &cwd, &cfg)?;
     let _lease = if cli.no_session {
         None
     } else {
@@ -734,58 +743,15 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 println!("{line}");
             }
         }
+        print_progress(&event, &setup.client.model, setup.client.debug_cache);
         match event {
             AgentEvent::AgentEnd => ended = true,
-            AgentEvent::ToolExecStart {
-                tool_name, args, ..
-            } => {
-                let args_summary = summarise_tool_args(tool_name.as_str(), &args);
-                eprintln!(
-                    "{} {args_summary}",
-                    Style::Cyan.stderr(format_args!("▶ {tool_name}"))
-                );
-            }
-            AgentEvent::ToolExecEnd {
-                tool_name, result, ..
-            } => {
-                if result.outcome.is_error() {
-                    eprintln!(
-                        "{}",
-                        Style::Red.stderr(format_args!("✗ {tool_name} failed"))
-                    );
-                } else {
-                    eprintln!("{}", Style::Green.stderr(format_args!("✓ {tool_name}")));
-                }
-            }
             AgentEvent::MessageEnd { message } => {
                 context_tokens.store(
                     message.usage.total_input_tokens().get(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 final_message = Some(message);
-            }
-            AgentEvent::TurnEnd { message, .. } => {
-                let cost = models::calculate_cost(&setup.client.model, &message.usage);
-                eprintln!(
-                    "{}",
-                    Style::Dim.stderr(format_args!(
-                        "{} | in:{} out:{} cache:{} | {}",
-                        message.model,
-                        message.usage.input_tokens,
-                        message.usage.output_tokens,
-                        message.usage.cache_read_tokens,
-                        cost.total(),
-                    )),
-                );
-                if setup.client.debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
-                    eprintln!(
-                        "{}",
-                        Style::Cyan.stderr(format_args!(
-                            "cache read detected: {} tokens",
-                            message.usage.cache_read_tokens
-                        ))
-                    );
-                }
             }
             AgentEvent::ContextCompacted {
                 before_count,
@@ -818,41 +784,8 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                     ))
                 );
             }
-            AgentEvent::PartialDiscarded { error } => {
-                eprintln!(
-                    "{}",
-                    Style::Yellow.stderr(format_args!(
-                        "⚠ discarding the partial response and retrying: {}",
-                        format_error(&error)
-                    ))
-                );
-            }
-            AgentEvent::SteeringInjected { messages } => {
-                eprintln!(
-                    "{}",
-                    Style::Dim.stderr(format_args!(
-                        "(steering: {} messages injected)",
-                        messages.len()
-                    ))
-                );
-            }
-            AgentEvent::FollowUpInjected { messages } => {
-                eprintln!(
-                    "{}",
-                    Style::Dim.stderr(format_args!(
-                        "(follow-up: {} messages queued)",
-                        messages.len()
-                    ))
-                );
-            }
-            AgentEvent::MaxTurnsReached { max_turns } => {
-                if signalled.is_none() {
-                    status.state = "turn_limit";
-                }
-                eprintln!(
-                    "{}",
-                    Style::Yellow.stderr(format_args!("⚠ hit max turns limit ({max_turns})"))
-                );
+            AgentEvent::MaxTurnsReached { .. } if signalled.is_none() => {
+                status.state = "turn_limit";
             }
             AgentEvent::Error { error } => failure = Some(error),
             _ => {}
@@ -883,6 +816,89 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         print_final_text(&message);
     }
     Ok(())
+}
+
+fn print_progress(event: &AgentEvent, model: &Model, debug_cache: bool) {
+    match event {
+        AgentEvent::ToolExecStart {
+            tool_name, args, ..
+        } => {
+            let args_summary = summarise_tool_args(tool_name.as_str(), args);
+            eprintln!(
+                "{} {args_summary}",
+                Style::Cyan.stderr(format_args!("▶ {tool_name}"))
+            );
+        }
+        AgentEvent::ToolExecEnd {
+            tool_name, result, ..
+        } => {
+            if result.outcome.is_error() {
+                eprintln!(
+                    "{}",
+                    Style::Red.stderr(format_args!("✗ {tool_name} failed"))
+                );
+            } else {
+                eprintln!("{}", Style::Green.stderr(format_args!("✓ {tool_name}")));
+            }
+        }
+        AgentEvent::TurnEnd { message, .. } => {
+            let cost = models::calculate_cost(model, &message.usage);
+            eprintln!(
+                "{}",
+                Style::Dim.stderr(format_args!(
+                    "{} | in:{} out:{} cache:{} | {}",
+                    message.model,
+                    message.usage.input_tokens,
+                    message.usage.output_tokens,
+                    message.usage.cache_read_tokens,
+                    cost.total(),
+                )),
+            );
+            if debug_cache && message.usage.cache_read_tokens > TokenCount::ZERO {
+                eprintln!(
+                    "{}",
+                    Style::Cyan.stderr(format_args!(
+                        "cache read detected: {} tokens",
+                        message.usage.cache_read_tokens
+                    ))
+                );
+            }
+        }
+        AgentEvent::PartialDiscarded { error } => {
+            eprintln!(
+                "{}",
+                Style::Yellow.stderr(format_args!(
+                    "⚠ discarding the partial response and retrying: {}",
+                    format_error(error)
+                ))
+            );
+        }
+        AgentEvent::SteeringInjected { messages } => {
+            eprintln!(
+                "{}",
+                Style::Dim.stderr(format_args!(
+                    "(steering: {} messages injected)",
+                    messages.len()
+                ))
+            );
+        }
+        AgentEvent::FollowUpInjected { messages } => {
+            eprintln!(
+                "{}",
+                Style::Dim.stderr(format_args!(
+                    "(follow-up: {} messages queued)",
+                    messages.len()
+                ))
+            );
+        }
+        AgentEvent::MaxTurnsReached { max_turns } => {
+            eprintln!(
+                "{}",
+                Style::Yellow.stderr(format_args!("⚠ hit max turns limit ({max_turns})"))
+            );
+        }
+        _ => {}
+    }
 }
 
 fn compaction_transform(
