@@ -70,34 +70,4 @@ impl Session {
     pub fn fields_mut(&mut self) -> (&mut App, &mut ImageProtocols) {
         (&mut self.app, &mut self.image_protos)
     }
-
-    pub fn ensure_image_protocols(
-        &mut self,
-        picker: &ratatui_image::picker::Picker,
-        render_areas: &[crate::display_types::ImageRenderArea],
-    ) {
-        use crate::display_types::MessageRole;
-        for area in render_areas {
-            let key = (area.msg_idx, area.tc_idx);
-            if self.image_protos.contains_key(&key) {
-                continue;
-            }
-            let Some(msg) = self.app.messages.get(area.msg_idx) else {
-                continue;
-            };
-            let bytes: Option<&[u8]> = if msg.role == MessageRole::User {
-                msg.images.get(area.tc_idx).map(Vec::as_slice)
-            } else {
-                msg.tool_calls
-                    .get(area.tc_idx)
-                    .and_then(|tc| tc.image_data.as_deref())
-            };
-            let Some(bytes) = bytes else { continue };
-            let Ok(dyn_img) = image::load_from_memory(bytes) else {
-                continue;
-            };
-            self.image_protos
-                .insert(key, picker.new_resize_protocol(dyn_img));
-        }
-    }
 }

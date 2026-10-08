@@ -66,8 +66,6 @@ pub enum SlashParseError {
     ScheduleUsage,
     #[error("usage: /rlm-max-depth [<non-negative integer> [--global]]")]
     RlmMaxDepthUsage,
-    #[error("usage: /compaction-model [same|<model-id>]")]
-    CompactionModelUsage,
     #[error(
         "usage: /compact [--context-budget <count>] [instructions] (budget e.g. 10k, 1024, 1.5k, 1m)"
     )]
@@ -87,7 +85,6 @@ pub enum SlashAction {
     SystemPrompt,
     Help,
     Keys,
-    Clear,
     New {
         name: Option<String>,
         prompt: Option<String>,
@@ -196,8 +193,7 @@ impl SlashAction {
     pub fn is_safe_during_stream(&self) -> bool {
         !matches!(
             self,
-            Self::Clear
-                | Self::New { .. }
+            Self::New { .. }
                 | Self::Resume { .. }
                 | Self::Branch { .. }
                 | Self::NavigateTree { .. }

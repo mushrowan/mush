@@ -280,10 +280,6 @@ pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
     }
 }
 
-pub fn transcript_lines(app: &App, width: u16) -> Vec<Line<'static>> {
-    lines_around_stream(app, &app.messages, width)
-}
-
 pub fn live_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let live = app.messages.get(app.commit_point()..).unwrap_or_default();
     lines_around_stream(app, live, width)

@@ -376,10 +376,6 @@ pub(super) async fn handle_slash_action(
             run_session_command(session, tui_config, mush_runtime::SessionCommand::Clone).await;
             true
         }
-        SlashAction::Clear => {
-            run_session_command(session, tui_config, mush_runtime::SessionCommand::Clear).await;
-            false
-        }
         SlashAction::Undo => {
             run_session_command(session, tui_config, mush_runtime::SessionCommand::Undo).await
         }

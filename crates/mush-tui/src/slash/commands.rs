@@ -26,7 +26,6 @@ pub async fn handle(
         | SlashAction::New { .. }
         | SlashAction::Fork { index: Some(_) }
         | SlashAction::Clone
-        | SlashAction::Clear
         | SlashAction::Undo
         | SlashAction::Resume { .. }
         | SlashAction::Branch { index: Some(_) }
