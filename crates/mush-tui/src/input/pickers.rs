@@ -69,37 +69,15 @@ pub(super) fn handle_picker_key(app: &mut App, key: KeyEvent) -> Option<AppEvent
                 None
             }
         }
-        _ if app
-            .keymap
-            .matches_in(KeyScope::SessionPicker, Action::PreviousItem, key) =>
-        {
-            if let Some(ref mut picker) = app.interaction.session_picker {
-                picker.select_previous();
+        _ => {
+            let keymap = &app.keymap;
+            if let Some(picker) = app.interaction.session_picker.as_mut() {
+                navigate_list(picker, key, |action| {
+                    keymap.matches_in(KeyScope::SessionPicker, action, key)
+                });
             }
             None
         }
-        _ if app
-            .keymap
-            .matches_in(KeyScope::SessionPicker, Action::NextItem, key) =>
-        {
-            if let Some(ref mut picker) = app.interaction.session_picker {
-                picker.select_next();
-            }
-            None
-        }
-        _ if crate::keybinds::is_backspace(key) => {
-            if let Some(ref mut picker) = app.interaction.session_picker {
-                picker.pop_filter();
-            }
-            None
-        }
-        _ if let Some(c) = crate::keybinds::typed_char(key) => {
-            if let Some(ref mut picker) = app.interaction.session_picker {
-                picker.push_filter(c);
-            }
-            None
-        }
-        _ => None,
     }
 }
 
@@ -134,22 +112,28 @@ pub(super) fn handle_message_picker_key(app: &mut App, key: KeyEvent) -> Option<
         };
         return Some(AppEvent::SlashCommand { action });
     }
-    if app
-        .keymap
-        .matches_in(KeyScope::SessionPicker, Action::PreviousItem, key)
-    {
+    navigate_list(picker, key, |action| {
+        app.keymap.matches_in(KeyScope::SessionPicker, action, key)
+    });
+    None
+}
+
+fn navigate_list(picker: &mut impl FilteredList, key: KeyEvent, matches: impl Fn(Action) -> bool) {
+    if matches(Action::PreviousItem) {
         picker.select_previous();
-    } else if app
-        .keymap
-        .matches_in(KeyScope::SessionPicker, Action::NextItem, key)
-    {
+    } else if matches(Action::NextItem) {
         picker.select_next();
-    } else if crate::keybinds::is_backspace(key) {
+    } else {
+        edit_list_filter(picker, key);
+    }
+}
+
+fn edit_list_filter(picker: &mut impl FilteredList, key: KeyEvent) {
+    if crate::keybinds::is_backspace(key) {
         picker.pop_filter();
     } else if let Some(c) = crate::keybinds::typed_char(key) {
         picker.push_filter(c);
     }
-    None
 }
 
 fn handle_session_picker_delete_confirm_key(
@@ -270,19 +254,12 @@ pub(super) fn handle_model_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
             }
             None
         }
-        _ if crate::keybinds::is_backspace(key) => {
-            if let Some(ref mut picker) = app.interaction.model_picker {
-                picker.pop_filter();
+        _ => {
+            if let Some(picker) = app.interaction.model_picker.as_mut() {
+                edit_list_filter(picker, key);
             }
             None
         }
-        _ if let Some(c) = crate::keybinds::typed_char(key) => {
-            if let Some(ref mut picker) = app.interaction.model_picker {
-                picker.push_filter(c);
-            }
-            None
-        }
-        _ => None,
     }
 }
 
@@ -408,31 +385,13 @@ pub(super) fn handle_login_picker_key(app: &mut App, key: KeyEvent) -> Option<Ap
             None
         }
         _ if app.keymap.matches(Action::Confirm, key) => confirm_login_pick(app),
-        _ if app.keymap.matches(Action::PreviousItem, key) => {
+        _ => {
+            let keymap = &app.keymap;
             if let Some(picker) = app.interaction.login_picker.as_mut() {
-                picker.select_previous();
+                navigate_list(picker, key, |action| keymap.matches(action, key));
             }
             None
         }
-        _ if app.keymap.matches(Action::NextItem, key) => {
-            if let Some(picker) = app.interaction.login_picker.as_mut() {
-                picker.select_next();
-            }
-            None
-        }
-        _ if crate::keybinds::is_backspace(key) => {
-            if let Some(picker) = app.interaction.login_picker.as_mut() {
-                picker.pop_filter();
-            }
-            None
-        }
-        _ if let Some(c) = crate::keybinds::typed_char(key) => {
-            if let Some(picker) = app.interaction.login_picker.as_mut() {
-                picker.push_filter(c);
-            }
-            None
-        }
-        _ => None,
     }
 }
 
