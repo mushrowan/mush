@@ -37,18 +37,22 @@ impl McpCatalogue {
             {
                 continue;
             }
-            for tool in server.tools().await {
-                out.push(McpToolInfo {
-                    server: server.name().to_string(),
-                    full_name: full_tool_name(server.name(), &tool.name),
-                    tool_name: tool.name.to_string(),
-                    description: tool
-                        .description
-                        .as_deref()
-                        .unwrap_or("MCP tool")
-                        .to_string(),
-                });
-            }
+            server
+                .read_tools(|tools| {
+                    out.extend(tools.iter().map(|tool| {
+                        McpToolInfo {
+                            server: server.name().to_string(),
+                            full_name: full_tool_name(server.name(), &tool.name),
+                            tool_name: tool.name.to_string(),
+                            description: tool
+                                .description
+                                .as_deref()
+                                .unwrap_or("MCP tool")
+                                .to_string(),
+                        }
+                    }));
+                })
+                .await;
         }
 
         out
@@ -67,18 +71,21 @@ impl McpCatalogue {
     async fn find(&self, full_name: &str) -> Option<(Arc<McpServer>, McpToolDef)> {
         let query = full_name.to_lowercase();
         for server in &self.servers {
-            for tool in server.tools().await {
-                if full_tool_name(server.name(), &tool.name).to_lowercase() == query {
-                    return Some((Arc::clone(server), tool));
-                }
+            let found = server
+                .read_tools(|tools| {
+                    tools
+                        .iter()
+                        .find(|tool| {
+                            full_tool_name(server.name(), &tool.name).to_lowercase() == query
+                        })
+                        .cloned()
+                })
+                .await;
+            if let Some(tool) = found {
+                return Some((Arc::clone(server), tool));
             }
         }
         None
-    }
-
-    #[must_use]
-    pub fn server_names(&self) -> Vec<&str> {
-        self.servers.iter().map(|s| s.name()).collect()
     }
 }
 

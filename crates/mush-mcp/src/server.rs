@@ -15,11 +15,6 @@ pub enum ServerState {
 
 impl ServerState {
     #[must_use]
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::Connected { .. })
-    }
-
-    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Connected { .. } => "connected",
@@ -98,6 +93,10 @@ impl McpServer {
 
     pub async fn tools(&self) -> Vec<McpToolDef> {
         self.tools.read().await.clone()
+    }
+
+    pub(crate) async fn read_tools<R>(&self, f: impl FnOnce(&[McpToolDef]) -> R) -> R {
+        f(&self.tools.read().await)
     }
 
     pub async fn status(&self) -> McpServerStatus {

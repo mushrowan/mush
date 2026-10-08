@@ -66,21 +66,6 @@ impl McpManager {
             .find(|s| s.name().to_lowercase() == query)?;
         Some(server.reconnect().await)
     }
-
-    pub async fn connected_servers(&self) -> Vec<&str> {
-        let mut out = Vec::new();
-        for server in &self.servers {
-            if server.state().await.is_connected() {
-                out.push(server.name());
-            }
-        }
-        out
-    }
-
-    #[must_use]
-    pub fn servers(&self) -> &[Arc<McpServer>] {
-        &self.servers
-    }
 }
 
 #[cfg(test)]
@@ -106,7 +91,7 @@ mod tests {
     #[tokio::test]
     async fn connect_all_with_empty_config() {
         let manager = McpManager::connect_all(&HashMap::new()).await;
-        assert!(manager.connected_servers().await.is_empty());
+        assert!(manager.statuses().await.is_empty());
         assert!(manager.tool_registry().await.is_empty());
     }
 
@@ -117,7 +102,6 @@ mod tests {
 
         let manager = McpManager::connect_all(&configs).await;
 
-        assert!(manager.connected_servers().await.is_empty());
         assert!(manager.tool_registry().await.is_empty());
         let statuses = manager.statuses().await;
         assert_eq!(statuses.len(), 1);
@@ -128,7 +112,6 @@ mod tests {
     async fn failed_server_keeps_its_reason_for_display() {
         let manager = McpManager::connect_all(&local("bad", &["__nope__"], 5)).await;
 
-        assert!(manager.connected_servers().await.is_empty());
         let statuses = manager.statuses().await;
         assert_eq!(statuses[0].name, "bad");
         assert!(matches!(statuses[0].state, ServerState::Failed { .. }));
@@ -177,6 +160,7 @@ mod tests {
         let Ok(manager) = connected else {
             panic!("connect_all ignored the 1s timeout and hung");
         };
-        assert!(manager.connected_servers().await.is_empty());
+        let statuses = manager.statuses().await;
+        assert!(matches!(statuses[0].state, ServerState::Failed { .. }));
     }
 }
