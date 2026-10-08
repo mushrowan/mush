@@ -327,11 +327,7 @@ impl Registry {
         {
             return Err("review counters did not advance".into());
         }
-        let bytes = read(&last.directory.join("capture/verdict.json"), 256 * 1024)?;
-        if saved.capture.as_ref() != Some(&digest(&bytes)) {
-            return Err("previous review capture changed".into());
-        }
-        let verdict: Verdict = decode(&bytes)?;
+        let verdict = captured_verdict(&last.directory, &saved)?;
         if matches!(
             verdict.result,
             VerdictResult::Blocked | VerdictResult::Error
@@ -425,11 +421,7 @@ impl Registry {
             return Err("review task is stopped or revoked".into());
         }
         let saved = state(&last.directory)?;
-        let bytes = read(&last.directory.join("capture/verdict.json"), 256 * 1024)?;
-        if saved.capture.as_ref() != Some(&digest(&bytes)) {
-            return Err("previous review capture changed".into());
-        }
-        let verdict: Verdict = decode(&bytes)?;
+        let verdict = captured_verdict(&last.directory, &saved)?;
         if matches!(
             verdict.result,
             VerdictResult::Blocked | VerdictResult::Error
@@ -480,6 +472,14 @@ impl Registry {
         task.pair.clone_from(&request.pair);
         self.save()
     }
+}
+
+fn captured_verdict(directory: &Path, saved: &State) -> Result<Verdict> {
+    let bytes = read(&directory.join("capture/verdict.json"), 256 * 1024)?;
+    if saved.capture.as_ref() != Some(&digest(&bytes)) {
+        return Err("previous review capture changed".into());
+    }
+    Ok(decode(&bytes)?)
 }
 
 fn terminal(actor: &Participant) -> Result<File> {
