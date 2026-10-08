@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::nonpoison::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -254,7 +255,7 @@ impl Kernel {
         let mut frames = Frames::new(stdout);
         let python_version = await_ready(&mut frames, config.ready_timeout, &shared).await?;
 
-        *lock(&shared.child) = Some(child);
+        *shared.child.lock() = Some(child);
         let reader = tokio::spawn(read_events(frames, shared.clone()));
 
         Ok(Self {
@@ -271,7 +272,7 @@ impl Kernel {
 
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
-        lock(&self.shared.child).as_ref().and_then(Child::id)
+        self.shared.child.lock().as_ref().and_then(Child::id)
     }
 
     #[must_use]
@@ -631,37 +632,37 @@ async fn write_request(
 
 impl Shared {
     fn take_child(&self) -> Option<Child> {
-        lock(&self.child).take()
+        self.child.lock().take()
     }
 
     fn register(&self, id: &str) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded_channel();
-        lock(&self.cells).insert(id.to_string(), tx);
+        self.cells.lock().insert(id.to_string(), tx);
         rx
     }
 
     fn unregister(&self, id: &str) {
-        lock(&self.cells).remove(id);
-        let mut current = lock(&self.current);
+        self.cells.lock().remove(id);
+        let mut current = self.current.lock();
         if current.as_deref() == Some(id) {
             *current = None;
         }
     }
 
     fn set_current(&self, id: Option<String>) {
-        *lock(&self.current) = id;
+        *self.current.lock() = id;
     }
 
     fn running(&self) -> Option<String> {
-        lock(&self.running).clone()
+        self.running.lock().clone()
     }
 
     fn set_running(&self, id: Option<String>) {
-        *lock(&self.running) = id;
+        *self.running.lock() = id;
     }
 
     fn finish_running(&self, id: &str) {
-        let mut running = lock(&self.running);
+        let mut running = self.running.lock();
         if running.as_deref() == Some(id) {
             *running = None;
             self.idle.notify_waiters();
@@ -669,15 +670,17 @@ impl Shared {
     }
 
     fn owns(&self, id: Option<&str>) -> bool {
-        id.is_some_and(|id| lock(&self.cells).contains_key(id))
+        id.is_some_and(|id| self.cells.lock().contains_key(id))
     }
 
     fn push_background(&self, text: &str) {
-        lock(&self.background).push(text, MAX_BACKGROUND_OUTPUT_CHARS);
+        self.background
+            .lock()
+            .push(text, MAX_BACKGROUND_OUTPUT_CHARS);
     }
 
     fn take_background(&self) -> String {
-        std::mem::take(&mut *lock(&self.background))
+        std::mem::take(&mut *self.background.lock())
             .finish("background output", MAX_BACKGROUND_OUTPUT_CHARS)
     }
 
@@ -699,12 +702,12 @@ impl Shared {
         let target = event
             .cell_id()
             .map(str::to_string)
-            .or_else(|| lock(&self.current).clone());
+            .or_else(|| self.current.lock().clone());
         let Some(target) = target else {
             tracing::debug!(?event, "kernel event with no cell to deliver to");
             return;
         };
-        let sender = lock(&self.cells).get(&target).cloned();
+        let sender = self.cells.lock().get(&target).cloned();
         match sender {
             Some(sender) => {
                 let _ = sender.send(event);
@@ -715,14 +718,14 @@ impl Shared {
 
     fn corrupt(&self, reason: String) {
         tracing::warn!(reason, "bad kernel protocol frame, killing the kernel");
-        lock(&self.broken).get_or_insert(reason);
-        if let Some(child) = lock(&self.child).as_mut() {
+        self.broken.lock().get_or_insert(reason);
+        if let Some(child) = self.child.lock().as_mut() {
             let _ = child.start_kill();
         }
     }
 
     fn protocol_failure(&self) -> Option<String> {
-        lock(&self.broken).clone()
+        self.broken.lock().clone()
     }
 
     fn gone(&self) -> KernelError {
@@ -733,7 +736,8 @@ impl Shared {
     }
 
     fn stderr_tail_text(&self) -> String {
-        lock(&self.stderr_tail)
+        self.stderr_tail
+            .lock()
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>()
@@ -824,7 +828,7 @@ async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Ar
         };
         match event {
             Event::HostCancel { id } => {
-                let request = lock(&shared.requests).remove(&id);
+                let request = shared.requests.lock().remove(&id);
                 if let Some(request) = request {
                     request.abort();
                 }
@@ -835,20 +839,20 @@ async fn read_events(mut frames: Frames<tokio::process::ChildStdout>, shared: Ar
             other => shared.route(other),
         }
     }
-    lock(&shared.cells).clear();
+    shared.cells.lock().clear();
     shared.set_running(None);
     shared.idle.notify_waiters();
 }
 
 fn spawn_host_request(shared: &Arc<Shared>, id: String, kind: String, payload: Value) {
     let cancellable = shared.handler.cancellable(&kind);
-    let mut requests = lock(&shared.requests);
+    let mut requests = shared.requests.lock();
     let task = tokio::spawn({
         let shared = shared.clone();
         let id = id.clone();
         async move {
             let reply = shared.handler.handle(&kind, payload).await;
-            lock(&shared.requests).remove(&id);
+            shared.requests.lock().remove(&id);
             reply_to_host(&shared, id, reply).await;
         }
     });
@@ -907,10 +911,6 @@ async fn await_ready<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 async fn tail_stderr(stderr: tokio::process::ChildStderr, shared: Arc<Shared>) {
     keep_tail(stderr, &shared.stderr_tail).await;
 }
@@ -922,7 +922,7 @@ async fn keep_tail(reader: impl tokio::io::AsyncRead + Unpin, tail: &Mutex<VecDe
         let line = String::from_utf8_lossy(bytes.strip_suffix(b"\n").unwrap_or(&bytes));
         let line = line.strip_suffix('\r').unwrap_or(&line).to_owned();
         bytes.clear();
-        let mut tail = lock(tail);
+        let mut tail = tail.lock();
         if tail.len() >= STDERR_TAIL_LINES {
             tail.pop_front();
         }
@@ -939,7 +939,7 @@ mod tests {
         let tail = Mutex::new(VecDeque::new());
         keep_tail(&b"caf\xe9\r\nafter\nlast"[..], &tail).await;
         assert_eq!(
-            Vec::from(tail.into_inner().unwrap()),
+            Vec::from(tail.into_inner()),
             ["caf\u{fffd}", "after", "last"]
         );
     }

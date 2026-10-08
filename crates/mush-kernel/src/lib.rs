@@ -1,3 +1,5 @@
+#![feature(sync_nonpoison, nonpoison_mutex)]
+
 pub mod kernel;
 pub mod protocol;
 pub mod python;
