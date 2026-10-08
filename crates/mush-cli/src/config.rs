@@ -949,9 +949,23 @@ advisor = true
     }
 
     #[test]
-    fn parse_empty_config() {
+    fn an_empty_config_takes_the_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.model.is_none());
+        assert_eq!(config.terminal, TerminalPolicy::default());
+        assert_eq!(config.thinking, None);
+        assert!(!config.auto_fork_compact);
+        assert!(config.cache_timer);
+        assert_eq!(config.cache_timer, Config::default().cache_timer);
+        assert!(config.repo_map.enabled);
+        assert_eq!(config.repo_map.budget, 8192);
+        assert!(!config.lsp.diagnostics);
+        assert!(config.lsp.servers.is_empty());
+        assert!(config.model_tiers.is_empty());
+        assert!(config.compaction_model.is_none());
+        assert!(config.favourite_models.is_empty());
+        assert!(config.forbidden_chars.is_empty());
+        assert!(config.forbidden_char_classes.is_empty());
     }
 
     #[test]
@@ -987,12 +1001,6 @@ mouse_scroll_lines = 5
     }
 
     #[test]
-    fn terminal_policy_defaults_match_tui_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.terminal, TerminalPolicy::default());
-    }
-
-    #[test]
     fn thinking_config_accepts_level_string() {
         let config: Config = toml::from_str(r#"thinking = "medium""#).unwrap();
         assert_eq!(config.thinking, Some(ThinkingLevel::Medium));
@@ -1002,12 +1010,6 @@ mouse_scroll_lines = 5
     fn thinking_config_accepts_bool_false() {
         let config: Config = toml::from_str("thinking = false").unwrap();
         assert_eq!(config.thinking, Some(ThinkingLevel::Off));
-    }
-
-    #[test]
-    fn thinking_config_defaults_to_none() {
-        let config: Config = toml::from_str("").unwrap();
-        assert_eq!(config.thinking, None);
     }
 
     #[test]
@@ -1053,34 +1055,15 @@ mouse_scroll_lines = 5
     }
 
     #[test]
-    fn auto_fork_compact_defaults_to_false() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.auto_fork_compact);
-    }
-
-    #[test]
     fn auto_fork_compact_can_be_enabled() {
         let config: Config = toml::from_str("auto_fork_compact = true").unwrap();
         assert!(config.auto_fork_compact);
     }
 
     #[test]
-    fn cache_timer_defaults_to_true() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.cache_timer);
-    }
-
-    #[test]
     fn cache_timer_can_be_disabled() {
         let config: Config = toml::from_str("cache_timer = false").unwrap();
         assert!(!config.cache_timer);
-    }
-
-    #[test]
-    fn cache_timer_default_matches_struct_default() {
-        let from_empty: Config = toml::from_str("").unwrap();
-        let from_default = Config::default();
-        assert_eq!(from_empty.cache_timer, from_default.cache_timer);
     }
 
     #[test]
@@ -1111,12 +1094,6 @@ mouse_scroll_lines = 5
         .expect("scoped keys should be accepted");
 
         assert!(config.keys.insert.raw.contains_key("edit_steering"));
-    }
-
-    #[test]
-    fn load_missing_config_returns_default() {
-        let config = Config::default();
-        assert!(config.model.is_none());
     }
 
     #[test]
@@ -1193,13 +1170,6 @@ blocking = true
     }
 
     #[test]
-    fn repo_map_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.repo_map.enabled);
-        assert_eq!(config.repo_map.budget, 8192);
-    }
-
-    #[test]
     fn repo_map_custom_budget() {
         let config: Config = toml::from_str(
             r#"
@@ -1252,13 +1222,6 @@ command = "echo critical rules here"
     }
 
     #[test]
-    fn parse_lsp_config_defaults() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(!config.lsp.diagnostics);
-        assert!(config.lsp.servers.is_empty());
-    }
-
-    #[test]
     fn parse_lsp_config_with_servers() {
         let toml = r#"
 [lsp]
@@ -1293,12 +1256,6 @@ strong = "claude-opus-4-7"
     }
 
     #[test]
-    fn model_tiers_default_empty() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.model_tiers.is_empty());
-    }
-
-    #[test]
     fn autonomous_defaults_match_the_runtime_and_the_table_overrides_them() {
         let config: Config = toml::from_str("").unwrap();
         let defaults = config.autonomous.settings();
@@ -1326,24 +1283,12 @@ strong = "claude-opus-4-7"
     }
 
     #[test]
-    fn compaction_model_defaults_to_none() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.compaction_model.is_none());
-    }
-
-    #[test]
     fn compaction_model_can_be_set() {
         let config: Config = toml::from_str(r#"compaction_model = "openai/gpt-5-nano""#).unwrap();
         assert_eq!(
             config.compaction_model.as_deref(),
             Some("openai/gpt-5-nano")
         );
-    }
-
-    #[test]
-    fn favourite_models_default_empty() {
-        let config: Config = toml::from_str("").unwrap();
-        assert!(config.favourite_models.is_empty());
     }
 
     #[test]

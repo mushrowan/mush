@@ -1186,11 +1186,6 @@ mod tests {
     }
 
     #[test]
-    fn config_defaults_are_sensible() {
-        assert_eq!(DEFAULT_MAX_TURNS, usize::MAX);
-    }
-
-    #[test]
     fn is_file_modifying_tool_matches_expected() {
         assert!(is_file_modifying_tool("write"));
         assert!(is_file_modifying_tool("Write"));

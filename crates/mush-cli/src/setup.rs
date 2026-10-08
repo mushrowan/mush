@@ -1978,12 +1978,6 @@ effort = "low"
     }
 
     #[test]
-    fn forbidden_chars_defaults_to_empty() {
-        let cfg: config::Config = toml::from_str("").unwrap();
-        assert!(cfg.forbidden_chars.is_empty());
-    }
-
-    #[test]
     fn forbidden_chars_rejects_multi_char_strings() {
         let result: Result<config::Config, _> = toml::from_str(r#"forbidden_chars = ["nope"]"#);
         assert!(
@@ -2001,11 +1995,5 @@ effort = "low"
             cfg.forbidden_char_classes,
             vec![CharClass::Emoji, CharClass::Arrows]
         );
-    }
-
-    #[test]
-    fn forbidden_char_classes_default_to_empty() {
-        let cfg: config::Config = toml::from_str("").unwrap();
-        assert!(cfg.forbidden_char_classes.is_empty());
     }
 }
