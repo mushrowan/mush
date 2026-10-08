@@ -90,11 +90,6 @@ impl RuleIndex {
     }
 }
 
-pub fn parse_rule_frontmatter(content: &str) -> Option<Vec<String>> {
-    let (frontmatter, _) = crate::frontmatter::extract(content)?;
-    parse_globs(frontmatter)
-}
-
 fn parse_bracket_list(val: &str) -> Option<Vec<String>> {
     let val = val.trim();
     if val.starts_with('[') && val.ends_with(']') {
@@ -184,6 +179,11 @@ fn scan_rules_dir(dir: &Path) -> Vec<Rule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_rule_frontmatter(content: &str) -> Option<Vec<String>> {
+        let (frontmatter, _) = crate::frontmatter::extract(content)?;
+        parse_globs(frontmatter)
+    }
 
     #[test]
     fn parse_frontmatter_basic() {

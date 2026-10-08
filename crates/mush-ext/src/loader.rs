@@ -73,16 +73,6 @@ pub(crate) fn resolve_config_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/mush"))
 }
 
-fn config_dir_from_home(home: &Path) -> PathBuf {
-    home.join(".config/mush")
-}
-
-pub fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let config_dir = resolve_config_dir();
-    find_agents_md_inner(cwd, home.as_deref(), config_dir.as_deref())
-}
-
 pub fn find_nested_agents_md(cwd: &Path, target: &Path) -> Vec<AgentsMd> {
     let target_dir = if target.is_dir() {
         target
@@ -198,24 +188,10 @@ pub struct DiscoveryOptions {
 }
 
 #[tracing::instrument(name = "discover_context", skip_all)]
-pub fn discover_project_context(cwd: &Path) -> ProjectContext {
-    discover_project_context_with(cwd, &DiscoveryOptions::default())
-}
-
 pub fn discover_project_context_with(cwd: &Path, options: &DiscoveryOptions) -> ProjectContext {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let config_dir = resolve_config_dir();
     discover_project_context_inner(cwd, home.as_deref(), config_dir.as_deref(), options)
-}
-
-pub fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
-    let config_dir = home.map(config_dir_from_home);
-    discover_project_context_inner(
-        cwd,
-        home,
-        config_dir.as_deref(),
-        &DiscoveryOptions::default(),
-    )
 }
 
 fn ancestors_to_home<'a>(cwd: &'a Path, home: Option<&'a Path>) -> impl Iterator<Item = &'a Path> {
@@ -303,6 +279,22 @@ fn discover_project_context_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn find_agents_md(cwd: &Path) -> Vec<AgentsMd> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let config_dir = resolve_config_dir();
+        find_agents_md_inner(cwd, home.as_deref(), config_dir.as_deref())
+    }
+
+    fn discover_project_context_with_home(cwd: &Path, home: Option<&Path>) -> ProjectContext {
+        let config_dir = home.map(|home| home.join(".config/mush"));
+        discover_project_context_inner(
+            cwd,
+            home,
+            config_dir.as_deref(),
+            &DiscoveryOptions::default(),
+        )
+    }
 
     #[test]
     fn parse_skills_from_content() {
@@ -571,7 +563,7 @@ more content
             )
             .unwrap();
         }
-        let config_dir = config_dir_from_home(home);
+        let config_dir = home.join(".config/mush");
 
         let with_defaults = discover_project_context_inner(
             &cwd,
