@@ -344,90 +344,126 @@ fn parent_unavailable_reconnect_and_changed_verdict() {
     );
 }
 
-#[test]
-fn malformed_stale_partial_and_ambiguous_claim_refuse() {
-    for scenario in [
-        "malformed",
-        "stale",
-        "incomplete_rejection",
-        "capture_partial",
-        "claim",
-        "archive_partial",
-        "short_prompt",
-        "budget",
-        "session_drift",
-        "report_drift",
-        "executable_drift",
-    ] {
-        let fixture = Fixture::new(true, true, "rejected");
-        let source = fixture
-            .root
-            .path()
-            .join("review/reviewer/event-reports/assignment-0001.json");
-        match scenario {
-            "malformed" => write(&source, &json!({"invalid":true})),
-            "stale" | "incomplete_rejection" => {
-                let mut journal: Value =
-                    serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
-                let raw: Vec<u8> =
-                    serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
-                let mut verdict: Value = serde_json::from_slice(&raw).unwrap();
-                if scenario == "stale" {
-                    verdict["generation"] = json!(2);
-                } else {
-                    verdict["complete"] = json!(false);
-                }
-                let bytes = serde_json::to_vec(&verdict).unwrap();
-                journal["review"] = json!({"sha256":digest(&bytes),"bytes":bytes});
-                write(&source, &journal);
+#[expect(clippy::unwrap_used)]
+fn route_refuses(scenario: &str) {
+    let fixture = Fixture::new(true, true, "rejected");
+    let source = fixture
+        .root
+        .path()
+        .join("review/reviewer/event-reports/assignment-0001.json");
+    match scenario {
+        "malformed" => write(&source, &json!({"invalid":true})),
+        "stale" | "incomplete_rejection" => {
+            let mut journal: Value = serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+            let raw: Vec<u8> = serde_json::from_value(journal["review"]["bytes"].clone()).unwrap();
+            let mut verdict: Value = serde_json::from_slice(&raw).unwrap();
+            if scenario == "stale" {
+                verdict["generation"] = json!(2);
+            } else {
+                verdict["complete"] = json!(false);
             }
-            "capture_partial" => directory(&fixture.route.join("capture-pending")),
-            "claim" => {
-                let mut state = fixture.state();
-                state["launch_claimed"] = json!(true);
-                state["producer"] = json!("launch_claimed");
-                write(&fixture.route.join("history/0001.json"), &state);
-                write(&fixture.route.join("state.json"), &state);
-            }
-            "archive_partial" => {
-                directory(&fixture.run.join("producer/followups"));
-                directory(&fixture.run.join("producer/followups/preparing-001"));
-            }
-            "short_prompt" => fs::write(fixture.root.path().join("prompt"), "short").unwrap(),
-            "budget" => {
-                let path = fixture.run.join("manifest.json");
-                let mut manifest: Value =
-                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                manifest["max_rounds"] = json!(1);
-                write(&path, &manifest);
-            }
-            "session_drift" => fs::write(
-                fixture
-                    .run
-                    .join("producer/mush-data/sessions/original.json"),
-                "changed",
-            )
-            .unwrap(),
-            "report_drift" => {
-                fs::write(fixture.cwd.join("report.json"), "{\"manual\":true}").unwrap()
-            }
-            "executable_drift" => {
-                fs::write(fixture.root.path().join("worker"), "#!/bin/sh\nexit 0\n").unwrap()
-            }
-            _ => unreachable!(),
+            let bytes = serde_json::to_vec(&verdict).unwrap();
+            journal["review"] = json!({"sha256":digest(&bytes),"bytes":bytes});
+            write(&source, &journal);
         }
-        fixture.route();
-        fixture.route();
-        assert!(!fixture.root.path().join("calls").exists(), "{scenario}");
-        assert!(
-            fixture.state()["producer"]
-                .as_str()
-                .unwrap()
-                .contains("input"),
-            "{scenario}: {}",
-            fixture.state()
-        );
+        "capture_partial" => directory(&fixture.route.join("capture-pending")),
+        "claim" => {
+            let mut state = fixture.state();
+            state["launch_claimed"] = json!(true);
+            state["producer"] = json!("launch_claimed");
+            write(&fixture.route.join("history/0001.json"), &state);
+            write(&fixture.route.join("state.json"), &state);
+        }
+        "archive_partial" => {
+            directory(&fixture.run.join("producer/followups"));
+            directory(&fixture.run.join("producer/followups/preparing-001"));
+        }
+        "short_prompt" => fs::write(fixture.root.path().join("prompt"), "short").unwrap(),
+        "budget" => {
+            let path = fixture.run.join("manifest.json");
+            let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            manifest["max_rounds"] = json!(1);
+            write(&path, &manifest);
+        }
+        "session_drift" => fs::write(
+            fixture
+                .run
+                .join("producer/mush-data/sessions/original.json"),
+            "changed",
+        )
+        .unwrap(),
+        "report_drift" => fs::write(fixture.cwd.join("report.json"), "{\"manual\":true}").unwrap(),
+        "executable_drift" => {
+            fs::write(fixture.root.path().join("worker"), "#!/bin/sh\nexit 0\n").unwrap()
+        }
+        _ => unreachable!(),
     }
+    fixture.route();
+    fixture.route();
+    assert!(!fixture.root.path().join("calls").exists(), "{scenario}");
+    assert!(
+        fixture.state()["producer"]
+            .as_str()
+            .unwrap()
+            .contains("input"),
+        "{scenario}: {}",
+        fixture.state()
+    );
+}
+
+#[test]
+fn a_malformed_verdict_refuses() {
+    route_refuses("malformed");
+}
+
+#[test]
+fn a_stale_verdict_refuses() {
+    route_refuses("stale");
+}
+
+#[test]
+fn an_incomplete_rejection_refuses() {
+    route_refuses("incomplete_rejection");
+}
+
+#[test]
+fn a_partial_capture_refuses() {
+    route_refuses("capture_partial");
+}
+
+#[test]
+fn an_ambiguous_launch_claim_refuses() {
+    route_refuses("claim");
+}
+
+#[test]
+fn a_partial_archive_refuses() {
+    route_refuses("archive_partial");
+}
+
+#[test]
+fn a_short_prompt_refuses() {
+    route_refuses("short_prompt");
+}
+
+#[test]
+fn an_exhausted_round_budget_refuses() {
+    route_refuses("budget");
+}
+
+#[test]
+fn session_drift_refuses() {
+    route_refuses("session_drift");
+}
+
+#[test]
+fn report_drift_refuses() {
+    route_refuses("report_drift");
+}
+
+#[test]
+fn executable_drift_refuses() {
+    route_refuses("executable_drift");
 }
 
 #[test]
@@ -1162,90 +1198,114 @@ fn ordinary_registration_cannot_replace_pair_or_bypass_task_by_directory() {
     }
 }
 
-#[test]
-fn busy_missing_blocked_reviewer_does_not_get_replaced() {
-    for scenario in [
-        "busy",
-        "busy_session",
-        "missing",
-        "blocked",
-        "stopped",
-        "capacity",
-        "workspace",
-    ] {
-        let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
-        fixture.reviewer_history();
-        fixture.route();
-        let preparation = fixture.continuation();
-        fixture.ok(&[
-            "continue-review",
-            fixture.route.to_str().unwrap(),
-            preparation.to_str().unwrap(),
-        ]);
-        let run = fixture.root.path().join("review");
-        let mut lock = None;
-        match scenario {
-            "busy" => {
-                let file = fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(run.join("supervisor.lock"))
-                    .unwrap();
-                file.lock().unwrap();
-                lock = Some(file);
-            }
-            "busy_session" => {
-                lock = Some(
-                    mush_supervisor::admission::session_lock(
-                        &run.join("reviewer/mush-data/sessions"),
-                        "review-session",
-                        None,
-                    )
-                    .unwrap(),
-                );
-            }
-            "missing" => {
-                fs::remove_file(run.join("reviewer/mush-data/sessions/review-session.json"))
-                    .unwrap()
-            }
-            "blocked" => {
-                let path = run.join("reviewer/state.json");
-                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                value["state"] = json!("blocked");
-                write(&path, &value);
-            }
-            "stopped" => fs::write(run.join("STOP"), "stop").unwrap(),
-            "workspace" => fs::rename(
-                fixture.root.path().join("review-work"),
-                fixture.root.path().join("unavailable-review-work"),
-            )
-            .unwrap(),
-            "capacity" => {
-                let path = fixture.root.path().join("pool/policy.json");
-                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                value["external_reserved"] = json!(2);
-                write(&path, &value);
-            }
-            _ => unreachable!(),
+#[expect(clippy::unwrap_used)]
+fn reviewer_is_not_replaced(scenario: &str) {
+    let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
+    fixture.reviewer_history();
+    fixture.route();
+    let preparation = fixture.continuation();
+    fixture.ok(&[
+        "continue-review",
+        fixture.route.to_str().unwrap(),
+        preparation.to_str().unwrap(),
+    ]);
+    let run = fixture.root.path().join("review");
+    let mut lock = None;
+    match scenario {
+        "busy" => {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(run.join("supervisor.lock"))
+                .unwrap();
+            file.lock().unwrap();
+            lock = Some(file);
         }
-        fixture.route();
-        assert!(!fixture.root.path().join("review-calls").exists());
-        let state: Value = serde_json::from_slice(
-            &fs::read(fixture.root.path().join("next-route/state.json")).unwrap(),
+        "busy_session" => {
+            lock = Some(
+                mush_supervisor::admission::session_lock(
+                    &run.join("reviewer/mush-data/sessions"),
+                    "review-session",
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        "missing" => {
+            fs::remove_file(run.join("reviewer/mush-data/sessions/review-session.json")).unwrap()
+        }
+        "blocked" => {
+            let path = run.join("reviewer/state.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["state"] = json!("blocked");
+            write(&path, &value);
+        }
+        "stopped" => fs::write(run.join("STOP"), "stop").unwrap(),
+        "workspace" => fs::rename(
+            fixture.root.path().join("review-work"),
+            fixture.root.path().join("unavailable-review-work"),
         )
-        .unwrap();
-        assert_eq!(
-            state["reviewer_action"],
-            if scenario == "busy" || scenario == "busy_session" {
-                "queued_busy"
-            } else if scenario == "capacity" {
-                "queued_capacity"
-            } else {
-                "needs_input"
-            }
-        );
-        drop(lock);
+        .unwrap(),
+        "capacity" => {
+            let path = fixture.root.path().join("pool/policy.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value["external_reserved"] = json!(2);
+            write(&path, &value);
+        }
+        _ => unreachable!(),
     }
+    fixture.route();
+    assert!(!fixture.root.path().join("review-calls").exists());
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.root.path().join("next-route/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state["reviewer_action"],
+        if scenario == "busy" || scenario == "busy_session" {
+            "queued_busy"
+        } else if scenario == "capacity" {
+            "queued_capacity"
+        } else {
+            "needs_input"
+        }
+    );
+    drop(lock);
+}
+
+#[test]
+fn a_busy_reviewer_is_not_replaced() {
+    reviewer_is_not_replaced("busy");
+}
+
+#[test]
+fn a_busy_reviewer_session_is_not_replaced() {
+    reviewer_is_not_replaced("busy_session");
+}
+
+#[test]
+fn a_missing_reviewer_session_is_not_replaced() {
+    reviewer_is_not_replaced("missing");
+}
+
+#[test]
+fn a_blocked_reviewer_is_not_replaced() {
+    reviewer_is_not_replaced("blocked");
+}
+
+#[test]
+fn a_stopped_reviewer_is_not_replaced() {
+    reviewer_is_not_replaced("stopped");
+}
+
+#[test]
+fn a_reviewer_without_capacity_is_not_replaced() {
+    reviewer_is_not_replaced("capacity");
+}
+
+#[test]
+fn a_reviewer_without_its_workspace_is_not_replaced() {
+    reviewer_is_not_replaced("workspace");
 }
 
 #[test]
