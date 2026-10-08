@@ -5,6 +5,9 @@ use ratatui::text::{Line, Span, Text};
 use crate::syntax::{SYNTAX_SET, code_theme, syntect_to_style};
 use crate::theme::Theme;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 #[cfg(test)]
 use std::cell::Cell;
 use syntect::easy::HighlightLines;
@@ -13,6 +16,13 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 const MAX_HIGHLIGHTED_CODE_BLOCK_LINES: usize = 64;
 
 const HORIZONTAL_RULE_WIDTH: usize = 80;
+
+const HIGHLIGHT_MEMO_ENTRIES: usize = 256;
+
+thread_local! {
+    static HIGHLIGHTED_BLOCKS: RefCell<HashMap<String, Vec<Line<'static>>>> =
+        RefCell::new(HashMap::new());
+}
 
 #[cfg(test)]
 thread_local! {
@@ -564,12 +574,18 @@ fn highlight_code_block(
     ps: &SyntaxSet,
     ui_theme: &Theme,
 ) -> Vec<Line<'static>> {
+    let key = highlight_memo_key(syntax, code_lines);
+    if let Some(lines) = HIGHLIGHTED_BLOCKS.with_borrow(|memo| memo.get(&key).cloned()) {
+        return lines;
+    }
+
     #[cfg(test)]
     HIGHLIGHT_CODE_BLOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
 
     let mut h = HighlightLines::new(syntax, code_theme());
     let mut lines = Vec::with_capacity(code_lines.len());
     let mut line_with_nl = String::new();
+    let mut themed_fallback = false;
 
     for code_line in code_lines {
         line_with_nl.clear();
@@ -588,6 +604,7 @@ fn highlight_code_block(
                 lines.push(Line::from(spans));
             }
             Err(_) => {
+                themed_fallback = true;
                 lines.push(Line::from(vec![
                     Span::raw(CODE_BLOCK_INDENT),
                     Span::styled(code_line.to_string(), ui_theme.code_block),
@@ -598,7 +615,27 @@ fn highlight_code_block(
     if lines.is_empty() {
         lines.push(Line::from(CODE_BLOCK_INDENT));
     }
+    if !themed_fallback {
+        HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| {
+            if memo.len() >= HIGHLIGHT_MEMO_ENTRIES {
+                memo.clear();
+            }
+            memo.insert(key, lines.clone());
+        });
+    }
     lines
+}
+
+fn highlight_memo_key(syntax: &SyntaxReference, code_lines: &[&str]) -> String {
+    let len = syntax.name.len() + code_lines.iter().map(|line| line.len() + 1).sum::<usize>();
+    let mut key = String::with_capacity(len + 1);
+    key.push_str(&syntax.name);
+    key.push('\0');
+    for line in code_lines {
+        key.push_str(line);
+        key.push('\n');
+    }
+    key
 }
 
 #[cfg(test)]
@@ -902,6 +939,18 @@ mod tests {
             vec!["currently:", "    core/component.yml owns:Pipeline"]
         );
         assert_eq!(text.lines[1].spans[0].style, Style::default());
+    }
+
+    #[test]
+    fn a_code_block_rendered_again_reuses_its_highlighting() {
+        let source = "```rust\nfn main() {}\n```";
+        reset_highlight_code_block_call_count();
+
+        let first = render(source, &t());
+        let again = render_with_width(source, &t(), Some(40));
+
+        assert_eq!(highlight_code_block_call_count(), 1);
+        assert_eq!(first.lines, again.lines);
     }
 
     #[test]
