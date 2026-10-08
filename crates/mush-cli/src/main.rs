@@ -1236,7 +1236,7 @@ async fn open_session(
         }
     }
     let saver = (!no_session)
-        .then(|| SaverThread::spawn(cwd_str))
+        .then(|| SaverThread::spawn(store, cwd_str))
         .transpose()?;
     Ok(OpenedSession {
         session,
@@ -1772,13 +1772,12 @@ struct SaverThread {
 }
 
 impl SaverThread {
-    fn spawn(cwd: String) -> std::io::Result<Self> {
+    fn spawn(store: SessionStore, cwd: String) -> std::io::Result<Self> {
         let (tx, rx) = std::sync::mpsc::channel::<mush_tui::SessionSnapshot>();
         let thread = std::thread::Builder::new()
             .name("session-saver".into())
             .spawn(move || {
-                let mut writer =
-                    SnapshotWriter::new(SessionStore::new(SessionStore::default_dir()), cwd);
+                let mut writer = SnapshotWriter::new(store, cwd);
                 while let Ok(snapshot) = rx.recv() {
                     for snapshot in latest_per_session(snapshot, &rx) {
                         writer.save(snapshot);
