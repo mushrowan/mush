@@ -456,8 +456,8 @@ async fn handle_idle_iteration(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn another_clients_input_shows_up_and_its_retraction_clears_it() {
+    #[test]
+    fn another_clients_input_shows_up_and_its_retraction_clears_it() {
         let mut config = super::super::TuiConfig::for_test();
         let mut session = crate::session::Session::new(crate::app::App::new(
             config.model.id.clone(),

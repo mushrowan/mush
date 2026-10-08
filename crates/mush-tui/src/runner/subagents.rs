@@ -144,8 +144,8 @@ fn parse(args: &str) -> Result<Option<Edit>, ()> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn registration_commands_persist_with_spaces_and_remove() {
+    #[test]
+    fn registration_commands_persist_with_spaces_and_remove() {
         let dir = crate::test_support::tempdir().unwrap();
         let store =
             RegistrationStore::new(dir.path().into(), "synthetic".into(), dir.path().into())

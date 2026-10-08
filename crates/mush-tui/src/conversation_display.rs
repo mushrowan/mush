@@ -801,8 +801,8 @@ mod tests {
         assert!(app.stats.prev_usage().is_some());
     }
 
-    #[tokio::test]
-    async fn batch_rebuild_marks_unmatched_sub_calls_as_error() {
+    #[test]
+    fn batch_rebuild_marks_unmatched_sub_calls_as_error() {
         let mut app = app();
         let model = test_model();
         let conversation = vec![Message::Assistant(

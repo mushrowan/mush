@@ -611,8 +611,8 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_bash_done_event_lands_in_the_transcript() {
+    #[test]
+    fn a_bash_done_event_lands_in_the_transcript() {
         let mut session = Session::new(app());
         let mut config = test_tui_config();
 
@@ -656,8 +656,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_withdrawn_busy_kernel_question_closes_the_prompt() {
+    #[test]
+    fn a_withdrawn_busy_kernel_question_closes_the_prompt() {
         let mut session = Session::new(app());
         let mut config = test_tui_config();
         let stream_state = StreamState::new();
@@ -681,8 +681,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_notice_with_a_known_origin_attaches_to_its_cell() {
+    #[test]
+    fn a_notice_with_a_known_origin_attaches_to_its_cell() {
         let mut session = Session::new(app());
         let mut config = test_tui_config();
         let mut cell = crate::app::DisplayMessage::new(crate::app::MessageRole::Assistant, "");

@@ -805,8 +805,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn replay_compaction_inputs_is_noop_when_nothing_queued() {
+    #[test]
+    fn replay_compaction_inputs_is_noop_when_nothing_queued() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut pane = Session::new(app);
 
@@ -921,8 +921,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn compaction_failure_opens_recovery_prompt() {
+    #[test]
+    fn compaction_failure_opens_recovery_prompt() {
         let app = App::new("test".into(), TokenCount::new(200_000));
         let mut runtime = RunnerRuntime::from_pane(Session::new(app));
         let original = vec![user_message("hello"), assistant_message("hi")];
