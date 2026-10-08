@@ -178,33 +178,24 @@ impl SessionTree {
             return Err(String::from("session history leaf missing"));
         }
         for index in 0..tree.entries.len() {
-            let messages = match &tree.entries[index].kind {
-                EntryKind::BranchSummary { from_id, .. } => tree
-                    .branch_ending_at(Some(from_id))
-                    .into_iter()
-                    .filter_map(entry_to_message)
-                    .collect::<Vec<_>>(),
+            let receipts = match &tree.entries[index].kind {
+                EntryKind::BranchSummary { from_id, .. } => {
+                    branch_receipts(tree.branch_ending_at(Some(from_id)))
+                }
                 EntryKind::Compaction { first_kept_id, .. } => {
                     let branch = tree.branch_ending_at(tree.entries[index].parent_id.as_ref());
                     let Some(kept) = branch.iter().position(|entry| entry.id == *first_kept_id)
                     else {
                         return Err(String::from("compaction boundary outside history"));
                     };
-                    branch[..kept]
-                        .iter()
-                        .copied()
-                        .filter_map(entry_to_message)
-                        .collect()
+                    branch_receipts(branch[..kept].iter().copied())
                 }
                 EntryKind::Message {
                     message: Message::Event(event),
                 } if event.kind.is_summary() => {
-                    let history: Vec<_> = tree
-                        .branch_ending_at(tree.entries[index].parent_id.as_ref())
-                        .into_iter()
-                        .filter_map(entry_to_message)
-                        .collect();
-                    let receipts = summary_receipts(&history);
+                    let receipts = branch_receipts(
+                        tree.branch_ending_at(tree.entries[index].parent_id.as_ref()),
+                    );
                     if event
                         .receipts
                         .iter()
@@ -218,7 +209,6 @@ impl SessionTree {
                 }
                 _ => continue,
             };
-            let receipts = summary_receipts(&messages);
             match &mut Arc::make_mut(&mut tree.entries[index]).kind {
                 EntryKind::BranchSummary { event_receipts, .. }
                 | EntryKind::Compaction { event_receipts, .. } => {
@@ -253,6 +243,29 @@ impl<'de> Deserialize<'de> for SessionTree {
 
 fn summary_receipts(messages: &[Message]) -> Vec<EventReceipt> {
     EventMessage::summary(String::new(), Timestamp::zero(), messages).receipts
+}
+
+fn branch_receipts<'a>(entries: impl IntoIterator<Item = &'a SessionEntry>) -> Vec<EventReceipt> {
+    let mut receipts: Vec<EventReceipt> = Vec::new();
+    for receipt in entries.into_iter().flat_map(entry_receipts) {
+        if !receipts.contains(receipt) {
+            receipts.push(receipt.clone());
+        }
+    }
+    receipts
+}
+
+fn entry_receipts(entry: &SessionEntry) -> &[EventReceipt] {
+    match &entry.kind {
+        EntryKind::Message {
+            message: Message::Event(event),
+        } => &event.receipts,
+        EntryKind::BranchSummary { event_receipts, .. }
+        | EntryKind::Compaction { event_receipts, .. } => event_receipts,
+        EntryKind::Message { .. }
+        | EntryKind::Refinement { .. }
+        | EntryKind::ThinkingLevelChange { .. } => &[],
+    }
 }
 
 fn is_digest(entry: &SessionEntry) -> bool {
