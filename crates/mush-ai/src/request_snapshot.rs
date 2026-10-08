@@ -240,18 +240,22 @@ pub(crate) fn redact_json_value(
 }
 
 pub(crate) fn redact_secret_text(text: &str) -> String {
-    text.split_whitespace()
-        .map(redact_secret_word)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut redacted = String::with_capacity(text.len());
+    for (index, word) in text.split_whitespace().enumerate() {
+        if index > 0 {
+            redacted.push(' ');
+        }
+        redacted.push_str(&redact_secret_word(word));
+    }
+    redacted
 }
 
-fn redact_secret_word(word: &str) -> String {
+fn redact_secret_word(word: &str) -> std::borrow::Cow<'_, str> {
     let trimmed = word.trim_matches(|ch: char| ch.is_ascii_punctuation());
     if looks_like_secret(trimmed) {
-        word.replacen(trimmed, REDACTED_HEADER_VALUE, 1)
+        word.replacen(trimmed, REDACTED_HEADER_VALUE, 1).into()
     } else {
-        word.to_string()
+        word.into()
     }
 }
 
