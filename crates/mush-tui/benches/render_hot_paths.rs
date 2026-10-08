@@ -81,6 +81,57 @@ fn bench_transcript_with_tool_output(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_transcript_resize_with_read_output(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transcript_resize_with_read_output");
+    let wide = Rect::new(0, 0, 100, 40);
+    let narrow = Rect::new(0, 0, 80, 40);
+
+    for &count in &[64usize, 256] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let app = read_heavy_app(count);
+                    let mut screen = Screen::new();
+                    let mut buf = Buffer::empty(wide);
+                    screen.render(&app, wide, &mut buf);
+                    (app, screen, Buffer::empty(narrow))
+                },
+                |(app, mut screen, mut buf)| {
+                    screen.render(black_box(&app), narrow, &mut buf);
+                    black_box(buf);
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    group.finish();
+}
+
+fn read_heavy_app(message_count: usize) -> App {
+    let mut app = conversation_app(message_count);
+    for (i, mut msg) in app.messages.iter_mut().enumerate() {
+        if matches!(msg.role, MessageRole::Assistant) {
+            let output = (1..=8)
+                .map(|n| format!("L{n}: let value_{i}_{n} = render(&mut buf, \"row {n}\");"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            msg.tool_calls.push(DisplayToolCall {
+                tool_call_id: "tc".into(),
+                name: "read".into(),
+                summary: format!("crates/mush-tui/src/widgets/message_list{i}.rs"),
+                status: ToolCallStatus::Done,
+                output: Some(output),
+                image_data: None,
+                batch: 0,
+                bash_done: None,
+                cell: None,
+            });
+        }
+    }
+    app
+}
+
 fn tool_heavy_app(message_count: usize) -> App {
     let mut app = conversation_app(message_count);
     let output = code_block_body_fixture(10);
@@ -250,6 +301,7 @@ criterion_group!(
     bench_transcript_scaling,
     bench_transcript_resize,
     bench_transcript_with_tool_output,
+    bench_transcript_resize_with_read_output,
     bench_markdown,
     bench_code_blocks,
     bench_input_layout
