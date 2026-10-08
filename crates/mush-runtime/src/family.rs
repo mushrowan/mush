@@ -389,6 +389,17 @@ struct Node {
     cancel_reason: Option<String>,
 }
 
+impl Node {
+    fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if !self.summary.status.settled() {
+            self.summary.status = ChildStatus::Cancelled;
+        }
+    }
+}
+
 struct Inner {
     root: Identity,
     root_session_id: String,
@@ -535,12 +546,7 @@ impl Family {
 
     pub fn rebind(&self, session_id: String, registry_path: Option<PathBuf>) {
         for node in self.lock().children.values_mut() {
-            if let Some(shutdown) = node.shutdown.take() {
-                let _ = shutdown.send(());
-            }
-            if !node.summary.status.settled() {
-                node.summary.status = ChildStatus::Cancelled;
-            }
+            node.stop();
         }
         self.persist();
         let children = load_registry(registry_path.as_deref());
@@ -676,56 +682,18 @@ impl Family {
         let inner = self.lock();
         let mut views = Vec::new();
         match &caller.id {
-            None => views.push(AgentView {
-                name: inner.root.name.clone(),
-                relationship: "self".into(),
-                session_id: inner.root_session_id.clone(),
-                rlm_child_id: None,
-                status: root_status(&inner).into(),
-                state: root_activity(&inner),
-                observable: false,
-                model_id: None,
-                progress_note: inner.root_note.clone(),
-                streaming: false,
-                tool_running: None,
-                awaiting_confirmation: None,
-                children_running: running_children(&inner, &None),
-            }),
+            None => views.push(root_view(&inner, "self", false)),
             Some(id) => {
                 let me = inner.children.get(id);
                 if let Some(node) = me {
-                    views.push(view_of(
-                        node,
-                        "self",
-                        false,
-                        running_children(&inner, &Some(node.summary.id.clone())),
-                    ));
+                    views.push(view_of(&inner, node, "self", false));
                 }
                 let parent = me.and_then(|node| node.summary.parent.clone());
                 match &parent {
-                    None => views.push(AgentView {
-                        name: inner.root.name.clone(),
-                        relationship: "parent".into(),
-                        session_id: inner.root_session_id.clone(),
-                        rlm_child_id: None,
-                        status: root_status(&inner).into(),
-                        state: root_activity(&inner),
-                        observable: inner.root_observe.is_some(),
-                        model_id: None,
-                        progress_note: inner.root_note.clone(),
-                        streaming: false,
-                        tool_running: None,
-                        awaiting_confirmation: None,
-                        children_running: running_children(&inner, &None),
-                    }),
+                    None => views.push(root_view(&inner, "parent", inner.root_observe.is_some())),
                     Some(parent_id) => {
                         if let Some(node) = inner.children.get(parent_id) {
-                            views.push(view_of(
-                                node,
-                                "parent",
-                                node.observe.is_some(),
-                                running_children(&inner, &Some(node.summary.id.clone())),
-                            ));
+                            views.push(view_of(&inner, node, "parent", node.observe.is_some()));
                         }
                     }
                 }
@@ -734,24 +702,14 @@ impl Family {
                         && node.summary.parent == parent
                         && node.summary.status != ChildStatus::Deleted
                     {
-                        views.push(view_of(
-                            node,
-                            "sibling",
-                            node.observe.is_some(),
-                            running_children(&inner, &Some(node.summary.id.clone())),
-                        ));
+                        views.push(view_of(&inner, node, "sibling", node.observe.is_some()));
                     }
                 }
             }
         }
         for node in inner.children.values() {
             if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
-                views.push(view_of(
-                    node,
-                    "child",
-                    node.observe.is_some(),
-                    running_children(&inner, &Some(node.summary.id.clone())),
-                ));
+                views.push(view_of(&inner, node, "child", node.observe.is_some()));
             }
         }
         views
@@ -1570,7 +1528,7 @@ impl Family {
         let now = Timestamp::now();
         let mut inner = self.lock();
         let mut targets = Vec::new();
-        let mut hibernating = 0;
+        let mut siblings_of = None;
         if let Some(my_id) = caller.id.as_deref() {
             let node = inner
                 .children
@@ -1583,36 +1541,33 @@ impl Family {
                 child: my_parent.clone(),
                 sender: self.sender_label(caller, "child"),
             });
-            for node in inner.children.values() {
-                if node.summary.parent != my_parent
-                    || node.summary.id == my_id
-                    || node.summary.status == ChildStatus::Deleted
-                {
-                    continue;
-                }
-                if node.summary.activity(now) == Activity::Hibernating {
-                    hibernating += 1;
-                } else {
-                    targets.push(Target {
-                        endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
-                        child: Some(node.summary.id.clone()),
-                        sender: self.sender_label(caller, "sibling"),
-                    });
-                }
-            }
+            siblings_of = Some((my_id, my_parent));
         }
-        for node in inner.children.values() {
-            if node.summary.parent != caller.id || node.summary.status == ChildStatus::Deleted {
-                continue;
-            }
+        let mut hibernating = 0;
+        let mut reach = |node: &Node, role: &str| {
             if node.summary.activity(now) == Activity::Hibernating {
                 hibernating += 1;
             } else {
                 targets.push(Target {
                     endpoint: Self::endpoint(&inner, Some(&node.summary.id)),
                     child: Some(node.summary.id.clone()),
-                    sender: self.sender_label(caller, "parent"),
+                    sender: self.sender_label(caller, role),
                 });
+            }
+        };
+        if let Some((my_id, my_parent)) = &siblings_of {
+            for node in inner.children.values() {
+                if node.summary.parent == *my_parent
+                    && node.summary.id != *my_id
+                    && node.summary.status != ChildStatus::Deleted
+                {
+                    reach(node, "sibling");
+                }
+            }
+        }
+        for node in inner.children.values() {
+            if node.summary.parent == caller.id && node.summary.status != ChildStatus::Deleted {
+                reach(node, "parent");
             }
         }
         Ok((targets, hibernating))
@@ -1789,12 +1744,7 @@ impl Family {
                 .children
                 .values_mut()
                 .filter_map(|node| {
-                    if let Some(shutdown) = node.shutdown.take() {
-                        let _ = shutdown.send(());
-                    }
-                    if !node.summary.status.settled() {
-                        node.summary.status = ChildStatus::Cancelled;
-                    }
+                    node.stop();
                     node.task.take()
                 })
                 .collect()
@@ -1893,13 +1843,27 @@ fn compact_preview(text: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-fn view_of(
-    node: &Node,
-    relationship: &str,
-    observable: bool,
-    children_running: usize,
-) -> AgentView {
+fn root_view(inner: &Inner, relationship: &str, observable: bool) -> AgentView {
+    AgentView {
+        name: inner.root.name.clone(),
+        relationship: relationship.to_string(),
+        session_id: inner.root_session_id.clone(),
+        rlm_child_id: None,
+        status: root_status(inner).into(),
+        state: root_activity(inner),
+        observable,
+        model_id: None,
+        progress_note: inner.root_note.clone(),
+        streaming: false,
+        tool_running: None,
+        awaiting_confirmation: None,
+        children_running: running_children(inner, &None),
+    }
+}
+
+fn view_of(inner: &Inner, node: &Node, relationship: &str, observable: bool) -> AgentView {
     let summary = &node.summary;
+    let children_running = running_children(inner, &Some(summary.id.clone()));
     AgentView {
         name: summary.name.clone(),
         relationship: relationship.to_string(),
