@@ -63,15 +63,7 @@ impl PythonPlan {
     }
 }
 
-pub fn resolve_python(explicit: Option<&Path>) -> Result<PathBuf, KernelError> {
-    let environment = std::env::var_os(PYTHON_ENV);
-    match explicit.or(environment.as_deref().map(Path::new)) {
-        Some(path) => check(path),
-        None => system_python(),
-    }
-}
-
-fn system_python() -> Result<PathBuf, KernelError> {
+pub(crate) fn system_python() -> Result<PathBuf, KernelError> {
     ["python3", "python"]
         .into_iter()
         .find_map(find_on_path)
@@ -102,12 +94,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_explicit_path_is_an_error() {
-        let error = resolve_python(Some(Path::new("/definitely/not/python"))).unwrap_err();
-        assert!(matches!(error, KernelError::PythonMissing(_)));
-    }
-
-    #[test]
     fn python_selection_precedence() {
         let dir = tempfile::tempdir().unwrap();
         let venv = crate::venv::ManagedVenv::at(dir.path().join("venv"));
@@ -136,7 +122,7 @@ mod tests {
 
     #[test]
     fn python3_is_found_on_the_path() {
-        let path = resolve_python(None).unwrap();
+        let path = system_python().unwrap();
         assert!(path.is_file(), "{path:?}");
     }
 }

@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_probe_lists_only_importable_modules() {
-        let Ok(python) = crate::python::resolve_python(None) else {
+        let Ok(python) = crate::python::system_python() else {
             return;
         };
 
