@@ -45,25 +45,32 @@ pub struct Pool {
     ledger: Ledger,
 }
 
-pub fn execution_lock(directory: &Path, workspace: &Path) -> io::Result<File> {
-    private_directory(directory)?;
-    let canonical = std::fs::canonicalize(workspace)?;
-    let key = crate::review::digest(canonical.as_os_str().as_encoded_bytes());
-    let path = directory.join(format!("workspace-{key}.lock"));
+fn open_private_lock(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)?;
-    read_private(&path, 0)?;
+        .open(path)?;
+    read_private(path, 0)?;
+    Ok(file)
+}
+
+fn exclusive(file: File, busy: &str) -> io::Result<File> {
     file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            io::Error::new(io::ErrorKind::WouldBlock, "workspace is busy")
-        }
+        std::fs::TryLockError::WouldBlock => io::Error::new(io::ErrorKind::WouldBlock, busy),
         std::fs::TryLockError::Error(error) => error,
     })?;
     Ok(file)
+}
+
+pub fn execution_lock(directory: &Path, workspace: &Path) -> io::Result<File> {
+    private_directory(directory)?;
+    let canonical = std::fs::canonicalize(workspace)?;
+    let key = crate::review::digest(canonical.as_os_str().as_encoded_bytes());
+    let path = directory.join(format!("workspace-{key}.lock"));
+    let file = open_private_lock(&path)?;
+    exclusive(file, "workspace is busy")
 }
 
 pub fn claim_lock(directory: &Path, id: &str) -> io::Result<File> {
@@ -72,20 +79,8 @@ pub fn claim_lock(directory: &Path, id: &str) -> io::Result<File> {
     }
     private_directory(directory)?;
     let path = directory.join(format!("claim-{id}.lock"));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)?;
-    read_private(&path, 0)?;
-    file.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            io::Error::new(io::ErrorKind::WouldBlock, "claim still owns an execution")
-        }
-        std::fs::TryLockError::Error(error) => error,
-    })?;
-    Ok(file)
+    let file = open_private_lock(&path)?;
+    exclusive(file, "claim still owns an execution")
 }
 
 pub fn session_lock(directory: &Path, session: &str, inherited: Option<i32>) -> io::Result<File> {
@@ -94,13 +89,7 @@ pub fn session_lock(directory: &Path, session: &str, inherited: Option<i32>) -> 
     }
     private_directory(directory)?;
     let path = directory.join(format!("{session}.lease"));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)?;
-    read_private(&path, 0)?;
+    let file = open_private_lock(&path)?;
     let lock = if let Some(fd) = inherited {
         if fd < 3 {
             return Err(io::Error::other("invalid session lease descriptor"));
@@ -122,25 +111,13 @@ pub fn session_lock(directory: &Path, session: &str, inherited: Option<i32>) -> 
     } else {
         file
     };
-    lock.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => {
-            io::Error::new(io::ErrorKind::WouldBlock, "session is busy")
-        }
-        std::fs::TryLockError::Error(error) => error,
-    })?;
-    Ok(lock)
+    exclusive(lock, "session is busy")
 }
 
 impl Pool {
     pub fn open(directory: &Path) -> io::Result<Self> {
         private_directory(directory)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(directory.join("admission.lock"))?;
-        read_private(&directory.join("admission.lock"), 0)?;
+        let lock = open_private_lock(&directory.join("admission.lock"))?;
         lock.try_lock().map_err(io::Error::other)?;
         let policy: Policy =
             crate::review::decode(&read_private(&directory.join("policy.json"), 64 * 1024)?)?;
