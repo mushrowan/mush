@@ -3091,7 +3091,6 @@ dependencies = [
 name = "mush-treesitter"
 version = "0.1.0"
 dependencies = [
- "filetime",
  "ignore",
  "notify",
  "rayon",

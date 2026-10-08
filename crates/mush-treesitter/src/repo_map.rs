@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
+use crate::Language;
 use crate::parser::{detect_language, new_parser};
 use crate::references::extract_references;
 use crate::symbols::{self, SymbolInfo, SymbolKind};
-use crate::{Language, ParserPool};
 
 struct FileData {
     definitions: Vec<SymbolInfo>,
@@ -74,11 +74,6 @@ impl RepoMap {
             .cloned()
             .collect();
         Self { files }
-    }
-
-    #[must_use]
-    pub fn file_count(&self) -> usize {
-        self.files.len()
     }
 
     #[must_use]
@@ -150,11 +145,6 @@ impl RepoMap {
     #[must_use]
     pub fn format(&self, max_chars: usize) -> String {
         self.render(RenderOptions::for_chars(max_chars))
-    }
-
-    #[must_use]
-    pub fn format_for_tokens(&self, max_tokens: usize) -> String {
-        self.render(RenderOptions::for_tokens(max_tokens))
     }
 }
 
@@ -239,8 +229,8 @@ pub fn is_inside_repo(path: &Path) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub struct DiscoverOptions {
-    pub max_files: usize,
+struct DiscoverOptions {
+    max_files: usize,
 }
 
 impl Default for DiscoverOptions {
@@ -310,14 +300,7 @@ fn discover_files_with_options(root: &Path, opts: &DiscoverOptions) -> Vec<PathB
     files
 }
 
-fn parse_file_data(pool: &ParserPool, path: &Path) -> Result<FileData, crate::ParseError> {
-    let language = detect_language(path)?;
-    let source = std::fs::read(path)?;
-    let tree = pool.parse(language, &source)?;
-    Ok(FileData::extract(language, &source, &tree, path))
-}
-
-fn parse_file_standalone(path: &Path) -> Result<FileData, crate::ParseError> {
+fn parse_file_data(path: &Path) -> Result<FileData, crate::ParseError> {
     thread_local! {
         static PARSERS: RefCell<HashMap<Language, tree_sitter::Parser>> =
             RefCell::new(HashMap::new());
@@ -345,7 +328,7 @@ fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
 
     files
         .par_iter()
-        .filter_map(|path| match parse_file_standalone(path) {
+        .filter_map(|path| match parse_file_data(path) {
             Ok(data) => Some((path.clone(), data)),
             Err(e) => {
                 tracing::debug!("skipping {}: {e}", path.display());
@@ -357,7 +340,6 @@ fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
 
 pub struct IncrementalRepoMap {
     root: PathBuf,
-    pool: ParserPool,
     file_data: FxHashMap<PathBuf, FileData>,
     current: RepoMap,
     last_edges_fp: u64,
@@ -368,7 +350,6 @@ pub struct IncrementalRepoMap {
 impl IncrementalRepoMap {
     #[tracing::instrument(name = "repo_map_build", skip_all)]
     pub fn new(root: &Path) -> Self {
-        let pool = ParserPool::new();
         let files = discover_files(root);
         let file_data = parse_files_parallel(&files);
 
@@ -379,7 +360,6 @@ impl IncrementalRepoMap {
         } = build_from_data(root, &file_data, None);
         Self {
             root: root.to_path_buf(),
-            pool,
             file_data,
             current: map,
             last_edges_fp: edges_fp,
@@ -405,14 +385,11 @@ impl IncrementalRepoMap {
 
         for path in removed {
             if self.file_data.remove(path).is_some() {
-                self.pool.invalidate(path);
                 any_change = true;
             }
         }
 
         for path in changed {
-            self.pool.invalidate(path);
-
             if !path.exists() {
                 if self.file_data.remove(path).is_some() {
                     any_change = true;
@@ -420,7 +397,7 @@ impl IncrementalRepoMap {
                 continue;
             }
 
-            match parse_file_data(&self.pool, path) {
+            match parse_file_data(path) {
                 Ok(data) => {
                     self.file_data.insert(path.clone(), data);
                     any_change = true;
@@ -1027,10 +1004,9 @@ pub struct Config {
         let files = discover_files(dir.path());
         assert_eq!(files.len(), 3, "should find all code files");
 
-        let pool = ParserPool::new();
         let mut serial: FxHashMap<PathBuf, FileData> = FxHashMap::default();
         for path in &files {
-            if let Ok(data) = parse_file_data(&pool, path) {
+            if let Ok(data) = parse_file_data(path) {
                 serial.insert(path.clone(), data);
             }
         }

@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::path::Path;
+use std::sync::nonpoison::Mutex;
 
 use crate::language::Language;
-use crate::symbols::{self, SymbolInfo};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -18,22 +16,9 @@ pub enum ParseError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Clone)]
-struct ParsedFile {
-    language: Language,
-    source: Vec<u8>,
-    tree: tree_sitter::Tree,
-}
-
-struct CachedTree {
-    parsed: ParsedFile,
-    mtime: SystemTime,
-}
-
 #[derive(Default)]
 pub struct ParserPool {
     parsers: Mutex<HashMap<Language, tree_sitter::Parser>>,
-    tree_cache: Mutex<HashMap<PathBuf, CachedTree>>,
 }
 
 impl ParserPool {
@@ -50,84 +35,19 @@ impl ParserPool {
             .tree_sitter_language()
             .ok_or(ParseError::GrammarNotAvailable(language))?;
 
-        let mut parsers = lock(&self.parsers);
+        let mut parsers = self.parsers.lock();
         let parser = parsers
             .entry(language)
             .or_insert_with(|| new_parser(&ts_lang));
 
         parser.parse(source, None).ok_or(ParseError::ParseFailed)
     }
-
-    pub fn parse_file(&self, path: &Path) -> Result<(Language, tree_sitter::Tree), ParseError> {
-        let parsed = self.parse_file_cached(path)?;
-        Ok((parsed.language, parsed.tree))
-    }
-
-    pub fn symbols_from_file(
-        &self,
-        path: &Path,
-    ) -> Result<(Language, Vec<SymbolInfo>), ParseError> {
-        let parsed = self.parse_file_cached(path)?;
-        let syms =
-            symbols::extract_symbols(parsed.language, &parsed.source, &parsed.tree, Some(path));
-        Ok((parsed.language, syms))
-    }
-
-    fn parse_file_cached(&self, path: &Path) -> Result<ParsedFile, ParseError> {
-        let language = detect_language(path)?;
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let mtime = std::fs::metadata(path)?.modified().ok();
-
-        if let Some(mtime) = mtime
-            && let Some(entry) = lock(&self.tree_cache).get(&canon)
-            && entry.mtime == mtime
-            && entry.parsed.language == language
-        {
-            return Ok(entry.parsed.clone());
-        }
-
-        let source = std::fs::read(path)?;
-        let tree = self.parse(language, &source)?;
-        let parsed = ParsedFile {
-            language,
-            source,
-            tree,
-        };
-
-        if let Some(mtime) = mtime {
-            lock(&self.tree_cache).insert(
-                canon,
-                CachedTree {
-                    parsed: parsed.clone(),
-                    mtime,
-                },
-            );
-        }
-
-        Ok(parsed)
-    }
-
-    pub fn invalidate(&self, path: &Path) {
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        lock(&self.tree_cache).remove(&canon);
-    }
-
-    pub fn invalidate_all(&self) {
-        lock(&self.tree_cache).clear();
-    }
-
-    pub fn cached_file_count(&self) -> usize {
-        lock(&self.tree_cache).len()
-    }
 }
 
 impl std::fmt::Debug for ParserPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let parser_count = self.parsers.lock().map(|p| p.len()).unwrap_or(0);
-        let cache_count = self.tree_cache.lock().map(|c| c.len()).unwrap_or(0);
         f.debug_struct("ParserPool")
-            .field("cached_parsers", &parser_count)
-            .field("cached_files", &cache_count)
+            .field("cached_parsers", &self.parsers.lock().len())
             .finish()
     }
 }
@@ -149,14 +69,8 @@ pub(crate) fn new_parser(language: &tree_sitter::Language) -> tree_sitter::Parse
     parser
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
     use super::*;
 
     #[test]
@@ -193,9 +107,10 @@ mod tests {
 
     #[test]
     fn parse_unknown_extension() {
-        let pool = ParserPool::new();
-        let result = pool.parse_file(Path::new("photo.png"));
-        assert!(result.is_err());
+        assert!(matches!(
+            detect_language(Path::new("photo.png")),
+            Err(ParseError::UnsupportedLanguage(_))
+        ));
     }
 
     #[test]
@@ -205,100 +120,7 @@ mod tests {
         pool.parse(Language::Rust, source).unwrap();
         pool.parse(Language::Rust, source).unwrap();
 
-        let count = pool.parsers.lock().unwrap().len();
+        let count = pool.parsers.lock().len();
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn parse_file_populates_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("test.rs");
-        std::fs::write(&file, "fn cached() {}").unwrap();
-
-        let pool = ParserPool::new();
-        assert_eq!(pool.cached_file_count(), 0);
-
-        pool.parse_file(&file).unwrap();
-        assert_eq!(pool.cached_file_count(), 1);
-
-        pool.parse_file(&file).unwrap();
-        assert_eq!(pool.cached_file_count(), 1);
-    }
-
-    #[test]
-    fn cache_invalidated_on_mtime_change() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("evolving.rs");
-        std::fs::write(&file, "fn v1() {}").unwrap();
-
-        let pool = ParserPool::new();
-        let (_, syms1) = pool.symbols_from_file(&file).unwrap();
-        assert_eq!(syms1[0].name, "v1");
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&file)
-            .unwrap();
-        f.write_all(b"fn v2() {}").unwrap();
-        f.flush().unwrap();
-        drop(f);
-
-        let future = SystemTime::now() + std::time::Duration::from_secs(10);
-        filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(future)).unwrap();
-
-        let (_, syms2) = pool.symbols_from_file(&file).unwrap();
-        assert_eq!(syms2[0].name, "v2");
-    }
-
-    #[test]
-    fn invalidate_removes_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("removeme.rs");
-        std::fs::write(&file, "fn bye() {}").unwrap();
-
-        let pool = ParserPool::new();
-        pool.parse_file(&file).unwrap();
-        assert_eq!(pool.cached_file_count(), 1);
-
-        pool.invalidate(&file);
-        assert_eq!(pool.cached_file_count(), 0);
-    }
-
-    #[test]
-    fn invalidate_all_clears_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.rs");
-        let b = dir.path().join("b.py");
-        std::fs::write(&a, "fn a() {}").unwrap();
-        std::fs::write(&b, "def b(): pass").unwrap();
-
-        let pool = ParserPool::new();
-        pool.parse_file(&a).unwrap();
-        pool.parse_file(&b).unwrap();
-        assert_eq!(pool.cached_file_count(), 2);
-
-        pool.invalidate_all();
-        assert_eq!(pool.cached_file_count(), 0);
-    }
-
-    #[test]
-    fn symbols_from_file_uses_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("lib.rs");
-        std::fs::write(&file, "fn hello() {}\nfn world() {}").unwrap();
-
-        let pool = ParserPool::new();
-
-        let (lang, syms) = pool.symbols_from_file(&file).unwrap();
-        assert_eq!(lang, Language::Rust);
-        assert_eq!(syms.len(), 2);
-        assert_eq!(pool.cached_file_count(), 1);
-
-        let (_, syms2) = pool.symbols_from_file(&file).unwrap();
-        assert_eq!(syms2.len(), 2);
-        assert_eq!(pool.cached_file_count(), 1);
     }
 }

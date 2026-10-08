@@ -72,7 +72,6 @@ lang-nix = ["dep:tree-sitter-nix"]
 
 [dev-dependencies]
 tempfile.workspace = true
-filetime.workspace = true
 
 [lints]
 workspace = true
