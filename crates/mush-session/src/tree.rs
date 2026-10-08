@@ -132,6 +132,7 @@ struct Index {
     positions: std::collections::HashMap<EntryId, usize>,
     parents: Vec<Option<usize>>,
     child_counts: Vec<usize>,
+    open_tool_calls: Vec<Arc<[ToolCallId]>>,
 }
 
 impl SessionTree {
@@ -255,6 +256,38 @@ fn branch_receipts<'a>(entries: impl IntoIterator<Item = &'a SessionEntry>) -> V
     receipts
 }
 
+fn open_tool_calls_after(
+    open: Option<&Arc<[ToolCallId]>>,
+    entry: &SessionEntry,
+) -> Arc<[ToolCallId]> {
+    let open = open.cloned().unwrap_or_default();
+    let EntryKind::Message { message } = &entry.kind else {
+        return open;
+    };
+    match message {
+        Message::Assistant(assistant) => {
+            let mut calls = assistant
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    AssistantContentPart::ToolCall(call) => Some(&call.id),
+                    _ => None,
+                })
+                .peekable();
+            if calls.peek().is_none() {
+                return open;
+            }
+            open.iter().chain(calls).cloned().collect()
+        }
+        Message::ToolResult(result) if open.contains(&result.tool_call_id) => open
+            .iter()
+            .filter(|call| **call != result.tool_call_id)
+            .cloned()
+            .collect(),
+        Message::ToolResult(_) | Message::User(_) | Message::Event(_) => open,
+    }
+}
+
 fn entry_receipts(entry: &SessionEntry) -> &[EventReceipt] {
     match &entry.kind {
         EntryKind::Message {
@@ -342,9 +375,12 @@ impl SessionTree {
         if let Some(parent) = parent {
             index.child_counts[parent] += 1;
         }
+        let open =
+            open_tool_calls_after(parent.map(|parent| &index.open_tool_calls[parent]), &entry);
         index.positions.insert(entry.id.clone(), self.entries.len());
         index.parents.push(parent);
         index.child_counts.push(0);
+        index.open_tool_calls.push(open);
         self.entries.push(entry);
     }
 
@@ -577,23 +613,11 @@ impl SessionTree {
     }
 
     pub fn unanswered_tool_calls(&self, id: &EntryId) -> Vec<ToolCallId> {
-        let mut open: Vec<&ToolCallId> = Vec::new();
-        for entry in self.branch_ending_at(Some(id)) {
-            let EntryKind::Message { message } = &entry.kind else {
-                continue;
-            };
-            match message {
-                Message::Assistant(assistant) => {
-                    open.extend(assistant.content.iter().filter_map(|part| match part {
-                        AssistantContentPart::ToolCall(call) => Some(&call.id),
-                        _ => None,
-                    }));
-                }
-                Message::ToolResult(result) => open.retain(|call| **call != result.tool_call_id),
-                Message::User(_) | Message::Event(_) => {}
-            }
-        }
-        open.into_iter().cloned().collect()
+        self.index
+            .positions
+            .get(id)
+            .map(|&position| self.index.open_tool_calls[position].to_vec())
+            .unwrap_or_default()
     }
 
     pub fn nearest_branchable_ancestor(&self, id: &EntryId) -> Option<&EntryId> {
@@ -1125,6 +1149,34 @@ mod tests {
             tree.unanswered_tool_calls(&answered).is_empty(),
             "the tool result closes the call"
         );
+    }
+
+    #[test]
+    fn unanswered_tool_calls_follow_only_the_asked_branch_and_survive_a_reload() {
+        let mut tree = SessionTree::new();
+        let user = tree.append_message(user_msg("q0"));
+        let open = tree.append_message(assistant_calling("call_1"));
+        assert!(tree.branch(&user));
+        let other = tree.append_message(assistant_calling("call_2"));
+        let answered = tree.append_message(tool_result("call_2"));
+        let restored: SessionTree =
+            serde_json::from_str(&serde_json::to_string(&tree).unwrap()).unwrap();
+
+        for tree in [&tree, &restored] {
+            assert_eq!(
+                tree.unanswered_tool_calls(&open),
+                vec![ToolCallId::from("call_1")]
+            );
+            assert_eq!(
+                tree.unanswered_tool_calls(&other),
+                vec![ToolCallId::from("call_2")]
+            );
+            assert!(tree.unanswered_tool_calls(&answered).is_empty());
+            assert!(
+                tree.unanswered_tool_calls(&EntryId::from("missing"))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
