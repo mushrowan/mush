@@ -164,14 +164,18 @@ impl InProcessConnection {
             return Err(ConnectionError::Compacting);
         }
         self.compaction_auto = false;
-        let target = self.runtime.compaction_target(&self.config).await.fitting(
-            mush_session::compact::summary_request_tokens(
-                &messages,
-                self.config.compaction.keep_recent(&messages),
-                &focus,
-                &self.config.compaction,
-            ),
-        );
+        let target = self
+            .runtime
+            .compaction_target(&self.config)
+            .await
+            .fitting(|| {
+                mush_session::compact::summary_request_tokens(
+                    &messages,
+                    self.config.compaction.keep_recent(&messages),
+                    &focus,
+                    &self.config.compaction,
+                )
+            });
         let pane_model = self.runtime.model(&self.config.default_model);
         let live = target.uses_session_model().then(|| {
             let tools = crate::turn::aligned_tools(

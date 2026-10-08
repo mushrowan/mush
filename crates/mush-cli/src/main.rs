@@ -944,12 +944,14 @@ fn compaction_transform(
         let kernel = kernel.clone();
         Box::pin(async move {
             let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
-            let target = target.fitting(mush_session::compact::summary_request_tokens(
-                &owned,
-                compaction_settings.keep_recent(&owned),
-                &mush_session::compact::CompactionFocus::default(),
-                &compaction_settings,
-            ));
+            let target = target.fitting(|| {
+                mush_session::compact::summary_request_tokens(
+                    &owned,
+                    compaction_settings.keep_recent(&owned),
+                    &mush_session::compact::CompactionFocus::default(),
+                    &compaction_settings,
+                )
+            });
             let mut result = auto_compact(
                 owned,
                 tokens,

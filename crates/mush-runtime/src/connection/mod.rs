@@ -933,12 +933,10 @@ impl InProcessConnection {
         }
         let settings = self.config.branch_summary;
         let target = self.runtime.compaction_target(&self.config).await;
-        let required = mush_session::compact::branch_summary_request_tokens(
-            &abandoned,
-            target.window,
-            &settings,
-        );
-        let target = target.fitting(required);
+        let window = target.window;
+        let target = target.fitting(|| {
+            mush_session::compact::branch_summary_request_tokens(&abandoned, window, &settings)
+        });
         let registry = self.registry.clone();
         let task = tokio::spawn(async move {
             mush_session::compact::summarise_branch(

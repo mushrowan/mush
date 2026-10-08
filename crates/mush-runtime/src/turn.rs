@@ -63,24 +63,30 @@ pub struct CompactionTarget {
 
 impl CompactionTarget {
     #[must_use]
-    pub fn fitting(self, required_tokens: usize) -> Self {
-        match self.session {
-            Some((model, options))
-                if !mush_session::compact::window_fits(&self.model, required_tokens) =>
-            {
-                tracing::warn!(
-                    compaction_model = %self.model.id,
-                    required_tokens,
-                    "compaction model window is too small for the summary request, using the session model"
-                );
-                Self {
-                    model,
-                    options,
-                    session: None,
-                    ..self
-                }
-            }
-            session => Self { session, ..self },
+    pub fn fitting(self, required_tokens: impl FnOnce() -> usize) -> Self {
+        let Some((model, options)) = self.session else {
+            return Self {
+                session: None,
+                ..self
+            };
+        };
+        let required_tokens = required_tokens();
+        if mush_session::compact::window_fits(&self.model, required_tokens) {
+            return Self {
+                session: Some((model, options)),
+                ..self
+            };
+        }
+        tracing::warn!(
+            compaction_model = %self.model.id,
+            required_tokens,
+            "compaction model window is too small for the summary request, using the session model"
+        );
+        Self {
+            model,
+            options,
+            session: None,
+            ..self
         }
     }
 
@@ -407,12 +413,14 @@ pub fn build_context_transform(
                 );
                 return mush_agent::ContextTransformResult::Unchanged;
             }
-            let target = target.fitting(mush_session::compact::summary_request_tokens(
-                &owned_messages,
-                settings.keep_recent(&owned_messages),
-                &mush_session::compact::CompactionFocus::default(),
-                &settings,
-            ));
+            let target = target.fitting(|| {
+                mush_session::compact::summary_request_tokens(
+                    &owned_messages,
+                    settings.keep_recent(&owned_messages),
+                    &mush_session::compact::CompactionFocus::default(),
+                    &settings,
+                )
+            });
             let mut result = auto_compact(
                 owned_messages,
                 effective_compaction_tokens,
@@ -625,23 +633,23 @@ mod tests {
             session: Some((session.clone(), StreamOptions::default())),
         };
 
-        let fits = target(&summariser).fitting(8_000);
+        let fits = target(&summariser).fitting(|| 8_000);
         assert_eq!(fits.model.id, summariser.id);
         assert!(!fits.uses_session_model());
 
-        let falls_back = target(&summariser).fitting(8_001);
+        let falls_back = target(&summariser).fitting(|| 8_001);
         assert_eq!(falls_back.model.id, session.id);
         assert!(falls_back.uses_session_model());
         assert_eq!(falls_back.window, session.compaction_window());
 
         summariser.context_window = TokenCount::ZERO;
         assert_eq!(
-            target(&summariser).fitting(1_000_000).model.id,
+            target(&summariser).fitting(|| 1_000_000).model.id,
             summariser.id
         );
         assert_eq!(
             CompactionTarget::session_model(session.clone(), StreamOptions::default())
-                .fitting(1_000_000)
+                .fitting(|| 1_000_000)
                 .model
                 .id,
             session.id
