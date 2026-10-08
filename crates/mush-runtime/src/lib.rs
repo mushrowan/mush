@@ -25,7 +25,7 @@ pub mod turn;
 pub mod worker;
 
 use mush_agent::AgentEvent;
-use mush_ai::types::{Message, Timestamp, ToolResultMessage};
+use mush_ai::types::Message;
 use mush_session::ConversationState;
 
 pub use autonomous::{
@@ -76,14 +76,11 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
             tool_name,
             result,
         } => {
-            conversation.append_message(Message::ToolResult(ToolResultMessage {
-                tool_call_id: tool_call_id.clone(),
-                tool_name: tool_name.clone(),
-                content: result.content.clone(),
-                outcome: result.outcome,
-                timestamp_ms: Timestamp::now(),
-                details: result.details.clone(),
-            }));
+            conversation.append_message(Message::ToolResult(
+                result
+                    .clone()
+                    .into_message(tool_call_id.clone(), tool_name.clone()),
+            ));
             Applied::Appended
         }
         AgentEvent::SteeringInjected { messages } | AgentEvent::FollowUpInjected { messages } => {
@@ -112,7 +109,7 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
 mod tests {
     use super::*;
     use mush_ai::types::{
-        Api, AssistantMessage, Provider, TextContent, ToolCallId, ToolName, ToolOutcome,
+        Api, AssistantMessage, Provider, TextContent, Timestamp, ToolCallId, ToolName, ToolOutcome,
         ToolResultContentPart, UserContent, UserMessage,
     };
 

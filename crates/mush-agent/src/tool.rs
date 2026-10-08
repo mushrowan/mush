@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use mush_ai::types::{
-    Api, ImageContent, ImageMimeType, TextContent, ToolOutcome, ToolResultContentPart,
+    Api, ImageContent, ImageMimeType, TextContent, Timestamp, ToolCallId, ToolName, ToolOutcome,
+    ToolResultContentPart, ToolResultMessage,
 };
 use serde::de::DeserializeOwned;
 
@@ -48,6 +49,17 @@ impl ToolResult {
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
         self.details = Some(details);
         self
+    }
+
+    pub fn into_message(self, tool_call_id: ToolCallId, tool_name: ToolName) -> ToolResultMessage {
+        ToolResultMessage {
+            tool_call_id,
+            tool_name,
+            content: self.content,
+            outcome: self.outcome,
+            timestamp_ms: Timestamp::now(),
+            details: self.details,
+        }
     }
 }
 

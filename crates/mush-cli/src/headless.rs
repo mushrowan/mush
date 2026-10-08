@@ -149,14 +149,11 @@ impl Transcript {
                 if !self.awaiting.remove(tool_call_id) {
                     return false;
                 }
-                self.pending.push(Message::ToolResult(ToolResultMessage {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    content: result.content.clone(),
-                    outcome: result.outcome,
-                    timestamp_ms: Timestamp::now(),
-                    details: result.details.clone(),
-                }));
+                self.pending.push(Message::ToolResult(
+                    result
+                        .clone()
+                        .into_message(tool_call_id.clone(), tool_name.clone()),
+                ));
             }
             AgentEvent::FollowUpInjected { messages } => {
                 self.follow_up = messages.clone();

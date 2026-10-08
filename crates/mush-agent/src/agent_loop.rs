@@ -610,14 +610,7 @@ fn exec_end(call: &ToolCall, result: ToolResult) -> AgentEvent {
 }
 
 fn tool_result_message(call: &ToolCall, result: ToolResult) -> Message {
-    Message::ToolResult(ToolResultMessage {
-        tool_call_id: call.id.clone(),
-        tool_name: call.name.clone(),
-        content: result.content,
-        outcome: result.outcome,
-        timestamp_ms: Timestamp::now(),
-        details: result.details,
-    })
+    Message::ToolResult(result.into_message(call.id.clone(), call.name.clone()))
 }
 
 fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {

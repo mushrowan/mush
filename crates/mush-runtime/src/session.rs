@@ -446,9 +446,8 @@ impl SessionRuntime {
     }
 
     pub fn record_cancelled_tools(&mut self) -> Vec<ToolCallId> {
-        use mush_ai::types::{
-            AssistantContentPart, TextContent, ToolResultContentPart, ToolResultMessage,
-        };
+        use mush_agent::tool::ToolResult;
+        use mush_ai::types::AssistantContentPart;
         let context = self.conversation.context();
         let mut answered: Vec<ToolCallId> = Vec::new();
         let mut open = Vec::new();
@@ -471,17 +470,10 @@ impl SessionRuntime {
         }
         let mut cancelled = Vec::new();
         for (tool_call_id, tool_name) in open {
-            self.conversation
-                .append_message(Message::ToolResult(ToolResultMessage {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name,
-                    content: vec![ToolResultContentPart::Text(TextContent {
-                        text: CANCELLED_TOOL_MESSAGE.into(),
-                    })],
-                    outcome: mush_ai::types::ToolOutcome::Error,
-                    timestamp_ms: mush_ai::types::Timestamp::now(),
-                    details: None,
-                }));
+            self.conversation.append_message(Message::ToolResult(
+                ToolResult::error(CANCELLED_TOOL_MESSAGE)
+                    .into_message(tool_call_id.clone(), tool_name),
+            ));
             cancelled.push(tool_call_id);
         }
         cancelled

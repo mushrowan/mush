@@ -149,14 +149,11 @@ impl JsonEvents {
                     "result": tool_result(result),
                     "isError": result.outcome.is_error(),
                 }));
-                let message = Message::ToolResult(ToolResultMessage {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    content: result.content.clone(),
-                    outcome: result.outcome,
-                    timestamp_ms: Timestamp::now(),
-                    details: result.details.clone(),
-                });
+                let message = Message::ToolResult(
+                    result
+                        .clone()
+                        .into_message(tool_call_id.clone(), tool_name.clone()),
+                );
                 let value = self.push_message(&mut out, &message);
                 self.tool_results.push(value);
             }
