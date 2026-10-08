@@ -1,4 +1,25 @@
-use crate::language::Language;
+use std::sync::OnceLock;
+
+use crate::language::{self, Language};
+
+pub fn compiled(language: Language) -> Option<&'static tree_sitter::Query> {
+    static COMPILED: [OnceLock<Option<tree_sitter::Query>>; language::ALL.len()] =
+        [const { OnceLock::new() }; language::ALL.len()];
+    COMPILED[language as usize]
+        .get_or_init(|| compile(language))
+        .as_ref()
+}
+
+fn compile(language: Language) -> Option<tree_sitter::Query> {
+    let source = query_for(language);
+    if source.is_empty() {
+        return None;
+    }
+    let grammar = language.tree_sitter_language()?;
+    tree_sitter::Query::new(&grammar, source)
+        .inspect_err(|e| tracing::warn!("failed to compile query for {language}: {e}"))
+        .ok()
+}
 
 pub fn query_for(language: Language) -> &'static str {
     match language {
@@ -226,7 +247,14 @@ const NIX: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::language::{CODE, DATA};
+    use crate::language::{ALL, CODE, DATA};
+
+    #[test]
+    fn languages_index_the_compiled_cache_in_declaration_order() {
+        for (index, lang) in ALL.iter().enumerate() {
+            assert_eq!(*lang as usize, index, "{lang} is out of order in ALL");
+        }
+    }
 
     #[test]
     fn all_code_languages_have_queries() {

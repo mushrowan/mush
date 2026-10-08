@@ -66,26 +66,12 @@ pub fn extract_symbols(
     tree: &tree_sitter::Tree,
     file_path: Option<&Path>,
 ) -> Vec<SymbolInfo> {
-    let query_source = queries::query_for(language);
-    if query_source.is_empty() {
+    let Some(query) = queries::compiled(language) else {
         return vec![];
-    }
-
-    let ts_lang = match language.tree_sitter_language() {
-        Some(l) => l,
-        None => return vec![],
-    };
-
-    let query = match tree_sitter::Query::new(&ts_lang, query_source) {
-        Ok(q) => q,
-        Err(e) => {
-            tracing::warn!("failed to compile query for {language}: {e}");
-            return vec![];
-        }
     };
 
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), source);
+    let mut matches = cursor.matches(query, tree.root_node(), source);
 
     let mut symbols = Vec::new();
 
