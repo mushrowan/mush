@@ -543,24 +543,7 @@ pub fn agent_loop(
                             }));
                         }
 
-                        if let Some(ref file_rules) = config.injections.file_rules
-                            && let Some(path) = extract_file_path(&tc.arguments)
-                            && let Some(rule_text) = file_rules(&path)
-                        {
-                            result.content.push(ToolResultContentPart::Text(TextContent {
-                                text: format!("[auto-attached rules]\n{rule_text}"),
-                            }));
-                        }
-
-                        if let Some(ref lsp_diag) = config.injections.lsp_diagnostics
-                            && is_file_modifying_tool(tc.name.as_str())
-                            && let Some(path) = extract_file_path(&tc.arguments)
-                            && let Some(diag_text) = lsp_diag(&path).await
-                        {
-                            result.content.push(ToolResultContentPart::Text(TextContent {
-                                text: format!("[LSP diagnostics]\n{diag_text}"),
-                            }));
-                        }
+                        attach_file_context(&config.injections, tc, &mut result).await;
 
                         yield exec_end(tc, result.clone());
                         messages.push(tool_result_message(tc, result));
@@ -611,6 +594,35 @@ fn exec_end(call: &ToolCall, result: ToolResult) -> AgentEvent {
 
 fn tool_result_message(call: &ToolCall, result: ToolResult) -> Message {
     Message::ToolResult(result.into_message(call.id.clone(), call.name.clone()))
+}
+
+async fn attach_file_context(
+    injections: &AgentInjections,
+    call: &ToolCall,
+    result: &mut ToolResult,
+) {
+    let Some(path) = extract_file_path(&call.arguments) else {
+        return;
+    };
+    if let Some(file_rules) = &injections.file_rules
+        && let Some(rule_text) = file_rules(&path)
+    {
+        result
+            .content
+            .push(ToolResultContentPart::Text(TextContent {
+                text: format!("[auto-attached rules]\n{rule_text}"),
+            }));
+    }
+    if let Some(lsp_diag) = &injections.lsp_diagnostics
+        && is_file_modifying_tool(call.name.as_str())
+        && let Some(diag_text) = lsp_diag(&path).await
+    {
+        result
+            .content
+            .push(ToolResultContentPart::Text(TextContent {
+                text: format!("[LSP diagnostics]\n{diag_text}"),
+            }));
+    }
 }
 
 fn extract_file_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {
