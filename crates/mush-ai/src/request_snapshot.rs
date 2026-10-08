@@ -346,15 +346,15 @@ impl Snapshot {
     ) -> Option<()> {
         std::fs::create_dir_all(dir).ok()?;
 
-        let envelope = serde_json::json!({
+        let mut envelope = serde_json::json!({
             "_snapshot": {
                 "provider": provider,
                 "timestamp_ms": self.ts_ms,
                 "fingerprint": fingerprint,
                 "headers": headers,
             },
-            "body": redact_body(body_json, redact_secret_text)
         });
+        envelope["body"] = redact_body(body_json, redact_secret_text);
 
         let json = serde_json::to_string_pretty(&envelope).ok()?;
         crate::private_io::write_private(&self.path, json).ok()?;
