@@ -176,12 +176,14 @@ pub(crate) fn is_sensitive_header(name: &str) -> bool {
 }
 
 pub(crate) fn is_sensitive_json_field(name: &str) -> bool {
-    let normalised = name.replace(['-', '_'], "").to_ascii_lowercase();
-    SENSITIVE_JSON_FIELDS.iter().any(|field| {
-        field
-            .replace(['-', '_'], "")
-            .eq_ignore_ascii_case(&normalised)
-    })
+    fn folded(text: &str) -> impl Iterator<Item = u8> + '_ {
+        text.bytes()
+            .filter(|byte| !matches!(byte, b'-' | b'_'))
+            .map(|byte| byte.to_ascii_lowercase())
+    }
+    SENSITIVE_JSON_FIELDS
+        .iter()
+        .any(|field| folded(field).eq(folded(name)))
 }
 
 pub(crate) fn redacted_headers(headers: &[(&str, &str)]) -> serde_json::Value {
@@ -398,6 +400,26 @@ mod tests {
             .into_iter()
             .take(limit)
             .collect()
+    }
+
+    #[test]
+    fn sensitive_fields_match_ignoring_case_dashes_and_underscores() {
+        for name in [
+            "token",
+            "Refresh-Token",
+            "API_KEY",
+            "apiKey",
+            "set_cookie",
+            "SetCookie",
+        ] {
+            assert!(is_sensitive_json_field(name), "{name} should be sensitive");
+        }
+        for name in ["tokens", "x_token", "key", "t\u{f6}ken", ""] {
+            assert!(
+                !is_sensitive_json_field(name),
+                "{name} should not be sensitive"
+            );
+        }
     }
 
     #[test]
