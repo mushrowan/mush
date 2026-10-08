@@ -857,7 +857,7 @@ fn resolve_motion(app: &App, key: KeyEvent) -> Option<Action> {
     .find(|action| app.keymap.matches_in(KeyScope::Normal, *action, key))
 }
 
-fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Action)) {
+fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Action, usize)) {
     if take_count_digit(app, key) {
         return;
     }
@@ -865,9 +865,7 @@ fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Action)) {
     let Some(action) = resolve_motion(app, key) else {
         return;
     };
-    for _ in 0..count {
-        run(app, action);
-    }
+    run(app, action, count);
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -975,24 +973,27 @@ fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
     true
 }
 
-fn run_composer_motion(app: &mut App, action: Action) {
-    crate::normal::apply_motion(
-        &mut crate::normal::ComposerTarget::new(&mut app.input),
-        action,
-    );
+fn run_composer_motion(app: &mut App, action: Action, count: usize) {
+    let mut target = crate::normal::ComposerTarget::new(&mut app.input);
+    for _ in 0..count {
+        crate::normal::apply_motion(&mut target, action);
+    }
 }
 
-fn run_log_motion(app: &mut App, action: Action) {
-    let page = app.viewport.page() as isize;
-    match action {
-        Action::LineUp => app.viewport.scroll_by(-1),
-        Action::LineDown => app.viewport.scroll_by(1),
-        Action::HalfPageUp => app.viewport.page_by(-page / 2),
-        Action::HalfPageDown => app.viewport.page_by(page / 2),
-        Action::PageUp => app.viewport.page_by(-page),
-        Action::PageDown => app.viewport.page_by(page),
-        action => {
-            crate::normal::apply_motion(&mut crate::normal::LogTarget::new(app), action);
+fn run_log_motion(app: &mut App, action: Action, count: usize) {
+    let mut target = crate::normal::LogTarget::new(app);
+    for _ in 0..count {
+        let page = app.viewport.page() as isize;
+        match action {
+            Action::LineUp => app.viewport.scroll_by(-1),
+            Action::LineDown => app.viewport.scroll_by(1),
+            Action::HalfPageUp => app.viewport.page_by(-page / 2),
+            Action::HalfPageDown => app.viewport.page_by(page / 2),
+            Action::PageUp => app.viewport.page_by(-page),
+            Action::PageDown => app.viewport.page_by(page),
+            action => {
+                crate::normal::apply_motion(&mut target, action);
+            }
         }
     }
 }

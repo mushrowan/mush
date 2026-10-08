@@ -22,11 +22,16 @@ pub(crate) trait NormalTarget {
 pub(crate) fn apply_motion(target: &mut impl NormalTarget, action: Action) -> bool {
     let at = target.cursor();
     let (line, column) = at;
-    let row = target.rows().get(line).cloned().unwrap_or_default();
     match action {
         Action::CursorLineStart => target.place_cursor((line, 0)),
-        Action::CursorFirstNonBlank => target.place_cursor((line, motion::first_non_blank(&row))),
-        Action::CursorLineEnd => target.place_cursor((line, motion::last_cell(&row))),
+        Action::CursorFirstNonBlank => {
+            let column = motion::first_non_blank(row_at(target, line));
+            target.place_cursor((line, column));
+        }
+        Action::CursorLineEnd => {
+            let column = motion::last_cell(row_at(target, line));
+            target.place_cursor((line, column));
+        }
         Action::CursorLeft => target.place_cursor((line, column.saturating_sub(1))),
         Action::CursorRight => target.place_cursor((line, column + 1)),
         Action::PreviousItem => target.move_line(-1),
@@ -44,20 +49,26 @@ pub(crate) fn apply_motion(target: &mut impl NormalTarget, action: Action) -> bo
     true
 }
 
+fn row_at(target: &impl NormalTarget, line: usize) -> &str {
+    target.rows().get(line).map_or("", String::as_str)
+}
+
 fn word(target: &mut impl NormalTarget, motion: motion::Motion, at: (usize, usize), word: Word) {
     let to = motion(target.rows(), at, word);
     target.place_cursor(to);
 }
 
 pub(crate) struct LogTarget<'a> {
-    rows: Vec<String>,
+    rows: std::cell::OnceCell<Vec<String>>,
+    app: &'a crate::app::App,
     viewport: &'a crate::screen::Viewport,
 }
 
 impl<'a> LogTarget<'a> {
     pub(crate) fn new(app: &'a crate::app::App) -> Self {
         Self {
-            rows: crate::selection::transcript_rows(app),
+            rows: std::cell::OnceCell::new(),
+            app,
             viewport: &app.viewport,
         }
     }
@@ -65,7 +76,8 @@ impl<'a> LogTarget<'a> {
 
 impl NormalTarget for LogTarget<'_> {
     fn rows(&self) -> &[String] {
-        &self.rows
+        self.rows
+            .get_or_init(|| crate::selection::transcript_rows(self.app))
     }
 
     fn cursor(&self) -> (usize, usize) {
