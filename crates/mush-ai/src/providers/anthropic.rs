@@ -332,7 +332,7 @@ fn record_request_snapshot(
     crate::request_snapshot::record_request(
         session.unwrap_or(""),
         fp,
-        crate::request_snapshot::body_uses_context_management(&body_json),
+        body.context_management.is_some(),
         ttl_secs,
         snapshot,
     );

@@ -209,15 +209,6 @@ pub(crate) fn redact_body(body_json: &str, redact_text: fn(&str) -> String) -> s
     }
 }
 
-pub fn body_uses_context_management(body_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body_json)
-        .ok()
-        .is_some_and(|body| {
-            body.get("context_management")
-                .is_some_and(|cm| !cm.is_null())
-        })
-}
-
 pub(crate) fn redact_json_value(
     value: &mut serde_json::Value,
     field_name: Option<&str>,
