@@ -597,45 +597,46 @@ fn render_streaming_markdown_cached(app: &App, source: &str, width: usize) -> Te
     }
 
     let full = &app.stream.text;
-
-    if let Some((cached_width, cached_source, cached)) =
-        app.render_state.stream_markdown_cache.borrow().as_ref()
-        && *cached_width == width
-        && cached_source == full
-    {
-        return truncate_text(cached.clone(), source.chars().count());
-    }
-
-    let rendered = crate::markdown::render_streaming_with_width(full, &app.theme, Some(width));
-    *app.render_state.stream_markdown_cache.borrow_mut() =
-        Some((width, full.to_string(), rendered.clone()));
+    let mut cache = app.render_state.stream_markdown_cache.borrow_mut();
+    let rendered = match &mut *cache {
+        Some((cached_width, cached_source, rendered))
+            if *cached_width == width && cached_source == full =>
+        {
+            rendered
+        }
+        cache => {
+            let rendered =
+                crate::markdown::render_streaming_with_width(full, &app.theme, Some(width));
+            &mut cache.insert((width, full.clone(), rendered)).2
+        }
+    };
     truncate_text(rendered, source.chars().count())
 }
 
-fn truncate_text(text: Text<'static>, max_chars: usize) -> Text<'static> {
+fn truncate_text(text: &Text<'static>, max_chars: usize) -> Text<'static> {
     let total: usize = text.lines.iter().map(rendered_line_char_count).sum();
     if total <= max_chars {
-        return text;
+        return text.clone();
     }
 
     let mut remaining = max_chars;
     let mut result = Vec::new();
-    for line in text.lines {
+    for line in &text.lines {
         if remaining == 0 {
             break;
         }
-        let line_chars = rendered_line_char_count(&line);
+        let line_chars = rendered_line_char_count(line);
         if line_chars <= remaining {
             remaining -= line_chars;
-            result.push(line);
+            result.push(line.clone());
         } else {
             let mut spans = Vec::new();
             let mut left = remaining;
-            for span in line.spans {
+            for span in &line.spans {
                 let span_chars = span.content.chars().count();
                 if span_chars <= left {
                     left -= span_chars;
-                    spans.push(span);
+                    spans.push(span.clone());
                 } else if left > 0 {
                     let truncated: String = span.content.chars().take(left).collect();
                     spans.push(Span::styled(truncated, span.style));

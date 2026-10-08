@@ -1007,7 +1007,7 @@ fn highlighted_tool_box_wraps_halfwidth_dakuten_by_cells() {
 fn truncate_text_reveals_by_chars_after_halfwidth_dakuten() {
     let text = Text::from(Line::raw("ｶﾞx"));
 
-    let truncated = truncate_text(text, 2);
+    let truncated = truncate_text(&text, 2);
 
     assert_eq!(plain_text(&truncated), "ｶﾞ");
 }
@@ -1016,7 +1016,7 @@ fn truncate_text_reveals_by_chars_after_halfwidth_dakuten() {
 fn truncate_text_reveals_by_chars_across_span_boundary_after_wide_char() {
     let text = Text::from(Line::from(vec![Span::raw("界"), Span::raw("ab")]));
 
-    let truncated = truncate_text(text, 2);
+    let truncated = truncate_text(&text, 2);
 
     assert_eq!(plain_text(&truncated), "界a");
 }
