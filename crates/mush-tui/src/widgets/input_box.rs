@@ -120,27 +120,34 @@ fn build_input_layout(
     content_width: usize,
 ) -> InputLayout {
     let expanded = expand_input(input, cursor, images);
-    let (cursor_visual_line, cursor_visual_col) =
-        cursor_visual_position(&expanded.text, expanded.cursor, content_width);
     let mut wrapped_lines = Vec::new();
-    let mut global_offset = 0usize;
+    let mut cursor_visual = (0, 0);
+    let mut line_start = 0usize;
 
     for (line_idx, line_text) in expanded.text.split('\n').enumerate() {
         let indent = if line_idx == 0 { 2 } else { 0 };
         let segments = word_wrap_segments(line_text, content_width, indent);
+        let line_end = line_start + line_text.len();
+
+        if (line_start..=line_end).contains(&expanded.cursor) {
+            let (seg_offset, col) =
+                cursor_in_segments(line_text, &segments, expanded.cursor - line_start, indent);
+            cursor_visual = (wrapped_lines.len() + seg_offset, col);
+        }
 
         for (seg_idx, seg) in segments.iter().enumerate() {
             wrapped_lines.push(WrappedInputLine {
-                start: global_offset + seg.start,
-                end: global_offset + seg.end,
+                start: line_start + seg.start,
+                end: line_start + seg.end,
                 show_prompt: line_idx == 0 && seg_idx == 0,
             });
         }
 
-        global_offset += line_text.len() + 1;
+        line_start = line_end + 1;
     }
 
     let total_lines = wrapped_lines.len().max(1).min(u16::MAX as usize) as u16;
+    let (cursor_visual_line, cursor_visual_col) = cursor_visual;
 
     InputLayout {
         expanded,
@@ -149,6 +156,24 @@ fn build_input_layout(
         cursor_visual_line,
         cursor_visual_col,
     }
+}
+
+fn cursor_in_segments(
+    line_text: &str,
+    segments: &[WrapSegment],
+    cursor_in_line: usize,
+    indent: usize,
+) -> (usize, usize) {
+    for (seg_i, seg) in segments.iter().enumerate() {
+        let is_last_seg = seg_i == segments.len() - 1;
+        if cursor_in_line < seg.end || (is_last_seg && cursor_in_line <= seg.end) {
+            let seg_text = &line_text[seg.start..cursor_in_line];
+            let visual_offset: usize = seg_text.chars().map(char_width).sum();
+            let seg_indent = if seg_i == 0 { indent } else { 0 };
+            return (seg_i, seg_indent + visual_offset);
+        }
+    }
+    (segments.len(), 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,49 +317,6 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
     });
 
     segments
-}
-
-fn cursor_visual_position(
-    expanded_text: &str,
-    cursor: usize,
-    content_width: usize,
-) -> (usize, usize) {
-    let text_before_cursor = &expanded_text[..cursor];
-    let input_lines: Vec<&str> = expanded_text.split('\n').collect();
-    let cursor_lines: Vec<&str> = text_before_cursor.split('\n').collect();
-    let cursor_input_line = cursor_lines.len() - 1;
-    let cursor_in_line = cursor_lines.last().map(|s| s.len()).unwrap_or(0);
-
-    let mut visual_line: usize = 0;
-    let mut visual_col: usize = 0;
-
-    for (line_idx, line_text) in input_lines.iter().enumerate() {
-        let indent = if line_idx == 0 { 2 } else { 0 };
-        let segments = word_wrap_segments(line_text, content_width, indent);
-
-        if line_idx == cursor_input_line {
-            for (seg_i, seg) in segments.iter().enumerate() {
-                let is_last_seg = seg_i == segments.len() - 1;
-                if cursor_in_line < seg.end || (is_last_seg && cursor_in_line <= seg.end) {
-                    let seg_text = &line_text[seg.start..cursor_in_line];
-                    let visual_offset: usize = seg_text.chars().map(char_width).sum();
-                    let seg_indent = if seg_i == 0 { indent } else { 0 };
-                    visual_col = seg_indent + visual_offset;
-                    break;
-                }
-                visual_line += 1;
-            }
-            break;
-        }
-
-        visual_line += segments.len();
-    }
-
-    (visual_line, visual_col)
-}
-
-pub fn cursor_visual_line(expanded_text: &str, cursor: usize, content_width: usize) -> usize {
-    cursor_visual_position(expanded_text, cursor, content_width).0
 }
 
 pub struct InputBox<'a> {
