@@ -155,7 +155,7 @@ pub fn build_repo_map(root: &Path) -> RepoMap {
 
 fn rank_symbols(
     definitions: &[SymbolInfo],
-    def_index: &FxHashMap<&str, Vec<&PathBuf>>,
+    def_index: &FxHashMap<&str, Vec<usize>>,
 ) -> Vec<SymbolInfo> {
     let mut scored: Vec<(usize, &SymbolInfo)> = definitions
         .iter()
@@ -463,40 +463,36 @@ fn build_from_data(
         };
     }
 
-    let mut def_index: FxHashMap<&str, Vec<&PathBuf>> = FxHashMap::default();
-    for (path, data) in file_data {
+    let mut ordered: Vec<(&PathBuf, &FileData)> = file_data.iter().collect();
+    ordered.sort_by_key(|(path, _)| *path);
+    let ordered_paths: Vec<&PathBuf> = ordered.iter().map(|(path, _)| *path).collect();
+    let n = ordered.len();
+
+    let mut def_index: FxHashMap<&str, Vec<usize>> = FxHashMap::default();
+    for (index, (_, data)) in ordered.iter().enumerate() {
         for sym in &data.definitions {
-            def_index.entry(sym.name.as_str()).or_default().push(path);
+            def_index.entry(sym.name.as_str()).or_default().push(index);
         }
     }
 
-    let mut ordered_paths: Vec<&PathBuf> = file_data.keys().collect();
-    ordered_paths.sort();
-    let file_indices: FxHashMap<&PathBuf, usize> = ordered_paths
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (*p, i))
-        .collect();
-    let n = file_indices.len();
-
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for path in &ordered_paths {
-        let from = file_indices[*path];
-        let data = &file_data[*path];
+    let mut linked_from = vec![usize::MAX; n];
+    let mut targets = Vec::new();
+    for (from, (_, data)) in ordered.iter().enumerate() {
         for ref_name in &data.references {
-            if let Some(def_files) = def_index.get(ref_name.as_str()) {
-                for def_path in def_files {
-                    if *def_path != *path {
-                        let to = file_indices[def_path];
-                        edges.push((from, to));
-                    }
+            let Some(def_files) = def_index.get(ref_name.as_str()) else {
+                continue;
+            };
+            for &to in def_files {
+                if to != from && linked_from[to] != from {
+                    linked_from[to] = from;
+                    targets.push(to);
                 }
             }
         }
+        targets.sort_unstable();
+        edges.extend(targets.drain(..).map(|to| (from, to)));
     }
-
-    edges.sort_unstable();
-    edges.dedup();
 
     let edges_fp = edges_fingerprint(&ordered_paths, &edges);
 
@@ -512,20 +508,17 @@ fn build_from_data(
 
     let ranks_by_path: FxHashMap<PathBuf, f64> = ordered_paths
         .iter()
-        .enumerate()
-        .map(|(i, p)| ((*p).clone(), ranks[i]))
+        .zip(&ranks)
+        .map(|(path, rank)| ((*path).clone(), *rank))
         .collect();
 
-    let mut ranked: Vec<RankedFile> = file_data
+    let mut ranked: Vec<RankedFile> = ordered
         .iter()
-        .map(|(path, data)| {
-            let idx = file_indices[path];
-            let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
-            RankedFile {
-                path: rel,
-                rank: ranks[idx],
-                symbols: rank_symbols(&data.definitions, &def_index),
-            }
+        .zip(&ranks)
+        .map(|((path, data), rank)| RankedFile {
+            path: path.strip_prefix(root).unwrap_or(path).to_path_buf(),
+            rank: *rank,
+            symbols: rank_symbols(&data.definitions, &def_index),
         })
         .collect();
 
