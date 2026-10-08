@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -9,6 +11,14 @@ use syntect::parsing::SyntaxSet;
 pub(crate) static SYNTAX_SET: LazyLock<SyntaxSet> =
     LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+const HIGHLIGHT_MEMO_LINES: usize = 4096;
+const HIGHLIGHT_MEMO_MAX_LINE_BYTES: usize = 512;
+
+thread_local! {
+    static HIGHLIGHTED_LINES: RefCell<HashMap<String, Option<Vec<Span<'static>>>>> =
+        RefCell::new(HashMap::new());
+}
 
 pub(crate) fn code_theme() -> &'static highlighting::Theme {
     &THEME_SET.themes["base16-ocean.dark"]
@@ -44,6 +54,24 @@ pub fn lang_from_path(path: &str) -> Option<&'static str> {
 
 #[must_use]
 pub fn highlight_line(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
+    if line.len() > HIGHLIGHT_MEMO_MAX_LINE_BYTES {
+        return highlight_line_uncached(line, lang);
+    }
+    let key = format!("{lang}\0{line}");
+    if let Some(spans) = HIGHLIGHTED_LINES.with_borrow(|memo| memo.get(&key).cloned()) {
+        return spans;
+    }
+    let spans = highlight_line_uncached(line, lang);
+    HIGHLIGHTED_LINES.with_borrow_mut(|memo| {
+        if memo.len() >= HIGHLIGHT_MEMO_LINES {
+            memo.clear();
+        }
+        memo.insert(key, spans.clone());
+    });
+    spans
+}
+
+fn highlight_line_uncached(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
     let ps = &*SYNTAX_SET;
     let syntax = ps.find_syntax_by_token(lang)?;
     let mut h = HighlightLines::new(syntax, code_theme());
@@ -111,6 +139,15 @@ mod tests {
             styles.len() >= 2,
             "expected multiple styles for rust code, got {styles:?}"
         );
+    }
+
+    #[test]
+    fn a_line_highlighted_again_comes_back_the_same() {
+        let first = highlight_line("let x = 1;", "rs");
+        let again = highlight_line("let x = 1;", "rs");
+
+        assert_eq!(first, again);
+        assert!(HIGHLIGHTED_LINES.with_borrow(|memo| memo.contains_key("rs\0let x = 1;")));
     }
 
     #[test]
