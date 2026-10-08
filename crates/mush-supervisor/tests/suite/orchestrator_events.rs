@@ -243,36 +243,45 @@ async fn terminal_reasons_do_not_report_failed_work_as_completed() {
     }
 }
 
-#[tokio::test]
-async fn timeout_deadline_and_stop_are_distinct() {
-    for reason in [
-        TerminalReason::Timeout,
-        TerminalReason::Deadline,
-        TerminalReason::Cancelled,
-    ] {
-        let fixture = Fixture::new("report done; touch ready; sleep 30");
-        fixture.alter(|m| {
-            if reason == TerminalReason::Timeout {
-                m["attempt_seconds"] = json!(1);
-            }
-            if reason == TerminalReason::Deadline {
-                m["until"] = json!(chrono::Utc::now() + chrono::Duration::seconds(2));
-            }
-        });
-        let mut process = fixture.command("run").spawn().unwrap();
-        wait_for(&fixture.cwd.join("ready")).await;
-        if reason == TerminalReason::Cancelled {
-            fs::write(fixture.run.join("STOP"), "").unwrap();
+#[expect(clippy::unwrap_used)]
+async fn the_terminal_event_names(reason: TerminalReason) {
+    let fixture = Fixture::new("report done; touch ready; sleep 30");
+    fixture.alter(|m| {
+        if reason == TerminalReason::Timeout {
+            m["attempt_seconds"] = json!(1);
         }
-        assert!(
-            tokio::time::timeout(Duration::from_secs(8), process.wait())
-                .await
-                .unwrap()
-                .unwrap()
-                .success()
-        );
-        assert_eq!(fixture.events()[0].reason, reason);
+        if reason == TerminalReason::Deadline {
+            m["until"] = json!(chrono::Utc::now() + chrono::Duration::seconds(2));
+        }
+    });
+    let mut process = fixture.command("run").spawn().unwrap();
+    wait_for(&fixture.cwd.join("ready")).await;
+    if reason == TerminalReason::Cancelled {
+        fs::write(fixture.run.join("STOP"), "").unwrap();
     }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(8), process.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(fixture.events()[0].reason, reason);
+}
+
+#[tokio::test]
+async fn an_attempt_timeout_is_a_timeout() {
+    the_terminal_event_names(TerminalReason::Timeout).await;
+}
+
+#[tokio::test]
+async fn the_run_deadline_is_a_deadline() {
+    the_terminal_event_names(TerminalReason::Deadline).await;
+}
+
+#[tokio::test]
+async fn a_stop_file_is_a_cancellation() {
+    the_terminal_event_names(TerminalReason::Cancelled).await;
 }
 
 #[tokio::test]
