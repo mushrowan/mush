@@ -121,10 +121,6 @@ impl PaneId {
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
-
-    pub const fn as_u32(self) -> u32 {
-        self.0
-    }
 }
 
 #[derive(
@@ -233,10 +229,6 @@ impl TokenCount {
             return 0.0;
         }
         (self.0 as f64 / window.0 as f64) * 100.0
-    }
-
-    pub fn exceeds_fraction(self, window: Self, numerator: u64, denominator: u64) -> bool {
-        self.0 * denominator > window.0 * numerator
     }
 }
 

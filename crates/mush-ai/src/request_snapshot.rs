@@ -368,19 +368,6 @@ pub fn dump_in(
     Some(snapshot.path)
 }
 
-#[must_use]
-pub fn recent_snapshots(provider: &str, limit: usize) -> Vec<PathBuf> {
-    recent_snapshots_in(&snapshot_dir(), provider, limit)
-}
-
-#[must_use]
-pub fn recent_snapshots_in(dir: &Path, provider: &str, limit: usize) -> Vec<PathBuf> {
-    snapshots_newest_first(dir, provider)
-        .into_iter()
-        .take(limit)
-        .collect()
-}
-
 fn prune_old_snapshots(dir: &Path, scope: &str) {
     for old in snapshots_newest_first(dir, scope)
         .into_iter()
@@ -414,6 +401,13 @@ fn snapshots_newest_first(dir: &Path, scope: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recent_snapshots_in(dir: &Path, provider: &str, limit: usize) -> Vec<PathBuf> {
+        snapshots_newest_first(dir, provider)
+            .into_iter()
+            .take(limit)
+            .collect()
+    }
 
     #[test]
     fn dump_records_headers_and_redacts_authorization() {

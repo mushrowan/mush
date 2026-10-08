@@ -9,12 +9,6 @@ pub struct SseRawEvent {
 }
 
 #[must_use]
-pub fn preview_bytes(bytes: &[u8], max_chars: usize) -> String {
-    let text = String::from_utf8_lossy(bytes);
-    preview_text(&text, max_chars)
-}
-
-#[must_use]
 pub fn preview_text(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for ch in text.chars().take(max_chars) {

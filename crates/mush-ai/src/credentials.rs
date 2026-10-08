@@ -210,16 +210,6 @@ pub fn default_store() -> Arc<dyn CredentialStore> {
         .clone()
 }
 
-#[must_use]
-pub fn active_backend() -> &'static str {
-    default_store().backend()
-}
-
-#[must_use]
-pub fn fallback_file_path() -> PathBuf {
-    default_credentials_path()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
