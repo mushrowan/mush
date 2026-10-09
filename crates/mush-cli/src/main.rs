@@ -933,7 +933,7 @@ fn compaction_transform(
     });
     let compaction_settings = setup.client.cfg.compaction.settings();
     let kernel = setup.kernel_state.clone();
-    Some(Box::new(move |msgs| {
+    Some(Box::new(move |msgs, pressure| {
         let target = target.clone();
         let ctx = context_tokens.clone();
         let owned = msgs.to_vec();
@@ -944,6 +944,10 @@ fn compaction_transform(
         let kernel = kernel.clone();
         Box::pin(async move {
             let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
+            let tokens = match pressure {
+                mush_agent::ContextPressure::Normal => tokens,
+                mush_agent::ContextPressure::Overflowed => tokens.max(context_window),
+            };
             let target = target.fitting(|| {
                 mush_session::compact::summary_request_tokens(
                     &owned,

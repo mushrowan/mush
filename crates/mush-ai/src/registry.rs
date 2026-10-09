@@ -212,6 +212,22 @@ pub fn classify_stream_error_message(message: &str) -> StreamErrorKind {
 }
 
 #[must_use]
+pub fn is_context_overflow_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length exceeded",
+        "context window",
+        "too many input tokens",
+        "input tokens exceed",
+        "maximum context",
+        "prompt is too long",
+    ]
+    .iter()
+    .any(|pat| lower.contains(pat))
+}
+
+#[must_use]
 pub fn is_retryable_stream_error_message(message: &str) -> bool {
     classify_stream_error_message(message).is_retryable()
 }
@@ -594,6 +610,19 @@ mod tests {
         ] {
             assert!(is_retryable_stream_error_message(message), "{message}");
         }
+    }
+
+    #[test]
+    fn a_prompt_too_long_error_is_a_context_overflow() {
+        assert!(is_context_overflow_message(
+            r#"anthropic returned 400 Bad Request (application/json): {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1011825 tokens > 1000000 maximum"}}"#
+        ));
+        assert!(is_context_overflow_message(
+            "context_length_exceeded: too many input tokens"
+        ));
+        assert!(!is_context_overflow_message(
+            "invalid_request_error: missing field"
+        ));
     }
 
     #[test]

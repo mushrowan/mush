@@ -448,7 +448,7 @@ impl SessionTree {
             start > 0
                 && context
                     .get(start..start + kept.len())
-                    .is_some_and(|window| window == kept)
+                    .is_some_and(|window| window.iter().zip(kept).all(same_message))
         };
         let start = if matches_at(summarised_count) {
             summarised_count
@@ -456,7 +456,7 @@ impl SessionTree {
             let candidates: Vec<_> = context
                 .iter()
                 .enumerate()
-                .filter(|(start, message)| *message == first && matches_at(*start))
+                .filter(|(start, message)| same_message((message, first)) && matches_at(*start))
                 .map(|(start, _)| start)
                 .collect();
             let [start] = candidates[..] else {
@@ -875,6 +875,27 @@ impl SessionTree {
 impl Default for SessionTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn same_message((stored, compacted): (&Message, &Message)) -> bool {
+    match (stored, compacted) {
+        (Message::ToolResult(stored), Message::ToolResult(compacted)) => {
+            let ToolResultMessage {
+                tool_call_id,
+                tool_name,
+                content,
+                outcome,
+                timestamp_ms: _,
+                details,
+            } = compacted;
+            stored.tool_call_id == *tool_call_id
+                && stored.tool_name == *tool_name
+                && stored.content == *content
+                && stored.outcome == *outcome
+                && stored.details == *details
+        }
+        _ => stored == compacted,
     }
 }
 

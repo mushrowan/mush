@@ -393,7 +393,7 @@ mod tests {
     use std::collections::HashMap;
 
     use mush_agent::{AgentConfig, agent_loop};
-    use mush_runtime::turn::{build_context_transform, estimated_tokens_u64};
+    use mush_runtime::turn::build_context_transform;
     use tokio::sync::Mutex;
 
     use crate::event_handler;
@@ -509,7 +509,7 @@ mod tests {
                 TokenCount::new(10_000),
                 registry.clone(),
                 Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                estimated_tokens_u64(&messages),
+                messages.len(),
                 mush_agent::LifecycleHooks::default(),
                 std::path::PathBuf::from("/tmp"),
                 None,

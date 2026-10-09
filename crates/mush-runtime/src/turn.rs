@@ -279,7 +279,7 @@ impl SessionRuntime {
         let conversation_snapshot = self.conversation.context();
         self.pending_prompt = None;
 
-        let initial_estimated_tokens = estimated_tokens_u64(&conversation_snapshot);
+        let measured_len = mush_session::compact::measured_len(&conversation_snapshot);
         let context_tokens_shared =
             Arc::new(std::sync::atomic::AtomicU64::new(context_tokens.get()));
         let cwd = injections.cwd.clone().unwrap_or_default();
@@ -295,7 +295,7 @@ impl SessionRuntime {
             model.compaction_window(),
             registry.clone(),
             context_tokens_shared.clone(),
-            initial_estimated_tokens,
+            measured_len,
             injections.lifecycle_hooks.clone(),
             cwd.clone(),
             live,
@@ -362,7 +362,7 @@ pub fn build_context_transform(
     compaction_window: TokenCount,
     registry: ApiRegistry,
     context_tokens_shared: Arc<std::sync::atomic::AtomicU64>,
-    initial_estimated_tokens: u64,
+    measured_len: usize,
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
     live: Option<mush_session::compact::LiveContext>,
@@ -371,18 +371,17 @@ pub fn build_context_transform(
     if !do_auto_compact {
         return None;
     }
-    let baseline_estimated_tokens =
-        Arc::new(std::sync::atomic::AtomicU64::new(initial_estimated_tokens));
+    let measured_len = Arc::new(std::sync::atomic::AtomicUsize::new(measured_len));
     let hooks = Arc::new(lifecycle_hooks);
     let cwd = Arc::new(cwd);
     let registry = Arc::new(registry);
     let live = Arc::new(live);
 
-    Some(Box::new(move |messages| {
+    Some(Box::new(move |messages, pressure| {
         let owned_messages = messages.to_vec();
         let target = target.clone();
         let ctx_tokens = context_tokens_shared.clone();
-        let baseline_estimated_tokens = baseline_estimated_tokens.clone();
+        let measured_len = measured_len.clone();
         let hooks = hooks.clone();
         let cwd = cwd.clone();
         let registry = registry.clone();
@@ -391,26 +390,22 @@ pub fn build_context_transform(
         Box::pin(async move {
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
-            let current_estimated_tokens = TokenCount::new(estimated_tokens_u64(&owned_messages));
-            let baseline_tokens = TokenCount::new(
-                baseline_estimated_tokens.load(std::sync::atomic::Ordering::Relaxed),
+            let measured_tokens = mush_session::compact::compaction_tokens(
+                current_tokens,
+                &owned_messages,
+                measured_len.load(std::sync::atomic::Ordering::Relaxed),
             );
-            let effective_compaction_tokens =
-                mush_session::compact::compaction_tokens_for_estimated_payload(
-                    current_tokens,
-                    baseline_tokens,
-                    current_estimated_tokens,
-                );
+            let effective_compaction_tokens = match pressure {
+                mush_agent::ContextPressure::Normal => measured_tokens,
+                mush_agent::ContextPressure::Overflowed => measured_tokens.max(compaction_window),
+            };
             if !mush_session::compact::needs_compaction_at(
                 effective_compaction_tokens,
                 compaction_window,
                 owned_messages.len(),
                 &settings,
             ) {
-                baseline_estimated_tokens.store(
-                    current_estimated_tokens.get(),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                measured_len.store(owned_messages.len(), std::sync::atomic::Ordering::Relaxed);
                 return mush_agent::ContextTransformResult::Unchanged;
             }
             let target = target.fitting(|| {
@@ -442,10 +437,12 @@ pub fn build_context_transform(
             {
                 result.messages.push(notice);
             }
-            let tokens_after = estimated_tokens_u64(&result.messages);
-            baseline_estimated_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
+            measured_len.store(result.messages.len(), std::sync::atomic::Ordering::Relaxed);
             if result.summarised_count > 0 {
-                ctx_tokens.store(tokens_after, std::sync::atomic::Ordering::Relaxed);
+                ctx_tokens.store(
+                    estimated_tokens_u64(&result.messages),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
                     messages: result.messages,
                     summary: result.summary,
@@ -743,14 +740,14 @@ mod tests {
 
         let baseline: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         assert!(matches!(
-            transform(&baseline).await,
+            transform(&baseline, mush_agent::ContextPressure::Normal).await,
             mush_agent::ContextTransformResult::Unchanged
         ));
 
         let mut grown = baseline;
         grown.push(user_msg("x".repeat(16_000)));
 
-        match transform(&grown).await {
+        match transform(&grown, mush_agent::ContextPressure::Normal).await {
             mush_agent::ContextTransformResult::Compacted(compaction) => {
                 assert!(
                     compaction.messages.len() < grown.len(),
@@ -810,10 +807,24 @@ mod tests {
         let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         grown.push(user_msg("x".repeat(16_000)));
 
-        let mush_agent::ContextTransformResult::Compacted(compaction) = transform(&grown).await
+        let mush_agent::ContextTransformResult::Compacted(compaction) =
+            transform(&grown, mush_agent::ContextPressure::Normal).await
         else {
             panic!("expected a compaction");
         };
+        let mut conversation = mush_session::ConversationState::from_messages(grown.clone());
+        let applied = crate::apply_agent_event(
+            &mut conversation,
+            &mush_agent::AgentEvent::ContextCompacted {
+                before_count: grown.len(),
+                compaction: compaction.clone(),
+            },
+        );
+        assert!(
+            matches!(applied, crate::Applied::Compacted { .. }),
+            "the session must keep the compaction the model saw"
+        );
+        assert_eq!(conversation.context().last(), compaction.messages.last());
 
         let Some(Message::User(last)) = compaction.messages.last() else {
             panic!("{:?}", compaction.messages.last());
@@ -843,7 +854,7 @@ mod tests {
             TokenCount::new(10_000),
             ApiRegistry::new(),
             context_tokens,
-            estimated_tokens_u64(&messages),
+            messages.len(),
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
             None,
@@ -851,7 +862,7 @@ mod tests {
         )
         .expect("auto-compaction enabled should build a transform");
 
-        match transform(&messages).await {
+        match transform(&messages, mush_agent::ContextPressure::Normal).await {
             mush_agent::ContextTransformResult::Unchanged => {}
             other => {
                 panic!("expected unchanged context without new estimated growth, got {other:?}")

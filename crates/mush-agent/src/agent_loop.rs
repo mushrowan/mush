@@ -74,6 +74,12 @@ pub const DEFAULT_MAX_TURNS: usize = usize::MAX;
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPressure {
+    Normal,
+    Overflowed,
+}
+
 #[derive(Debug, Clone)]
 pub enum ContextTransformResult {
     Unchanged,
@@ -106,6 +112,7 @@ pub trait AgentHooks: Send + Sync {
     fn transform_context<'a>(
         &'a self,
         _messages: &'a [Message],
+        _pressure: ContextPressure,
     ) -> BoxFuture<'a, ContextTransformResult> {
         Box::pin(async { ContextTransformResult::Unchanged })
     }
@@ -125,7 +132,7 @@ impl AgentHooks for NoopHooks {}
 
 pub type SteeringFn = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 pub type TransformFn =
-    Box<dyn Fn(&[Message]) -> BoxFuture<'_, ContextTransformResult> + Send + Sync>;
+    Box<dyn Fn(&[Message], ContextPressure) -> BoxFuture<'_, ContextTransformResult> + Send + Sync>;
 pub type ConfirmFn = Box<
     dyn Fn(&ToolCallId, &str, &serde_json::Value) -> BoxFuture<'static, ConfirmAction>
         + Send
@@ -158,9 +165,10 @@ impl AgentHooks for ClosureHooks {
     fn transform_context<'a>(
         &'a self,
         messages: &'a [Message],
+        pressure: ContextPressure,
     ) -> BoxFuture<'a, ContextTransformResult> {
         match &self.transform {
-            Some(f) => f(messages),
+            Some(f) => f(messages, pressure),
             None => Box::pin(async { ContextTransformResult::Unchanged }),
         }
     }
@@ -223,6 +231,8 @@ pub fn agent_loop(
         }
 
         let mut pending: Vec<Message> = config.hooks.get_steering().await;
+        let mut overflow: Option<String> = None;
+        let mut overflow_retried = false;
 
         'outer: loop {
             loop {
@@ -244,9 +254,22 @@ pub fn agent_loop(
                 });
                 let llm_messages = {
                     let before = messages.len();
-                    match config.hooks.transform_context(&messages).await {
-                        ContextTransformResult::Unchanged => messages.clone(),
+                    let pressure = if overflow.is_some() {
+                        ContextPressure::Overflowed
+                    } else {
+                        ContextPressure::Normal
+                    };
+                    match config.hooks.transform_context(&messages, pressure).await {
+                        ContextTransformResult::Unchanged => {
+                            if let Some(error) = overflow.take() {
+                                yield AgentEvent::Error { error };
+                                yield AgentEvent::AgentEnd;
+                                return;
+                            }
+                            messages.clone()
+                        }
                         ContextTransformResult::Compacted(compaction) => {
+                            overflow = None;
                             messages = compaction.messages.clone();
                             yield AgentEvent::ContextCompacted {
                                 before_count: before,
@@ -332,6 +355,16 @@ pub fn agent_loop(
                             }
                             StreamEvent::Error { message, .. } => {
                                 let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
+                                if message.content.is_empty()
+                                    && !overflow_retried
+                                    && mush_ai::registry::is_context_overflow_message(&error_msg)
+                                {
+                                    if streamed {
+                                        yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
+                                    }
+                                    last_error = Some(format!("stream error: {error_msg}"));
+                                    break 'attempt;
+                                }
                                 if attempt < MAX_RETRIES && retry_stream_error(&error_msg, attempt) {
                                     if streamed {
                                         yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
@@ -413,10 +446,17 @@ pub fn agent_loop(
 
                 let Some(assistant_msg) = final_message else {
                     let error = last_error.unwrap_or_else(|| STREAM_ENDED_EARLY.into());
+                    if !overflow_retried && mush_ai::registry::is_context_overflow_message(&error) {
+                        tracing::warn!(%error, "the prompt overflowed the context window, compacting and retrying");
+                        overflow_retried = true;
+                        overflow = Some(error);
+                        continue;
+                    }
                     yield AgentEvent::Error { error };
                     yield AgentEvent::AgentEnd;
                     return;
                 };
+                overflow_retried = false;
 
                 if assistant_msg.stop_reason == StopReason::Error {
                     let error = last_error
@@ -1020,7 +1060,7 @@ mod tests {
         let model = test_model();
         let tools = ToolRegistry::new();
 
-        let transform: TransformFn = Box::new(move |_| {
+        let transform: TransformFn = Box::new(move |_, _| {
             called_clone.store(true, Ordering::SeqCst);
             Box::pin(async move { ContextTransformResult::Unchanged })
         });
@@ -1830,6 +1870,146 @@ mod tests {
         }
     }
 
+    struct OverflowingProvider {
+        max_messages: usize,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for OverflowingProvider {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+        async fn stream(
+            &self,
+            model: &Model,
+            context: &mush_ai::registry::LlmContext,
+            options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            self.seen.lock().unwrap().push(
+                context
+                    .messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::User(user) => Some(user.text()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+            if context.messages.len() > self.max_messages {
+                return Err(mush_ai::registry::ProviderError::Other(
+                    "anthropic returned 400 Bad Request: prompt is too long: 1011825 tokens > 1000000 maximum".into(),
+                ));
+            }
+            RecordingProvider {
+                seen: std::sync::Arc::default(),
+            }
+            .stream(model, context, options)
+            .await
+        }
+    }
+
+    async fn overflow_run(
+        compacts: bool,
+    ) -> (Vec<AgentEvent>, Vec<ContextPressure>, Vec<Vec<String>>) {
+        let user = |text: &str| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pressures = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(OverflowingProvider {
+            max_messages: 2,
+            seen: seen.clone(),
+        }));
+        let recorded = pressures.clone();
+        let config = AgentConfig {
+            model: test_model(),
+            system_prompt: None,
+            tools: ToolRegistry::new(),
+            registry: &registry,
+            options: StreamOptions::default(),
+            max_turns: 3,
+            hooks: Box::new(ClosureHooks {
+                transform: Some(Box::new(move |messages, pressure| {
+                    recorded.lock().unwrap().push(pressure);
+                    let result = if compacts && pressure == ContextPressure::Overflowed {
+                        ContextTransformResult::Compacted(ContextCompaction {
+                            messages: vec![user("summary"), messages[2].clone()],
+                            summary: "summary".into(),
+                            summarised_count: 2,
+                        })
+                    } else {
+                        ContextTransformResult::Unchanged
+                    };
+                    Box::pin(async move { result })
+                })),
+                ..Default::default()
+            }),
+            injections: Default::default(),
+            cancel: None,
+        };
+        let events: Vec<_> = agent_loop(config, vec![user("old 1"), user("old 2"), user("kept")])
+            .collect()
+            .await;
+        let pressures = pressures.lock().unwrap().clone();
+        let seen = seen.lock().unwrap().clone();
+        (events, pressures, seen)
+    }
+
+    #[tokio::test]
+    async fn a_prompt_too_long_error_compacts_and_retries_the_request() {
+        let (events, pressures, seen) = overflow_run(true).await;
+
+        assert_eq!(
+            pressures,
+            [ContextPressure::Normal, ContextPressure::Overflowed]
+        );
+        assert_eq!(
+            seen,
+            [vec!["old 1", "old 2", "kept"], vec!["summary", "kept"]]
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ContextCompacted { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(events.last(), Some(AgentEvent::AgentEnd)));
+    }
+
+    #[tokio::test]
+    async fn a_prompt_too_long_error_that_cannot_compact_ends_the_turn_with_the_error() {
+        let (events, pressures, seen) = overflow_run(false).await;
+
+        assert_eq!(
+            pressures,
+            [ContextPressure::Normal, ContextPressure::Overflowed]
+        );
+        assert_eq!(seen.len(), 1);
+        let errors: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Error { error } => Some(error.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("prompt is too long"), "{errors:?}");
+    }
+
     fn echoing_hook(command: &str) -> crate::hooks::LifecycleHook {
         crate::hooks::LifecycleHook {
             tool_match: "*".into(),
@@ -1865,7 +2045,7 @@ mod tests {
             options: StreamOptions::default(),
             max_turns: 3,
             hooks: Box::new(ClosureHooks {
-                transform: Some(Box::new(move |messages| {
+                transform: Some(Box::new(move |messages, _| {
                     let result = if transform_called.swap(true, Ordering::SeqCst) {
                         assert_eq!(messages.len(), 4);
                         ContextTransformResult::Unchanged

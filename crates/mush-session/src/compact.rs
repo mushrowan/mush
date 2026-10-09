@@ -619,15 +619,35 @@ pub fn needs_compaction_for_messages(
     )
 }
 
-pub fn compaction_tokens_for_estimated_payload(
+pub fn compaction_tokens(
     context_tokens: TokenCount,
-    baseline_estimated_tokens: TokenCount,
-    current_estimated_tokens: TokenCount,
+    messages: &[Message],
+    measured_len: usize,
 ) -> TokenCount {
-    let estimated_growth = current_estimated_tokens - baseline_estimated_tokens;
-    let lag_adjusted_tokens =
-        TokenCount::new(context_tokens.get().saturating_add(estimated_growth.get()));
-    lag_adjusted_tokens.max(current_estimated_tokens)
+    let unmeasured: u64 = messages
+        .get(measured_len..)
+        .unwrap_or_default()
+        .iter()
+        .map(unmeasured_message_tokens)
+        .sum();
+    TokenCount::new(context_tokens.get().saturating_add(unmeasured))
+        .max(TokenCount::new(estimate_tokens(messages) as u64))
+}
+
+#[must_use]
+pub fn measured_len(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .rposition(|message| matches!(message, Message::Assistant(_)))
+        .unwrap_or(0)
+}
+
+fn unmeasured_message_tokens(message: &Message) -> u64 {
+    let estimate = estimate_message_tokens(message) as u64;
+    match message {
+        Message::Assistant(assistant) => estimate.max(assistant.usage.output_tokens.get()),
+        _ => estimate,
+    }
 }
 
 #[derive(Debug)]
@@ -1295,23 +1315,12 @@ impl From<mush_ai::oneshot::OneshotError> for CompactionFailure {
 
 impl CompactionFailure {
     fn is_context_overflow(&self) -> bool {
-        let message = match self {
-            Self::Request(message) | Self::Stream(message) => message,
-            Self::EmptyResponse => return false,
+        match self {
+            Self::Request(message) | Self::Stream(message) => {
+                mush_ai::registry::is_context_overflow_message(message)
+            }
+            Self::EmptyResponse => false,
         }
-        .to_ascii_lowercase();
-
-        [
-            "context_length_exceeded",
-            "context length exceeded",
-            "context window",
-            "too many input tokens",
-            "input tokens exceed",
-            "maximum context",
-            "prompt is too long",
-        ]
-        .iter()
-        .any(|pat| message.contains(pat))
     }
 }
 
@@ -1833,15 +1842,8 @@ mod tests {
         let context_window = TokenCount::new(10_000);
         let previous_api_tokens = TokenCount::new(6_000);
 
-        let before_new_payload = TokenCount::new(estimate_tokens(&messages[..20]) as u64);
-        let after_new_payload = TokenCount::new(estimate_tokens(&messages) as u64);
-
         assert!(needs_compaction_at(
-            compaction_tokens_for_estimated_payload(
-                previous_api_tokens,
-                before_new_payload,
-                after_new_payload,
-            ),
+            compaction_tokens(previous_api_tokens, &messages, 20),
             context_window,
             messages.len(),
             &CompactionSettings::default(),
@@ -1854,6 +1856,37 @@ mod tests {
                 &CompactionSettings::default()
             ),
             "old api-token-only trigger misses the newly appended payload"
+        );
+    }
+
+    #[test]
+    fn a_new_prompt_and_the_last_replys_hidden_output_count_toward_compaction() {
+        let mut messages: Vec<Message> = (0..20).map(|i| user_msg(&format!("small {i}"))).collect();
+        let Message::Assistant(mut reply) = assistant_msg("done") else {
+            panic!("assistant_msg builds an assistant message");
+        };
+        reply.usage.output_tokens = TokenCount::new(300);
+        messages.push(Message::Assistant(reply));
+        messages.push(user_msg(&"x".repeat(1_000)));
+        let window = TokenCount::new(10_000);
+        let reported = TokenCount::new(9_000);
+        let settings = CompactionSettings::default();
+
+        assert_eq!(measured_len(&messages), 20);
+        assert!(needs_compaction_at(
+            compaction_tokens(reported, &messages, measured_len(&messages)),
+            window,
+            messages.len(),
+            &settings,
+        ));
+        assert!(
+            !needs_compaction_at(
+                compaction_tokens(reported, &messages, messages.len()),
+                window,
+                messages.len(),
+                &settings,
+            ),
+            "counting the whole snapshot as already reported misses the new turn"
         );
     }
 

@@ -90,19 +90,45 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
             Applied::Appended
         }
         AgentEvent::ContextCompacted { compaction, .. } => {
-            match conversation.apply_compaction(
-                compaction.summary.clone(),
-                compaction.summarised_count,
-                &compaction.messages,
-            ) {
+            match apply_context_compaction(conversation, compaction) {
                 Ok(_) => Applied::Compacted {
                     after_count: conversation.context_len(),
                 },
-                Err(_) => Applied::Nothing,
+                Err(_) => {
+                    tracing::warn!(
+                        summarised = compaction.summarised_count,
+                        "auto-compaction did not match the conversation and was not saved"
+                    );
+                    Applied::Nothing
+                }
             }
         }
         _ => Applied::Nothing,
     }
+}
+
+fn apply_context_compaction(
+    conversation: &mut ConversationState,
+    compaction: &mush_agent::ContextCompaction,
+) -> Result<Option<mush_session::EntryId>, mush_session::StaleCompaction> {
+    let summary = || compaction.summary.clone();
+    let stale = match conversation.apply_compaction(
+        summary(),
+        compaction.summarised_count,
+        &compaction.messages,
+    ) {
+        Err(stale) => stale,
+        applied => return applied,
+    };
+    let Some((notice @ Message::User(last), kept)) = compaction.messages.split_last() else {
+        return Err(stale);
+    };
+    if !kernel_notice::is_notice(&last.text()) {
+        return Err(stale);
+    }
+    let applied = conversation.apply_compaction(summary(), compaction.summarised_count, kept)?;
+    conversation.append_message(notice.clone());
+    Ok(applied)
 }
 
 #[cfg(test)]
@@ -199,6 +225,53 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["steer", "later"]);
+    }
+
+    #[test]
+    fn an_auto_compaction_is_saved_despite_a_kernel_notice_and_restamped_tool_results() {
+        let mut conversation = ConversationState::new();
+        for text in ["a", "b", "c"] {
+            conversation.append_message(user(text));
+        }
+        apply_agent_event(
+            &mut conversation,
+            &AgentEvent::ToolExecEnd {
+                tool_call_id: ToolCallId::from("tc_1"),
+                tool_name: ToolName::from("ipython"),
+                result: mush_agent::tool::ToolResult {
+                    content: vec![ToolResultContentPart::Text(TextContent {
+                        text: "ok".into(),
+                    })],
+                    outcome: ToolOutcome::Success,
+                    details: None,
+                },
+            },
+        );
+        conversation.append_message(user("d"));
+        let mut kept = conversation.context()[2..].to_vec();
+        let Message::ToolResult(tool) = &mut kept[1] else {
+            panic!("{:?}", kept[1]);
+        };
+        tool.timestamp_ms = Timestamp::from_ms(tool.timestamp_ms.as_ms() + 7);
+        let notice = kernel_notice::persisted(&Ok(vec!["df".into()]));
+        let messages = [vec![user("summary")], kept, vec![notice.clone()]].concat();
+
+        let applied = apply_agent_event(
+            &mut conversation,
+            &AgentEvent::ContextCompacted {
+                before_count: 5,
+                compaction: mush_agent::ContextCompaction {
+                    messages,
+                    summary: "summary".into(),
+                    summarised_count: 2,
+                },
+            },
+        );
+
+        assert_eq!(applied, Applied::Compacted { after_count: 5 });
+        let context = conversation.context();
+        assert!(matches!(&context[0], Message::User(u) if u.text().contains("summary")));
+        assert_eq!(context.last(), Some(&notice));
     }
 
     #[test]
