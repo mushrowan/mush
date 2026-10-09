@@ -107,6 +107,7 @@ fn draw_frame(
     if let Some(ref recovery) = app.interaction.compaction_recovery {
         widgets::compaction_recovery::render(frame, recovery, &app.theme);
     }
+    widgets::question_dialog::render(app, area, frame.buffer_mut());
 
     let needs_input_anchor =
         app.completion.slash_menu.is_some() || app.interaction.at_picker.is_some();

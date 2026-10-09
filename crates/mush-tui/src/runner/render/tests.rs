@@ -384,9 +384,15 @@ fn tool_confirmation_releases_and_restores_the_log_cursor() {
     repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Log);
     let cursor = app.viewport.cursor();
     app.interaction.mode = AppMode::ToolConfirm;
-    app.interaction.confirm_prompt = Some("synthetic confirmation".into());
+    app.interaction.confirm_prompt = Some("bash synthetic confirmation".into());
     repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Hidden);
-    assert!(buffer_to_string(terminal.backend().buffer()).contains("synthetic confirmation"));
+    let screen_text = buffer_to_string(terminal.backend().buffer());
+    assert!(
+        screen_text.contains("synthetic confirmation"),
+        "{screen_text}"
+    );
+    assert!(screen_text.contains("y/enter allow"), "{screen_text}");
+    assert!(screen_text.contains("> draft"), "{screen_text}");
     app.interaction.confirm_prompt = None;
     app.interaction.mode = AppMode::Normal;
     repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Log);

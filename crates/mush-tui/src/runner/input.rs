@@ -1,9 +1,10 @@
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyEvent, KeyEventKind};
 
 use crate::app::{self, App, AppEvent};
 use crate::input::handle_key;
+use crate::question::{Answer, Question};
 use crate::session::Session;
 
 use super::TuiConfig;
@@ -72,12 +73,25 @@ impl InputDeps<'_> {
     }
 }
 
-fn confirmation_answer(code: KeyCode) -> Option<bool> {
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(true),
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-        _ => None,
+async fn handle_question_key(
+    session: &mut Session,
+    deps: &mut InputDeps<'_>,
+    key: KeyEvent,
+) -> LoopAction {
+    let (Some(question), Some(answer)) = (Question::open(&session.app), Answer::from_key(key.code))
+    else {
+        return LoopAction::Continue;
+    };
+    match question {
+        Question::Tool => answer_confirmation(session, answer == Answer::Yes).await,
+        Question::KernelBusy => {
+            super::streams::answer_kernel_busy(session, kernel_busy_choice(answer)).await;
+        }
+        Question::BranchSummary => {
+            answer_branch_summary(session, deps.tui_config, branch_summary_choice(answer)).await;
+        }
     }
+    LoopAction::Redraw
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,14 +101,11 @@ enum BranchSummaryChoice {
     Stay,
 }
 
-fn branch_summary_answer(code: KeyCode) -> Option<BranchSummaryChoice> {
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            Some(BranchSummaryChoice::Summarise)
-        }
-        KeyCode::Char('n') | KeyCode::Char('N') => Some(BranchSummaryChoice::JustJump),
-        KeyCode::Esc => Some(BranchSummaryChoice::Stay),
-        _ => None,
+fn branch_summary_choice(answer: Answer) -> BranchSummaryChoice {
+    match answer {
+        Answer::Yes => BranchSummaryChoice::Summarise,
+        Answer::No => BranchSummaryChoice::JustJump,
+        Answer::Dismiss => BranchSummaryChoice::Stay,
     }
 }
 
@@ -132,13 +143,12 @@ async fn answer_branch_summary(
     }
 }
 
-fn kernel_busy_answer(code: KeyCode) -> Option<mush_tools::ipython::BusyKernelChoice> {
+fn kernel_busy_choice(answer: Answer) -> mush_tools::ipython::BusyKernelChoice {
     use mush_tools::ipython::BusyKernelChoice;
-    match code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(BusyKernelChoice::Wait),
-        KeyCode::Char('n') | KeyCode::Char('N') => Some(BusyKernelChoice::Kill),
-        KeyCode::Esc => Some(BusyKernelChoice::Cancel),
-        _ => None,
+    match answer {
+        Answer::Yes => BusyKernelChoice::Wait,
+        Answer::No => BusyKernelChoice::Kill,
+        Answer::Dismiss => BusyKernelChoice::Cancel,
     }
 }
 
@@ -393,25 +403,7 @@ async fn handle_streaming_key_event(
         return Ok(LoopAction::Redraw);
     }
     if session.app.interaction.mode == app::AppMode::ToolConfirm {
-        if session.app.interaction.branch_summary_ask.is_some() {
-            if let Some(choice) = branch_summary_answer(key.code) {
-                answer_branch_summary(session, deps.tui_config, choice).await;
-                return Ok(LoopAction::Redraw);
-            }
-            return Ok(LoopAction::Continue);
-        }
-        if session.app.interaction.kernel_busy == crate::app_state::KernelBusy::Asked {
-            if let Some(choice) = kernel_busy_answer(key.code) {
-                super::streams::answer_kernel_busy(session, choice).await;
-                return Ok(LoopAction::Redraw);
-            }
-            return Ok(LoopAction::Continue);
-        }
-        if let Some(allowed) = confirmation_answer(key.code) {
-            answer_confirmation(session, allowed).await;
-            return Ok(LoopAction::Redraw);
-        }
-        return Ok(LoopAction::Continue);
+        return Ok(handle_question_key(session, deps, key).await);
     }
 
     let app_event = handle_key(&mut session.app, key);
@@ -488,11 +480,7 @@ pub(super) async fn handle_idle_terminal_events(
         changed |= !matches!(&event, Event::Resize(..));
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let Some(app_event) = handle_key(&mut session.app, key) else {
-                    continue;
-                };
-
-                match handle_idle_app_event(session, deps, app_event).await {
+                match handle_idle_key(session, deps, key).await {
                     IdleStep::Quit => return Ok(LoopAction::Quit),
                     IdleStep::ReadNext => continue,
                     IdleStep::Done => {}
@@ -529,6 +517,23 @@ enum IdleStep {
     Done,
     Quit,
     ReadNext,
+}
+
+async fn handle_idle_key(
+    session: &mut Session,
+    deps: &mut InputDeps<'_>,
+    key: KeyEvent,
+) -> IdleStep {
+    if session.app.interaction.mode == app::AppMode::ToolConfirm {
+        if !session.app.subagents.handle_key(&session.app.keymap, key) {
+            handle_question_key(session, deps, key).await;
+        }
+        return IdleStep::Done;
+    }
+    let Some(app_event) = handle_key(&mut session.app, key) else {
+        return IdleStep::ReadNext;
+    };
+    handle_idle_app_event(session, deps, app_event).await
 }
 
 async fn handle_idle_app_event(
@@ -712,7 +717,7 @@ mod tests {
     use super::*;
     use crate::runner::size_cached_backend::CachedSizeState;
     use crate::session::Session;
-    use crossterm::event::{KeyEvent, KeyEventState, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventState, KeyModifiers};
     use mush_ai::types::TokenCount;
     use std::rc::Rc;
 
@@ -964,20 +969,134 @@ mod tests {
     }
 
     #[test]
-    fn branch_summary_answers_map_the_three_keys() {
+    fn answers_map_onto_each_question() {
+        use mush_tools::ipython::BusyKernelChoice;
         assert_eq!(
-            branch_summary_answer(KeyCode::Char('y')),
-            Some(BranchSummaryChoice::Summarise)
+            branch_summary_choice(Answer::Yes),
+            BranchSummaryChoice::Summarise
         );
         assert_eq!(
-            branch_summary_answer(KeyCode::Char('n')),
-            Some(BranchSummaryChoice::JustJump)
+            branch_summary_choice(Answer::No),
+            BranchSummaryChoice::JustJump
         );
         assert_eq!(
-            branch_summary_answer(KeyCode::Esc),
-            Some(BranchSummaryChoice::Stay)
+            branch_summary_choice(Answer::Dismiss),
+            BranchSummaryChoice::Stay
         );
-        assert_eq!(branch_summary_answer(KeyCode::Char('x')), None);
+        assert_eq!(kernel_busy_choice(Answer::Yes), BusyKernelChoice::Wait);
+        assert_eq!(kernel_busy_choice(Answer::No), BusyKernelChoice::Kill);
+        assert_eq!(
+            kernel_busy_choice(Answer::Dismiss),
+            BusyKernelChoice::Cancel
+        );
+    }
+
+    fn asking_about_the_branch(draft: &str) -> Session {
+        let mut session = Session::with_conversation(
+            App::new("test".into(), TokenCount::new(200_000)),
+            mush_session::ConversationState::from_messages(vec![
+                crate::test_support::user_message("first"),
+                crate::test_support::user_message("second"),
+            ]),
+        );
+        let target = session.in_process().runtime.conversation.tree().entries()[1]
+            .id
+            .clone();
+        session.app.interaction.branch_summary_ask = Some(target);
+        session.app.interaction.mode = app::AppMode::ToolConfirm;
+        session.app.input.text = draft.into();
+        session.app.input.cursor = draft.len();
+        session
+    }
+
+    #[tokio::test]
+    async fn an_idle_question_keeps_typing_out_of_the_draft() {
+        let mut session = asking_about_the_branch("half typed");
+        let mut tui_config = streaming_test_config();
+        let mut pending_prompt = None;
+        let image_picker = None;
+        let mut resize = ResizeState::default();
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            pending_prompt: &mut pending_prompt,
+            image_picker: &image_picker,
+            resize: &mut resize,
+        };
+
+        for code in [KeyCode::Char('x'), KeyCode::Backspace, KeyCode::Tab] {
+            handle_idle_key(&mut session, &mut deps, key(code)).await;
+        }
+        assert_eq!(session.app.interaction.mode, app::AppMode::ToolConfirm);
+        assert!(session.app.interaction.branch_summary_ask.is_some());
+        assert_eq!(session.app.input.text, "half typed");
+
+        handle_idle_key(&mut session, &mut deps, key(KeyCode::Esc)).await;
+        assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+        assert!(session.app.interaction.branch_summary_ask.is_none());
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
+        assert_eq!(session.app.input.text, "half typed");
+        assert_eq!(session.app.input.cursor, "half typed".len());
+    }
+
+    #[tokio::test]
+    async fn an_idle_no_to_the_branch_question_jumps() {
+        let mut session = asking_about_the_branch("");
+        let mut tui_config = streaming_test_config();
+        let mut pending_prompt = None;
+        let image_picker = None;
+        let mut resize = ResizeState::default();
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            pending_prompt: &mut pending_prompt,
+            image_picker: &image_picker,
+            resize: &mut resize,
+        };
+
+        handle_idle_key(&mut session, &mut deps, key(KeyCode::Char('n'))).await;
+
+        assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_tool_question_swallows_other_keys_and_keeps_the_draft() {
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+        let mut state = StreamState::new();
+        session.app.interaction.mode = app::AppMode::ToolConfirm;
+        session.app.interaction.confirm_prompt = Some("bash ls".into());
+        session.app.input.text = "half typed".into();
+        session.app.input.cursor = 4;
+        let mut tui_config = streaming_test_config();
+        let mut pending_prompt = None;
+        let image_picker = None;
+        let mut resize = ResizeState::default();
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            pending_prompt: &mut pending_prompt,
+            image_picker: &image_picker,
+            resize: &mut resize,
+        };
+
+        let action = handle_streaming_key_event(
+            &mut session,
+            &mut state,
+            &mut deps,
+            key(KeyCode::Char('x')),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, LoopAction::Continue));
+        assert_eq!(session.app.interaction.mode, app::AppMode::ToolConfirm);
+
+        let action =
+            handle_streaming_key_event(&mut session, &mut state, &mut deps, key(KeyCode::Esc))
+                .await
+                .unwrap();
+        assert!(matches!(action, LoopAction::Redraw));
+        assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
+        assert!(session.app.interaction.confirm_prompt.is_none());
+        assert_eq!(session.app.input.text, "half typed");
+        assert_eq!(session.app.input.cursor, 4);
     }
 
     #[test]
@@ -1076,26 +1195,6 @@ mod tests {
             session.app.interaction.show_cost,
             "a slash command entered during a streaming iteration must execute, not be dropped"
         );
-    }
-
-    #[test]
-    fn confirmation_answer_accepts_yes_keys() {
-        assert_eq!(confirmation_answer(KeyCode::Char('y')), Some(true));
-        assert_eq!(confirmation_answer(KeyCode::Char('Y')), Some(true));
-        assert_eq!(confirmation_answer(KeyCode::Enter), Some(true));
-    }
-
-    #[test]
-    fn confirmation_answer_accepts_no_keys() {
-        assert_eq!(confirmation_answer(KeyCode::Char('n')), Some(false));
-        assert_eq!(confirmation_answer(KeyCode::Char('N')), Some(false));
-        assert_eq!(confirmation_answer(KeyCode::Esc), Some(false));
-    }
-
-    #[test]
-    fn confirmation_answer_ignores_other_keys() {
-        assert_eq!(confirmation_answer(KeyCode::Char('x')), None);
-        assert_eq!(confirmation_answer(KeyCode::Tab), None);
     }
 
     fn key_info(

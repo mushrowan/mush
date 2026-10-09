@@ -29,7 +29,7 @@ impl<'a> Ui<'a> {
 pub struct LayoutRegions {
     pub top: Rect,
     pub messages: Rect,
-    pub prompt: Rect,
+    pub hint: Rect,
     pub input: Rect,
     pub status: Rect,
 }
@@ -47,17 +47,17 @@ pub fn input_height(input: &crate::app::InputBuffer, area_width: u16) -> u16 {
 pub fn app_layout(app: &App, area: Rect) -> LayoutRegions {
     let input_h = input_height(&app.input, area.width);
     let status_h = status_bar_height(app, area.width);
-    let prompt_h = crate::widgets::prompt_line::height(app);
-    layout(area, prompt_h, input_h, status_h)
+    let hint_h = crate::widgets::hint_line::height(app);
+    layout(area, hint_h, input_h, status_h)
 }
 
-pub fn layout(area: Rect, prompt_h: u16, input_h: u16, status_h: u16) -> LayoutRegions {
+pub fn layout(area: Rect, hint_h: u16, input_h: u16, status_h: u16) -> LayoutRegions {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(TOP_BAR_HEIGHT),
             Constraint::Min(0),
-            Constraint::Length(prompt_h),
+            Constraint::Length(hint_h),
             Constraint::Length(input_h),
             Constraint::Length(status_h),
         ])
@@ -66,7 +66,7 @@ pub fn layout(area: Rect, prompt_h: u16, input_h: u16, status_h: u16) -> LayoutR
     LayoutRegions {
         top: chunks[0],
         messages: chunks[1],
-        prompt: chunks[2],
+        hint: chunks[2],
         input: chunks[3],
         status: chunks[4],
     }
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(regions.top.y, 0);
         assert_eq!(regions.status.height, 1);
         assert_eq!(regions.input.height, 3);
-        assert_eq!(regions.prompt.height, 0);
+        assert_eq!(regions.hint.height, 0);
         assert_eq!(regions.messages.height, 19);
         assert_eq!(regions.messages.y, 1);
     }

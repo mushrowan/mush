@@ -25,6 +25,7 @@ mod normal;
 pub mod notify;
 pub mod path_utils;
 pub mod prompt_cache;
+pub mod question;
 pub mod runner;
 pub mod screen;
 mod selection;

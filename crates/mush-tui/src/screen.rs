@@ -399,7 +399,7 @@ impl Screen {
         self.render_scrollbar(app, regions.messages, buf);
 
         TopBar::new(app).render(regions.top, buf);
-        crate::widgets::prompt_line::render(app, regions.prompt, buf);
+        crate::widgets::hint_line::render(app, regions.hint, buf);
         InputBox::new(app).render(regions.input, buf);
         StatusBar::new(app).render(regions.status, buf);
     }
