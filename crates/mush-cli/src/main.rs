@@ -1594,7 +1594,7 @@ fn worker_config(
                 .as_ref()
                 .map(|dir| dir.join("scheduled-jobs.json")),
         ));
-        let notes = mush_runtime::Notes::new(artifacts.as_ref().map(|dir| dir.join("notes.md")));
+        let notes = mush_runtime::Notes::new(artifacts.clone());
         let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
         if let Some(host) = ipython.mush_host() {
             let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)

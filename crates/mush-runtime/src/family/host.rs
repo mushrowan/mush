@@ -362,12 +362,23 @@ impl RlmHandler {
 
     fn notes(&self, kind: &str, payload: Payload<'_>) -> Result<Value, HostError> {
         let notes = self.notes.as_ref().ok_or("notes are not available here")?;
+        let key = payload.text("key");
         let text = match kind {
-            "rlm.note" => notes.append(&payload.required("text")?)?,
+            "rlm.note" => notes
+                .keep(&payload.required("text")?, key.as_deref())?
+                .to_string(),
+            "rlm.drop_note" => notes.drop_note(&payload.required("key")?)?,
             "rlm.clear_notes" => {
-                notes.replace("");
+                notes.clear();
                 String::new()
             }
+            _ if payload.flag("archived") => notes.archived(
+                key.as_deref(),
+                payload
+                    .number("limit")
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .unwrap_or(crate::notes::DEFAULT_ARCHIVE_LIMIT),
+            ),
             _ => notes.read(),
         };
         Ok(json!({ "notes": text }))
@@ -688,7 +699,9 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             }
             "agent_observe.recent_messages" => self.recent_messages(payload).await,
             "rlm.create_session" => self.create_session(payload).await,
-            "rlm.note" | "rlm.notes" | "rlm.clear_notes" => self.notes(kind, payload),
+            "rlm.note" | "rlm.notes" | "rlm.drop_note" | "rlm.clear_notes" => {
+                self.notes(kind, payload)
+            }
             "rlm_heartbeat.list" => self.list_heartbeats(payload),
             "rlm_heartbeat.create" => self.create_heartbeat(payload),
             "rlm_heartbeat.update" => self.change_heartbeat(payload, false),

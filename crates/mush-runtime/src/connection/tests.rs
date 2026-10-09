@@ -2131,7 +2131,7 @@ async fn the_notes_ride_in_the_conversation_and_not_the_system_prompt() {
     };
     let (fingerprint, body) = crate::notes::extract(&carried.text()).unwrap();
     assert_eq!(fingerprint, crate::notes::fingerprint(&notes.read()));
-    assert!(body.ends_with("- remember the socket path"));
+    assert!(body.ends_with("- [n1] remember the socket path"));
     assert!(matches!(&turn[1], Message::User(u) if u.text() == "first"));
 
     connection
@@ -2171,7 +2171,10 @@ async fn the_notes_ride_in_the_conversation_and_not_the_system_prompt() {
     let Message::User(latest) = &turn[turn.len() - 2] else {
         panic!("{turn:?}")
     };
-    assert!(crate::notes::extract(&latest.text()).is_some());
+    let (fingerprint, body) = crate::notes::extract(&latest.text()).unwrap();
+    assert_eq!(fingerprint, crate::notes::fingerprint(&notes.read()));
+    assert!(body.ends_with("- [n2] and the pid file"));
+    assert!(!body.contains("socket path"), "only the change is re-shown");
 }
 
 #[tokio::test]

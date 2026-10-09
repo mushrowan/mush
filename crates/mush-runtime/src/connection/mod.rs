@@ -465,7 +465,7 @@ impl InProcessConnection {
         let dir = persisted
             .then(|| mush_session::SessionStore::default_artifact_dir(&self.runtime.session_id));
         if let Some(notes) = &self.notes {
-            notes.rebind(dir.as_ref().map(|dir| dir.join("notes.md")));
+            notes.rebind(dir.clone());
         }
         if let Some(family) = &self.family {
             family.rebind(

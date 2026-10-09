@@ -480,11 +480,16 @@ class _Rlm:
         payload = _with_optional({"prompt": prompt}, name=name, model=model, thinking=thinking, cwd=cwd)
         return await host_request("rlm.create_session", payload)
 
-    async def note(self, text: str) -> str:
-        return str((await host_request("rlm.note", {"text": text})).get("notes", ""))
+    async def note(self, text: str, key: str | None = None) -> str:
+        payload = _with_optional({"text": text}, key=key)
+        return str((await host_request("rlm.note", payload)).get("notes", ""))
 
-    async def notes(self) -> str:
-        return str((await host_request("rlm.notes", {})).get("notes", ""))
+    async def drop_note(self, key: str) -> str:
+        return str((await host_request("rlm.drop_note", {"key": key})).get("notes", ""))
+
+    async def notes(self, archived: bool = False, key: str | None = None, limit: int | None = None) -> str:
+        payload = _with_optional({"archived": archived}, key=key, limit=limit)
+        return str((await host_request("rlm.notes", payload)).get("notes", ""))
 
     async def clear_notes(self) -> None:
         await host_request("rlm.clear_notes", {})

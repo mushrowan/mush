@@ -39,19 +39,10 @@ impl SessionRuntime {
     }
 
     pub fn refresh_notes(&mut self) -> Option<String> {
-        let text = self.notes.as_ref()?.read();
-        if text.trim().is_empty() {
-            return None;
-        }
-        let current = crate::notes::fingerprint(&text);
-        if crate::notes::latest_fingerprint(&self.conversation.context()).as_deref()
-            == Some(&current)
-        {
-            return None;
-        }
-        self.conversation
-            .append_message(crate::notes::message(&text));
-        Some(text)
+        let latest = crate::notes::latest_fingerprint(&self.conversation.context());
+        let delivery = self.notes.as_ref()?.delivery(latest.as_deref())?;
+        self.conversation.append_message(delivery.message);
+        Some(delivery.text)
     }
 
     #[must_use]
