@@ -272,10 +272,6 @@ mod tests {
                     kind: *kind,
                     signature: (*name).into(),
                     start_line: *line,
-                    end_line: *line,
-                    start_byte: 0,
-                    end_byte: 0,
-                    file_path: None,
                 })
                 .collect(),
         }

@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use tree_sitter::StreamingIterator;
 
 use crate::language::Language;
@@ -52,11 +50,7 @@ impl std::fmt::Display for SymbolKind {
 pub struct SymbolInfo {
     pub name: String,
     pub kind: SymbolKind,
-    pub file_path: Option<PathBuf>,
     pub start_line: usize,
-    pub end_line: usize,
-    pub start_byte: usize,
-    pub end_byte: usize,
     pub signature: String,
 }
 
@@ -64,7 +58,6 @@ pub fn extract_symbols(
     language: Language,
     source: &[u8],
     tree: &tree_sitter::Tree,
-    file_path: Option<&Path>,
 ) -> Vec<SymbolInfo> {
     let Some(query) = queries::compiled(language) else {
         return vec![];
@@ -99,11 +92,7 @@ pub fn extract_symbols(
             symbols.push(SymbolInfo {
                 name,
                 kind,
-                file_path: file_path.map(Path::to_path_buf),
                 start_line: node.start_position().row,
-                end_line: node.end_position().row,
-                start_byte: node.start_byte(),
-                end_byte: node.end_byte(),
                 signature,
             });
         }
@@ -158,7 +147,7 @@ mod tests {
     fn parse_and_extract(lang: Language, source: &str) -> Vec<SymbolInfo> {
         let pool = crate::ParserPool::new();
         let tree = pool.parse(lang, source.as_bytes()).unwrap();
-        extract_symbols(lang, source.as_bytes(), &tree, None)
+        extract_symbols(lang, source.as_bytes(), &tree)
     }
 
     #[cfg(feature = "lang-rust")]
@@ -451,22 +440,5 @@ function deploy {
 
         let second = symbols.iter().find(|s| s.name == "second").unwrap();
         assert_eq!(second.start_line, 2);
-    }
-
-    #[test]
-    fn extract_without_path_has_none() {
-        let symbols = parse_and_extract(Language::Rust, "fn hello() {}");
-        assert!(symbols[0].file_path.is_none());
-    }
-
-    #[test]
-    fn extract_with_path_carries_it() {
-        let pool = crate::ParserPool::new();
-        let source = b"fn hello() {}";
-        let tree = pool.parse(Language::Rust, source).unwrap();
-        let path = Path::new("src/lib.rs");
-        let symbols = extract_symbols(Language::Rust, source, &tree, Some(path));
-
-        assert_eq!(symbols[0].file_path.as_deref(), Some(path));
     }
 }

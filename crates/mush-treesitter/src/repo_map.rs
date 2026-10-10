@@ -16,9 +16,9 @@ struct FileData {
 }
 
 impl FileData {
-    fn extract(language: Language, source: &[u8], tree: &tree_sitter::Tree, path: &Path) -> Self {
+    fn extract(language: Language, source: &[u8], tree: &tree_sitter::Tree) -> Self {
         Self {
-            definitions: symbols::extract_symbols(language, source, tree, Some(path)),
+            definitions: symbols::extract_symbols(language, source, tree),
             references: extract_references(source, tree),
         }
     }
@@ -320,7 +320,7 @@ fn parse_file_data(path: &Path) -> Result<FileData, crate::ParseError> {
             .ok_or(crate::ParseError::ParseFailed)
     })?;
 
-    Ok(FileData::extract(language, &source, &tree, path))
+    Ok(FileData::extract(language, &source, &tree))
 }
 
 fn parse_files_parallel(files: &[PathBuf]) -> FxHashMap<PathBuf, FileData> {
