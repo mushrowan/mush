@@ -239,6 +239,19 @@ pub const CHILD_INTERRUPTED: &str = "The parent session restarted while this age
 The saved transcript was recovered, but unfinished model, tool, bash or child-agent work was not \
 replayed. Inspect external side effects before continuing.";
 
+pub const INTERRUPTED_REASON: &str = "mush stopped while this agent was working";
+
+#[must_use]
+pub fn children_interrupted(names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| {
+        format!(
+            "[children-interrupted] {} stopped mid-work when mush did. Each keeps its transcript \
+             and kernel snapshot; message one to wake it.",
+            names.join(", ")
+        )
+    })
+}
+
 struct Target {
     child: Option<ChildId>,
     endpoint: MessageTarget,
@@ -1754,6 +1767,24 @@ impl Family {
         }
         self.persist();
     }
+    pub fn announce_interrupted(&self) -> Vec<String> {
+        let names: Vec<String> = self
+            .lock()
+            .children
+            .values_mut()
+            .filter(|node| {
+                node.summary.status == ChildStatus::Interrupted && node.summary.error.is_none()
+            })
+            .map(|node| {
+                node.summary.error = Some(INTERRUPTED_REASON.into());
+                node.summary.name.clone()
+            })
+            .collect();
+        if !names.is_empty() {
+            self.persist();
+        }
+        names
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3235,6 +3266,55 @@ mod tests {
         assert_eq!(family.all()[0].status, ChildStatus::Interrupted);
         let reloaded = Family::new(root, "root".into(), 2, None, Some(path));
         assert_eq!(reloaded.all()[0].status, ChildStatus::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn the_parent_is_told_once_which_children_a_restart_interrupted() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let children = vec![
+            ChildSummary {
+                status: ChildStatus::Running,
+                ..saved_child("sub-1", "left")
+            },
+            ChildSummary {
+                status: ChildStatus::Idle,
+                ..saved_child("sub-2", "right")
+            },
+        ];
+        std::fs::write(&path, serde_json::to_vec(&Registry { children }).unwrap()).unwrap();
+        let events = |family: Arc<Family>| {
+            let mut config = WorkerConfig::new(echo_config(echo_model()));
+            config.family = Some(family);
+            let connection = config.connect(&ToolRegistry::new(), &ApiRegistry::new());
+            connection
+                .runtime
+                .conversation
+                .context()
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::Event(event) => Some(event.content),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let restored = || {
+            Family::new(
+                Identity::root("root"),
+                "root".into(),
+                2,
+                None,
+                Some(path.clone()),
+            )
+        };
+
+        assert_eq!(
+            events(restored()),
+            vec![children_interrupted(&["left".into()]).unwrap()]
+        );
+        assert!(events(restored()).is_empty());
+        assert_eq!(restored().all()[0].status, ChildStatus::Interrupted);
     }
 
     #[tokio::test]

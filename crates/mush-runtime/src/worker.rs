@@ -118,7 +118,19 @@ impl WorkerConfig {
         runtime.set_kernel_state(self.kernel_state);
         runtime.begin_kernel_restore();
         runtime.save_now();
-        if let Some(notice) = self.recovery_notice {
+        let interrupted = self
+            .family
+            .as_ref()
+            .map(|family| family.announce_interrupted())
+            .unwrap_or_default();
+        let notice = [
+            self.recovery_notice,
+            crate::family::children_interrupted(&interrupted),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|first, second| format!("{first}\n\n{second}"));
+        if let Some(notice) = notice {
             runtime
                 .conversation
                 .append_message(mush_ai::types::Message::Event(
