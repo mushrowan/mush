@@ -59,7 +59,10 @@ async fn probe(socket: &Path) -> io::Result<Disposition> {
     let busy = match mush_daemon::supervisor::request(socket, &SupervisorRequest::List).await {
         Ok(SupervisorReply::Workers(workers)) => workers
             .iter()
-            .filter(|worker| worker.failed.is_none() && worker.turn_active)
+            .filter(|worker| {
+                worker.failed.is_none()
+                    && (worker.turn_active || worker.children.iter().any(|child| child.working))
+            })
             .count(),
         Ok(_) | Err(_) => return Ok(Disposition::Busy(None)),
     };
@@ -558,6 +561,23 @@ mod tests {
         let socket = dir.path().join("daemon.sock");
         let workers = vec![descriptor(true, false), descriptor(false, false)];
         let fake = fake_daemon(socket.clone(), "other".into(), Some(workers));
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(Some(1)));
+        assert!(listening(&socket));
+        fake.abort();
+    }
+
+    #[tokio::test]
+    async fn a_daemon_of_another_build_with_working_children_is_left_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let waiting_parent = WorkerDescriptor {
+            children: vec![mush_daemon::ChildDescriptor {
+                working: true,
+                ..mush_daemon::ChildDescriptor::default()
+            }],
+            ..descriptor(false, false)
+        };
+        let fake = fake_daemon(socket.clone(), "other".into(), Some(vec![waiting_parent]));
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Busy(Some(1)));
         assert!(listening(&socket));
         fake.abort();
