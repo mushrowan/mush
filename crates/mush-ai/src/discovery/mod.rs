@@ -13,7 +13,7 @@ pub use merge::{
     resolve_model_by_id,
 };
 pub use orchestrate::{
-    DiscoveryOutcome, DiscoveryRunResult, DiscoveryRunSummary, refresh_and_save, run_all_available,
+    DiscoveryOutcome, DiscoveryRunResult, DiscoveryRunSummary, refresh_and_save,
 };
 
 use std::time::SystemTime;

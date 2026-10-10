@@ -11,8 +11,6 @@ mod queries;
 
 pub use language::Language;
 pub use parser::{ParseError, ParserPool};
-pub use repo_map::{
-    IncrementalRepoMap, RankedFile, RenderOptions, RepoMap, build_repo_map, is_inside_repo,
-};
+pub use repo_map::{IncrementalRepoMap, RankedFile, RenderOptions, RepoMap, is_inside_repo};
 pub use symbols::{SymbolInfo, SymbolKind};
 pub use watcher::{RepoMapWatcher, SharedRepoMap};

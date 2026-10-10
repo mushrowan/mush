@@ -6,11 +6,10 @@ pub mod python;
 pub mod venv;
 
 pub use kernel::{
-    ATTACHMENT_MIME, Attachment, CellError, CellOutput, DEFAULT_MAX_OUTPUT_CHARS, HostError,
-    HostRequestHandler, Kernel, KernelConfig, NoHost, RESTORED_TAG, RestoreReport, SnapshotReport,
-    restore_notice_text,
+    Attachment, CellError, CellOutput, DEFAULT_MAX_OUTPUT_CHARS, HostError, HostRequestHandler,
+    Kernel, KernelConfig, NoHost, RESTORED_TAG, RestoreReport, SnapshotReport, restore_notice_text,
 };
-pub use protocol::{Event, PROTOCOL_VERSION, Request};
+pub use protocol::{Event, Request};
 pub use python::PythonPlan;
 pub use venv::{DEFAULT_PACKAGES, ManagedVenv, Package, SkillPackage};
 
