@@ -99,13 +99,15 @@ pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
-pub(crate) fn render_menu_frame(
+pub(crate) fn render_menu<'a>(
     frame: &mut Frame,
-    rows: usize,
+    sigil: char,
+    rows: &[(&'a str, &'a str)],
+    selected: usize,
     input_area: Rect,
     theme: &Theme,
-) -> Rect {
-    let height = u16::try_from(MENU_MAX_ROWS.min(rows) + 2).unwrap_or(u16::MAX);
+) {
+    let height = u16::try_from(MENU_MAX_ROWS.min(rows.len()) + 2).unwrap_or(u16::MAX);
     let popup = Rect::new(
         input_area.x,
         input_area.y.saturating_sub(height),
@@ -120,7 +122,28 @@ pub(crate) fn render_menu_frame(
         .padding(Padding::horizontal(1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    inner
+
+    let visible = inner.height as usize;
+    let scroll = (selected + 1).saturating_sub(visible);
+    let lines: Vec<Line<'_>> = rows
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .map(|(i, (name, description))| {
+            let (prefix, name_style) = selection_row(i == selected, theme);
+            let name_text = format!("{sigil}{name}");
+            let pad = 16usize
+                .saturating_sub(Span::raw(prefix).width() + Span::raw(name_text.as_str()).width());
+            Line::from(vec![
+                Span::styled(prefix, name_style),
+                Span::styled(name_text, name_style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(*description, theme.menu_description),
+            ])
+        })
+        .collect();
+    frame.render_widget(ratatui::text::Text::from(lines), inner);
 }
 
 #[cfg(test)]

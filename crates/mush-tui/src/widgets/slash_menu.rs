@@ -1,35 +1,16 @@
 use crate::slash_menu::SlashMenuState;
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{render_menu_frame, selection_row};
+use crate::widgets::popup_layout::render_menu;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, menu: &SlashMenuState, input_area: Rect, theme: &Theme) {
-    let inner = render_menu_frame(frame, menu.matches.len(), input_area, theme);
-    let visible = inner.height as usize;
-    let scroll = (menu.selected + 1).saturating_sub(visible);
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, cmd) in menu.matches.iter().enumerate().skip(scroll).take(visible) {
-        let is_selected = i == menu.selected;
-
-        let (prefix, name_style) = selection_row(is_selected, theme);
-
-        let name_text = format!("/{}", cmd.name);
-        let pad = 16usize
-            .saturating_sub(Span::raw(prefix).width() + Span::raw(name_text.as_str()).width());
-
-        lines.push(Line::from(vec![
-            Span::styled(prefix, name_style),
-            Span::styled(name_text, name_style),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(&cmd.description, theme.menu_description),
-        ]));
-    }
-
-    let text = ratatui::text::Text::from(lines);
-    frame.render_widget(text, inner);
+    let rows: Vec<(&str, &str)> = menu
+        .matches
+        .iter()
+        .map(|cmd| (cmd.name.as_str(), cmd.description.as_str()))
+        .collect();
+    render_menu(frame, '/', &rows, menu.selected, input_area, theme);
 }
 
 #[cfg(test)]

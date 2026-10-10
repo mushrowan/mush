@@ -1,36 +1,21 @@
 use crate::app_state::AtPickerState;
 use crate::theme::Theme;
-use crate::widgets::popup_layout::{render_menu_frame, selection_row};
+use crate::widgets::popup_layout::render_menu;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
 
 pub fn render(frame: &mut Frame, picker: &AtPickerState, input_area: Rect, theme: &Theme) {
-    let inner = render_menu_frame(frame, picker.matches.len(), input_area, theme);
-    let visible = inner.height as usize;
-    let scroll = (picker.selected + 1).saturating_sub(visible);
-
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    for (i, template) in picker.matches.iter().enumerate().skip(scroll).take(visible) {
-        let is_selected = i == picker.selected;
-        let (prefix, name_style) = selection_row(is_selected, theme);
-        let name_text = format!("@{}", template.name);
-        let pad = 16usize
-            .saturating_sub(Span::raw(prefix).width() + Span::raw(name_text.as_str()).width());
-
-        lines.push(Line::from(vec![
-            Span::styled(prefix, name_style),
-            Span::styled(name_text, name_style),
-            Span::raw(" ".repeat(pad)),
-            Span::styled(
+    let rows: Vec<(&str, &str)> = picker
+        .matches
+        .iter()
+        .map(|template| {
+            (
+                template.name.as_str(),
                 template.description.as_deref().unwrap_or(""),
-                theme.menu_description,
-            ),
-        ]));
-    }
-
-    let text = ratatui::text::Text::from(lines);
-    frame.render_widget(text, inner);
+            )
+        })
+        .collect();
+    render_menu(frame, '@', &rows, picker.selected, input_area, theme);
 }
 
 #[cfg(test)]
