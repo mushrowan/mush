@@ -112,18 +112,20 @@ fn python_skills(discovered: &[loader::Skill]) -> Vec<loader::PythonSkill> {
         .collect()
 }
 
+#[must_use]
+pub fn orphan_journal() -> mush_tools::orphans::OrphanJournal {
+    mush_tools::orphans::OrphanJournal::at(mush_session::data_dir().join("orphan-processes.jsonl"))
+}
+
 pub fn build_ipython_tool(
     cfg: &config::Config,
     cwd: &std::path::Path,
     skills: &[loader::Skill],
     sinks: KernelSinks,
-    orphans: Option<mush_tools::orphans::OrphanJournal>,
 ) -> mush_tools::ipython::IpythonTool {
     let cwd_arc: Arc<std::path::Path> = Arc::from(cwd);
     let host = mush_tools::ipython::MushHost::new(cwd_arc.clone());
-    if let Some(orphans) = orphans {
-        host.jobs().set_orphan_journal(orphans);
-    }
+    host.jobs().set_orphan_journal(orphan_journal());
     if let Some(sink) = sinks.notices {
         host.jobs().set_notice_sink(sink);
     }
@@ -267,10 +269,7 @@ impl AppSetup {
         }
         let classic_tools = !args.no_tools && !rlm;
         let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
-        let orphans = mush_tools::orphans::OrphanJournal::at(
-            mush_session::data_dir().join("orphan-processes.jsonl"),
-        );
-        let reaped = orphans.reap_abandoned();
+        let reaped = orphan_journal().reap_abandoned();
         if !reaped.killed.is_empty() {
             tracing::info!(pids = ?reaped.killed, "killed bash jobs left by an earlier mush");
         }
@@ -284,7 +283,6 @@ impl AppSetup {
                 cwd,
                 &project_context.skills,
                 args.kernel_sinks,
-                Some(orphans),
             ));
             kernel_state = Some(ipython.clone());
             ipython_tool = Some(ipython.clone());
@@ -1299,6 +1297,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_ipython_tool_journals_its_bash_jobs_for_reaping() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set(&[("MUSH_DATA_DIR", dir.path().to_str())]);
+
+        let tool = build_ipython_tool(
+            &config::Config::default(),
+            dir.path(),
+            &[],
+            KernelSinks::default(),
+        );
+        tool.mush_host().unwrap().jobs().journal(Some(4242), true);
+
+        let journal = std::fs::read_to_string(dir.path().join("orphan-processes.jsonl")).unwrap();
+        assert!(journal.contains("\"pid\":4242"), "{journal}");
     }
 
     #[test]

@@ -211,10 +211,7 @@ pub async fn findings(fix: bool) -> Result<Vec<Finding>> {
     }
 
     if fix {
-        let journal = mush_tools::orphans::OrphanJournal::at(
-            mush_session::data_dir().join("orphan-processes.jsonl"),
-        );
-        let reaped = journal.reap_abandoned();
+        let reaped = crate::setup::orphan_journal().reap_abandoned();
         if !reaped.killed.is_empty() || !reaped.gone.is_empty() {
             findings.push(Finding {
                 what: "bash jobs".into(),

@@ -1337,6 +1337,10 @@ fn parent_agent_name(spec: &mush_runtime::ChildSpec, session_dir: &std::path::Pa
         .unwrap_or_else(|| spec.parent_session_id.clone())
 }
 
+fn child_artifacts(saved: bool, session_id: &SessionId) -> Option<std::path::PathBuf> {
+    saved.then(|| SessionStore::default_artifact_dir(session_id))
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
@@ -1383,7 +1387,6 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 &seed.cwd,
                 &project.skills,
                 sinks.into(),
-                None,
             ));
             let identity = mush_runtime::Identity {
                 id: Some(spec.id.clone()),
@@ -1392,7 +1395,8 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             };
             let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(None));
             let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(None));
-            let notes = mush_runtime::Notes::new(None);
+            let notes =
+                mush_runtime::Notes::new(child_artifacts(seed.saver.is_some(), &session.meta.id));
             if let Some(host) = ipython.mush_host() {
                 host.set_extension(std::sync::Arc::new(
                     mush_runtime::RlmHandler::new(family.clone(), identity)
@@ -2178,6 +2182,22 @@ mod tests {
             }
         }
         EnvGuard { saved }
+    }
+
+    #[test]
+    fn a_saved_childs_notes_outlive_its_process() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = with_env(&[("MUSH_DATA_DIR", dir.path().to_str())]);
+        let id = SessionId::new();
+
+        mush_runtime::Notes::new(child_artifacts(true, &id))
+            .keep("resume from step three", None)
+            .unwrap();
+
+        let reopened = mush_runtime::Notes::new(child_artifacts(true, &id));
+        assert!(reopened.read().contains("resume from step three"));
+        assert_eq!(child_artifacts(false, &id), None);
     }
 
     #[test]
