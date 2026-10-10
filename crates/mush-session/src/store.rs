@@ -491,17 +491,7 @@ pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
     }
 }
 
-pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("MUSH_DATA_DIR") {
-        PathBuf::from(dir)
-    } else if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(data).join("mush")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/share/mush")
-    } else {
-        PathBuf::from(".mush")
-    }
-}
+pub use mush_ai::dirs::data_dir;
 
 #[cfg(test)]
 mod tests {

@@ -475,7 +475,7 @@ pub struct CacheBustDiagnostic {
 }
 
 pub fn dump_cache_bust_diagnostic(diag: &CacheBustDiagnostic) -> Option<std::path::PathBuf> {
-    dump_cache_bust_diagnostic_in(&cache_bust_dir(), diag)
+    dump_cache_bust_diagnostic_in(&mush_ai::dirs::state_dir().join("cache-busts"), diag)
 }
 
 pub fn dump_cache_bust_diagnostic_in(
@@ -533,16 +533,6 @@ pub fn dump_cache_bust_diagnostic_in(
             tracing::error!(error = %e, "failed to serialize cache bust diagnostic");
             None
         }
-    }
-}
-
-fn cache_bust_dir() -> std::path::PathBuf {
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
-        std::path::PathBuf::from(state).join("mush/cache-busts")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".local/state/mush/cache-busts")
-    } else {
-        std::path::PathBuf::from(".mush/cache-busts")
     }
 }
 

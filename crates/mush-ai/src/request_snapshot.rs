@@ -148,13 +148,7 @@ fn split_last_user(messages_json: &str) -> (String, String, String) {
 
 #[must_use]
 pub fn snapshot_dir() -> PathBuf {
-    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
-        PathBuf::from(state).join("mush/request-snapshots")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".local/state/mush/request-snapshots")
-    } else {
-        PathBuf::from(".mush/request-snapshots")
-    }
+    crate::dirs::state_dir().join("request-snapshots")
 }
 
 pub const SNAPSHOT_RETENTION: usize = 5;

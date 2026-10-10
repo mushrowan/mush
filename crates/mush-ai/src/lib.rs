@@ -1,6 +1,6 @@
 pub mod auth;
 pub mod credentials;
-mod dirs;
+pub mod dirs;
 pub mod discovery;
 pub mod env;
 pub mod http;
