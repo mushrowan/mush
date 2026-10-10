@@ -22,10 +22,6 @@ pub enum OAuthError {
     #[error("oauth token refresh failed: {0}")]
     TokenRefresh(String),
 
-    #[error("unknown oauth provider: {0}")]
-    #[diagnostic(help("available providers: {}", available_provider_names().join(", ")))]
-    UnknownProvider(String),
-
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
 
@@ -115,13 +111,6 @@ pub fn list_providers() -> Vec<(&'static str, &'static str)> {
         ("openai-codex", "ChatGPT Plus/Pro (Codex subscription)"),
         ("openrouter", "OpenRouter (web sign-in)"),
     ]
-}
-
-fn available_provider_names() -> Vec<String> {
-    list_providers()
-        .iter()
-        .map(|(id, _)| id.to_string())
-        .collect()
 }
 
 pub async fn get_oauth_token(

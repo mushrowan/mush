@@ -51,18 +51,6 @@ pub fn mark(timer: &mut Option<PhaseTimer>, name: &str) {
     }
 }
 
-impl StartupReport {
-    #[allow(dead_code)]
-    pub fn phases(&self) -> &[(String, Duration)] {
-        &self.phases
-    }
-
-    #[allow(dead_code)]
-    pub fn total(&self) -> Duration {
-        self.total
-    }
-}
-
 fn format_duration(d: Duration) -> String {
     let ms = d.as_millis();
     if ms >= 1000 {
@@ -137,7 +125,7 @@ mod tests {
         timer.phase("third");
         let report = timer.finish();
 
-        let names: Vec<&str> = report.phases().iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = report.phases.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
     }
 
@@ -148,8 +136,8 @@ mod tests {
         timer.phase("b");
         let report = timer.finish();
 
-        let sum: Duration = report.phases().iter().map(|(_, d)| *d).sum();
-        assert!(report.total() >= sum);
+        let sum: Duration = report.phases.iter().map(|(_, d)| *d).sum();
+        assert!(report.total >= sum);
     }
 
     #[test]

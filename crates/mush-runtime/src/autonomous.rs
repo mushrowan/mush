@@ -48,14 +48,6 @@ impl Limits {
     pub fn unlimited() -> Self {
         Self::default()
     }
-
-    #[must_use]
-    pub fn is_default_shaped(&self) -> bool {
-        self.max_continuations.is_none()
-            && self.max_turns.is_none()
-            && self.max_tokens.is_none()
-            && self.timeout_ms.is_none()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -57,9 +57,6 @@ pub enum DiscoveryError {
     #[error("malformed response: {0}")]
     Malformed(String),
 
-    #[error("missing credentials for {0}")]
-    MissingCredentials(Provider),
-
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
 }

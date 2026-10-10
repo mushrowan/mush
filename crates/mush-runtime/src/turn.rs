@@ -237,11 +237,6 @@ impl SessionRuntime {
         }
     }
 
-    pub async fn start_turn(&mut self, request: TurnRequest, deps: &TurnDeps<'_>) {
-        let prep = self.prepare_turn(&deps.config).await;
-        self.start_prepared_turn(request, prep, deps);
-    }
-
     pub fn start_prepared_turn(
         &mut self,
         request: TurnRequest,
