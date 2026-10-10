@@ -390,7 +390,6 @@ impl BashTool {
         let state = crate::background::JobState::running(
             id.clone(),
             args.command.clone(),
-            self.cwd.clone(),
             std::time::Instant::now(),
         );
 
@@ -648,7 +647,6 @@ async fn run_foreground(
             if let Some(registry) = timeout_adoption {
                 return continue_in_background_after_timeout(
                     registry,
-                    cwd,
                     command,
                     timeout_secs,
                     TimedOutCommand {
@@ -695,7 +693,6 @@ struct TimedOutCommand {
 
 async fn continue_in_background_after_timeout(
     registry: &crate::background::BackgroundJobRegistry,
-    cwd: &std::path::Path,
     command: &str,
     timeout_secs: u64,
     running: TimedOutCommand,
@@ -707,7 +704,6 @@ async fn continue_in_background_after_timeout(
     let state = crate::background::JobState::running(
         id.clone(),
         command.to_string(),
-        Arc::from(cwd),
         std::time::Instant::now() - duration,
     );
     let handle = registry.insert(state).await;

@@ -42,10 +42,6 @@ impl ReadLedger {
         lock(&self.0).insert(canonical_or_given(path), modified);
     }
 
-    pub fn forget(&self, path: &Path) {
-        lock(&self.0).remove(&canonical_or_given(path));
-    }
-
     pub fn check(&self, path: &Path) -> Result<(), StaleRead> {
         let recorded = lock(&self.0).get(&canonical_or_given(path)).copied();
         match (recorded, mtime(path)) {

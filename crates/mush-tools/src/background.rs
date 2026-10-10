@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,11 +34,10 @@ pub struct JobState {
     pub stderr_consumed_bytes: usize,
     pub started: Instant,
     pub finished: Option<Instant>,
-    pub cwd: Arc<Path>,
 }
 
 impl JobState {
-    pub fn running(id: String, command: String, cwd: Arc<Path>, started: Instant) -> Self {
+    pub fn running(id: String, command: String, started: Instant) -> Self {
         Self {
             id,
             command,
@@ -50,7 +48,6 @@ impl JobState {
             stderr_consumed_bytes: 0,
             started,
             finished: None,
-            cwd,
         }
     }
 
@@ -207,12 +204,7 @@ mod tests {
     use super::*;
 
     fn make_job(id: &str, command: &str) -> JobState {
-        JobState::running(
-            id.to_string(),
-            command.to_string(),
-            Arc::from(Path::new(".")),
-            Instant::now(),
-        )
+        JobState::running(id.to_string(), command.to_string(), Instant::now())
     }
 
     #[tokio::test]

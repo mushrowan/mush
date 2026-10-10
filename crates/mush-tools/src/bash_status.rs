@@ -327,7 +327,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: Some(std::time::Instant::now()),
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
         drop(handle);
@@ -359,7 +358,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: Some(std::time::Instant::now()),
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -401,7 +399,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -448,7 +445,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -487,7 +483,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -530,7 +525,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -641,7 +635,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -665,7 +658,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started: std::time::Instant::now(),
                 finished: None,
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
@@ -693,7 +685,6 @@ mod tests {
                 stderr_consumed_bytes: 0,
                 started,
                 finished: Some(finished),
-                cwd: std::sync::Arc::from(std::path::Path::new(".")),
             })
             .await;
 
