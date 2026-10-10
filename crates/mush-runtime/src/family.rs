@@ -390,12 +390,12 @@ struct Node {
 }
 
 impl Node {
-    fn stop(&mut self) {
+    fn stop(&mut self, settled: ChildStatus) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
         if !self.summary.status.settled() {
-            self.summary.status = ChildStatus::Cancelled;
+            self.summary.status = settled;
         }
     }
 }
@@ -546,7 +546,7 @@ impl Family {
 
     pub fn rebind(&self, session_id: String, registry_path: Option<PathBuf>) {
         for node in self.lock().children.values_mut() {
-            node.stop();
+            node.stop(ChildStatus::Cancelled);
         }
         self.persist();
         let children = load_registry(registry_path.as_deref());
@@ -1744,7 +1744,7 @@ impl Family {
                 .children
                 .values_mut()
                 .filter_map(|node| {
-                    node.stop();
+                    node.stop(ChildStatus::Interrupted);
                     node.task.take()
                 })
                 .collect()
@@ -2009,7 +2009,11 @@ async fn drive_child(
     }
     family.update(&id, |child| {
         if !child.status.settled() {
-            child.status = ChildStatus::Cancelled;
+            child.status = if closing {
+                ChildStatus::Interrupted
+            } else {
+                ChildStatus::Cancelled
+            };
         }
     });
 }
@@ -3205,6 +3209,32 @@ mod tests {
         assert_eq!(family.all().len(), 2);
         let deleted = family.delete(&root, "w").await.unwrap();
         assert_eq!(deleted.id, second.rlm_child_id);
+    }
+
+    #[tokio::test]
+    async fn shutting_down_leaves_a_working_child_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            Some(path.clone()),
+        );
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+
+        family.shutdown().await;
+
+        assert_eq!(family.all()[0].status, ChildStatus::Interrupted);
+        let reloaded = Family::new(root, "root".into(), 2, None, Some(path));
+        assert_eq!(reloaded.all()[0].status, ChildStatus::Interrupted);
     }
 
     #[tokio::test]
