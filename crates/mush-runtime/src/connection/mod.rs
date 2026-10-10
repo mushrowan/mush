@@ -1154,6 +1154,27 @@ impl InProcessConnection {
         events
     }
 
+    async fn take_waiting_messages(&mut self) -> Vec<Message> {
+        if let Some(inbox) = self.agent_inbox.as_mut() {
+            while let Ok(delivery) = inbox.try_recv() {
+                self.deferred_deliveries.push_back(delivery);
+            }
+        }
+        let mut waiting: Vec<Message> = self
+            .runtime
+            .steering_queue
+            .lock()
+            .await
+            .drain(..)
+            .filter(|message| matches!(message, Message::User(_) | Message::Event(_)))
+            .collect();
+        waiting.extend(self.deferred_deliveries.drain(..).map(|mut delivery| {
+            delivery.ack(crate::family::Receipt::Queued);
+            Message::Event(delivery.event)
+        }));
+        waiting
+    }
+
     async fn take_user_steers(&mut self) -> Vec<Message> {
         self.runtime
             .steering_queue
@@ -1263,7 +1284,11 @@ impl InProcessConnection {
         if let Some(family) = self.family.clone() {
             family.shutdown().await;
         }
+        let waiting = self.take_waiting_messages().await;
         self.abort().await;
+        for message in waiting {
+            self.runtime.conversation.append_message(message);
+        }
         self.runtime.snapshot_kernel(&self.runtime.session_id).await;
         self.runtime.save_now_and_settle();
         self.closed = true;

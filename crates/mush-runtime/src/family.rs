@@ -2643,6 +2643,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn messages_still_waiting_at_shutdown_reach_the_transcript() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        let (mut root_connection, _root_requests) = crate::testing::echo_connection();
+        root_connection.attach_agent_inbox(family.root_inbox());
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        let child = Identity {
+            id: Some(family.children_of(&root)[0].id.clone()),
+            name: "auth".into(),
+            depth: 1,
+        };
+        root_connection
+            .runtime
+            .steering_queue
+            .lock()
+            .await
+            .push(Message::User(
+                mush_ai::types::UserMessage::builder()
+                    .content(mush_ai::types::UserContent::Text("a queued steer".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ));
+
+        let (receipt, ()) = tokio::join!(
+            family.send_message(&child, "parent", None, "found two issues", &family),
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                root_connection.send(ClientCommand::Shutdown).await.unwrap();
+            }
+        );
+
+        assert_eq!(receipt.unwrap().delivery_status, Receipt::Queued);
+        let texts: Vec<String> = root_connection
+            .runtime
+            .conversation
+            .context()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                Message::Event(event) => Some(event.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|text| text == "a queued steer"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "[agent-message from child:auth]\n\nfound two issues"),
+            "{texts:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_child_message_reaches_an_idle_parent_as_a_prompt() {
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let family = family(Arc::clone(&requests), 2, None);
