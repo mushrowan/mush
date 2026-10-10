@@ -126,29 +126,19 @@ fn build_auth_url(pkce: &PkceChallenge, redirect_uri: &str) -> String {
     format!("{AUTHORIZE_URL}?{query}")
 }
 
-async fn exchange_code_impl(
-    code: &str,
-    state: &str,
-    verifier: &str,
-    redirect_uri: &str,
+async fn request_tokens(
+    body: serde_json::Value,
+    error: fn(String) -> OAuthError,
 ) -> Result<OAuthCredentials, OAuthError> {
-    let client = crate::http::client();
-    let response = client
+    let response = crate::http::client()
         .post(TOKEN_URL)
-        .json(&serde_json::json!({
-            "grant_type": "authorization_code",
-            "client_id": CLIENT_ID,
-            "code": code,
-            "state": state,
-            "redirect_uri": redirect_uri,
-            "code_verifier": verifier,
-        }))
+        .json(&body)
         .send()
         .await?;
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(OAuthError::TokenExchange(text));
+        return Err(error(text));
     }
 
     let data: TokenResponse = response.json().await?;
@@ -161,31 +151,36 @@ async fn exchange_code_impl(
     })
 }
 
+async fn exchange_code_impl(
+    code: &str,
+    state: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthCredentials, OAuthError> {
+    request_tokens(
+        serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": CLIENT_ID,
+            "code": code,
+            "state": state,
+            "redirect_uri": redirect_uri,
+            "code_verifier": verifier,
+        }),
+        OAuthError::TokenExchange,
+    )
+    .await
+}
+
 async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAuthError> {
-    let client = crate::http::client();
-    let response = client
-        .post(TOKEN_URL)
-        .json(&serde_json::json!({
+    request_tokens(
+        serde_json::json!({
             "grant_type": "refresh_token",
             "client_id": CLIENT_ID,
             "refresh_token": refresh_token,
-        }))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(OAuthError::TokenRefresh(text));
-    }
-
-    let data: TokenResponse = response.json().await?;
-    Ok(OAuthCredentials {
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        expires_at: crate::types::Timestamp::now().as_ms() + data.expires_in * 1000
-            - EXPIRY_BUFFER_MS,
-        account_id: None,
-    })
+        }),
+        OAuthError::TokenRefresh,
+    )
+    .await
 }
 
 #[derive(Deserialize)]

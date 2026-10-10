@@ -107,25 +107,17 @@ async fn exchange_code_impl(input: &str, verifier: &str) -> Result<OAuthCredenti
     exchange_code_with_redirect(&code, verifier, REDIRECT_URI).await
 }
 
-async fn exchange_code_with_redirect(
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
+async fn request_tokens(
+    form: &[(&str, &str)],
+    error: fn(String) -> OAuthError,
 ) -> Result<OAuthCredentials, OAuthError> {
-    let body = [
-        ("grant_type", "authorization_code"),
-        ("client_id", CLIENT_ID),
-        ("code", code),
-        ("code_verifier", verifier),
-        ("redirect_uri", redirect_uri),
-    ]
-    .iter()
-    .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
-    .collect::<Vec<_>>()
-    .join("&");
+    let body = form
+        .iter()
+        .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
 
-    let client = crate::http::client();
-    let response = client
+    let response = crate::http::client()
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
@@ -134,7 +126,7 @@ async fn exchange_code_with_redirect(
 
     if !response.status().is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(OAuthError::TokenExchange(text));
+        return Err(error(text));
     }
 
     let data: TokenResponse = response.json().await?;
@@ -150,41 +142,34 @@ async fn exchange_code_with_redirect(
     })
 }
 
+async fn exchange_code_with_redirect(
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthCredentials, OAuthError> {
+    request_tokens(
+        &[
+            ("grant_type", "authorization_code"),
+            ("client_id", CLIENT_ID),
+            ("code", code),
+            ("code_verifier", verifier),
+            ("redirect_uri", redirect_uri),
+        ],
+        OAuthError::TokenExchange,
+    )
+    .await
+}
+
 async fn refresh_token_impl(refresh_token: &str) -> Result<OAuthCredentials, OAuthError> {
-    let body = [
-        ("grant_type", "refresh_token"),
-        ("client_id", CLIENT_ID),
-        ("refresh_token", refresh_token),
-    ]
-    .iter()
-    .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
-    .collect::<Vec<_>>()
-    .join("&");
-
-    let client = crate::http::client();
-    let response = client
-        .post(TOKEN_URL)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(OAuthError::TokenRefresh(text));
-    }
-
-    let data: TokenResponse = response.json().await?;
-    let account_id =
-        extract_account_id(&data.id_token).or_else(|| extract_account_id(&data.access_token));
-
-    Ok(OAuthCredentials {
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        expires_at: crate::types::Timestamp::now().as_ms() + data.expires_in * 1000
-            - EXPIRY_BUFFER_MS,
-        account_id,
-    })
+    request_tokens(
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", CLIENT_ID),
+            ("refresh_token", refresh_token),
+        ],
+        OAuthError::TokenRefresh,
+    )
+    .await
 }
 
 #[derive(Debug)]
