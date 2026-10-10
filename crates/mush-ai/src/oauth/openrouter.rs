@@ -105,10 +105,6 @@ impl OpenRouterLoginSession {
         })
     }
 
-    pub fn port(&self) -> u16 {
-        self.server.port()
-    }
-
     pub async fn await_credentials(self) -> Result<OAuthCredentials, OAuthError> {
         let pkce = self.pkce;
         let (params, writer) = self.server.await_callback().await?;
@@ -211,7 +207,7 @@ mod tests {
         let session = OpenRouterLoginSession::start()
             .await
             .expect("session start");
-        let port = session.port();
+        let port = session.server.port();
         assert!(session.auth_url.starts_with("https://openrouter.ai/auth?"));
         assert!(session.auth_url.contains(&format!(
             "callback_url=http%3A%2F%2Flocalhost%3A{port}%2Fauth%2Fcallback"

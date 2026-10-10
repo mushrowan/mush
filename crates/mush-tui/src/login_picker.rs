@@ -191,13 +191,6 @@ impl LoginPickerState {
         let visible = filtered_entries(self);
         visible.get(self.selected).copied()
     }
-
-    pub fn refresh_entries(&mut self, entries: Vec<LoginEntry>) {
-        self.entries = entries;
-        if self.selected >= self.entries.len() {
-            self.selected = self.entries.len().saturating_sub(1);
-        }
-    }
 }
 
 impl crate::filtered_list::FilteredList for LoginPickerState {
@@ -395,18 +388,6 @@ mod tests {
         picker.cancel_entry();
         assert!(picker.entry.is_none());
         assert!(picker.toast.is_none());
-    }
-
-    #[test]
-    fn refresh_entries_clamps_selection_when_list_shrinks() {
-        let mut picker = LoginPickerState::new(vec![
-            api_key_entry("a", "A", None),
-            api_key_entry("b", "B", None),
-            api_key_entry("c", "C", None),
-        ]);
-        picker.selected = 2;
-        picker.refresh_entries(vec![api_key_entry("a", "A", None)]);
-        assert_eq!(picker.selected, 0, "must clamp into the new range");
     }
 
     #[test]
