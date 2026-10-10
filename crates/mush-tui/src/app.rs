@@ -10,8 +10,8 @@ pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
 };
 pub use crate::display_types::{
-    ActiveToolState, ChatDetail, DisplayMessage, DisplayToolCall, ImageRenderArea, MessageRole,
-    Messages, ToolCallStatus,
+    ActiveToolState, ChatDetail, DisplayMessage, DisplayToolCall, MessageRole, Messages,
+    ToolCallStatus,
 };
 pub use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 pub use crate::prompt_cache::{

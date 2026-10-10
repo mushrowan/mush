@@ -78,7 +78,6 @@ pub struct Theme {
     pub search_match: Style,
 
     pub tab_active: Style,
-    pub tab_inactive: Style,
     pub tab_busy: Style,
 
     pub menu_selected_bg: Color,
@@ -89,8 +88,6 @@ pub struct Theme {
     pub confirm: Style,
 
     pub image_label: Style,
-
-    pub unread: Style,
 
     pub shimmer: Vec<Color>,
 }
@@ -210,7 +207,6 @@ impl Theme {
             tab_active: Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-            tab_inactive: Style::default().fg(Color::DarkGray),
             tab_busy: Style::default().fg(Color::Yellow),
 
             menu_selected_bg: Color::DarkGray,
@@ -221,7 +217,6 @@ impl Theme {
             image_label: Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
-            unread: Style::default().fg(Color::Yellow),
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
                     Color::Rgb(95, 255, 255),
@@ -325,7 +320,6 @@ impl Theme {
             tab_active: Style::default()
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
-            tab_inactive: Style::default().fg(Color::Gray),
             tab_busy: Style::default().fg(Color::Yellow),
 
             menu_selected_bg: Color::Indexed(254),
@@ -336,7 +330,6 @@ impl Theme {
             image_label: Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
-            unread: Style::default().fg(Color::Yellow),
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
                     Color::Rgb(0, 135, 175),

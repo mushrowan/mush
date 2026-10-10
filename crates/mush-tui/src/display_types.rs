@@ -1,5 +1,4 @@
 use mush_ai::types::{Dollars, ModelId, ToolCallId, ToolOutcome, Usage};
-use ratatui::layout::Rect;
 use ratatui::text::Line;
 use std::cell::RefCell;
 
@@ -294,11 +293,4 @@ impl ActiveToolState {
             output: None,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ImageRenderArea {
-    pub msg_idx: usize,
-    pub tc_idx: usize,
-    pub area: Rect,
 }

@@ -8,7 +8,6 @@ pub enum CacheMode {
 pub struct ServingProviderCache {
     pub ttl_secs: u16,
     pub mode: CacheMode,
-    pub min_tokens: u32,
 }
 
 #[must_use]
@@ -18,23 +17,19 @@ pub fn serving_provider_cache(name: &str) -> Option<ServingProviderCache> {
             Some(ServingProviderCache {
                 ttl_secs: 300,
                 mode: CacheMode::Explicit,
-                min_tokens: 1024,
             })
         }
         "openai" | "azure" => Some(ServingProviderCache {
             ttl_secs: 600,
             mode: CacheMode::Implicit,
-            min_tokens: 1024,
         }),
         "google" | "googleaistudio" | "gemini" => Some(ServingProviderCache {
             ttl_secs: 240,
             mode: CacheMode::Implicit,
-            min_tokens: 2048,
         }),
         "moonshot" | "moonshotai" => Some(ServingProviderCache {
             ttl_secs: 300,
             mode: CacheMode::Implicit,
-            min_tokens: 0,
         }),
         _ => None,
     }
@@ -52,11 +47,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anthropic_is_explicit_5min_with_1k_minimum() {
+    fn anthropic_is_explicit_5min() {
         let b = serving_provider_cache("Anthropic").expect("known");
         assert_eq!(b.ttl_secs, 300);
         assert_eq!(b.mode, CacheMode::Explicit);
-        assert_eq!(b.min_tokens, 1024);
     }
 
     #[test]
@@ -73,7 +67,6 @@ mod tests {
         let b = serving_provider_cache("OpenAI").expect("known");
         assert_eq!(b.ttl_secs, 600);
         assert_eq!(b.mode, CacheMode::Implicit);
-        assert_eq!(b.min_tokens, 1024);
     }
 
     #[test]
