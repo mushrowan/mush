@@ -18,24 +18,7 @@ impl Daemon {
     fn start() -> Self {
         let dir = crate::tempdir().unwrap();
         let socket = dir.path().join("mush").join("daemon.sock");
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
-        command.env_clear();
-        for (key, value) in env(dir.path()) {
-            command.env(key, value);
-        }
-        let child = command
-            .args(["daemon", "--socket"])
-            .arg(&socket)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-            assert!(Instant::now() < deadline, "daemon socket never answered");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let child = spawn_daemon(dir.path(), &socket);
         Self { dir, socket, child }
     }
 
@@ -114,6 +97,28 @@ impl Drop for Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn spawn_daemon(dir: &Path, socket: &Path) -> std::process::Child {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mush"));
+    command.env_clear();
+    for (key, value) in env(dir) {
+        command.env(key, value);
+    }
+    let child = command
+        .args(["daemon", "--socket"])
+        .arg(socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::net::UnixStream::connect(socket).is_err() {
+        assert!(Instant::now() < deadline, "daemon socket never answered");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
 }
 
 fn env(dir: &Path) -> Vec<(String, String)> {
@@ -1214,4 +1219,49 @@ async fn a_worker_elects_a_replacement_daemon_and_it_adopts_the_worker() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test]
+async fn sessions_kept_across_a_daemon_restart_come_back_on_the_next_daemon() {
+    let mut daemon = Daemon::start();
+    let store = mush_session::SessionStore::new(daemon.dir.path().join("data/sessions"));
+    let mut saved =
+        mush_session::Session::new("claude-opus-4-7", &daemon.dir.path().display().to_string());
+    saved.meta.title = Some("keeper".into());
+    store.save(&saved).unwrap();
+    let id = saved.meta.id.to_string();
+    let SupervisorReply::Worker { descriptor, .. } = daemon
+        .request(daemon.open_saved(OpenTarget::Resume(id.clone())))
+        .await
+    else {
+        panic!("expected a worker")
+    };
+
+    let relaunch = mush_daemon::Relaunch::save(&daemon.socket.with_file_name("workers"));
+    assert!(matches!(
+        daemon.request(SupervisorRequest::Shutdown).await,
+        SupervisorReply::Done
+    ));
+    daemon.child.wait().unwrap();
+    assert!(!alive(descriptor.pid));
+    relaunch.restore();
+    daemon.child = spawn_daemon(daemon.dir.path(), &daemon.socket);
+
+    let SupervisorReply::Worker {
+        descriptor: resumed,
+        fresh,
+    } = daemon
+        .request(daemon.open_saved(OpenTarget::Resume(id.clone())))
+        .await
+    else {
+        panic!("expected a worker")
+    };
+    assert!(!fresh);
+    assert_eq!(resumed.session_id, id);
+    assert_eq!(resumed.socket, descriptor.socket);
+    assert_ne!(resumed.pid, descriptor.pid);
+    let SupervisorReply::Workers(workers) = daemon.request(SupervisorRequest::List).await else {
+        panic!("expected a roster")
+    };
+    assert_eq!(workers.len(), 1, "{workers:?}");
 }

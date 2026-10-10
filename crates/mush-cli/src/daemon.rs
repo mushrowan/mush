@@ -73,8 +73,10 @@ async fn probe(socket: &Path) -> io::Result<Disposition> {
 }
 
 async fn stop_stale(socket: &Path) -> Disposition {
+    let relaunch = mush_daemon::Relaunch::save(&socket.with_file_name("workers"));
     let _ = mush_daemon::supervisor::request(socket, &SupervisorRequest::Shutdown).await;
     if wait_until_gone(socket).await {
+        relaunch.restore();
         Disposition::Stopped
     } else {
         Disposition::Busy(None)
@@ -517,6 +519,7 @@ mod tests {
                 };
                 let _ = writer.write_all(format!("{reply}\n").as_bytes()).await;
                 if matches!(request, SupervisorRequest::Shutdown) {
+                    let _ = std::fs::remove_dir_all(socket.with_file_name("workers"));
                     drop(listener);
                     let _ = std::fs::remove_file(&socket);
                     return seen;
@@ -553,6 +556,30 @@ mod tests {
         assert_eq!(probe(&socket).await.unwrap(), Disposition::Stopped);
         assert_eq!(fake.await.unwrap(), ["Shutdown"]);
         assert!(!listening(&socket));
+    }
+
+    #[tokio::test]
+    async fn replacing_a_daemon_of_another_build_keeps_its_sessions_for_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let workers = dir.path().join("workers");
+        std::fs::create_dir_all(&workers).unwrap();
+        let pid = std::process::id();
+        let live = WorkerDescriptor {
+            pid,
+            start_id: mush_tools::orphans::process_start_id(pid),
+            ..descriptor(false, false)
+        };
+        let described = serde_json::to_vec(&live).unwrap();
+        std::fs::write(workers.join("w.json"), &described).unwrap();
+        std::fs::write(workers.join("w.recipe"), b"recipe").unwrap();
+        let fake = fake_daemon(socket.clone(), "other".into(), Some(vec![live]));
+
+        assert_eq!(probe(&socket).await.unwrap(), Disposition::Stopped);
+
+        assert_eq!(fake.await.unwrap(), ["Shutdown"]);
+        assert_eq!(std::fs::read(workers.join("w.json")).unwrap(), described);
+        assert_eq!(std::fs::read(workers.join("w.recipe")).unwrap(), b"recipe");
     }
 
     #[tokio::test]

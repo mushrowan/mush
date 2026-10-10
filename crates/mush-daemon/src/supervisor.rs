@@ -294,17 +294,13 @@ impl Supervisor {
         cwd: PathBuf,
         env: Vec<(String, String)>,
     ) -> io::Result<SupervisorReply> {
-        if let OpenTarget::Resume(id) = &target {
-            let running = self
-                .roster()
-                .into_iter()
-                .filter(|worker| worker.failed.is_none());
-            if let Some(worker) = select(running, id).map_err(io::Error::other)? {
-                return Ok(SupervisorReply::Worker {
-                    descriptor: Box::new(worker),
-                    fresh: false,
-                });
-            }
+        if let OpenTarget::Resume(id) = &target
+            && let Some(worker) = self.nursery.running(id).await?
+        {
+            return Ok(SupervisorReply::Worker {
+                descriptor: Box::new(worker),
+                fresh: false,
+            });
         }
         let name = mush_ai::types::SessionId::new().to_string();
         let descriptor = self
@@ -437,6 +433,38 @@ impl Nursery {
         }
         self.worker_exited(&name, Err(io::Error::other("an adopted worker vanished")))
             .await;
+    }
+
+    async fn running(&self, id: &str) -> io::Result<Option<WorkerDescriptor>> {
+        let deadline = tokio::time::Instant::now() + SPAWN_TIMEOUT;
+        loop {
+            let live = self
+                .roster()
+                .into_iter()
+                .filter(|worker| worker.failed.is_none());
+            if let Some(worker) = select(live, id).map_err(io::Error::other)? {
+                return Ok(Some(worker));
+            }
+            if !self.recovering(id) || tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn recovering(&self, id: &str) -> bool {
+        let names: Vec<String> = self
+            .residents()
+            .iter()
+            .filter(|(_, resident)| {
+                !resident.stopping && resident.recipe.session_id.starts_with(id)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.iter().any(|name| {
+            self.read_descriptor(name)
+                .is_none_or(|descriptor| !descriptor.alive())
+        })
     }
 
     fn residents(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Resident>> {
@@ -768,6 +796,45 @@ pub fn running_workers(dir: &Path) -> Vec<WorkerDescriptor> {
         .collect();
     running.sort_by_key(|worker| worker.started_at);
     running
+}
+
+pub struct Relaunch(Vec<(PathBuf, Vec<u8>)>);
+
+impl Relaunch {
+    #[must_use]
+    pub fn save(workers_dir: &Path) -> Self {
+        let Ok(entries) = std::fs::read_dir(workers_dir) else {
+            return Self(Vec::new());
+        };
+        let mut files = Vec::new();
+        for descriptor in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        {
+            let recipe = descriptor.with_extension("recipe");
+            let (Ok(described), Ok(recipe_bytes)) =
+                (std::fs::read(&descriptor), std::fs::read(&recipe))
+            else {
+                continue;
+            };
+            if serde_json::from_slice::<WorkerDescriptor>(&described)
+                .is_ok_and(|worker| worker.alive())
+            {
+                files.push((descriptor, described));
+                files.push((recipe, recipe_bytes));
+            }
+        }
+        Self(files)
+    }
+
+    pub fn restore(self) {
+        for (path, bytes) in self.0 {
+            if !path.exists() {
+                let _ = mush_ai::private_io::write_private(&path, bytes);
+            }
+        }
+    }
 }
 
 pub async fn stop_unsupervised(worker: &WorkerDescriptor) -> io::Result<()> {
