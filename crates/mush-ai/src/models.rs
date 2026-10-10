@@ -527,13 +527,6 @@ pub fn find_model(provider: &Provider, id: &str) -> Option<Model> {
         .find(|m| &m.provider == provider && m.id.as_str() == id)
 }
 
-#[must_use]
-pub fn find_model_by_id(id: &str) -> Option<Model> {
-    all_models_with_user()
-        .into_iter()
-        .find(|m| m.id.as_str() == id)
-}
-
 fn load_user_models() -> Vec<Model> {
     let stamp = user_models_stamp();
 
@@ -572,14 +565,6 @@ fn clear_user_models_cache() {
     if let Ok(mut cache) = USER_MODELS_CACHE.lock() {
         *cache = None;
     }
-}
-
-#[must_use]
-pub fn models_for_provider(provider: &Provider) -> Vec<Model> {
-    all_models()
-        .into_iter()
-        .filter(|m| &m.provider == provider)
-        .collect()
 }
 
 pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
@@ -770,21 +755,15 @@ mod tests {
     }
 
     #[test]
-    fn find_model_by_id_alone() {
-        let model = find_model_by_id("claude-sonnet-4-20250514");
-        assert!(model.is_some());
-    }
-
-    #[test]
     fn find_new_opus_4_5_model() {
-        let model = find_model_by_id("claude-opus-4-5");
+        let model = find_model(&Provider::Anthropic, "claude-opus-4-5");
         assert!(model.is_some());
         assert_eq!(model.unwrap().name, "Claude Opus 4.5");
     }
 
     #[test]
     fn find_new_opus_4_7_model() {
-        let model = find_model_by_id("claude-opus-4-7").unwrap();
+        let model = find_model(&Provider::Anthropic, "claude-opus-4-7").unwrap();
         assert_eq!(model.name, "Claude Opus 4.7");
         assert_eq!(model.context_window, TokenCount::new(1_000_000));
         assert_eq!(model.max_output_tokens, TokenCount::new(128_000));
@@ -794,78 +773,7 @@ mod tests {
 
     #[test]
     fn find_model_missing() {
-        assert!(find_model_by_id("nonexistent-model").is_none());
-    }
-
-    #[test]
-    fn models_for_provider_filters() {
-        let anthropic = models_for_provider(&Provider::Anthropic);
-        let openrouter = models_for_provider(&Provider::OpenRouter);
-        assert!(anthropic.iter().all(|m| m.provider == Provider::Anthropic));
-        assert!(
-            openrouter
-                .iter()
-                .all(|m| m.provider == Provider::OpenRouter)
-        );
-    }
-
-    #[test]
-    fn user_models_override_builtins() {
-        let mut models = vec![Model {
-            id: "test-model".into(),
-            name: "Test".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 1.0,
-                output: 2.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(100_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(4096),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }];
-
-        let user = vec![Model {
-            id: "test-model".into(),
-            name: "Test Override".into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: "https://custom.api.com".into(),
-            reasoning: true,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 5.0,
-                output: 10.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }];
-
-        for um in user {
-            if let Some(pos) = models.iter().position(|m| m.id == um.id) {
-                models[pos] = um;
-            } else {
-                models.push(um);
-            }
-        }
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].name, "Test Override");
-        assert_eq!(models[0].context_window, TokenCount::new(200_000));
+        assert!(find_model(&Provider::Anthropic, "nonexistent-model").is_none());
     }
 
     #[test]
@@ -918,40 +826,6 @@ mod tests {
     }
 
     #[test]
-    fn load_user_models_from_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models.json");
-        let models = vec![Model {
-            id: "custom/test".into(),
-            name: "Custom Test".into(),
-            api: Api::OpenaiCompletions,
-            provider: Provider::Custom("test".into()),
-            base_url: "https://test.api.com".into(),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost {
-                input: 1.0,
-                output: 2.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: TokenCount::new(128_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(4096),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }];
-        crate::private_io::write_atomic(&path, serde_json::to_string(&models).unwrap()).unwrap();
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let loaded: Vec<Model> = serde_json::from_str(&content).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id.as_str(), "custom/test");
-        assert_eq!(loaded[0].name, "Custom Test");
-    }
-
-    #[test]
     fn cached_user_models_reload_after_file_change() {
         let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -980,7 +854,12 @@ mod tests {
             default_thinking_level: None,
         }];
         crate::private_io::write_atomic(&path, serde_json::to_string(&first).unwrap()).unwrap();
-        assert_eq!(find_model_by_id("custom/test").unwrap().name, "First");
+        assert_eq!(
+            find_model(&Provider::Custom("test".into()), "custom/test")
+                .unwrap()
+                .name,
+            "First"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(20));
 
@@ -990,14 +869,12 @@ mod tests {
         }];
         crate::private_io::write_atomic(&path, serde_json::to_string(&second).unwrap()).unwrap();
 
-        assert_eq!(find_model_by_id("custom/test").unwrap().name, "Second");
-    }
-
-    #[test]
-    fn user_models_path_uses_env() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mush/models.json");
-        assert!(path.to_str().unwrap().ends_with("mush/models.json"));
+        assert_eq!(
+            find_model(&Provider::Custom("test".into()), "custom/test")
+                .unwrap()
+                .name,
+            "Second"
+        );
     }
 
     #[test]
