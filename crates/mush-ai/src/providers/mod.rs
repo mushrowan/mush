@@ -10,7 +10,7 @@ use crate::registry::ApiRegistry;
 use crate::types::{
     AccountLabel, ApiKey, AssistantContentPart, AssistantMessage, CacheRetention, EffortLevel,
     ImageContent, Message, Model, StreamOptions, TextContent, ThinkingContent, ThinkingLevel,
-    ToolResultContentPart, ToolResultMessage, ToolResultTrimming, TurnPivot, UserMessage,
+    ToolResultContentPart, ToolResultMessage, ToolResultTrimming, UserMessage,
     find_recent_boundary,
 };
 
@@ -38,7 +38,7 @@ pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
 }
 
 fn recent_boundary(messages: &[Message]) -> usize {
-    find_recent_boundary(messages, TurnPivot::User, RECENT_TURNS_TO_KEEP).unwrap_or(0)
+    find_recent_boundary(messages, RECENT_TURNS_TO_KEEP).unwrap_or(0)
 }
 
 pub(crate) trait MessageVisitor {
