@@ -1,4 +1,5 @@
 use std::cell::Ref;
+use std::ops::Range;
 
 use ratatui::buffer::{Buffer, CellWidth};
 use ratatui::layout::Rect;
@@ -160,7 +161,7 @@ fn build_input_layout(
 
 fn cursor_in_segments(
     line_text: &str,
-    segments: &[WrapSegment],
+    segments: &[Range<usize>],
     cursor_in_line: usize,
     indent: usize,
 ) -> (usize, usize) {
@@ -246,22 +247,7 @@ pub fn expand_input(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WrapSegment {
-    pub start: usize,
-    pub end: usize,
-    pub cols: usize,
-}
-
-pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSegment> {
-    if text.is_empty() {
-        return vec![WrapSegment {
-            start: 0,
-            end: 0,
-            cols: indent,
-        }];
-    }
-
+pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<Range<usize>> {
     let mut segments = Vec::new();
     let mut seg_start: usize = 0;
     let mut col: usize = indent;
@@ -276,11 +262,7 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
             last_space = Some((byte_pos + ch_bytes, col));
 
             if col >= width {
-                segments.push(WrapSegment {
-                    start: seg_start,
-                    end: byte_pos + ch_bytes,
-                    cols: col,
-                });
+                segments.push(seg_start..byte_pos + ch_bytes);
                 seg_start = byte_pos + ch_bytes;
                 col = 0;
                 last_space = None;
@@ -289,20 +271,12 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
             col += ch_cols;
             if col >= width {
                 if let Some((sp_byte, sp_col)) = last_space.take() {
-                    segments.push(WrapSegment {
-                        start: seg_start,
-                        end: sp_byte,
-                        cols: sp_col,
-                    });
+                    segments.push(seg_start..sp_byte);
                     seg_start = sp_byte;
                     col -= sp_col;
                 } else {
                     let seg_end = byte_pos + ch_bytes;
-                    segments.push(WrapSegment {
-                        start: seg_start,
-                        end: seg_end,
-                        cols: col,
-                    });
+                    segments.push(seg_start..seg_end);
                     seg_start = seg_end;
                     col -= width;
                 }
@@ -310,11 +284,7 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<WrapSe
         }
     }
 
-    segments.push(WrapSegment {
-        start: seg_start,
-        end: text.len(),
-        cols: col,
-    });
+    segments.push(seg_start..text.len());
 
     segments
 }
@@ -536,76 +506,39 @@ mod tests {
     fn word_wrap_no_wrap_needed() {
         let segs = word_wrap_segments("hello", 20, 2);
         assert_eq!(segs.len(), 1);
-        assert_eq!(
-            segs[0],
-            WrapSegment {
-                start: 0,
-                end: 5,
-                cols: 7
-            }
-        );
+        assert_eq!(segs[0], 0..5);
     }
 
     #[test]
     fn word_wrap_at_space() {
         let segs = word_wrap_segments("hello world", 10, 2);
-        assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0].start, 0);
-        assert_eq!(segs[0].end, 6);
-        assert_eq!(segs[1].start, 6);
-        assert_eq!(segs[1].end, 11);
+        assert_eq!(segs, [0..6, 6..11]);
     }
 
     #[test]
     fn word_wrap_long_word_hard_break() {
         let segs = word_wrap_segments("abcdefghij", 6, 0);
-        assert_eq!(segs.len(), 2);
-        assert_eq!(
-            segs[0],
-            WrapSegment {
-                start: 0,
-                end: 6,
-                cols: 6
-            }
-        );
-        assert_eq!(
-            segs[1],
-            WrapSegment {
-                start: 6,
-                end: 10,
-                cols: 4
-            }
-        );
+        assert_eq!(segs, [0..6, 6..10]);
     }
 
     #[test]
     fn word_wrap_empty() {
         let segs = word_wrap_segments("", 20, 2);
         assert_eq!(segs.len(), 1);
-        assert_eq!(
-            segs[0],
-            WrapSegment {
-                start: 0,
-                end: 0,
-                cols: 2
-            }
-        );
+        assert_eq!(segs[0], 0..0);
     }
 
     #[test]
     fn word_wrap_multiple_lines() {
         let segs = word_wrap_segments("the quick brown fox", 12, 2);
-        assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0].end, 10);
-        assert_eq!(segs[1].start, 10);
-        assert_eq!(segs[1].end, 19);
+        assert_eq!(segs, [0..10, 10..19]);
     }
 
     #[test]
     fn word_wrap_multibyte_chars() {
         let segs = word_wrap_segments("a¬b", 20, 0);
         assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].cols, 3);
+        assert_eq!(segs[0], 0..4);
     }
 
     #[test]
