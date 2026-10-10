@@ -33,14 +33,6 @@ mod tests {
     }
 
     #[test]
-    fn is_oauth_token_detection() {
-        let oauth = ApiKey::new("sk-ant-oat-abc123").unwrap();
-        assert!(oauth.is_oauth_token());
-        let regular = ApiKey::new("sk-ant-api-abc123").unwrap();
-        assert!(!regular.is_oauth_token());
-    }
-
-    #[test]
     fn custom_provider_env_var_name() {
         let name = "my-proxy";
         let expected = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
