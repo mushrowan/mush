@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
 use crate::types::{
     Api, ApiKey, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount,
 };
@@ -31,14 +31,8 @@ impl AnthropicDiscovery {
             api_key,
         }
     }
-}
 
-impl ModelDiscovery for AnthropicDiscovery {
-    fn provider(&self) -> Provider {
-        Provider::Anthropic
-    }
-
-    async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
+    pub async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
         let base = if self.base_url.is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -73,14 +67,7 @@ pub fn parse_anthropic_models(body: &str) -> Result<Vec<DiscoveredModel>, Discov
     response
         .data
         .into_iter()
-        .map(|raw| {
-            let entry = AnthropicModelEntry::deserialize(&raw)
-                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-            Ok(DiscoveredModel {
-                model: entry_to_model(entry),
-                raw: Some(raw),
-            })
-        })
+        .map(|raw| super::discovered(raw, entry_to_model))
         .collect()
 }
 

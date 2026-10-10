@@ -7,7 +7,7 @@ use super::codex::CodexDiscovery;
 use super::openai::OpenAiDiscovery;
 use super::openrouter::OpenRouterDiscovery;
 use super::zai::ZaiDiscovery;
-use super::{DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveryError, DiscoveryReport};
 use crate::auth::resolve_auth_from_default_sources;
 use crate::env;
 use crate::types::{ApiKey, Provider};

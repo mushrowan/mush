@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
 use crate::models::ZAI_CODING_PLAN_BASE_URL;
 use crate::types::{Api, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount};
 
@@ -22,14 +22,8 @@ impl ZaiDiscovery {
             url: url.into(),
         }
     }
-}
 
-impl ModelDiscovery for ZaiDiscovery {
-    fn provider(&self) -> Provider {
-        Provider::Custom("zai".into())
-    }
-
-    async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
+    pub async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
         let url = if self.url.is_empty() {
             MODELS_DEV_URL
         } else {
@@ -37,7 +31,7 @@ impl ModelDiscovery for ZaiDiscovery {
         };
         let body = super::execute_request(self.client.get(url)).await?;
         Ok(DiscoveryReport {
-            provider: self.provider(),
+            provider: Provider::Custom("zai".into()),
             fetched_at: SystemTime::now(),
             models: parse_models_dev(&body)?,
         })

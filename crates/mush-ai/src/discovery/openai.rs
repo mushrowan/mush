@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -28,14 +28,8 @@ impl OpenAiDiscovery {
             api_key,
         }
     }
-}
 
-impl ModelDiscovery for OpenAiDiscovery {
-    fn provider(&self) -> Provider {
-        Provider::Custom("openai".into())
-    }
-
-    async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
+    pub async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
         let base = if self.base_url.is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -69,14 +63,7 @@ pub fn parse_openai_models(body: &str) -> Result<Vec<DiscoveredModel>, Discovery
                 .map(is_chat_capable)
                 .unwrap_or(false)
         })
-        .map(|raw| {
-            let entry = OpenAiModelEntry::deserialize(&raw)
-                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-            Ok(DiscoveredModel {
-                model: entry_to_model(entry),
-                raw: Some(raw),
-            })
-        })
+        .map(|raw| super::discovered(raw, entry_to_model))
         .collect()
 }
 

@@ -2,7 +2,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
 use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -28,14 +28,8 @@ impl OpenRouterDiscovery {
             api_key,
         }
     }
-}
 
-impl ModelDiscovery for OpenRouterDiscovery {
-    fn provider(&self) -> Provider {
-        Provider::OpenRouter
-    }
-
-    async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
+    pub async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
         let base = if self.base_url.is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -64,14 +58,7 @@ pub fn parse_openrouter_models(body: &str) -> Result<Vec<DiscoveredModel>, Disco
     response
         .data
         .into_iter()
-        .map(|raw| {
-            let entry = OpenRouterModelEntry::deserialize(&raw)
-                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-            Ok(DiscoveredModel {
-                model: entry_to_model(entry),
-                raw: Some(raw),
-            })
-        })
+        .map(|raw| super::discovered(raw, entry_to_model))
         .collect()
 }
 

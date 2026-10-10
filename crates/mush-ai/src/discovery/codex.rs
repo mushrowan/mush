@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use semver::Version;
 use serde::Deserialize;
 
-use super::{DiscoveredModel, DiscoveryError, DiscoveryReport, ModelDiscovery};
+use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
 use crate::oauth::openai_codex::{account_id_claim, jwt_payload};
 use crate::types::{
     Api, ApiKey, InputModality, Model, ModelCost, Provider, ThinkingLevel, TokenCount,
@@ -54,12 +54,8 @@ fn discovery_client_version(version: &str) -> String {
     std::cmp::max(parsed, MIN_DISCOVERY_CLIENT_VERSION.clone()).to_string()
 }
 
-impl ModelDiscovery for CodexDiscovery {
-    fn provider(&self) -> Provider {
-        Provider::Custom(PROVIDER_NAME.into())
-    }
-
-    async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
+impl CodexDiscovery {
+    pub async fn fetch(&self) -> Result<DiscoveryReport, DiscoveryError> {
         let base = if self.base_url.is_empty() {
             DEFAULT_BASE_URL
         } else {
@@ -101,14 +97,7 @@ pub fn parse_codex_models(body: &str) -> Result<Vec<DiscoveredModel>, DiscoveryE
     response
         .models
         .into_iter()
-        .map(|raw| {
-            let entry = CodexModelEntry::deserialize(&raw)
-                .map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
-            Ok(DiscoveredModel {
-                model: entry_to_model(entry),
-                raw: Some(raw),
-            })
-        })
+        .map(|raw| super::discovered(raw, entry_to_model))
         .collect()
 }
 

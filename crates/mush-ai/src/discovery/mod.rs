@@ -70,12 +70,15 @@ impl From<reqwest_middleware::Error> for DiscoveryError {
     }
 }
 
-pub trait ModelDiscovery: Send + Sync {
-    fn provider(&self) -> Provider;
-
-    fn fetch(
-        &self,
-    ) -> impl std::future::Future<Output = Result<DiscoveryReport, DiscoveryError>> + Send;
+pub(crate) fn discovered<E: serde::de::DeserializeOwned>(
+    raw: serde_json::Value,
+    to_model: impl FnOnce(E) -> Model,
+) -> Result<DiscoveredModel, DiscoveryError> {
+    let entry = E::deserialize(&raw).map_err(|e| DiscoveryError::Malformed(e.to_string()))?;
+    Ok(DiscoveredModel {
+        model: to_model(entry),
+        raw: Some(raw),
+    })
 }
 
 pub(crate) async fn execute_request(
