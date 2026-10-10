@@ -1,6 +1,5 @@
 #![feature(sync_nonpoison, nonpoison_mutex)]
 
-pub mod chunking;
 pub mod language;
 pub mod parser;
 pub mod references;
@@ -10,7 +9,6 @@ pub mod watcher;
 
 mod queries;
 
-pub use chunking::{Chunk, ChunkOptions, chunk_file};
 pub use language::Language;
 pub use parser::{ParseError, ParserPool};
 pub use repo_map::{
