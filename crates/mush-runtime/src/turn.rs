@@ -757,23 +757,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl mush_kernel::KernelState for NamedKernel {
-        async fn snapshot(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-            Ok(None)
-        }
-        async fn restore_from(
-            &self,
-            _path: &std::path::Path,
-        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
-            None
-        }
         async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
             Some(Ok(vec!["df".into(), "load".into()]))
         }
-        async fn reset(&self) {}
-        fn attach_session(&self, _session: mush_kernel::KernelSession) {}
     }
 
     #[tokio::test]

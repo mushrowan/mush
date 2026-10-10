@@ -529,23 +529,9 @@ struct LiveKernel(Option<Vec<String>>);
 
 #[async_trait::async_trait]
 impl mush_kernel::KernelState for LiveKernel {
-    async fn snapshot(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-        Ok(None)
-    }
-    async fn restore_from(
-        &self,
-        _path: &std::path::Path,
-    ) -> Option<Result<mush_kernel::RestoreReport, String>> {
-        None
-    }
     async fn live_names(&self) -> Option<Result<Vec<String>, String>> {
         self.0.clone().map(Ok)
     }
-    async fn reset(&self) {}
-    fn attach_session(&self, _session: mush_kernel::KernelSession) {}
 }
 
 async fn compacted_with(kernel: LiveKernel) -> Vec<Message> {
@@ -1474,20 +1460,6 @@ struct BusyKernel(std::sync::atomic::AtomicBool);
 
 #[async_trait::async_trait]
 impl mush_kernel::KernelState for BusyKernel {
-    async fn snapshot(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-        Ok(None)
-    }
-    async fn restore_from(
-        &self,
-        _path: &std::path::Path,
-    ) -> Option<Result<mush_kernel::RestoreReport, String>> {
-        None
-    }
-    async fn reset(&self) {}
-    fn attach_session(&self, _session: mush_kernel::KernelSession) {}
     fn background_work(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -1501,12 +1473,6 @@ struct RestoringKernel {
 
 #[async_trait::async_trait]
 impl mush_kernel::KernelState for RestoringKernel {
-    async fn snapshot(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-        Ok(None)
-    }
     async fn restore_from(
         &self,
         _path: &std::path::Path,
@@ -1516,8 +1482,6 @@ impl mush_kernel::KernelState for RestoringKernel {
         self.gate.notified().await;
         self.outcome.clone()
     }
-    async fn reset(&self) {}
-    fn attach_session(&self, _session: mush_kernel::KernelSession) {}
 }
 
 fn restoring_kernel(outcome: Result<mush_kernel::RestoreReport, String>) -> Arc<RestoringKernel> {
@@ -1818,20 +1782,6 @@ struct ModelKernel(std::sync::Mutex<Vec<(String, bool)>>);
 
 #[async_trait::async_trait]
 impl mush_kernel::KernelState for ModelKernel {
-    async fn snapshot(
-        &self,
-        _path: &std::path::Path,
-    ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-        Ok(None)
-    }
-    async fn restore_from(
-        &self,
-        _path: &std::path::Path,
-    ) -> Option<Result<mush_kernel::RestoreReport, String>> {
-        None
-    }
-    async fn reset(&self) {}
-    fn attach_session(&self, _session: mush_kernel::KernelSession) {}
     fn set_model(&self, id: &str, accepts_images: bool) {
         self.0
             .lock()

@@ -537,19 +537,6 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KernelState for RecordingKernel {
-        async fn snapshot(
-            &self,
-            _path: &std::path::Path,
-        ) -> Result<Option<mush_kernel::SnapshotReport>, String> {
-            Ok(None)
-        }
-        async fn restore_from(
-            &self,
-            _path: &std::path::Path,
-        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
-            None
-        }
-        async fn reset(&self) {}
         fn attach_session(&self, session: mush_kernel::KernelSession) {
             self.0.lock().unwrap().push(session);
         }
