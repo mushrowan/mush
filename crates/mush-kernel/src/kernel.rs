@@ -280,11 +280,6 @@ impl Kernel {
         self.shared.protocol_failure()
     }
 
-    #[must_use]
-    pub fn stderr_tail(&self) -> String {
-        self.shared.stderr_tail_text()
-    }
-
     pub async fn execute(&self, code: &str) -> Result<CellOutput, KernelError> {
         self.execute_streaming(code, |_| {}).await
     }
