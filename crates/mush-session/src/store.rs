@@ -48,18 +48,6 @@ struct Logged {
     bytes: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct SessionListReport {
-    pub sessions: Vec<SessionMeta>,
-    pub ignored: Vec<IgnoredSessionFile>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IgnoredSessionFile {
-    pub path: PathBuf,
-    pub reason: String,
-}
-
 #[derive(serde::Serialize)]
 struct StoredSession<'a> {
     meta: &'a SessionMeta,
@@ -370,27 +358,13 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
-        Ok(self.list_report()?.sessions)
-    }
-
-    pub fn list_report(&self) -> Result<SessionListReport, StoreError> {
-        self.init()?;
-        let mut sessions = Vec::new();
-        let mut ignored = Vec::new();
-
-        for path in self.list_paths()? {
-            match load_meta(&path) {
-                Ok(meta) => sessions.push(meta),
-                Err(error) => ignored.push(IgnoredSessionFile {
-                    path,
-                    reason: ignored_session_reason(&error),
-                }),
-            }
-        }
-
+        let mut sessions: Vec<SessionMeta> = self
+            .list_paths()?
+            .iter()
+            .filter_map(|path| load_meta(path).ok())
+            .collect();
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-        ignored.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(SessionListReport { sessions, ignored })
+        Ok(sessions)
     }
 
     pub fn list_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
@@ -419,20 +393,6 @@ impl SessionStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id);
         Ok(())
-    }
-}
-
-fn ignored_session_reason(error: &StoreError) -> String {
-    match error {
-        StoreError::Io(error) => {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                "zero-byte or truncated session file".into()
-            } else {
-                error.to_string()
-            }
-        }
-        StoreError::Json(error) if error.is_eof() => "zero-byte or truncated session file".into(),
-        other => other.to_string(),
     }
 }
 
@@ -893,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn list_report_includes_corrupt_and_empty_files() {
+    fn listing_skips_corrupt_and_empty_files() {
         let (dir, store) = temp_store();
         let good = Session::new("model-a", "/tmp");
         store.save(&good).unwrap();
@@ -902,17 +862,10 @@ mod tests {
         mush_ai::private_io::write_atomic(&sessions_dir.join("corrupt.json"), "not json").unwrap();
         mush_ai::private_io::write_atomic(&sessions_dir.join("empty.json"), "").unwrap();
 
-        let report = store.list_report().unwrap();
+        let sessions = store.list().unwrap();
 
-        assert_eq!(report.sessions.len(), 1);
-        assert_eq!(report.sessions[0].id, good.meta.id);
-        assert_eq!(report.ignored.len(), 2);
-        assert!(report.ignored.iter().any(|ignored| {
-            ignored.path.ends_with("corrupt.json") && ignored.reason.contains("json error")
-        }));
-        assert!(report.ignored.iter().any(|ignored| {
-            ignored.path.ends_with("empty.json") && ignored.reason.contains("zero-byte")
-        }));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, good.meta.id);
     }
 
     #[test]
@@ -934,22 +887,10 @@ mod tests {
         mush_ai::private_io::write_atomic(&sessions_dir.join("none.json"), r#"{"tree": {}}"#)
             .unwrap();
 
-        let report = store.list_report().unwrap();
+        let sessions = store.list().unwrap();
 
-        assert_eq!(report.sessions.len(), 2);
-        assert!(
-            report
-                .sessions
-                .iter()
-                .all(|listed| listed.id == session.meta.id)
-        );
-        assert_eq!(report.ignored.len(), 1);
-        assert!(report.ignored[0].path.ends_with("none.json"));
-        assert!(
-            report.ignored[0].reason.contains("meta"),
-            "{}",
-            report.ignored[0].reason
-        );
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|listed| listed.id == session.meta.id));
     }
 
     #[test]
