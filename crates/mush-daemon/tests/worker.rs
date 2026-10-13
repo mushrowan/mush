@@ -451,9 +451,11 @@ async fn the_descriptor_follows_the_title_and_the_message_count() {
     client.send(prompt("hello")).await.unwrap();
     drain_turn(&mut client).await;
 
-    let written = read_descriptor(&path, |written| written.messages == 2).await;
+    let written = read_descriptor(&path, |written| {
+        written.messages == 2 && !written.turn_active
+    })
+    .await;
     assert_eq!(written.title.as_deref(), Some("scout"));
-    assert!(!written.turn_active);
     assert!(written.updated_at >= written.started_at);
     assert!(!task.is_finished());
 }
