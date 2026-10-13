@@ -23,7 +23,7 @@
           "type": "boolean"
         },
         "fallback_credit": {
-          "default": true,
+          "default": false,
           "type": "boolean"
         },
         "thinking_token_count": {
@@ -792,7 +792,7 @@
             "context_1m": true,
             "context_management": true,
             "effort": true,
-            "fallback_credit": true,
+            "fallback_credit": false,
             "thinking_token_count": true,
             "thinking_updates": true
           }
@@ -1342,7 +1342,7 @@
           "context_1m": true,
           "context_management": true,
           "effort": true,
-          "fallback_credit": true,
+          "fallback_credit": false,
           "thinking_token_count": true,
           "thinking_updates": true
         },
