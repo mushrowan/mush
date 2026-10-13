@@ -12,6 +12,17 @@ const SWEEP: Duration = Duration::from_secs(10 * 60);
 const LONG_POLL: Duration = Duration::from_secs(240);
 const PATIENCE: Duration = Duration::from_secs(120);
 
+fn changes_something(kind: notify::EventKind) -> bool {
+    use notify::event::{AccessKind, AccessMode, ModifyKind};
+    match kind {
+        notify::EventKind::Create(_)
+        | notify::EventKind::Remove(_)
+        | notify::EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        notify::EventKind::Modify(modify) => !matches!(modify, ModifyKind::Metadata(_)),
+        notify::EventKind::Access(_) | notify::EventKind::Any | notify::EventKind::Other => false,
+    }
+}
+
 fn session_of(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     if crate::tool_output::saved_output(name) {
@@ -48,6 +59,13 @@ fn log(report: &Report) {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Wake {
+    Sweep,
+    Remote,
+    Local,
+}
+
 pub async fn watch(
     engine: Arc<Engine>,
     shutdown: impl std::future::Future<Output = ()>,
@@ -62,6 +80,9 @@ pub async fn watch(
             let Ok(event) = event else {
                 return;
             };
+            if !changes_something(event.kind) {
+                return;
+            }
             let ids: Vec<String> = event
                 .paths
                 .iter()
@@ -93,38 +114,37 @@ pub async fn watch(
         .map_err(std::io::Error::other)?;
     let poller = tokio::spawn(poll(Arc::clone(&engine), wake));
     tokio::pin!(shutdown);
-    let mut full = true;
+    let mut next = Wake::Sweep;
     loop {
-        let scope = if full {
-            dirty
+        let mut dirty = std::mem::take(
+            &mut *dirty
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
-            Scope::All
-        } else {
-            let ids = std::mem::take(
-                &mut *dirty
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
-            Scope::Sessions(ids.into_iter().collect())
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let scope = match next {
+            Wake::Sweep => {
+                dirty.clear();
+                Scope::All
+            }
+            Wake::Remote => Scope::Changed(dirty.into_iter().collect()),
+            Wake::Local => Scope::Sessions(dirty.into_iter().collect()),
         };
         match engine.pass(scope, Direction::Both, None, PATIENCE).await {
             Ok(report) => log(&report),
             Err(error) if error.offline() => tracing::info!(%error, "sync server unreachable"),
             Err(error) => tracing::warn!(%error, "sync pass failed"),
         }
-        full = tokio::select! {
+        next = tokio::select! {
             () = &mut shutdown => break,
             woke = woken.recv() => {
-                let mut full = woke.unwrap_or(true);
+                let mut remote = woke.unwrap_or(true);
                 tokio::time::sleep(SETTLE).await;
                 while let Ok(again) = woken.try_recv() {
-                    full |= again;
+                    remote |= again;
                 }
-                full
+                if remote { Wake::Remote } else { Wake::Local }
             }
-            () = tokio::time::sleep(SWEEP) => true,
+            () = tokio::time::sleep(SWEEP) => Wake::Sweep,
         };
     }
     poller.abort();
@@ -149,6 +169,37 @@ async fn poll(engine: Arc<Engine>, wake: tokio::sync::mpsc::Sender<bool>) {
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(300));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::EventKind;
+    use notify::event::{
+        AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+    };
+
+    #[test]
+    fn reading_a_session_never_wakes_the_watcher_but_writing_one_does() {
+        for quiet in [
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+            EventKind::Other,
+        ] {
+            assert!(!changes_something(quiet), "{quiet:?}");
+        }
+        for loud in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Remove(RemoveKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::To)),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+        ] {
+            assert!(changes_something(loud), "{loud:?}");
         }
     }
 }

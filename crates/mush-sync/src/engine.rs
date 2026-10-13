@@ -55,8 +55,15 @@ pub struct RemoteEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     All,
+    Changed(Vec<String>),
     Family(String),
     Sessions(Vec<String>),
+}
+
+impl Scope {
+    fn follows_feed(&self) -> bool {
+        matches!(self, Self::All | Self::Changed(_))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +76,7 @@ pub enum Direction {
 pub struct Report {
     pub pushed: Vec<String>,
     pub pulled: Vec<String>,
+    pub matched: Vec<String>,
     pub forked: Vec<(String, String)>,
     pub deleted: Vec<String>,
     pub sidecars: Vec<(String, String)>,
@@ -121,6 +129,26 @@ enum Order {
     Behind,
     Ahead,
     Diverged,
+}
+
+fn settle_stamps(known: &mut SessionState, local: &Local) -> bool {
+    let mut changed = known.remote_version != known.version || known.held != local.capped;
+    known.remote_version = known.version;
+    known.held.clone_from(&local.capped);
+    let entries = local
+        .meta
+        .as_ref()
+        .map(|meta| (META, meta))
+        .into_iter()
+        .chain(local.files.iter().map(|(key, entry)| (key.as_str(), entry)));
+    for (key, entry) in entries {
+        let in_sync = known.file(key).is_some_and(|file| file.blob == entry.blob);
+        if in_sync && known.stamps.get(key) != Some(&entry.stamp) {
+            known.stamps.insert(key.to_owned(), entry.stamp);
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(crate) fn internal(session: &str) -> bool {
@@ -193,6 +221,7 @@ struct Local {
     history_stamp: Option<Stamp>,
     files: BTreeMap<String, Entry>,
     held_back: BTreeSet<String>,
+    capped: BTreeMap<String, Stamp>,
 }
 
 impl Local {
@@ -331,6 +360,8 @@ enum Pushed {
 
 pub type Progress = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
+const REPORT_EVERY_MS: u64 = 60_000;
+
 pub struct Engine {
     layout: Layout,
     keys: Arc<Keys>,
@@ -338,6 +369,9 @@ pub struct Engine {
     machine: String,
     limits: Limits,
     progress: Option<Progress>,
+    reported: std::sync::atomic::AtomicU64,
+    reported_rev: std::sync::atomic::AtomicU64,
+    parent_cache: std::sync::Mutex<HashMap<String, (Stamp, Option<String>)>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -371,6 +405,9 @@ impl Engine {
             machine,
             limits,
             progress: None,
+            reported: std::sync::atomic::AtomicU64::new(0),
+            reported_rev: std::sync::atomic::AtomicU64::new(0),
+            parent_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -428,7 +465,7 @@ impl Engine {
         held: Option<&SessionLease>,
         patience: Duration,
     ) -> Result<Report, SyncError> {
-        let full = scope == Scope::All && direction == Direction::Both;
+        let full = scope.follows_feed() && direction == Direction::Both;
         let result = self.pass_once(scope, direction, held, patience).await;
         if let Ok(report) = &result {
             let forks = report
@@ -475,6 +512,18 @@ impl Engine {
         if result.is_err() {
             return;
         }
+        let last = self.reported.load(std::sync::atomic::Ordering::Relaxed);
+        let last_rev = self.reported_rev.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) < REPORT_EVERY_MS
+            && last_rev == status.rev
+            && status.failed.is_empty()
+        {
+            return;
+        }
+        self.reported
+            .store(now, std::sync::atomic::Ordering::Relaxed);
+        self.reported_rev
+            .store(status.rev, std::sync::atomic::Ordering::Relaxed);
         let review = crate::status::review(&self.layout).map_or(0, |review| review.len());
         let report = crate::protocol::MachineReport {
             rev: status.rev,
@@ -496,6 +545,15 @@ impl Engine {
         held: Option<&SessionLease>,
         patience: Duration,
     ) -> Result<Report, SyncError> {
+        if scope == Scope::All {
+            let removed = crate::local::sweep_abandoned(&self.layout);
+            if removed > 0 {
+                tracing::info!(
+                    removed,
+                    "cleared half written files an interrupted sync left"
+                );
+            }
+        }
         let mut cursor = Cursor::load(&self.layout)?;
         let Feed {
             entries: feed,
@@ -534,6 +592,7 @@ impl Engine {
                 ids.extend(feed.keys().cloned());
                 ids.into_iter().collect()
             }
+            Scope::Changed(extra) => feed.keys().chain(extra).cloned().collect(),
             Scope::Family(root) => self.family(root, &feed)?,
             Scope::Sessions(ids) => ids.clone(),
         };
@@ -577,7 +636,7 @@ impl Engine {
                 error.to_string(),
             )),
         }
-        if scope == Scope::All {
+        if scope.follows_feed() {
             match self.reconcile_harness(shared, direction, &mut report).await {
                 Ok(()) => {}
                 Err(error) if error.offline() => return Err(error),
@@ -586,7 +645,7 @@ impl Engine {
                     .push((crate::harness::HARNESS.to_owned(), error.to_string())),
             }
         }
-        if scope == Scope::All && direction == Direction::Both {
+        if scope.follows_feed() && direction == Direction::Both {
             cursor.save(&self.layout)?;
         }
         Ok(report)
@@ -735,6 +794,7 @@ impl Engine {
                 self.layout.forget_states()?;
                 cursor.server = changes.server;
                 cursor.rev = 0;
+                cursor.save(&self.layout)?;
                 if since > 0 {
                     since = 0;
                     entries.clear();
@@ -797,12 +857,32 @@ impl Engine {
     }
 
     fn parents(&self) -> std::io::Result<HashMap<String, String>> {
+        let mut known = self
+            .parent_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ids = self.layout.local_ids()?;
+        known.retain(|id, _| ids.contains(id));
         let mut parents = HashMap::new();
-        for id in self.layout.local_ids()? {
-            if let Ok(meta) = mush_session::load_meta(&self.layout.meta(&id))
-                && let Some(parent) = meta.parent
-            {
-                parents.insert(id, parent.to_string());
+        for id in ids {
+            let path = self.layout.meta(&id);
+            let Some(now) = stamp(&path)? else {
+                known.remove(&id);
+                continue;
+            };
+            let parent = match known.get(&id) {
+                Some((seen, parent)) if *seen == now => parent.clone(),
+                _ => {
+                    let parent = mush_session::load_meta(&path)
+                        .ok()
+                        .and_then(|meta| meta.parent)
+                        .map(|parent| parent.to_string());
+                    known.insert(id.clone(), (now, parent.clone()));
+                    parent
+                }
+            };
+            if let Some(parent) = parent {
+                parents.insert(id, parent);
             }
         }
         Ok(parents)
@@ -961,11 +1041,14 @@ impl Engine {
         };
         let mut files = BTreeMap::new();
         let mut held_back = BTreeSet::new();
+        let mut capped = BTreeMap::new();
         for (key, (path, now)) in artifact_files(&self.layout.artifact_dir(id))? {
-            let excluded = !self.limits.allows(&key, now.len)
-                || !self.limits.current(&key, &now)
-                || (live && live_only(&key));
-            if excluded {
+            if self.capped(&key, &now) {
+                held_back.insert(key.clone());
+                capped.insert(key, now);
+                continue;
+            }
+            if live && live_only(&key) {
                 held_back.insert(key);
                 continue;
             }
@@ -978,7 +1061,12 @@ impl Engine {
             history_stamp,
             files,
             held_back,
+            capped,
         })
+    }
+
+    fn capped(&self, key: &str, now: &Stamp) -> bool {
+        !self.limits.allows(key, now.len) || !self.limits.current(key, now)
     }
 
     fn remember(&self, id: &str, version: Option<u64>) -> std::io::Result<()> {
@@ -1102,9 +1190,8 @@ impl Engine {
                 }
                 None => {
                     if let Some(known) = &mut state
-                        && known.remote_version != known.version
+                        && settle_stamps(known, &local)
                     {
-                        known.remote_version = known.version;
                         known.save(&self.layout, id)?;
                     }
                     return Ok(forked);
@@ -1133,17 +1220,23 @@ impl Engine {
             }
         }
         let artifacts = artifact_files(&self.layout.artifact_dir(id))?;
-        let recorded = known
+        let mut recorded: BTreeMap<&String, &Stamp> = known
             .stamps
             .iter()
             .filter(|(key, _)| key.starts_with(ARTIFACTS))
-            .count();
-        if artifacts.len() != recorded {
+            .collect();
+        for (key, seen) in &known.held {
+            if !self.capped(key, seen) {
+                return Ok(false);
+            }
+            recorded.insert(key, seen);
+        }
+        if artifacts.len() != recorded.len() {
             return Ok(false);
         }
         Ok(artifacts
             .iter()
-            .all(|(key, (_, now))| known.stamps.get(key) == Some(now)))
+            .all(|(key, (_, now))| recorded.get(key) == Some(&now)))
     }
 
     pub(crate) async fn fetch_history(
@@ -1519,6 +1612,7 @@ impl Engine {
             .and_then(|manifest| manifest.history.as_ref())
             .cloned();
         let mut wrote_history = settled;
+        let mut changed_here = false;
         if take_core {
             if exists {
                 if !settled {
@@ -1536,6 +1630,7 @@ impl Engine {
                         None => remove(&self.layout.history(id))?,
                     }
                     wrote_history = true;
+                    changed_here = true;
                 }
             } else {
                 remove(&self.layout.meta(id))?;
@@ -1594,6 +1689,7 @@ impl Engine {
                 && let Some(merged) = self.merge_artifact(id, sid, &key, &path, file).await?
             {
                 write_file(&path, &merged)?;
+                changed_here = true;
                 skipped.remove(&key);
                 stamps.remove(&key);
                 continue;
@@ -1614,6 +1710,7 @@ impl Engine {
             }
             skipped.remove(&key);
             stamps.remove(&key);
+            changed_here = true;
             match target {
                 Some(file) => {
                     self.fetch_blob_into(id, sid, file, &path).await?;
@@ -1629,9 +1726,13 @@ impl Engine {
                 Some(file) if local.meta.as_ref().map(|meta| &meta.blob) != Some(&file.blob) => {
                     self.fetch_blob_into(id, sid, file, &self.layout.meta(id))
                         .await?;
+                    changed_here = true;
                 }
                 Some(_) => {}
-                None => remove(&self.layout.meta(id))?,
+                None => {
+                    remove(&self.layout.meta(id))?;
+                    changed_here = true;
+                }
             }
             stamps.remove(META);
             if let Some(now) = stamp(&self.layout.meta(id))? {
@@ -1669,17 +1770,21 @@ impl Engine {
         let merged = SessionState {
             version: entry.head.version,
             remote_version: entry.head.version,
-            generation: entry.head.generation,
+            generation: entry.head.generation + u64::from(entry.head.pruned_at.is_some()),
             manifest: Some(known),
             skipped,
             history,
             stamps,
+            held: local.capped.clone(),
         };
         merged.save(&self.layout, id)?;
         *state = Some(merged);
-        let pulled = (take_core && exists) || !changes.files_remote.is_empty();
-        if pulled && !report.pulled.iter().any(|seen| seen == id) {
-            report.pulled.push(id.to_owned());
+        if changed_here {
+            if !report.pulled.iter().any(|seen| seen == id) {
+                report.pulled.push(id.to_owned());
+            }
+        } else if take_core && exists && local.exists() && fork.is_none() {
+            report.matched.push(id.to_owned());
         }
         Ok(fork)
     }
@@ -1721,7 +1826,11 @@ impl Engine {
                     (HistoryView::Same, _) => (0, 0),
                     (HistoryView::Appended { to }, Some(reference)) => (reference.len, to),
                     (HistoryView::Appended { to } | HistoryView::Rewritten { len: to }, _) => {
-                        generation = if expect > 0 { generation + 1 } else { 0 };
+                        generation = match (&base.history, expect) {
+                            (_, 0) => 0,
+                            (Some(_), _) => generation + 1,
+                            (None, _) => generation,
+                        };
                         history = Some(HistoryRef {
                             generation,
                             seq: 0,
@@ -1843,6 +1952,7 @@ impl Engine {
             };
         }
         next.manifest = Some(manifest);
+        next.held.clone_from(&local.capped);
         next.save(&self.layout, id)?;
         *state = Some(next);
         Ok(Pushed::Done)

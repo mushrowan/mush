@@ -478,6 +478,44 @@ async fn kernel_state_waits_until_the_session_closes_and_respects_its_cap() {
         std::fs::read_to_string(esme.artifact(&id, "kernel-state.pickle")).unwrap(),
         "pickled"
     );
+    assert!(dot.engine.queue().unwrap().up.is_empty());
+    assert!(dot.sync().await.quiet());
+
+    std::fs::write(dot.artifact(&id, "kernel-state.pickle"), vec![b'y'; 4096]).unwrap();
+    assert!(dot.sync().await.quiet());
+    assert!(dot.engine.queue().unwrap().up.is_empty());
+    let dot = dot.moved_to(&server);
+    assert_eq!(dot.engine.queue().unwrap().up, [id.to_string()]);
+    assert_eq!(dot.sync().await.pushed, [id.to_string()]);
+    let esme = esme.moved_to(&server);
+    esme.sync().await;
+    assert_eq!(
+        std::fs::read(esme.artifact(&id, "kernel-state.pickle")).unwrap(),
+        vec![b'y'; 4096]
+    );
+}
+
+#[tokio::test]
+async fn a_session_whose_kernel_state_is_too_big_to_sync_counts_as_synced() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let limits = Limits {
+        kernel_state: 1024,
+        ..Limits::default()
+    };
+    let dot = machine_with("dot", &server.url, crate::harness::MASTER, limits);
+    let id = dot.create("big kernel", &["start"]);
+    std::fs::create_dir_all(dot.artifact(&id, "")).unwrap();
+    std::fs::write(dot.artifact(&id, "kernel-state.pickle"), vec![b'k'; 4096]).unwrap();
+    assert_eq!(dot.engine.queue().unwrap().up, [id.to_string()]);
+    assert_eq!(dot.sync().await.pushed, [id.to_string()]);
+    assert!(dot.engine.queue().unwrap().up.is_empty());
+    std::fs::write(dot.artifact(&id, "kernel-state.pickle"), vec![b'k'; 8192]).unwrap();
+    assert!(dot.sync().await.quiet());
+    assert!(dot.engine.queue().unwrap().up.is_empty());
+    std::fs::write(dot.artifact(&id, "notes.md"), "small").unwrap();
+    assert_eq!(dot.engine.queue().unwrap().up, [id.to_string()]);
+    assert_eq!(dot.sync().await.pushed, [id.to_string()]);
 }
 
 #[tokio::test]
@@ -661,10 +699,62 @@ async fn hand_copied_sessions_join_sync_without_forking() {
     assert_eq!(esme.texts(&older), ["one", "two from dot"]);
     assert_eq!(esme.texts(&newer), ["one", "two from esme"]);
     assert_eq!(report.pushed, [newer.to_string()], "{report:?}");
+    assert_eq!(report.matched, [same.to_string()], "{report:?}");
+    assert_eq!(report.pulled, [older.to_string()], "{report:?}");
     dot.sync().await;
     assert_eq!(dot.texts(&newer), ["one", "two from esme"]);
     assert_eq!(dot.history(&older), esme.history(&older));
     assert_eq!(dot.history(&newer), esme.history(&newer));
+    assert!(esme.sync().await.quiet());
+}
+
+#[tokio::test]
+async fn a_first_pass_cut_short_keeps_what_it_matched_when_it_resumes() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let first = dot.create("first", &["one"]);
+    let second = dot.create("second", &["one"]);
+    for id in [&first, &second] {
+        copy_session(&dot, &esme, id);
+    }
+    dot.sync().await;
+
+    let partial = esme
+        .engine
+        .pass(
+            Scope::Sessions(vec![first.to_string()]),
+            Direction::Both,
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(partial.matched, [first.to_string()], "{partial:?}");
+    let resumed = esme.sync().await;
+    assert_eq!(resumed.matched, [second.to_string()], "{resumed:?}");
+    assert!(resumed.forked.is_empty());
+}
+
+#[tokio::test]
+async fn a_merged_artifact_that_ends_up_equal_to_the_server_copy_settles() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("shared log", &["one"]);
+    copy_session(&dot, &esme, &id);
+    std::fs::create_dir_all(dot.artifact(&id, "")).unwrap();
+    std::fs::create_dir_all(esme.artifact(&id, "")).unwrap();
+    std::fs::write(dot.artifact(&id, "log.jsonl"), "{\"a\":1}\n{\"b\":2}\n").unwrap();
+    std::fs::write(esme.artifact(&id, "log.jsonl"), "{\"a\":1}\n").unwrap();
+    dot.sync().await;
+    esme.sync().await;
+    assert_eq!(
+        std::fs::read_to_string(esme.artifact(&id, "log.jsonl")).unwrap(),
+        "{\"a\":1}\n{\"b\":2}\n"
+    );
+    esme.sync().await;
+    assert!(esme.engine.queue().unwrap().up.is_empty());
     assert!(esme.sync().await.quiet());
 }
 

@@ -198,3 +198,61 @@ async fn every_machine_reports_its_sync_to_the_server_and_keeps_a_local_status()
     assert!(status.last_error.is_some());
     assert!(status.last_ok_ms.is_some());
 }
+
+#[tokio::test]
+async fn a_pass_woken_by_the_server_only_looks_at_what_changed_there() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let here = dot.create("edited on dot", &["one"]);
+    let there = dot.create("edited on esme", &["one"]);
+    dot.sync().await;
+    esme.sync().await;
+    assert!(dot.sync().await.quiet());
+    dot.append(&here, "two, not pushed yet");
+    esme.append(&there, "two from esme");
+    esme.sync().await;
+
+    let woken = dot
+        .engine
+        .pass(
+            mush_sync::Scope::Changed(Vec::new()),
+            mush_sync::Direction::Both,
+            None,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(woken.pulled, [there.to_string()], "{woken:?}");
+    assert!(woken.pushed.is_empty(), "{woken:?}");
+    assert_eq!(dot.sync().await.pushed, [here.to_string()]);
+}
+
+#[tokio::test]
+async fn half_written_files_an_interrupted_sync_left_are_cleared_once_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let dot = machine("dot", &server);
+    let id = dot.create("interrupted", &["one"]);
+    let sessions = dot.data().join("sessions");
+    let stale = sessions.join(format!("{id}.history.jsonl.sync-in-0123456789abcdef"));
+    let fresh = sessions.join(format!("{id}.history.jsonl.sync-in-fedcba9876543210"));
+    let artifact_dir = dot.artifact(&id, "");
+    std::fs::create_dir_all(&artifact_dir).unwrap();
+    let stale_artifact = artifact_dir.join("notes.md.tmp-1-2-3");
+    for path in [&stale, &fresh, &stale_artifact] {
+        std::fs::write(path, "partial").unwrap();
+    }
+    for path in [&stale, &stale_artifact] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(2 * 60 * 60))
+            .unwrap();
+    }
+    dot.sync().await;
+    assert!(!stale.exists());
+    assert!(!stale_artifact.exists());
+    assert!(fresh.exists());
+}

@@ -97,6 +97,14 @@ impl Engine {
             let Ok(Some(entry)) = self.open_head(archived.head.clone()) else {
                 continue;
             };
+            if entry
+                .manifest
+                .history
+                .as_ref()
+                .is_none_or(|history| history.len == 0)
+            {
+                continue;
+            }
             generations.push(Generation {
                 generation: archived.head.generation,
                 version: archived.head.version,

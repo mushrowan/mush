@@ -236,6 +236,7 @@ fn print_report(report: &Report) {
     let counts = [
         ("pushed", report.pushed.len()),
         ("pulled", report.pulled.len()),
+        ("identical copies joined", report.matched.len()),
         ("deleted", report.deleted.len()),
         ("forked", report.forked.len()),
         ("waiting", report.waiting.len()),

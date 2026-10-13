@@ -95,6 +95,68 @@ fn a_backup_fills_gaps_and_advances_old_copies_but_never_overwrites_newer_work()
 }
 
 #[test]
+fn the_same_diverged_session_in_two_backups_comes_back_as_one_fork() {
+    let here = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(here.path().join("data/sessions"));
+    let id = session(&store, &["one"]);
+    let mut theirs = store.load(&id).unwrap();
+    theirs.push_message(user("the backup went this way"));
+    let elsewhere = SessionStore::new(here.path().join("elsewhere"));
+    elsewhere.save(&theirs).unwrap();
+    let first = here.path().join("mush-sync-backup-20261007");
+    let second = here.path().join("mush-sync-backup-20261011");
+    back_up(&elsewhere, &id, &first);
+    back_up(&elsewhere, &id, &second);
+    let header = second.join(format!("{id}.json"));
+    let mut touched: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&header).unwrap()).unwrap();
+    touched["meta"]["updated_at"] = 7.into();
+    std::fs::write(&header, serde_json::to_vec(&touched).unwrap()).unwrap();
+    extend(&store, &id, "this machine went that way");
+
+    let layout = Layout::new(&here.path().join("data"));
+    let once = mush_sync::import::import(&layout, &first).unwrap();
+    assert_eq!(once.forked.len(), 1, "{once:?}");
+    let twice = mush_sync::import::import(&layout, &second).unwrap();
+    assert!(twice.forked.is_empty(), "{twice:?}");
+    assert_eq!(twice.unchanged, [id.to_string()]);
+    assert_eq!(store.list().unwrap().len(), 2);
+}
+
+#[test]
+fn an_older_backed_up_header_leaves_no_conflict_file_beside_newer_work() {
+    let here = tempfile::tempdir().unwrap();
+    let backup = here.path().join("mush-sync-backup-20261011");
+    let store = SessionStore::new(here.path().join("data/sessions"));
+    let id = session(&store, &["one"]);
+    back_up(&store, &id, &backup);
+    let header = backup.join(format!("{id}.json"));
+    let mut older: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&header).unwrap()).unwrap();
+    older["meta"]["created_at"] = 5.into();
+    older["meta"]["updated_at"] = u64::MAX.into();
+    std::fs::write(&header, serde_json::to_vec(&older).unwrap()).unwrap();
+    extend(&store, &id, "two, only here");
+
+    let layout = Layout::new(&here.path().join("data"));
+    let report = mush_sync::import::import(&layout, &backup).unwrap();
+    assert_eq!(report.unchanged, [id.to_string()]);
+    assert!(report.kept_beside.is_empty(), "{report:?}");
+    let leftovers: Vec<_> = std::fs::read_dir(here.path().join("data/sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("sync-conflict")
+        })
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert_eq!(texts(&store, &id), ["one", "two, only here"]);
+}
+
+#[test]
 fn a_backed_up_harness_adds_its_entries_without_rolling_back_newer_ones() {
     use mush_session::harness::{Action, Edit, Kind, Scope, State};
     let here = tempfile::tempdir().unwrap();

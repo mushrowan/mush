@@ -40,6 +40,8 @@ async fn a_deleted_session_is_pruned_only_after_the_grace_and_once_every_live_ma
     old.sync().await;
     esme.sync().await;
     tokio::time::sleep(GRACE * 3).await;
+    dot.create("keeps the feed moving", &["so esme reports again"]);
+    dot.sync().await;
     esme.sync().await;
 
     dot.store().delete(&id).unwrap();
@@ -70,7 +72,7 @@ async fn a_deleted_session_is_pruned_only_after_the_grace_and_once_every_live_ma
 
     let done = dot.engine.remote().prune(false).await.unwrap();
     assert_eq!(done.sessions.len(), 1);
-    assert!(chunk_generations(root.path()).is_empty());
+    assert!(session_generations(root.path(), id.as_str()).is_empty());
     assert!(dot.sync().await.quiet());
     assert!(esme.sync().await.quiet());
     assert!(
@@ -241,5 +243,32 @@ async fn a_deleted_session_comes_back_from_the_server_on_every_machine() {
             .unwrap_err()
             .to_string()
             .contains("not deleted")
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_gains_its_first_history_is_not_a_replaced_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_with(root.path(), None).await;
+    let dot = machine("dot", &server);
+    let mut session = mush_session::Session::new("test-model", "/tmp");
+    session.meta.title = Some("header only".into());
+    dot.store().save(&session).unwrap();
+    let id = session.meta.id.clone();
+    let _ = std::fs::remove_file(dot.store().history_path(&id));
+    dot.sync().await;
+    dot.append(&id, "the first message");
+    assert_eq!(dot.sync().await.pushed, [id.to_string()]);
+    assert!(
+        dot.engine
+            .restorable()
+            .await
+            .unwrap()
+            .iter()
+            .all(|entry| entry.session != id.as_str())
+    );
+    assert_eq!(
+        session_generations(root.path(), id.as_str()),
+        ["0".to_owned()].into()
     );
 }

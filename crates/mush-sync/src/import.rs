@@ -68,6 +68,25 @@ fn keep_beside(layout: &Layout, id: &str, who: &str, from: &Path) -> std::io::Re
     )
 }
 
+fn same_content(left: &Path, right: &Path) -> std::io::Result<bool> {
+    let (Ok(ours), Ok(theirs)) = (std::fs::metadata(left), std::fs::metadata(right)) else {
+        return Ok(false);
+    };
+    Ok(ours.len() == theirs.len() && prefix_equal(left, 0, right, ours.len())?)
+}
+
+fn already_forked(layout: &Layout, id: &str, history: &Path) -> std::io::Result<bool> {
+    if !history.exists() {
+        return Ok(false);
+    }
+    for (session, fork, _) in crate::status::review(layout)?.forks {
+        if session == id && same_content(&layout.history(&fork), history)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn fork_in(
     layout: &Layout,
     id: &str,
@@ -79,10 +98,19 @@ fn fork_in(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"import");
     hasher.update(id.as_bytes());
-    hasher.update(label.as_bytes());
-    hasher.update(&bytes);
+    match std::fs::File::open(history) {
+        Ok(mut file) => {
+            hasher.update(b"history");
+            std::io::copy(&mut file, &mut hasher)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            hasher.update(b"header");
+            hasher.update(&bytes);
+        }
+        Err(error) => return Err(error),
+    }
     let fork = hasher.finalize().to_hex()[..16].to_owned();
-    if layout.meta(&fork).exists() {
+    if layout.meta(&fork).exists() || already_forked(layout, id, history)? {
         return Ok(None);
     }
     if history.exists() {
@@ -176,11 +204,6 @@ pub fn import(layout: &Layout, source: &Path) -> std::io::Result<Imported> {
                 }
                 copy_durably(&meta, &layout.meta(&id))?;
                 imported.advanced.push(id);
-            }
-            Relation::Equal | Relation::Behind if meaningful && theirs_newer => {
-                keep_beside(layout, &id, &label, &meta)?;
-                imported.kept_beside.push(id.clone());
-                imported.unchanged.push(id);
             }
             Relation::Equal | Relation::Behind => imported.unchanged.push(id),
         }

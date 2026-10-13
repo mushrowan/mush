@@ -211,6 +211,8 @@ pub struct SessionState {
     pub history: Option<HistoryStamp>,
     #[serde(default)]
     pub stamps: BTreeMap<String, Stamp>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub held: BTreeMap<String, Stamp>,
 }
 
 impl SessionState {
@@ -418,6 +420,50 @@ pub fn artifact_files(dir: &Path) -> std::io::Result<BTreeMap<String, (PathBuf, 
         }
     }
     Ok(found)
+}
+
+const ABANDONED: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn abandoned_temp(name: &str) -> bool {
+    name.contains(".sync-in-") || name.contains(".tmp-")
+}
+
+pub fn sweep_abandoned(layout: &Layout) -> usize {
+    let mut removed = 0;
+    let mut pending = vec![
+        layout.sessions.clone(),
+        layout.artifacts.clone(),
+        layout.tool_output.clone(),
+        layout.state.clone(),
+    ];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                pending.push(entry.path());
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > ABANDONED);
+            if kind.is_file()
+                && stale
+                && abandoned_temp(&entry.file_name().to_string_lossy())
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 pub fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
