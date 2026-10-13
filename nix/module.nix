@@ -171,6 +171,16 @@ self: {
         '';
       };
 
+      syncService = {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          run `mush sync watch` as a systemd user service, so sessions and the
+          harness follow you between machines. needs settings.sync.server and
+          a key at settings.sync.key_file (default ~/.config/mush/sync.key)
+        '';
+      };
+
       prompts = {
         type = lib.types.attrsOf promptType;
         default = {};
@@ -223,6 +233,19 @@ self: {
   configModule = _: {
     config = lib.mkIf cfg.enable {
       home.packages = [cfg.package];
+
+      systemd.user.services.mush-sync = lib.mkIf cfg.syncService {
+        Unit = {
+          Description = "mush session sync";
+          After = ["network-online.target"];
+        };
+        Service = {
+          ExecStart = "${cfg.package}/bin/mush sync watch";
+          Restart = "on-failure";
+          RestartSec = 30;
+        };
+        Install.WantedBy = ["default.target"];
+      };
 
       xdg.configFile =
         {

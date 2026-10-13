@@ -43,6 +43,8 @@
         default = mod;
       };
 
+      flake.nixosModules.mush-sync-server = import ./nix/sync-server.nix inputs.self;
+
       imports = [
         inputs.treefmt-nix.flakeModule
         inputs.git-hooks.flakeModule
