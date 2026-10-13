@@ -1298,8 +1298,8 @@ enum CompactionFailure {
     Request(String),
     #[error("stream error: {0}")]
     Stream(String),
-    #[error("stream completed without text")]
-    EmptyResponse,
+    #[error("{0}")]
+    NoText(mush_ai::oneshot::TextlessReply),
 }
 
 impl From<mush_ai::oneshot::OneshotError> for CompactionFailure {
@@ -1308,7 +1308,7 @@ impl From<mush_ai::oneshot::OneshotError> for CompactionFailure {
         match error {
             OneshotError::Request(message) => Self::Request(message),
             OneshotError::Stream(message) => Self::Stream(message),
-            OneshotError::EmptyResponse => Self::EmptyResponse,
+            OneshotError::NoText(reply) => Self::NoText(reply),
         }
     }
 }
@@ -1319,7 +1319,7 @@ impl CompactionFailure {
             Self::Request(message) | Self::Stream(message) => {
                 mush_ai::registry::is_context_overflow_message(message)
             }
-            Self::EmptyResponse => false,
+            Self::NoText(_) => false,
         }
     }
 }

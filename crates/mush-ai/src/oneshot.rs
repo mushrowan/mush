@@ -5,7 +5,7 @@ use crate::registry::{
     retry_delay, retry_stream_error,
 };
 use crate::stream::StreamEvent;
-use crate::types::{AssistantContentPart, Model, StopReason, StreamOptions};
+use crate::types::{AssistantContentPart, AssistantMessage, Model, StopReason, StreamOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OneshotError {
@@ -13,16 +13,64 @@ pub enum OneshotError {
     Request(String),
     #[error("stream error: {0}")]
     Stream(String),
-    #[error("stream completed without text")]
-    EmptyResponse,
+    #[error("{0}")]
+    NoText(TextlessReply),
 }
 
 impl OneshotError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Request(_) | Self::EmptyResponse => false,
+            Self::Request(_) | Self::NoText(_) => false,
             Self::Stream(message) => crate::registry::is_retryable_stream_error_message(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextlessReply {
+    pub stop_reason: StopReason,
+    pub parts: Vec<String>,
+}
+
+impl TextlessReply {
+    fn of(message: &AssistantMessage) -> Self {
+        Self {
+            stop_reason: message.stop_reason,
+            parts: message.content.iter().filter_map(describe_part).collect(),
+        }
+    }
+}
+
+fn describe_part(part: &AssistantContentPart) -> Option<String> {
+    match part {
+        AssistantContentPart::Text(_) => None,
+        AssistantContentPart::Thinking(_) => Some("thinking".into()),
+        AssistantContentPart::ToolCall(call) => Some(format!("a call to {}", call.name)),
+        AssistantContentPart::ServerToolUse(tool) => {
+            Some(format!("a call to the {} server tool", tool.name))
+        }
+        AssistantContentPart::AdvisorToolResult(_) => Some("an advisor result".into()),
+    }
+}
+
+impl std::fmt::Display for TextlessReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ending = match self.stop_reason {
+            StopReason::Stop => "it ended its turn",
+            StopReason::Length => "it ran out of output tokens",
+            StopReason::ToolUse => "it stopped to use a tool",
+            StopReason::Error => "it failed",
+            StopReason::Aborted => "it was aborted",
+        };
+        if self.parts.is_empty() {
+            write!(f, "the model replied with nothing at all ({ending})")
+        } else {
+            write!(
+                f,
+                "the model replied without text, only {} ({ending})",
+                self.parts.join(", ")
+            )
         }
     }
 }
@@ -64,27 +112,20 @@ pub async fn collect_stream_text(mut stream: EventStream) -> Result<String, Ones
     let Some(message) = finished else {
         return Err(OneshotError::Stream(STREAM_ENDED_EARLY.into()));
     };
-    if !text.is_empty() {
+    if text.trim().is_empty() {
+        text = message.text();
+    }
+    if !text.trim().is_empty() {
         return Ok(text);
     }
-    let parts: Vec<String> = message
-        .content
-        .iter()
-        .map(|part| match part {
-            AssistantContentPart::Text(text) => format!("text({} chars)", text.text.len()),
-            AssistantContentPart::Thinking(_) => "thinking".into(),
-            AssistantContentPart::ToolCall(call) => format!("tool_call({})", call.name),
-            AssistantContentPart::ServerToolUse(_) => "server_tool_use".into(),
-            AssistantContentPart::AdvisorToolResult(_) => "advisor_tool_result".into(),
-        })
-        .collect();
+    let reply = TextlessReply::of(&message);
     tracing::warn!(
         model = %message.model,
-        stop_reason = ?message.stop_reason,
-        ?parts,
+        stop_reason = ?reply.stop_reason,
+        parts = ?reply.parts,
         "one-shot stream completed without text"
     );
-    Err(OneshotError::EmptyResponse)
+    Err(OneshotError::NoText(reply))
 }
 
 pub async fn collect_text(
@@ -121,7 +162,7 @@ pub async fn collect_text_retrying(
                         OneshotError::Stream(message) => {
                             can_retry && retry_stream_error(message, retries)
                         }
-                        OneshotError::Request(_) | OneshotError::EmptyResponse => false,
+                        OneshotError::Request(_) | OneshotError::NoText(_) => false,
                     };
                     (error, retryable, None)
                 }
@@ -235,11 +276,60 @@ mod tests {
             message: assistant(None, StopReason::Stop),
         }];
         let error = collect_stream_text(stream_of(events)).await.unwrap_err();
-        assert_eq!(error, OneshotError::EmptyResponse);
+        assert_eq!(
+            error,
+            OneshotError::NoText(TextlessReply {
+                stop_reason: StopReason::Stop,
+                parts: vec![],
+            })
+        );
+        assert_eq!(
+            error.to_string(),
+            "the model replied with nothing at all (it ended its turn)"
+        );
         assert!(
             !error.is_retryable(),
             "asking again yields the same nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_only_calls_a_tool_names_the_tool() {
+        let mut message = assistant(None, StopReason::ToolUse);
+        message.content = vec![
+            AssistantContentPart::Thinking(crate::types::ThinkingContent::Thinking {
+                thinking: "check the log".into(),
+                signature: None,
+            }),
+            AssistantContentPart::ToolCall(crate::types::ToolCall {
+                id: crate::types::ToolCallId::from("call_1"),
+                name: crate::types::ToolName::from("ipython"),
+                arguments: serde_json::json!({}),
+            }),
+        ];
+        let events = vec![StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            message,
+        }];
+        let error = collect_stream_text(stream_of(events)).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the model replied without text, only thinking, a call to ipython (it stopped to use a tool)"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_on_the_final_message_counts_without_deltas() {
+        let mut message = assistant(None, StopReason::Stop);
+        message.content = vec![AssistantContentPart::Text(crate::types::TextContent {
+            text: "a title".into(),
+        })];
+        let events = vec![StreamEvent::Done {
+            reason: StopReason::Stop,
+            message,
+        }];
+        let text = collect_stream_text(stream_of(events)).await.unwrap();
+        assert_eq!(text, "a title");
     }
 
     struct Scripted {
