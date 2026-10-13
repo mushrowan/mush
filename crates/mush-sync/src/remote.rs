@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::protocol::{
-    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Refusal, ReleaseRequest,
+    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, Refusal, ReleaseRequest,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +130,14 @@ impl Remote {
             wait.as_secs()
         ));
         Self::json(self.send(request, wait + CALL_TIMEOUT).await?).await
+    }
+
+    pub async fn leases(&self, timeout: Duration) -> Result<Leases, RemoteError> {
+        Self::json(
+            self.send(self.http.get(self.url("leases")), timeout)
+                .await?,
+        )
+        .await
     }
 
     pub async fn head(&self, sid: &str) -> Result<Option<Head>, RemoteError> {

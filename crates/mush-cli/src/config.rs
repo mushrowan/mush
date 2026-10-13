@@ -190,6 +190,66 @@ impl Default for KernelConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(default)]
+pub struct SyncConfig {
+    pub server: Option<String>,
+    pub key_file: Option<PathBuf>,
+    pub machine: Option<String>,
+    pub kernel_state_max_mb: u64,
+    pub kernel_state_max_age_days: u64,
+    pub lease_ttl_secs: u64,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            server: None,
+            key_file: None,
+            machine: None,
+            kernel_state_max_mb: 64,
+            kernel_state_max_age_days: 14,
+            lease_ttl_secs: 90,
+        }
+    }
+}
+
+fn expand_home(path: &std::path::Path) -> PathBuf {
+    match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_owned(),
+    }
+}
+
+impl SyncConfig {
+    #[must_use]
+    pub fn settings(&self) -> Option<mush_sync::Settings> {
+        let server = self
+            .server
+            .as_deref()
+            .map(str::trim)
+            .filter(|server| !server.is_empty())?;
+        Some(mush_sync::Settings {
+            server: server.to_owned(),
+            key_file: self
+                .key_file
+                .as_deref()
+                .map_or_else(|| config_dir().join("sync.key"), expand_home),
+            machine: self.machine.clone().unwrap_or_else(mush_sync::hostname),
+            data_dir: mush_session::data_dir(),
+            limits: mush_sync::Limits {
+                kernel_state: self.kernel_state_max_mb.saturating_mul(1 << 20),
+                kernel_state_age: std::time::Duration::from_secs(
+                    self.kernel_state_max_age_days.saturating_mul(24 * 60 * 60),
+                ),
+                ..mush_sync::Limits::default()
+            },
+            lease_ttl: std::time::Duration::from_secs(self.lease_ttl_secs.max(15)),
+            connect_timeout: std::time::Duration::from_secs(3),
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[schemars(extend("x-nixcfg-name" = "mush", "x-nixcfg-config-format" = "toml"))]
 #[serde(default)]
@@ -265,6 +325,8 @@ pub struct Config {
     pub max_image_mb: u32,
     #[serde(default)]
     pub web_search: mush_tools::web_search::WebSearchConfig,
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 fn default_max_image_mb() -> u32 {
@@ -330,6 +392,7 @@ impl Default for Config {
             forbidden_char_classes: Vec::new(),
             max_image_mb: default_max_image_mb(),
             web_search: mush_tools::web_search::WebSearchConfig::default(),
+            sync: SyncConfig::default(),
         }
     }
 }

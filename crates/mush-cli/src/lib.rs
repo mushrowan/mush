@@ -10,4 +10,5 @@ pub mod output;
 pub mod pause;
 pub mod schedule;
 pub mod setup;
+pub mod sync;
 pub mod timing;

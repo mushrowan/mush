@@ -9,7 +9,9 @@ pub mod settings;
 pub mod watch;
 
 pub use checkout::{Checkout, CheckoutError, Opened, checkout};
-pub use engine::{Direction, Engine, Report, Scope, SyncError};
+pub use engine::{
+    Direction, Engine, LocalSummary, OpenElsewhere, Overview, Report, Scope, SyncError,
+};
 pub use keys::Keys;
 pub use local::{Layout, Limits};
 pub use remote::Remote;

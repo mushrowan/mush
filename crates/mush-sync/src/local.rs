@@ -261,10 +261,11 @@ pub fn read_range(file: &std::fs::File, start: u64, end: u64) -> std::io::Result
     Ok(bytes)
 }
 
-pub fn same_content(path: &Path, start: u64, other: &Path) -> std::io::Result<bool> {
+pub fn prefix_equal(path: &Path, start: u64, other: &Path, len: u64) -> std::io::Result<bool> {
     let mut ours = std::fs::File::open(path)?;
     ours.seek(SeekFrom::Start(start))?;
-    let mut theirs = std::fs::File::open(other)?;
+    let mut ours = ours.take(len);
+    let mut theirs = std::fs::File::open(other)?.take(len);
     let (mut left, mut right) = (vec![0u8; 256 * 1024], vec![0u8; 256 * 1024]);
     loop {
         let read = theirs.read(&mut right)?;

@@ -72,6 +72,12 @@ pub struct Changes {
     pub more: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Leases {
+    pub now: u64,
+    pub held: Vec<(String, Lease)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "refusal", rename_all = "snake_case")]
 pub enum Refusal {

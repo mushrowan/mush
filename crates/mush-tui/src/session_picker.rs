@@ -18,6 +18,7 @@ pub enum Liveness {
     Paused,
     Stale,
     Failed,
+    Elsewhere,
 }
 
 impl Liveness {
@@ -29,6 +30,7 @@ impl Liveness {
             Self::Paused => "paused",
             Self::Stale => "stale",
             Self::Failed => "failed",
+            Self::Elsewhere => "elsewhere",
         }
     }
 }

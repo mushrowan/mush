@@ -126,7 +126,7 @@ fn session_row(
         .max(1);
     let live_style = match live {
         Some(Liveness::Stale | Liveness::Failed) => theme.tool_error,
-        Some(Liveness::Working) => theme.selection_marker,
+        Some(Liveness::Working | Liveness::Elsewhere) => theme.selection_marker,
         Some(Liveness::Idle | Liveness::Paused) | None => theme.dim,
     };
 

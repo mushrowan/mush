@@ -16,6 +16,7 @@ pub enum AgentStatus {
     Stale,
     Paused,
     Idle,
+    Elsewhere,
     Saved,
     Archived,
 }
@@ -28,6 +29,7 @@ impl AgentStatus {
             Self::Stale => "stale",
             Self::Paused => "paused",
             Self::Idle => "idle",
+            Self::Elsewhere => "elsewhere",
             Self::Saved => "saved",
             Self::Archived => "archived",
         }
@@ -40,6 +42,7 @@ impl AgentStatus {
             Self::Stale => Style::Magenta,
             Self::Paused => Style::Dim,
             Self::Idle => Style::Cyan,
+            Self::Elsewhere => Style::Yellow,
             Self::Saved => Style::Dim,
             Self::Archived => Style::Dim,
         }
@@ -61,6 +64,8 @@ pub struct AgentRow {
     pub clients: usize,
     pub failed: Option<String>,
     pub last_heard_from_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_on: Option<String>,
 }
 
 const NAME_WIDTH: usize = 32;
@@ -129,6 +134,7 @@ fn worker_row(worker: &WorkerDescriptor) -> AgentRow {
         clients: worker.clients,
         failed: worker.failed.clone(),
         last_heard_from_at: worker.last_heard_from_at,
+        open_on: None,
     }
 }
 
@@ -152,6 +158,7 @@ fn child_row(worker: &WorkerDescriptor, child: &ChildDescriptor) -> AgentRow {
         clients: 0,
         failed: None,
         last_heard_from_at: worker.last_heard_from_at,
+        open_on: None,
     }
 }
 
@@ -174,6 +181,7 @@ fn saved_row(meta: &SessionMeta) -> AgentRow {
         clients: 0,
         failed: None,
         last_heard_from_at: None,
+        open_on: None,
     }
 }
 
@@ -231,10 +239,11 @@ pub fn table(rows: &[AgentRow]) -> String {
                     .map(|count| count.to_string())
                     .unwrap_or_default(),
                 row.clients.to_string(),
-                match (&row.failed, row.last_heard_from_at) {
-                    (Some(reason), _) => cell(reason),
-                    (None, Some(heard)) => format!("last heard {} ago", age(heard)),
-                    (None, None) => cell(&row.cwd),
+                match (&row.failed, row.last_heard_from_at, &row.open_on) {
+                    (Some(reason), _, _) => cell(reason),
+                    (None, Some(heard), _) => format!("last heard {} ago", age(heard)),
+                    (None, None, Some(machine)) => format!("open on {}", cell(machine)),
+                    (None, None, None) => cell(&row.cwd),
                 },
             ]
         })
@@ -289,6 +298,7 @@ fn liveness(status: AgentStatus) -> Option<mush_tui::session_picker::Liveness> {
         AgentStatus::Stale => Some(Liveness::Stale),
         AgentStatus::Paused => Some(Liveness::Paused),
         AgentStatus::Idle => Some(Liveness::Idle),
+        AgentStatus::Elsewhere => Some(Liveness::Elsewhere),
         AgentStatus::Saved | AgentStatus::Archived => None,
     }
 }
@@ -308,16 +318,59 @@ pub fn roster_rows(workers: &[WorkerDescriptor]) -> mush_tui::session_picker::Ro
 }
 
 #[must_use]
-pub fn roster() -> mush_tui::AgentRoster {
-    std::sync::Arc::new(|| {
+pub fn roster(sync: crate::config::SyncConfig) -> mush_tui::AgentRoster {
+    std::sync::Arc::new(move || {
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         else {
             return Vec::new();
         };
-        roster_rows(&runtime.block_on(live()).unwrap_or_default())
+        let mut rows = roster_rows(&runtime.block_on(live()).unwrap_or_default());
+        for id in runtime.block_on(elsewhere(&sync)).into_keys() {
+            let id = mush_ai::types::SessionId::from(id);
+            if !rows.iter().any(|(live, _)| *live == id) {
+                rows.push((id, mush_tui::session_picker::Liveness::Elsewhere));
+            }
+        }
+        rows
     })
+}
+
+pub async fn elsewhere(
+    sync: &crate::config::SyncConfig,
+) -> std::collections::HashMap<String, String> {
+    let Some(engine) = sync.settings().and_then(|settings| settings.engine().ok()) else {
+        return std::collections::HashMap::new();
+    };
+    engine
+        .open_elsewhere(std::time::Duration::from_millis(1500))
+        .await
+        .unwrap_or_default()
+}
+
+fn mark_elsewhere(
+    rows: &mut [AgentRow],
+    saved: &[SessionMeta],
+    elsewhere: &std::collections::HashMap<String, String>,
+) {
+    for meta in saved {
+        let Some(machine) = elsewhere.get(meta.id.as_str()) else {
+            continue;
+        };
+        let short = short_id(meta.id.as_str());
+        if let Some(row) = rows.iter_mut().find(|row| {
+            row.id == short && matches!(row.status, AgentStatus::Saved | AgentStatus::Archived)
+        }) {
+            row.status = AgentStatus::Elsewhere;
+            row.open_on = Some(machine.clone());
+        }
+    }
+    let stored = rows
+        .iter()
+        .position(|row| row.pid.is_none())
+        .unwrap_or(rows.len());
+    rows[stored..].sort_by(order);
 }
 
 pub async fn live() -> Result<Vec<WorkerDescriptor>> {
@@ -457,7 +510,11 @@ pub async fn rename(selector: &str, name: &str, json: bool) -> Result<()> {
 pub async fn list(all: bool, json: bool) -> Result<()> {
     let workers = live().await?;
     let saved = if all { saved_sessions() } else { Vec::new() };
-    let rows = rows(&workers, &saved);
+    let mut rows = rows(&workers, &saved);
+    if all {
+        let sync = crate::config::load_config().sync;
+        mark_elsewhere(&mut rows, &saved, &elsewhere(&sync).await);
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -508,6 +565,29 @@ mod tests {
             accounts: Default::default(),
             lifecycle: mush_session::Lifecycle::Live,
         }
+    }
+
+    #[test]
+    fn a_saved_session_open_on_another_machine_says_where() {
+        let saved = [meta("aaaa1111"), meta("bbbb2222")];
+        let mut listed = rows(&[worker("live", false, 5)], &saved);
+        let elsewhere =
+            std::collections::HashMap::from([("bbbb2222".to_owned(), "esme".to_owned())]);
+        mark_elsewhere(&mut listed, &saved, &elsewhere);
+        let away = listed.iter().find(|row| row.id == "bbbb2222").unwrap();
+        assert_eq!(away.status, AgentStatus::Elsewhere);
+        assert_eq!(away.open_on.as_deref(), Some("esme"));
+        assert_eq!(listed[0].id, "live");
+        assert_eq!(listed[1].id, "bbbb2222");
+        assert!(table(&listed).contains("open on esme"));
+        assert_eq!(
+            listed
+                .iter()
+                .find(|row| row.id == "aaaa1111")
+                .unwrap()
+                .status,
+            AgentStatus::Saved
+        );
     }
 
     #[test]

@@ -846,6 +846,50 @@
       },
       "type": "object"
     },
+    "SyncConfig": {
+      "properties": {
+        "kernel_state_max_age_days": {
+          "default": 14,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kernel_state_max_mb": {
+          "default": 64,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key_file": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lease_ttl_secs": {
+          "default": 90,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "machine": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TerminalPolicy": {
       "properties": {
         "image_probe": {
@@ -1335,6 +1379,17 @@
         "string",
         "null"
       ]
+    },
+    "sync": {
+      "$ref": "#/$defs/SyncConfig",
+      "default": {
+        "kernel_state_max_age_days": 14,
+        "kernel_state_max_mb": 64,
+        "key_file": null,
+        "lease_ttl_secs": 90,
+        "machine": null,
+        "server": null
+      }
     },
     "system_prompt": {
       "default": null,

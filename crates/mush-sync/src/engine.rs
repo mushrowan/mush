@@ -11,7 +11,7 @@ use mush_session::{SessionId, SessionLease};
 use crate::keys::Keys;
 use crate::local::{
     Cursor, HistoryStamp, Layout, Limits, SessionState, Stamp, append, artifact_files,
-    complete_lines, copy_durably, live_only, read_range, remove, same_content, stamp, tail_hash,
+    complete_lines, copy_durably, live_only, prefix_equal, read_range, remove, stamp, tail_hash,
     temp_beside, write_file,
 };
 use crate::protocol::{
@@ -85,6 +85,42 @@ impl Report {
             && self.sidecars.is_empty()
             && self.failed.is_empty()
     }
+}
+
+#[derive(Debug, Default)]
+pub struct LocalSummary {
+    pub sessions: usize,
+    pub synced: usize,
+    pub waiting: usize,
+}
+
+#[derive(Debug)]
+pub struct OpenElsewhere {
+    pub session: String,
+    pub title: Option<String>,
+    pub holder: String,
+    pub left: Duration,
+}
+
+#[derive(Debug, Default)]
+pub struct Overview {
+    pub sessions: usize,
+    pub elsewhere: Vec<OpenElsewhere>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    Equal,
+    Behind,
+    Ahead,
+    Diverged,
+}
+
+fn updated_at_of(meta: &[u8]) -> u64 {
+    serde_json::from_slice::<serde_json::Value>(meta)
+        .ok()
+        .and_then(|value| value.get("meta")?.get("updated_at")?.as_u64())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,6 +440,83 @@ impl Engine {
             cursor.save(&self.layout)?;
         }
         Ok(report)
+    }
+
+    pub fn local_summary(&self) -> std::io::Result<LocalSummary> {
+        let mut summary = LocalSummary {
+            sessions: self.layout.local_ids()?.len(),
+            ..LocalSummary::default()
+        };
+        for id in self.layout.state_ids()? {
+            let Some(state) = SessionState::load(&self.layout, &id)? else {
+                continue;
+            };
+            if base_exists(Some(&state)) {
+                summary.synced += 1;
+            }
+            if state.remote_version > state.version {
+                summary.waiting += 1;
+            }
+        }
+        Ok(summary)
+    }
+
+    pub async fn overview(&self) -> Result<Overview, SyncError> {
+        let mut overview = Overview::default();
+        let mut since = 0;
+        loop {
+            let changes = self.remote.changes(since, Duration::ZERO, false).await?;
+            for head in changes.heads {
+                let entry = self.open_head(head.clone()).ok().flatten();
+                if entry.as_ref().is_some_and(|entry| !entry.manifest.deleted) {
+                    overview.sessions += 1;
+                }
+                let Some(lease) = head
+                    .lease
+                    .filter(|lease| lease.active(changes.now) && lease.holder != self.machine)
+                else {
+                    continue;
+                };
+                overview.elsewhere.push(OpenElsewhere {
+                    session: entry
+                        .as_ref()
+                        .map_or_else(|| head.sid.clone(), |entry| entry.manifest.session.clone()),
+                    title: entry.and_then(|entry| entry.manifest.title),
+                    holder: lease.holder,
+                    left: Duration::from_millis(lease.expires_at.saturating_sub(changes.now)),
+                });
+            }
+            since = changes.rev;
+            if !changes.more {
+                break;
+            }
+        }
+        Ok(overview)
+    }
+
+    pub async fn open_elsewhere(
+        &self,
+        timeout: Duration,
+    ) -> Result<HashMap<String, String>, SyncError> {
+        let leases = self.remote.leases(timeout).await?;
+        let mut blinded: HashMap<String, String> = HashMap::new();
+        for id in self.layout.local_ids()? {
+            blinded.insert(self.keys.sid(&id), id);
+        }
+        Ok(leases
+            .held
+            .into_iter()
+            .filter(|(_, lease)| lease.holder != self.machine)
+            .filter_map(|(sid, lease)| Some((blinded.remove(&sid)?, lease.holder)))
+            .collect())
+    }
+
+    pub async fn release_elsewhere(&self, id: &str) -> Result<(), SyncError> {
+        let request = crate::protocol::ReleaseRequest {
+            holder: self.machine.clone(),
+            force: true,
+        };
+        Ok(self.remote.release(&self.keys.sid(id), &request).await?)
     }
 
     async fn feed(&self, cursor: &mut Cursor) -> Result<Feed, SyncError> {
@@ -949,32 +1062,52 @@ impl Engine {
         Ok(fork)
     }
 
-    async fn core_matches(
+    async fn order(
         &self,
         id: &str,
         sid: &str,
         state: Option<&SessionState>,
         local: &Local,
         theirs: &Manifest,
-    ) -> Result<(bool, Option<Download>), SyncError> {
-        if local.meta.as_ref().map(|meta| &meta.blob)
-            != theirs.files.get(META).map(|file| &file.blob)
-        {
-            return Ok((false, None));
-        }
+    ) -> Result<(Order, Option<Download>), SyncError> {
         let base = state
             .and_then(|state| state.manifest.as_ref())
             .and_then(|manifest| manifest.history.as_ref());
         let Some(remote) = &theirs.history else {
-            return Ok((local.history == HistoryView::Absent, None));
+            let order = if local.history == HistoryView::Absent {
+                Order::Equal
+            } else {
+                Order::Diverged
+            };
+            return Ok((order, None));
         };
-        if local.history_len(base) != Some(remote.len) {
-            return Ok((false, None));
-        }
+        let Some(ours) = local.history_len(base) else {
+            return Ok((Order::Diverged, None));
+        };
         let from = base.filter(|_| local.prefix_intact());
         let download = self.fetch_history(id, sid, remote, from).await?;
-        let equal = same_content(&self.layout.history(id), download.start, &download.path)?;
-        Ok((equal, Some(download)))
+        let common = ours.min(remote.len).saturating_sub(download.start);
+        let agrees = prefix_equal(
+            &self.layout.history(id),
+            download.start,
+            &download.path,
+            common,
+        )?;
+        let order = match (agrees, ours.cmp(&remote.len)) {
+            (false, _) => Order::Diverged,
+            (true, std::cmp::Ordering::Equal) => Order::Equal,
+            (true, std::cmp::Ordering::Less) => Order::Behind,
+            (true, std::cmp::Ordering::Greater) => Order::Ahead,
+        };
+        Ok((order, Some(download)))
+    }
+
+    fn keep_beside(&self, id: &str, who: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let path = self
+            .layout
+            .sessions
+            .join(format!("{id}.json.sync-conflict-{who}-{}", now_ms()));
+        write_file(&path, bytes)
     }
 
     async fn merge(
@@ -991,24 +1124,72 @@ impl Engine {
         let exists = !theirs.deleted;
         let mut fork = None;
         let mut take_core = changes.core_remote;
-        let mut matched = None;
+        let mut keep_ours = false;
+        let mut settled = false;
+        let mut download = None;
         if changes.core_local && changes.core_remote {
             match (local.exists(), exists) {
                 (true, false) => take_core = false,
                 (false, _) => {}
                 (true, true) => {
-                    let (equal, download) = self
-                        .core_matches(id, sid, state.as_ref(), local, theirs)
-                        .await?;
-                    if !equal {
-                        let copy = self.fork(id, local)?;
-                        report.forked.push((id.to_owned(), copy.clone()));
-                        fork = Some(copy);
-                        if let Some(download) = &download {
-                            self.apply_history(id, download)?;
+                    let (order, fetched) =
+                        self.order(id, sid, state.as_ref(), local, theirs).await?;
+                    download = fetched;
+                    let ours = local.meta.as_ref().map(|meta| meta.blob.clone());
+                    let remote_meta = theirs.files.get(META);
+                    let metas_equal = ours.as_ref() == remote_meta.map(|file| &file.blob);
+                    let (local_at, remote_bytes, remote_at) = if metas_equal {
+                        (0, Vec::new(), 0)
+                    } else {
+                        let bytes = match remote_meta {
+                            Some(file) => self.fetch_blob(id, sid, file).await?,
+                            None => Vec::new(),
+                        };
+                        (
+                            updated_at_of(&std::fs::read(self.layout.meta(id))?),
+                            bytes.clone(),
+                            updated_at_of(&bytes),
+                        )
+                    };
+                    let mut keep_theirs_beside = false;
+                    let mut keep_ours_beside = false;
+                    match order {
+                        Order::Diverged => {
+                            let copy = self.fork(id, local)?;
+                            report.forked.push((id.to_owned(), copy.clone()));
+                            fork = Some(copy);
+                        }
+                        Order::Behind => keep_ours_beside = !metas_equal && local_at > remote_at,
+                        Order::Ahead => {
+                            take_core = false;
+                            keep_ours = true;
+                            keep_theirs_beside = !metas_equal && remote_at > local_at;
+                        }
+                        Order::Equal => {
+                            settled = true;
+                            if !metas_equal && local_at > remote_at {
+                                take_core = false;
+                                keep_ours = true;
+                                keep_theirs_beside = true;
+                            } else {
+                                keep_ours_beside = !metas_equal;
+                            }
                         }
                     }
-                    matched = download.map(|_| ());
+                    if keep_ours_beside {
+                        let bytes = std::fs::read(self.layout.meta(id))?;
+                        self.keep_beside(id, &self.machine, &bytes)?;
+                        report.sidecars.push((id.to_owned(), META.to_owned()));
+                    }
+                    if keep_theirs_beside && !remote_bytes.is_empty() {
+                        let who = if theirs.writer.is_empty() {
+                            "remote"
+                        } else {
+                            theirs.writer.as_str()
+                        };
+                        self.keep_beside(id, who, &remote_bytes)?;
+                        report.sidecars.push((id.to_owned(), META.to_owned()));
+                    }
                 }
             }
         }
@@ -1017,15 +1198,20 @@ impl Engine {
             .and_then(|state| state.manifest.as_ref())
             .and_then(|manifest| manifest.history.as_ref())
             .cloned();
-        let mut wrote_history = matched.is_some();
+        let mut wrote_history = settled;
         if take_core {
             if exists {
-                if matched.is_none() {
+                if !settled {
                     match &theirs.history {
                         Some(history) => {
-                            let from = base.as_ref().filter(|_| local.prefix_intact());
-                            let download = self.fetch_history(id, sid, history, from).await?;
-                            self.apply_history(id, &download)?;
+                            let fetched = match download.take() {
+                                Some(fetched) => fetched,
+                                None => {
+                                    let from = base.as_ref().filter(|_| local.prefix_intact());
+                                    self.fetch_history(id, sid, history, from).await?
+                                }
+                            };
+                            self.apply_history(id, &fetched)?;
                         }
                         None => remove(&self.layout.history(id))?,
                     }
@@ -1119,10 +1305,20 @@ impl Engine {
                 stamps.insert(META.to_owned(), now);
             }
         }
-        let history = if wrote_history {
+        if keep_ours {
+            stamps.remove(META);
+        }
+        let history = if wrote_history || keep_ours {
             match (&theirs.history, stamp(&self.layout.history(id))?) {
                 (Some(reference), Some(now)) => Some(HistoryStamp {
-                    stamp: now,
+                    stamp: if keep_ours {
+                        Stamp {
+                            len: reference.len,
+                            ..now
+                        }
+                    } else {
+                        now
+                    },
                     tail: tail_hash(&self.layout.history(id), reference.len)?,
                 }),
                 _ => None,

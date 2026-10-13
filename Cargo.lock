@@ -2965,6 +2965,7 @@ dependencies = [
  "mush-runtime",
  "mush-session",
  "mush-supervisor",
+ "mush-sync",
  "mush-tools",
  "mush-treesitter",
  "mush-tui",

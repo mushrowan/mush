@@ -15,8 +15,8 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::protocol::{
-    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Refusal, ReleaseRequest, now_ms,
-    valid_blob, valid_holder, valid_sid, valid_upload,
+    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, Refusal, ReleaseRequest,
+    now_ms, valid_blob, valid_holder, valid_sid, valid_upload,
 };
 
 const MAX_UPLOAD: u64 = 512 << 20;
@@ -96,6 +96,7 @@ pub fn router(config: ServerConfig) -> std::io::Result<Router> {
     let shared = Arc::new(Shared::open(config)?);
     Ok(Router::new()
         .route("/v1/changes", get(changes))
+        .route("/v1/leases", get(leases))
         .route("/v1/sessions/{sid}", get(head))
         .route("/v1/sessions/{sid}/chunks/{generation}/{seq}", get(chunk))
         .route(
@@ -283,6 +284,20 @@ async fn changes(
             _ => return Json(changes),
         }
     }
+}
+
+async fn leases(State(shared): State<Arc<Shared>>) -> Json<Leases> {
+    let now = now_ms();
+    let inner = shared.inner.lock().await;
+    let held = inner
+        .heads
+        .values()
+        .filter_map(|head| {
+            let lease = head.lease.as_ref().filter(|lease| lease.active(now))?;
+            Some((head.sid.clone(), lease.clone()))
+        })
+        .collect();
+    Json(Leases { now, held })
 }
 
 async fn head(

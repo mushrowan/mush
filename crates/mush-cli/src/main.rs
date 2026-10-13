@@ -406,6 +406,10 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    Sync {
+        #[command(subcommand)]
+        command: Option<mush_cli::sync::SyncCommand>,
+    },
     Config,
 }
 
@@ -453,6 +457,15 @@ async fn run() -> Result<()> {
     let command = cli.command.take();
     if let Some(Command::Control(args)) = command {
         return mush_cli::control::run(args).await;
+    }
+    if let Some(Command::Sync {
+        command: Some(sync),
+    }) = &command
+        && sync.runs_as_service()
+    {
+        mush_cli::sync::log_to_stderr();
+        let cfg = config::load_config_with(&cli.option)?;
+        return mush_cli::sync::run(Some(sync.clone()), &cfg.sync).await;
     }
     let cfg = config::load_config_with(&cli.option)?;
     let (_log_guards, log_buffer) = logging::init_logging(cfg.log_filter.as_deref(), cli.trace);
@@ -507,6 +520,7 @@ async fn run() -> Result<()> {
             all,
             apply,
         } => commands::slim_sessions(session.as_deref(), all, apply),
+        Command::Sync { command } => mush_cli::sync::run(command, &cfg.sync).await,
         Command::Config => commands::open_config(),
     }
 }
@@ -559,29 +573,74 @@ fn print_failure(message: String) -> color_eyre::Report {
     headless::PrintExit { code: 1, message }.into()
 }
 
-fn print_session(
+async fn print_session(
     cli: &Cli,
     store: &SessionStore,
     cwd: &std::path::Path,
     cfg: &config::Config,
-) -> Result<Session> {
-    Ok(match cli.session_target()? {
-        SessionTarget::Resume(id) => {
-            let meta = store.resolve(&id)?;
-            store.load(&meta.id)?
-        }
+) -> Result<Stored> {
+    let target = cli.session_target()?;
+    if matches!(target, SessionTarget::Pick) {
+        return Err(eyre!("--resume without an id needs the tui"));
+    }
+    let cwd_str = cwd.display().to_string();
+    open_stored(store, &target, &cwd_str, &cfg.sync, cli.no_session, || {
+        let model_id = match cli.model.clone() {
+            Some(model) => model,
+            None => setup::default_model_id(cfg, cwd),
+        };
+        Session::new(&model_id, &cwd_str)
+    })
+    .await
+}
+
+struct Stored {
+    session: Session,
+    lease: Option<mush_session::SessionLease>,
+    remote: Option<mush_sync::Checkout>,
+}
+
+async fn open_stored(
+    store: &SessionStore,
+    target: &SessionTarget,
+    cwd: &str,
+    sync: &config::SyncConfig,
+    no_session: bool,
+    fresh: impl FnOnce() -> Session,
+) -> Result<Stored> {
+    let (id, prepared) = match target {
+        SessionTarget::Resume(id) => match store.resolve(id) {
+            Ok(meta) => (meta.id, None),
+            Err(mush_session::StoreError::NotFound(missing)) if sync.settings().is_some() => {
+                return Err(eyre!(
+                    "session not found: {missing}. mush sync fetches sessions from your other machines"
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        },
         SessionTarget::Fork(id) => {
-            let meta = store.resolve(&id)?;
-            fork_session(store.load(&meta.id)?, &cwd.display().to_string())
+            let meta = store.resolve(id)?;
+            let session = fork_session(store.load(&meta.id)?, cwd);
+            (session.meta.id.clone(), Some(session))
         }
-        SessionTarget::Pick => return Err(eyre!("--resume without an id needs the tui")),
-        SessionTarget::New => {
-            let model_id = match cli.model.clone() {
-                Some(model) => model,
-                None => setup::default_model_id(cfg, cwd),
-            };
-            Session::new(&model_id, &cwd.display().to_string())
+        SessionTarget::New | SessionTarget::Pick => {
+            let session = fresh();
+            (session.meta.id.clone(), Some(session))
         }
+    };
+    let lease = (!no_session).then(|| store.acquire(&id)).transpose()?;
+    let remote = match &lease {
+        Some(lease) => mush_cli::sync::checkout(sync, lease).await?,
+        None => None,
+    };
+    let session = match prepared {
+        Some(session) => session,
+        None => store.load(&id)?,
+    };
+    Ok(Stored {
+        session,
+        lease,
+        remote,
     })
 }
 
@@ -589,12 +648,11 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     let store = SessionStore::new(SessionStore::default_dir());
     let cwd = mush_tui::canonical_dir(&std::env::current_dir()?);
     let cfg = config::load_config_with(&cli.option)?;
-    let mut session = print_session(&cli, &store, &cwd, &cfg)?;
-    let _lease = if cli.no_session {
-        None
-    } else {
-        Some(store.acquire(&session.meta.id)?)
-    };
+    let Stored {
+        mut session,
+        lease: _lease,
+        remote,
+    } = print_session(&cli, &store, &cwd, &cfg).await?;
     if let Some(model) = &cli.model {
         session.meta.model_id = model.clone().into();
     }
@@ -798,6 +856,9 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
             "{}",
             Style::Dim.stderr(format_args!("session: {}", session.meta.id))
         );
+    }
+    if let Some(remote) = remote {
+        remote.finish().await;
     }
 
     listener.shutdown().await?;
@@ -1011,6 +1072,7 @@ struct OpenedSession {
     session: Session,
     lease: Option<mush_session::SessionLease>,
     saver: Option<SaverThread>,
+    remote: Option<mush_sync::Checkout>,
 }
 
 async fn daemon_mode(socket: &std::path::Path) -> Result<()> {
@@ -1082,6 +1144,9 @@ async fn worker_mode(
     if let Some(saver) = opened.saver {
         saver.finish();
     }
+    if let Some(remote) = opened.remote {
+        remote.finish().await;
+    }
     Ok(())
 }
 
@@ -1129,7 +1194,7 @@ async fn tui_mode(cli: Cli, log_buffer: logging::LogBuffer) -> Result<()> {
             let mut tui_config = client_config(&cli, &client, &log_buffer, None, None);
             tui_config.open_session_picker = matches!(target, SessionTarget::Pick);
             tui_config.worker_opener = Some(daemon::worker_opener(cli.worker_args()));
-            tui_config.agent_roster = Some(agents::roster());
+            tui_config.agent_roster = Some(agents::roster(client.cfg.sync.clone()));
             if connection.worker_build() != mush_daemon::build_id() {
                 tui_config.startup_notice = Some(format!(
                     "this worker is from another build of mush. mush stop {} and start again to pick up the new one",
@@ -1217,24 +1282,19 @@ async fn open_session(
 ) -> Result<OpenedSession> {
     let cwd_str = setup.client.cwd.display().to_string();
     let store = SessionStore::new(SessionStore::default_dir());
-    let mut session = match target {
-        SessionTarget::Resume(id) => {
-            let meta = store.resolve(id)?;
-            store.load(&meta.id)?
-        }
-        SessionTarget::Fork(id) => {
-            let meta = store.resolve(id)?;
-            fork_session(store.load(&meta.id)?, &cwd_str)
-        }
-        SessionTarget::New | SessionTarget::Pick => {
-            Session::new(setup.client.model.id.as_str(), &cwd_str)
-        }
-    };
-    let lease = if no_session {
-        None
-    } else {
-        Some(store.acquire(&session.meta.id)?)
-    };
+    let Stored {
+        mut session,
+        lease,
+        remote,
+    } = open_stored(
+        &store,
+        target,
+        &cwd_str,
+        &setup.client.cfg.sync,
+        no_session,
+        || Session::new(setup.client.model.id.as_str(), &cwd_str),
+    )
+    .await?;
     if !session.meta.lifecycle.is_live() {
         session.meta.lifecycle = mush_session::Lifecycle::Live;
         if lease.is_some() {
@@ -1248,6 +1308,7 @@ async fn open_session(
         session,
         lease,
         saver,
+        remote,
     })
 }
 

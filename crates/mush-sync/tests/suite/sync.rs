@@ -629,3 +629,89 @@ async fn a_session_that_failed_is_retried_after_the_cursor_moves_on() {
     assert_eq!(esme.texts(&id), ["first"]);
     assert_eq!(esme.texts(&other), ["moves the cursor"]);
 }
+
+fn copy_session(
+    from: &crate::harness::Machine,
+    to: &crate::harness::Machine,
+    id: &mush_session::SessionId,
+) {
+    let (source, target) = (from.store(), to.store());
+    std::fs::create_dir_all(to.data().join("sessions")).unwrap();
+    std::fs::copy(source.history_path(id), target.history_path(id)).unwrap();
+    std::fs::copy(source.session_path(id), target.session_path(id)).unwrap();
+}
+
+#[tokio::test]
+async fn hand_copied_sessions_join_sync_without_forking() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let older = dot.create("older on esme", &["one"]);
+    let newer = dot.create("newer on esme", &["one"]);
+    let same = dot.create("same everywhere", &["one"]);
+    for id in [&older, &newer, &same] {
+        copy_session(&dot, &esme, id);
+    }
+    dot.append(&older, "two from dot");
+    esme.append(&newer, "two from esme");
+
+    dot.sync().await;
+    let report = esme.sync().await;
+    assert!(report.forked.is_empty(), "{report:?}");
+    assert_eq!(esme.texts(&older), ["one", "two from dot"]);
+    assert_eq!(esme.texts(&newer), ["one", "two from esme"]);
+    assert_eq!(report.pushed, [newer.to_string()], "{report:?}");
+    dot.sync().await;
+    assert_eq!(dot.texts(&newer), ["one", "two from esme"]);
+    assert_eq!(dot.history(&older), esme.history(&older));
+    assert_eq!(dot.history(&newer), esme.history(&newer));
+    assert!(esme.sync().await.quiet());
+}
+
+#[tokio::test]
+async fn a_hand_copy_that_really_diverged_is_still_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("split", &["one"]);
+    copy_session(&dot, &esme, &id);
+    dot.append(&id, "dot went this way");
+    esme.append(&id, "esme went that way");
+    dot.sync().await;
+    let report = esme.sync().await;
+    assert_eq!(report.forked.len(), 1, "{report:?}");
+    let fork = mush_session::SessionId::from(report.forked[0].1.as_str());
+    assert_eq!(esme.texts(&id), ["one", "dot went this way"]);
+    assert_eq!(esme.texts(&fork), ["one", "esme went that way"]);
+}
+
+#[tokio::test]
+async fn when_only_the_titles_differ_the_newer_wins_and_the_other_is_kept_beside_it() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("first title", &["one"]);
+    copy_session(&dot, &esme, &id);
+    let store = esme.store();
+    let mut renamed = store.load(&id).unwrap();
+    renamed.meta.title = Some("renamed on esme".into());
+    renamed.meta.updated_at =
+        mush_ai::types::Timestamp::from_ms(renamed.meta.updated_at.as_ms() + 5_000);
+    store.save(&renamed).unwrap();
+
+    dot.sync().await;
+    let report = esme.sync().await;
+    assert!(report.forked.is_empty(), "{report:?}");
+    assert_eq!(esme.title(&id).as_deref(), Some("renamed on esme"));
+    dot.sync().await;
+    assert_eq!(dot.title(&id).as_deref(), Some("renamed on esme"));
+    let kept: Vec<_> = std::fs::read_dir(esme.data().join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("sync-conflict"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    let sidecar = std::fs::read_to_string(esme.data().join("sessions").join(&kept[0])).unwrap();
+    assert!(sidecar.contains("first title"));
+}
