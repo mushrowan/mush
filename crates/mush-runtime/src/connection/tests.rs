@@ -1344,9 +1344,29 @@ async fn tool_output_lines_arrive_as_events() {
     );
 }
 
+async fn side_answer(connection: &mut InProcessConnection) -> (String, Result<String, String>) {
+    match wait_for(connection, |event| {
+        matches!(event, ClientEvent::SideAnswer { .. })
+    })
+    .await
+    {
+        ClientEvent::SideAnswer { question, answer } => (question, answer),
+        other => panic!("expected a side answer, got {other:?}"),
+    }
+}
+
+fn tool_names(context: &mush_ai::registry::LlmContext) -> Vec<(String, String)> {
+    context
+        .tools
+        .iter()
+        .map(|tool| (tool.name.clone(), tool.description.clone()))
+        .collect()
+}
+
 #[tokio::test]
 async fn a_side_question_is_answered_without_touching_the_conversation() {
     let (mut connection, requests) = connection();
+    connection.runtime.system_prompt = Some("base prompt".into());
     connection
         .send(ClientCommand::Prompt {
             text: "hello".into(),
@@ -1361,25 +1381,73 @@ async fn a_side_question_is_answered_without_touching_the_conversation() {
         .send(ClientCommand::SideQuestion("why slow?".into()))
         .await
         .unwrap();
-    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            match connection.next_event().await {
-                Some(ClientEvent::SideAnswer { question, answer }) => break (question, answer),
-                Some(_) => {}
-                None => panic!("closed"),
-            }
-        }
-    })
-    .await
-    .unwrap();
+    let answer = side_answer(&mut connection).await;
 
     assert_eq!(answer.0, "why slow?");
     assert_eq!(answer.1, Ok("hi back".into()));
     assert_eq!(connection.state().context_len, before);
     let asked = requests.lock().unwrap();
-    let last = &asked.last().unwrap().messages;
-    assert!(matches!(last.last(), Some(Message::User(user)) if user.text() == "why slow?"));
-    assert_eq!(last.len(), before + 1);
+    let (turn, side) = (&asked[0], &asked[1]);
+    assert_eq!(side.system_prompt.as_deref(), Some("base prompt"));
+    assert_eq!(side.system_prompt, turn.system_prompt);
+    assert!(!side.tools.is_empty());
+    assert_eq!(tool_names(side), tool_names(turn));
+    assert_eq!(side.messages[..turn.messages.len()], turn.messages[..]);
+    assert_eq!(side.messages.len(), before + 1);
+    assert!(
+        matches!(side.messages.last(), Some(Message::User(user)) if user.text().ends_with("why slow?"))
+    );
+}
+
+#[tokio::test]
+async fn a_side_question_during_a_tool_call_sees_the_call_still_running() {
+    let (mut connection, requests) = crate::testing::hanging_tool_connection();
+    connection
+        .send(ClientCommand::Prompt {
+            text: "start".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    wait_for(&mut connection, |event| {
+        matches!(
+            event,
+            ClientEvent::Agent {
+                event: AgentEvent::ToolExecStart { .. },
+                ..
+            }
+        )
+    })
+    .await;
+
+    connection
+        .send(ClientCommand::SideQuestion("what's going on?".into()))
+        .await
+        .unwrap();
+    let (_, answer) = side_answer(&mut connection).await;
+
+    assert_eq!(answer, Ok("done".into()));
+    let asked = requests.lock().unwrap();
+    let side = asked.last().unwrap();
+    assert_eq!(tool_names(side), tool_names(&asked[0]));
+    assert!(
+        matches!(
+            &side.messages[..],
+            [
+                Message::User(_),
+                Message::Assistant(_),
+                Message::ToolResult(running),
+                Message::User(question),
+            ] if running.outcome.is_success()
+                && running.content.iter().any(|part| matches!(
+                    part,
+                    mush_ai::types::ToolResultContentPart::Text(text) if text.text.starts_with("still running")
+                ))
+                && question.text().ends_with("what's going on?")
+        ),
+        "{:?}",
+        side.messages
+    );
 }
 
 #[tokio::test]

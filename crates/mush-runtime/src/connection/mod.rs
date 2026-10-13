@@ -26,7 +26,7 @@ use crate::session::{
     PendingConfirmation, PendingImage, PendingPrompt, SessionRuntime, StreamGeneration,
 };
 use crate::turn::{
-    TurnConfig, TurnDeps, TurnRequest, build_user_content, resolve_auth_for_model,
+    TurnConfig, TurnDeps, TurnRequest, aligned_tools, build_user_content, resolve_auth_for_model,
     resolve_auth_into_options,
 };
 
@@ -991,21 +991,21 @@ impl InProcessConnection {
     }
 
     fn ask_side_question(&mut self, question: String) {
+        let model = self.runtime.model(&self.config.default_model);
+        let cwd = self.injections.cwd.clone().unwrap_or_default();
+        let tools = aligned_tools(&self.tools, &model, &self.config, cwd);
         let context = crate::side_question::side_question_context(
-            self.runtime.system_prompt.as_deref(),
+            self.runtime.live_context(&tools, &model),
             self.runtime.conversation.context(),
             &question,
         );
         let registry = self.registry.clone();
-        let model = self.runtime.model(&self.config.default_model);
-        let options = self.config.options.clone();
+        let options = self.runtime.call_options(&self.config);
         let keys = self.config.provider_api_keys.clone();
         let account = self.runtime.account_for(&model);
         let task = tokio::spawn(async move {
             let options = resolve_auth_into_options(&model, options, &keys, account).await;
-            mush_ai::oneshot::collect_text(&registry, &model, &context, &options)
-                .await
-                .map_err(|error| error.to_string())
+            crate::side_question::answer(&registry, &model, context, &options).await
         });
         self.side_questions.push((question, task));
     }

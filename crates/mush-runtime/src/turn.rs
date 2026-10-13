@@ -206,6 +206,22 @@ impl SessionRuntime {
         }
     }
 
+    #[must_use]
+    pub fn call_options(&self, config: &TurnConfig) -> StreamOptions {
+        let mut options = config.options.clone();
+        options.session_id = Some(self.session_id.clone());
+        options.thinking = Some(self.thinking_level.clone());
+        options
+    }
+
+    #[must_use]
+    pub fn live_context(&self, aligned_tools: &ToolRegistry, model: &Model) -> LiveContext {
+        LiveContext {
+            system_prompt: self.system_prompt.clone(),
+            tools: mush_agent::tool_definitions(aligned_tools, model.api),
+        }
+    }
+
     async fn resolved_options(
         &self,
         model: &Model,
@@ -257,7 +273,6 @@ impl SessionRuntime {
                 model.input.contains(&mush_ai::types::InputModality::Image),
             );
         }
-        let thinking_level = self.thinking_level.clone();
         let context_tokens = self.context_tokens;
         let TurnDeps {
             ref config,
@@ -279,10 +294,7 @@ impl SessionRuntime {
             Arc::new(std::sync::atomic::AtomicU64::new(context_tokens.get()));
         let cwd = injections.cwd.clone().unwrap_or_default();
         let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
-        let live = Some(LiveContext {
-            system_prompt: self.system_prompt.clone(),
-            tools: mush_agent::tool_definitions(&tool_registry, model.api),
-        });
+        let live = Some(self.live_context(&tool_registry, &model));
         let transform = build_context_transform(
             target,
             config.auto_compact,
@@ -301,12 +313,10 @@ impl SessionRuntime {
         let follow_up = build_steering_callback(steering_queue.clone());
         let (confirm_req_rx, confirm) = build_confirm_callback(config.confirm_tools);
 
-        let mut call_options = config.options.clone();
-        call_options.session_id = Some(self.session_id.clone());
+        let mut call_options = self.call_options(config);
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.oauth_account = oauth_account;
-        call_options.thinking = Some(thinking_level);
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let generation = self.turns.register_active(
