@@ -139,9 +139,21 @@ fn a_backed_up_harness_adds_its_entries_without_rolling_back_newer_ones() {
         .unwrap();
     state.save(&global).unwrap();
 
+    std::fs::copy(
+        backup.join("harness/harness_state.json"),
+        backup.join("harness_state.json"),
+    )
+    .unwrap();
     let report =
         mush_sync::import::import(&Layout::new(&here.path().join("data")), &backup).unwrap();
     assert!(report.harness);
+    assert!(report.added.is_empty(), "{report:?}");
+    assert!(
+        !here
+            .path()
+            .join("data/sessions/harness_state.json")
+            .exists()
+    );
     let merged = State::load(&global, Scope::Global);
     let memories: Vec<(String, String)> = merged
         .list(Some(Kind::Memory))

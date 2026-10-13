@@ -273,6 +273,7 @@ fn delta(local: &Local, state: Option<&SessionState>, theirs: Option<&Manifest>)
     changes
 }
 
+#[derive(Default)]
 struct Feed {
     entries: HashMap<String, RemoteEntry>,
     unreadable: Vec<(Head, String)>,
@@ -295,12 +296,15 @@ enum Pushed {
     Locked(Lease),
 }
 
+pub type Progress = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
 pub struct Engine {
     layout: Layout,
     keys: Arc<Keys>,
     remote: Remote,
     machine: String,
     limits: Limits,
+    progress: Option<Progress>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -333,7 +337,14 @@ impl Engine {
             remote,
             machine,
             limits,
+            progress: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_progress(mut self, progress: Progress) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     #[must_use]
@@ -380,7 +391,10 @@ impl Engine {
         let Feed {
             entries: feed,
             unreadable,
-        } = self.feed(&mut cursor).await?;
+        } = match direction {
+            Direction::Both => self.feed(&mut cursor).await?,
+            Direction::PushOnly => Feed::default(),
+        };
         let mut report = Report::default();
         if !unreadable.is_empty() {
             let mut known: HashMap<String, String> = HashMap::new();
@@ -419,6 +433,9 @@ impl Engine {
         while let Some(id) = queue.pop_front() {
             if !seen.insert(id.clone()) {
                 continue;
+            }
+            if let Some(progress) = &self.progress {
+                progress(seen.len(), seen.len() + queue.len());
             }
             let fed = feed.get(&id).cloned();
             let version = fed.as_ref().map(|entry| entry.head.version);

@@ -211,7 +211,20 @@ fn print_report(report: &Report) {
 }
 
 async fn once(sync: &SyncConfig) -> Result<()> {
-    let engine = engine(sync)?;
+    let settings = sync.settings().ok_or_else(off)?;
+    let engine = if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        settings.engine_with_progress(Arc::new(|done, total| {
+            if total > 20 {
+                eprint!("\r{done}/{total} sessions");
+                if done == total {
+                    eprintln!();
+                }
+            }
+        }))
+    } else {
+        settings.engine()
+    }
+    .map_err(|error| eyre!("{error}"))?;
     let report = engine
         .pass(Scope::All, Direction::Both, None, Duration::from_secs(120))
         .await

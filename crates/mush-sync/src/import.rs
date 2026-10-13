@@ -117,7 +117,8 @@ fn sessions_in(source: &Path) -> std::io::Result<(PathBuf, Vec<String>)> {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
             let id = name.strip_suffix(".json")?;
-            valid_session(id).then(|| id.to_owned())
+            let meta = mush_session::load_meta(&entry.path()).ok()?;
+            (valid_session(id) && meta.id.as_str() == id).then(|| id.to_owned())
         })
         .collect();
     ids.sort();

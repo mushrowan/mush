@@ -10,6 +10,7 @@ use crate::remote::Claimed;
 const OPEN_PATIENCE: Duration = Duration::from_secs(20);
 const RENEW_PATIENCE: Duration = Duration::from_secs(1);
 const FINISH_PATIENCE: Duration = Duration::from_secs(30);
+const PUSH_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckoutError {
@@ -106,19 +107,23 @@ async fn renew(
     mut stopped: tokio::sync::oneshot::Receiver<()>,
 ) {
     let sid = engine.keys().sid(&session);
+    let mut renewed = tokio::time::Instant::now();
     loop {
         tokio::select! {
             _ = &mut stopped => return,
-            () = tokio::time::sleep(ttl / 3) => {}
+            () = tokio::time::sleep(PUSH_EVERY) => {}
         }
-        match engine.remote().claim(&sid, &request).await {
-            Ok(Claimed::Granted(_)) => {}
-            Ok(Claimed::Held { lease, .. }) => tracing::warn!(
-                session,
-                holder = lease.holder,
-                "another machine took this session over, what happens here from now on is kept as a fork"
-            ),
-            Err(error) => tracing::debug!(%error, "could not renew the session lease"),
+        if renewed.elapsed() >= ttl / 3 {
+            renewed = tokio::time::Instant::now();
+            match engine.remote().claim(&sid, &request).await {
+                Ok(Claimed::Granted(_)) => {}
+                Ok(Claimed::Held { lease, .. }) => tracing::warn!(
+                    session,
+                    holder = lease.holder,
+                    "another machine took this session over, what happens here from now on is kept as a fork"
+                ),
+                Err(error) => tracing::debug!(%error, "could not renew the session lease"),
+            }
         }
         if let Err(error) = engine
             .pass(

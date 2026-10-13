@@ -30,18 +30,33 @@ pub enum SetupError {
 
 impl Settings {
     pub fn engine(&self) -> Result<Arc<Engine>, SetupError> {
+        self.build(None)
+    }
+
+    pub fn engine_with_progress(
+        &self,
+        progress: crate::engine::Progress,
+    ) -> Result<Arc<Engine>, SetupError> {
+        self.build(Some(progress))
+    }
+
+    fn build(&self, progress: Option<crate::engine::Progress>) -> Result<Arc<Engine>, SetupError> {
         if !crate::protocol::valid_holder(&self.machine) {
             return Err(SetupError::Machine(self.machine.clone()));
         }
         let keys = Keys::load(&self.key_file)?;
         let remote = Remote::new(&self.server, keys.token(), self.connect_timeout)?;
-        Ok(Arc::new(Engine::new(
+        let engine = Engine::new(
             Layout::new(&self.data_dir),
             Arc::new(keys),
             remote,
             self.machine.clone(),
             self.limits,
-        )))
+        );
+        Ok(Arc::new(match progress {
+            Some(progress) => engine.with_progress(progress),
+            None => engine,
+        }))
     }
 }
 
