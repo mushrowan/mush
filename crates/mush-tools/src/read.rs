@@ -328,6 +328,7 @@ impl AgentTool for ReadTool {
         };
 
         let path = resolve_path(&self.cwd, &args.path);
+        let path = mush_agent::truncation::saved_output_here(&path).unwrap_or(path);
         let json_output = args.output.is_json();
         let max_image_bytes = self.max_image_bytes;
         let ledger = self.ledger.clone();

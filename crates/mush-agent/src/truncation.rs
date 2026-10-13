@@ -21,6 +21,28 @@ fn output_dir() -> PathBuf {
     base.join("tool-output")
 }
 
+#[must_use]
+pub fn saved_output_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".txt") else {
+        return false;
+    };
+    let digits = stem
+        .strip_prefix("tool_")
+        .or_else(|| stem.strip_prefix("rejected_"))
+        .unwrap_or_default();
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+#[must_use]
+pub fn saved_output_here(path: &std::path::Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    if path.exists() || path.parent()?.file_name()? != "tool-output" || !saved_output_name(name) {
+        return None;
+    }
+    let here = output_dir().join(name);
+    here.is_file().then_some(here)
+}
+
 fn save_full_output(content: &str) -> Option<PathBuf> {
     save_to_output_dir("tool", content)
 }
@@ -385,6 +407,32 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn a_saved_output_path_written_on_another_machine_resolves_here() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MUSH_DATA_DIR", tmp.path());
+        }
+        let saved = save_full_output("synced from dot").unwrap();
+        let name = saved.file_name().unwrap().to_str().unwrap().to_owned();
+        let elsewhere =
+            std::path::Path::new("/home/nobody-here/.local/share/mush/tool-output").join(&name);
+        assert_eq!(saved_output_here(&elsewhere), Some(saved.clone()));
+        assert_eq!(saved_output_here(&saved), None);
+        assert_eq!(
+            saved_output_here(std::path::Path::new(
+                "/home/nobody-here/.local/share/mush/tool-output/tool_1.txt"
+            )),
+            None
+        );
+        assert_eq!(
+            saved_output_here(&std::path::Path::new("/home/nobody-here/elsewhere").join(&name)),
+            None
+        );
+        assert!(!saved_output_name("notes.txt"));
+        assert!(saved_output_name("rejected_17.txt"));
     }
 
     #[test]
