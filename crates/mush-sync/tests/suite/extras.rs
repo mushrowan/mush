@@ -176,6 +176,7 @@ async fn every_machine_reports_its_sync_to_the_server_and_keeps_a_local_status()
     assert!(esme_report.rev > 0);
     assert_eq!(esme_report.sessions, 1);
     assert_eq!(esme_report.failed, 0);
+    assert_eq!(dot.engine.report_error(&machines.machines[1]), None);
 
     let status = LocalStatus::load(esme.engine.layout());
     assert!(status.last_ok_ms.is_some());
@@ -255,4 +256,40 @@ async fn half_written_files_an_interrupted_sync_left_are_cleared_once_stale() {
     assert!(!stale.exists());
     assert!(!stale_artifact.exists());
     assert!(fresh.exists());
+}
+
+#[tokio::test]
+async fn a_machines_sync_errors_reach_the_others_sealed() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("secret-title-marker", &["hello"]);
+    dot.sync().await;
+    let chunk = crate::harness::files_under(root.path())
+        .into_iter()
+        .find(|path| path.to_string_lossy().contains("/chunks/"))
+        .unwrap();
+    let mut bytes = std::fs::read(&chunk).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x55;
+    std::fs::write(&chunk, bytes).unwrap();
+    let report = esme.sync().await;
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+
+    let machines = dot
+        .engine
+        .remote()
+        .machines(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let esme_seen = machines
+        .machines
+        .iter()
+        .find(|machine| machine.name == "esme")
+        .unwrap();
+    assert_eq!(esme_seen.report.failed, 1);
+    let error = dot.engine.report_error(esme_seen).unwrap();
+    assert!(error.contains(id.as_str()), "{error}");
+    let stored = std::fs::read_to_string(root.path().join("machines/esme.json")).unwrap();
+    assert!(!stored.contains(id.as_str()), "{stored}");
 }

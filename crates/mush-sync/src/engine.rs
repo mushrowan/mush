@@ -531,7 +531,15 @@ impl Engine {
             waiting: status.waiting.len() as u64,
             failed: status.failed.len() as u64,
             review: review as u64,
-            last_error: status.last_error.clone(),
+            sealed_error: status.last_error.as_deref().and_then(|error| {
+                self.keys
+                    .seal(
+                        &crate::protocol::report_aad(&self.machine),
+                        error.as_bytes(),
+                    )
+                    .ok()
+                    .map(|sealed| STANDARD.encode(sealed))
+            }),
         };
         if let Err(error) = self.remote.report(&self.machine, &report).await {
             tracing::debug!(%error, "the sync server did not take this machine's report");
@@ -671,6 +679,18 @@ impl Engine {
             }
         }
         Ok(summary)
+    }
+
+    #[must_use]
+    pub fn report_error(&self, machine: &crate::protocol::Machine) -> Option<String> {
+        let sealed = STANDARD
+            .decode(machine.report.sealed_error.as_deref()?)
+            .ok()?;
+        let plain = self
+            .keys
+            .open(&crate::protocol::report_aad(&machine.name), &sealed)
+            .ok()?;
+        String::from_utf8(plain).ok()
     }
 
     pub fn queue(&self) -> std::io::Result<Queue> {

@@ -76,8 +76,8 @@ pub struct MachineReport {
     pub failed: u64,
     #[serde(default)]
     pub review: u64,
-    #[serde(default)]
-    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +259,11 @@ pub fn chunk_aad(sid: &str, generation: u64, seq: u64) -> Vec<u8> {
 #[must_use]
 pub fn blob_aad(sid: &str, blob: &str) -> Vec<u8> {
     format!("mush-sync blob {sid} {blob}").into_bytes()
+}
+
+#[must_use]
+pub fn report_aad(machine: &str) -> Vec<u8> {
+    format!("mush-sync machine report {machine}").into_bytes()
 }
 
 #[must_use]

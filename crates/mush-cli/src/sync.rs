@@ -376,10 +376,8 @@ async fn status(sync: &SyncConfig) -> Result<()> {
                 } else {
                     ""
                 };
-                let problem = machine
-                    .report
-                    .last_error
-                    .as_deref()
+                let problem = engine
+                    .report_error(machine)
                     .map(|error| format!(", {}", Style::Yellow.stdout(error)))
                     .unwrap_or_default();
                 println!(
