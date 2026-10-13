@@ -345,6 +345,7 @@ fn apply_command_event(
             });
         }
         ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
+        ClientEvent::SyncChanged(state) => session.app.note_sync(state),
         ClientEvent::Refined(result) => {
             session.app.status = None;
             session

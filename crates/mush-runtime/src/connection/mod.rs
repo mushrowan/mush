@@ -147,6 +147,7 @@ pub enum ClientEvent {
     PausedChanged(Option<mush_session::Pause>),
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
     Refined(Box<mush_session::harness::RefinementResult>),
+    SyncChanged(mush_session::SyncState),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -178,6 +179,8 @@ pub struct ConnectionState {
     pub last_request: Option<mush_ai::request_snapshot::RequestDigest>,
     #[serde(default)]
     pub cwd: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub sync: mush_session::SyncState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -265,6 +268,9 @@ pub struct InProcessConnection {
     autonomous: Option<Arc<Autonomous>>,
     gate_task: Option<tokio::task::JoinHandle<Vec<crate::autonomous::GateRun>>>,
     host_commands: Option<Arc<HostCommands>>,
+    sync: Option<tokio::sync::watch::Receiver<mush_session::SyncState>>,
+    sync_state: mush_session::SyncState,
+    relinquish: bool,
     closed: bool,
 }
 
@@ -345,12 +351,35 @@ impl InProcessConnection {
             autonomous: None,
             gate_task: None,
             host_commands: None,
+            sync: None,
+            sync_state: mush_session::SyncState::default(),
+            relinquish: false,
             closed: false,
         }
     }
 
     pub fn set_host_commands(&mut self, commands: Option<Arc<HostCommands>>) {
         self.host_commands = commands;
+    }
+
+    pub fn follow_sync(&mut self, receiver: tokio::sync::watch::Receiver<mush_session::SyncState>) {
+        self.sync = Some(receiver);
+    }
+
+    fn try_poll_sync(&mut self) -> Option<ClientEvent> {
+        let receiver = self.sync.as_mut()?;
+        if !receiver.has_changed().unwrap_or(false) {
+            return None;
+        }
+        let next = receiver.borrow_and_update().clone();
+        if next == self.sync_state {
+            return None;
+        }
+        if next.read_only() && !self.sync_state.read_only() {
+            self.relinquish = true;
+        }
+        self.sync_state = next.clone();
+        Some(ClientEvent::SyncChanged(next))
     }
 
     async fn run_host_commands(&mut self) {
@@ -819,6 +848,14 @@ impl InProcessConnection {
     }
 
     pub async fn start_pending(&mut self) -> bool {
+        if std::mem::take(&mut self.relinquish) && self.turn_active() {
+            let events = self.abort().await;
+            self.queued.extend(events);
+        }
+        if self.sync_state.read_only() {
+            self.answer_observers();
+            return false;
+        }
         if self.runtime.paused.is_some() {
             self.answer_observers();
             self.runtime.save_if_dirty();
@@ -899,6 +936,7 @@ impl InProcessConnection {
     fn poll_background(&mut self) -> Option<ClientEvent> {
         self.queued
             .pop_front()
+            .or_else(|| self.try_poll_sync())
             .or_else(|| self.try_poll_confirm())
             .or_else(|| self.try_poll_title())
             .or_else(|| self.try_poll_kernel())
@@ -1452,6 +1490,41 @@ impl InProcessConnection {
     }
 }
 
+fn changes_the_session(command: &ClientCommand) -> bool {
+    match command {
+        ClientCommand::Prompt { .. }
+        | ClientCommand::QueuePrompt { .. }
+        | ClientCommand::Steer { .. }
+        | ClientCommand::AbortAndSendQueued
+        | ClientCommand::SetModel(_)
+        | ClientCommand::SetSubagentModel(_)
+        | ClientCommand::SetAccount(_)
+        | ClientCommand::SetPaused(_)
+        | ClientCommand::SetThinking(_)
+        | ClientCommand::SetRlmMaxDepth(_)
+        | ClientCommand::SetSystemPrompt(_)
+        | ClientCommand::ReloadSystemPrompt
+        | ClientCommand::Session(_)
+        | ClientCommand::SummariseAndNavigate { .. }
+        | ClientCommand::Refine(_)
+        | ClientCommand::Compact { .. }
+        | ClientCommand::CompactionRetry
+        | ClientCommand::CompactionFallback
+        | ClientCommand::Goal(_)
+        | ClientCommand::Schedule(_)
+        | ClientCommand::Autonomous(_) => true,
+        ClientCommand::RetractSteer { .. }
+        | ClientCommand::Abort
+        | ClientCommand::ConfirmTool { .. }
+        | ClientCommand::SetStreamOptions(_)
+        | ClientCommand::SetCompactionModel(_)
+        | ClientCommand::AnswerKernelBusy(_)
+        | ClientCommand::SideQuestion(_)
+        | ClientCommand::StopChild { .. }
+        | ClientCommand::Shutdown => false,
+    }
+}
+
 #[async_trait::async_trait]
 impl AgentConnection for InProcessConnection {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -1461,6 +1534,14 @@ impl AgentConnection for InProcessConnection {
     async fn send(&mut self, command: ClientCommand) -> Result<Vec<ClientEvent>, ConnectionError> {
         if self.closed {
             return Err(ConnectionError::Closed);
+        }
+        if let Some(holder) = &self.sync_state.taken_by
+            && changes_the_session(&command)
+        {
+            return Err(ConnectionError::Refused(format!(
+                "this session is open on {holder} now, so it is read-only here. close this window and carry on there, or run `mush sync take {}` to bring it back",
+                self.runtime.session_id
+            )));
         }
         let before = self.queued.len();
         match command {
@@ -1652,6 +1733,7 @@ impl AgentConnection for InProcessConnection {
             controlled: self.runtime.control.is_some(),
             last_request: mush_ai::request_snapshot::last_request(self.runtime.session_id.as_str()),
             cwd: self.injections.cwd.clone(),
+            sync: self.sync_state.clone(),
         }
     }
 

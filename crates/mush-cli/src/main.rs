@@ -1119,9 +1119,12 @@ async fn worker_mode(
         Style::Dim.stderr(format_args!("worker listening on {}", socket.display()))
     );
     let mush_runtime::HostedWorker {
-        connection,
+        mut connection,
         ipc_listener,
     } = mush_runtime::host_worker(worker, &setup.tools, &setup.registry)?;
+    if let Some(remote) = &opened.remote {
+        connection.follow_sync(remote.state());
+    }
     let shutdown = tokio_util::sync::CancellationToken::new();
     tokio::spawn({
         let shutdown = shutdown.clone();

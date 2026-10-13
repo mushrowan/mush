@@ -42,6 +42,21 @@ impl Lifecycle {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+impl SyncState {
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        self.taken_by.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pause {
     pub at: Timestamp,

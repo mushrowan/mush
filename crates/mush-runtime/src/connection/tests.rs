@@ -2457,6 +2457,75 @@ async fn a_paused_agent_holds_a_queued_prompt_until_it_resumes() {
 }
 
 #[tokio::test]
+async fn a_session_taken_over_elsewhere_stops_its_turn_and_refuses_new_work() {
+    let (mut connection, _requests) = connection();
+    let (sync, receiver) = tokio::sync::watch::channel(mush_session::SyncState::default());
+    connection.follow_sync(receiver);
+    connection
+        .send(ClientCommand::Prompt {
+            text: "go".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(connection.turn_active());
+
+    sync.send_replace(mush_session::SyncState {
+        taken_by: Some("esme".into()),
+        problem: None,
+    });
+    let noticed = connection.try_next_event();
+    assert!(
+        matches!(&noticed, Some(ClientEvent::SyncChanged(state)) if state.taken_by.as_deref() == Some("esme")),
+        "{noticed:?}"
+    );
+    assert!(!connection.start_pending().await);
+    assert!(!connection.turn_active());
+    assert_eq!(connection.state().sync.taken_by.as_deref(), Some("esme"));
+
+    let refused = connection
+        .send(ClientCommand::Prompt {
+            text: "more".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("read-only"), "{refused}");
+    assert!(
+        connection
+            .send(ClientCommand::SetModel("other".into()))
+            .await
+            .is_err()
+    );
+    assert!(connection.send(ClientCommand::Abort).await.is_ok());
+    assert!(!connection.turn_active());
+}
+
+#[tokio::test]
+async fn a_sync_problem_reaches_the_client_without_stopping_work() {
+    let (mut connection, _requests) = connection();
+    let (sync, receiver) = tokio::sync::watch::channel(mush_session::SyncState::default());
+    connection.follow_sync(receiver);
+    sync.send_replace(mush_session::SyncState {
+        taken_by: None,
+        problem: Some("the sync server is unreachable".into()),
+    });
+    assert!(matches!(
+        connection.try_next_event(),
+        Some(ClientEvent::SyncChanged(state)) if state.problem.is_some()
+    ));
+    assert!(connection.try_next_event().is_none());
+    connection
+        .send(ClientCommand::Prompt {
+            text: "still works".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(connection.turn_active());
+}
+
+#[tokio::test]
 async fn a_pause_reaches_the_client_and_a_prompt_lifts_it() {
     let (mut connection, _requests) = connection();
     let events = connection

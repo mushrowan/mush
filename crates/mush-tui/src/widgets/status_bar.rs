@@ -154,6 +154,15 @@ fn push_model_sections(b: &mut StatusSpansBuilder, app: &App) {
         b.push_section(Span::styled("paused", app.theme.tool_error));
     }
 
+    if let Some(holder) = &app.sync.taken_by {
+        b.push_section(Span::styled(
+            format!("read-only, open on {holder}"),
+            app.theme.tool_error,
+        ));
+    } else if app.sync.problem.is_some() {
+        b.push_section(Span::styled("sync failing", app.theme.tool_error));
+    }
+
     if let Some(subagent) = &app.subagent_model_id {
         b.push_section(Span::styled(
             format!("sub: {}", subagent.abbreviated()),
@@ -530,6 +539,39 @@ mod tests {
     use crate::test_support::buffer_to_string;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn status_bar_says_when_sync_fails_and_when_the_session_moved_away() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.note_sync(mush_session::SyncState {
+            taken_by: None,
+            problem: Some("the sync server is unreachable".into()),
+        });
+        let content = buffer_to_string(&render_status(&app, 120, 1));
+        assert!(content.contains("sync failing"), "{content}");
+        assert!(app.messages.is_empty());
+
+        app.render_state.status_bar_cache.borrow_mut().take();
+        app.note_sync(mush_session::SyncState {
+            taken_by: Some("esme".into()),
+            problem: None,
+        });
+        let content = buffer_to_string(&render_status(&app, 120, 1));
+        assert!(content.contains("read-only, open on esme"), "{content}");
+        assert_eq!(app.messages.len(), 1);
+        assert!(
+            app.messages[0]
+                .content
+                .contains("esme took this session over"),
+            "{}",
+            app.messages[0].content
+        );
+        app.note_sync(mush_session::SyncState {
+            taken_by: Some("esme".into()),
+            problem: None,
+        });
+        assert_eq!(app.messages.len(), 1);
+    }
 
     #[test]
     fn status_bar_shows_model() {

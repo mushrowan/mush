@@ -138,6 +138,7 @@ pub struct App {
     pub subagent_model_id: Option<ModelId>,
     pub accounts: mush_ai::types::SessionAccounts,
     pub paused: Option<mush_session::Pause>,
+    pub sync: mush_session::SyncState,
     pub session_title: Option<String>,
     pub detail: ChatDetail,
     pub children: Vec<mush_runtime::ChildSummary>,
@@ -204,6 +205,7 @@ impl App {
             subagent_model_id: None,
             accounts: mush_ai::types::SessionAccounts::default(),
             paused: None,
+            sync: mush_session::SyncState::default(),
             completion: CompletionState::default(),
             navigation: NavigationState::default(),
             render_state: RenderState::new(),
@@ -246,6 +248,22 @@ impl App {
             autonomous: None,
             last_request: None,
         }
+    }
+
+    pub fn note_sync(&mut self, state: mush_session::SyncState) {
+        if let Some(holder) = &state.taken_by
+            && self.sync.taken_by.is_none()
+        {
+            self.push_system_message(format!(
+                "{holder} took this session over. it is read-only here now: anything that was running stopped, and what it left behind is kept as a fork. close this window and carry on on {holder}, or run `mush sync take` here to bring it back"
+            ));
+        }
+        if state.problem != self.sync.problem
+            && let Some(problem) = &state.problem
+        {
+            self.status = Some(format!("sync: {problem}").into());
+        }
+        self.sync = state;
     }
 
     pub fn note_autonomous(&mut self, status: mush_runtime::AutonomousStatus) {

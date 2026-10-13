@@ -441,6 +441,7 @@ fn seed_from_state(
         .map(mush_ai::types::ModelId::from);
     app.accounts = state.accounts.clone();
     app.paused = state.paused.clone();
+    app.sync = state.sync.clone();
     if state.turn_active {
         app.start_streaming();
     }

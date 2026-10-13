@@ -183,6 +183,7 @@ mod tests {
             controlled: false,
             last_request: None,
             cwd: None,
+            sync: Default::default(),
         }
     }
 
