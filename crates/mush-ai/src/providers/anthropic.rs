@@ -9,7 +9,9 @@ use super::sse::safe_preview_text;
 use super::{MessageVisitor, maybe_trim_tool_output, walk_messages};
 use crate::env::anthropic_api_key;
 use crate::ids::{lower_hex, random_bytes, random_uuid_v4};
-use crate::registry::{ApiProvider, EventStream, LlmContext, ProviderError, ToolDefinition};
+use crate::registry::{
+    ApiProvider, EventStream, LlmContext, ProviderError, STREAM_ENDED_EARLY, ToolDefinition,
+};
 use crate::stream::StreamEvent;
 use crate::types::*;
 
@@ -1392,6 +1394,16 @@ enum SseEvent {
     Error { error: ErrorData },
 }
 
+impl SseEvent {
+    fn ends_message(&self) -> bool {
+        match self {
+            Self::MessageDelta { delta, .. } => delta.stop_reason.is_some(),
+            Self::MessageStop | Self::Error { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct MessageStartData {
     #[serde(default)]
@@ -1526,6 +1538,7 @@ struct AnthropicProcessor {
     blocks: Vec<AnthropicBlock>,
     is_oauth: bool,
     tools: Vec<ToolDefinition>,
+    ended: bool,
 }
 
 impl super::sse::SseProcessor for AnthropicProcessor {
@@ -1536,6 +1549,7 @@ impl super::sse::SseProcessor for AnthropicProcessor {
     ) -> super::sse::ProcessResult {
         match serde_json::from_str::<SseEvent>(&raw.data) {
             Ok(event) => {
+                self.ended |= event.ends_message();
                 let events =
                     process_sse_event(event, output, &mut self.blocks, self.is_oauth, &self.tools);
                 super::sse::ProcessResult::Events(events)
@@ -1544,7 +1558,12 @@ impl super::sse::SseProcessor for AnthropicProcessor {
         }
     }
 
-    fn finish(&mut self, _output: &mut AssistantMessage) {}
+    fn finish(&mut self, output: &mut AssistantMessage) {
+        if !self.ended {
+            output.stop_reason = StopReason::Error;
+            output.error_message = Some(STREAM_ENDED_EARLY.into());
+        }
+    }
 
     fn emit_start(&self) -> bool {
         false
@@ -1566,6 +1585,7 @@ fn parse_sse_stream(
         blocks: Vec::new(),
         is_oauth,
         tools,
+        ended: false,
     };
     super::sse::run_sse_stream(response, model, call_id, processor)
 }
@@ -3554,6 +3574,65 @@ mod tests {
             last.unwrap().request_id.as_deref(),
             Some("req_011CegE4MyDYb8hhpqGcgXTQ")
         );
+    }
+
+    async fn final_event(sse: String) -> StreamEvent {
+        use futures::StreamExt;
+        let http_resp = http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(bytes::Bytes::from(sse))
+            .unwrap();
+        let stream = parse_sse_stream(
+            reqwest::Response::from(http_resp),
+            &test_model(),
+            0,
+            true,
+            vec![],
+        );
+        stream
+            .collect::<Vec<_>>()
+            .await
+            .pop()
+            .expect("a final event")
+    }
+
+    fn sse_after_message_start(rest: &[&str]) -> String {
+        let start = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"id":"msg_01x","usage":{"input_tokens":1,"output_tokens":0}}}"#,
+            "\n\n",
+        );
+        std::iter::once(start).chain(rest.iter().copied()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_off_before_the_message_ends_is_an_early_end() {
+        let sse = sse_after_message_start(&["event: ping\ndata: {\"type\":\"ping\"}\n\n"]);
+        match final_event(sse).await {
+            StreamEvent::Done { reason, message } => {
+                assert_eq!(reason, StopReason::Error);
+                assert_eq!(message.error_message.as_deref(), Some(STREAM_ENDED_EARLY));
+            }
+            other => panic!("expected a final message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_end_turn_is_a_finished_reply() {
+        let sse = sse_after_message_start(&[
+            "event: message_delta\n",
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+            "\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+        match final_event(sse).await {
+            StreamEvent::Done { reason, message } => {
+                assert_eq!(reason, StopReason::Stop);
+                assert!(message.content.is_empty());
+                assert_eq!(message.error_message, None);
+            }
+            other => panic!("expected a final message, got {other:?}"),
+        }
     }
 
     #[test]
