@@ -469,6 +469,118 @@ async fn a_session_owned_by_a_worker_refuses_a_second_opener() {
 }
 
 #[tokio::test]
+async fn a_daemon_worker_holds_the_sync_lease_while_open_and_releases_it_when_stopped() {
+    let daemon = Daemon::start();
+    let config = daemon.dir.path().join("config/mush");
+    std::fs::create_dir_all(&config).unwrap();
+    let model = mush_ai::types::Model::builder()
+        .id("gpt-lease-fixture".into())
+        .name("fixture".into())
+        .provider(mush_ai::types::Provider::Custom("fixture".into()))
+        .api(mush_ai::types::Api::OpenaiResponses)
+        .base_url("http://127.0.0.1:9".into())
+        .context_window(mush_ai::types::TokenCount::new(100_000))
+        .max_output_tokens(mush_ai::types::TokenCount::new(64))
+        .build();
+    std::fs::write(
+        config.join("models.json"),
+        serde_json::to_vec(&[model]).unwrap(),
+    )
+    .unwrap();
+    let generated = daemon
+        .cli()
+        .args(["sync", "key", "generate"])
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+    let hash = daemon
+        .cli()
+        .args(["sync", "key", "token-hash"])
+        .output()
+        .unwrap();
+    let hash = String::from_utf8(hash.stdout).unwrap().trim().to_owned();
+    struct Killed(std::process::Child);
+    impl Drop for Killed {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut server = Killed(
+        daemon
+            .cli()
+            .args(["sync", "serve", "--listen", "127.0.0.1:0", "--root"])
+            .arg(daemon.dir.path().join("vault"))
+            .args(["--token-hash", &hash])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut announced = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(server.0.stderr.take().unwrap()),
+        &mut announced,
+    )
+    .unwrap();
+    let url = format!("http://{}", announced.trim().rsplit(' ').next().unwrap());
+    std::fs::write(
+        config.join("config.toml"),
+        format!(
+            "rlm = false\n[api_keys]\nfixture = 'fixture-key'\n[sync]\nserver = \"{url}\"\nmachine = \"dot\"\n"
+        ),
+    )
+    .unwrap();
+
+    let SupervisorReply::Worker { descriptor, .. } = daemon
+        .request(SupervisorRequest::Open {
+            target: OpenTarget::New,
+            args: ["--no-tools", "--model", "gpt-lease-fixture"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            cwd: daemon.dir.path().to_path_buf(),
+            env: env(daemon.dir.path()),
+        })
+        .await
+    else {
+        panic!("expected a worker")
+    };
+    let keys = mush_sync::Keys::load(&config.join("sync.key")).unwrap();
+    let remote = mush_sync::Remote::new(&url, keys.token(), Duration::from_secs(2)).unwrap();
+    let sid = keys.sid(&descriptor.session_id);
+    let holders = |leases: mush_sync::protocol::Leases| -> Vec<String> {
+        leases
+            .held
+            .into_iter()
+            .filter(|(held, _)| *held == sid)
+            .map(|(_, lease)| lease.holder)
+            .collect()
+    };
+    assert_eq!(
+        holders(remote.leases(Duration::from_secs(5)).await.unwrap()),
+        ["dot"]
+    );
+
+    assert!(matches!(
+        daemon
+            .request(SupervisorRequest::Stop {
+                session_id: descriptor.session_id.clone(),
+            })
+            .await,
+        SupervisorReply::Done
+    ));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !holders(remote.leases(Duration::from_secs(5)).await.unwrap()).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "the stopped worker kept its lease"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
 async fn the_cli_lists_and_renames_a_live_agent() {
     let daemon = Daemon::start();
     let SupervisorReply::Worker { descriptor, .. } =

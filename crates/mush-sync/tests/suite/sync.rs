@@ -856,3 +856,35 @@ async fn a_sessions_own_harness_entries_merge_when_both_sides_add_some() {
         assert_eq!(ids, ["first", "from dot", "from esme"]);
     }
 }
+
+#[tokio::test]
+async fn a_conflicting_kernel_state_stays_beside_it_locally_and_is_not_uploaded() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("kernels", &["start"]);
+    std::fs::create_dir_all(dot.artifact(&id, "")).unwrap();
+    std::fs::write(dot.artifact(&id, "kernel-state.pickle"), "base").unwrap();
+    dot.sync().await;
+    esme.sync().await;
+    std::fs::write(dot.artifact(&id, "kernel-state.pickle"), "dot's kernel").unwrap();
+    std::fs::write(esme.artifact(&id, "kernel-state.pickle"), "esme's kernel").unwrap();
+    dot.sync().await;
+    esme.sync().await;
+    dot.sync().await;
+
+    let beside = |machine: &crate::harness::Machine| -> Vec<String> {
+        std::fs::read_dir(machine.artifact(&id, ""))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("sync-conflict"))
+            .collect()
+    };
+    assert_eq!(beside(&esme).len(), 1);
+    assert!(beside(&dot).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(esme.artifact(&id, "kernel-state.pickle")).unwrap(),
+        "dot's kernel"
+    );
+}

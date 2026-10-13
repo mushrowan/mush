@@ -24,7 +24,7 @@ pub enum SyncCommand {
         #[command(subcommand)]
         action: KeyAction,
     },
-    Release {
+    Take {
         session: String,
     },
     Import {
@@ -45,6 +45,7 @@ pub fn log_to_stderr() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_target(false)
         .try_init();
 }
@@ -101,7 +102,7 @@ pub async fn run(command: Option<SyncCommand>, sync: &SyncConfig) -> Result<()> 
             token_hash,
         }) => serve(&listen, root, token_hash).await,
         Some(SyncCommand::Key { action }) => key(sync, action),
-        Some(SyncCommand::Release { session }) => release(sync, &session).await,
+        Some(SyncCommand::Take { session }) => take(sync, &session).await,
         Some(SyncCommand::Import { dir }) => import(sync, &dir),
     }
 }
@@ -319,8 +320,9 @@ fn generate(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn release(sync: &SyncConfig, session: &str) -> Result<()> {
-    let engine = engine(sync)?;
+async fn take(sync: &SyncConfig, session: &str) -> Result<()> {
+    let settings = sync.settings().ok_or_else(off)?;
+    let engine = settings.engine().map_err(|error| eyre!("{error}"))?;
     let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
     let id = match store.resolve(session) {
         Ok(meta) => meta.id.to_string(),
@@ -331,11 +333,19 @@ async fn release(sync: &SyncConfig, session: &str) -> Result<()> {
         }
         Err(error) => return Err(eyre!("{error}")),
     };
-    engine
-        .release_elsewhere(&id)
+    let previous = engine
+        .take(&id, settings.lease_ttl)
         .await
         .map_err(|error| eyre!("{error}"))?;
-    println!("released {}, it can be opened here now", short_id(&id));
+    let from = previous
+        .map(|holder| format!(" from {holder}"))
+        .unwrap_or_default();
+    println!(
+        "took {}{from}, open it here within {}s (mush --resume {})",
+        short_id(&id),
+        settings.lease_ttl.as_secs(),
+        short_id(&id)
+    );
     Ok(())
 }
 

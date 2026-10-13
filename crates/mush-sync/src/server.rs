@@ -507,6 +507,7 @@ async fn commit(
     inner.heads.insert(sid, head.clone());
     shared.rev.send_replace(head.rev);
     sweep_blobs(&dir, &head.blobs);
+    sweep_staging(&dir);
     Ok(Json(head))
 }
 

@@ -14,7 +14,7 @@ const FINISH_PATIENCE: Duration = Duration::from_secs(30);
 #[derive(Debug, thiserror::Error)]
 pub enum CheckoutError {
     #[error(
-        "session {session} is open on {holder}, its lease there runs out in {}s. close it on {holder}, or run `mush sync release {session}` to take it over",
+        "session {session} is open on {holder}, its lease there runs out in {}s. close it on {holder}, or run `mush sync take {session}` to move it here",
         expires_in.as_secs()
     )]
     Held {

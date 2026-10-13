@@ -527,12 +527,23 @@ impl Engine {
             .collect())
     }
 
-    pub async fn release_elsewhere(&self, id: &str) -> Result<(), SyncError> {
-        let request = crate::protocol::ReleaseRequest {
+    pub async fn take(&self, id: &str, ttl: Duration) -> Result<Option<String>, SyncError> {
+        let request = crate::protocol::LeaseRequest {
             holder: self.machine.clone(),
-            force: true,
+            ttl_ms: u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX),
+            take: true,
         };
-        Ok(self.remote.release(&self.keys.sid(id), &request).await?)
+        let sid = self.keys.sid(id);
+        let previous = self
+            .remote
+            .leases(Duration::from_secs(10))
+            .await?
+            .held
+            .into_iter()
+            .find(|(held, lease)| *held == sid && lease.holder != self.machine)
+            .map(|(_, lease)| lease.holder);
+        self.remote.claim(&sid, &request).await?;
+        Ok(previous)
     }
 
     async fn feed(&self, cursor: &mut Cursor) -> Result<Feed, SyncError> {

@@ -350,7 +350,10 @@ pub fn live_only(key: &str) -> bool {
 }
 
 fn transient(name: &str) -> bool {
-    name.contains(".tmp-") || name.contains(".part-") || name.contains(".sync-in-")
+    name.contains(".tmp-")
+        || name.contains(".part-")
+        || name.contains(".sync-in-")
+        || name.starts_with(&format!("{KERNEL_STATE}.sync-conflict-"))
 }
 
 pub fn artifact_files(dir: &Path) -> std::io::Result<BTreeMap<String, (PathBuf, Stamp)>> {

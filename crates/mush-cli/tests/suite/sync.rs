@@ -177,10 +177,25 @@ fn a_session_open_on_another_machine_refuses_to_open_here() {
         text(&refused)
     );
 
-    let released = run(&esme, &["sync", "release", id.as_str()]);
-    assert!(released.status.success(), "{}", text(&released));
+    let taken = run(&esme, &["sync", "take", id.as_str()]);
+    assert!(taken.status.success(), "{}", text(&taken));
+    assert!(text(&taken).contains("from dot"), "{}", text(&taken));
     let status = run(&esme, &["sync", "status"]);
     assert!(!text(&status).contains("on dot"), "{}", text(&status));
+    let renewed = runtime
+        .block_on(remote.claim(
+            &keys.sid(id.as_str()),
+            &mush_sync::protocol::LeaseRequest {
+                holder: "dot".into(),
+                ttl_ms: 60_000,
+                take: false,
+            },
+        ))
+        .unwrap();
+    assert!(
+        matches!(&renewed, mush_sync::remote::Claimed::Held { lease, .. } if lease.holder == "esme"),
+        "dot's renewal must not win the session back: {renewed:?}"
+    );
 
     let missing = run(&esme, &["--resume", "nowhere", "-p", "hello"]);
     assert!(
