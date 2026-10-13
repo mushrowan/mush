@@ -371,8 +371,7 @@ pub async fn send(session: &str, text: &str) -> Result<()> {
 
 fn session_home(id: &str) -> Option<std::path::PathBuf> {
     let store = mush_session::SessionStore::new(mush_session::SessionStore::default_dir());
-    let cwd = std::path::PathBuf::from(store.resolve(id).ok()?.cwd);
-    cwd.is_dir().then_some(cwd)
+    mush_session::place::local_place(&store.resolve(id).ok()?.cwd)
 }
 
 pub fn worker_opener(worker_args: Vec<String>) -> mush_tui::WorkerOpener {

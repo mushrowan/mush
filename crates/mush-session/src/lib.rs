@@ -4,6 +4,7 @@ pub mod file_ops;
 pub mod harness;
 pub mod inbox;
 pub mod notes;
+pub mod place;
 pub mod refine;
 pub mod session;
 pub mod store;

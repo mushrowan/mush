@@ -150,7 +150,9 @@ impl Cli {
             return store
                 .list()?
                 .into_iter()
-                .find(|meta| meta.cwd == cwd && meta.parent.is_none())
+                .find(|meta| {
+                    mush_session::place::same_place(&meta.cwd, &cwd) && meta.parent.is_none()
+                })
                 .map(|meta| SessionTarget::Resume(meta.id.to_string()))
                 .ok_or_else(|| eyre!("no session for this directory yet, run mush to start one"));
         }

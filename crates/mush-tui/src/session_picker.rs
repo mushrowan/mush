@@ -175,7 +175,7 @@ pub fn filtered_sessions(picker: &SessionPickerState) -> Vec<&SessionMeta> {
         SessionScope::ThisDir => picker
             .sessions
             .iter()
-            .filter(|s| s.cwd == picker.cwd)
+            .filter(|s| mush_session::place::same_place(&s.cwd, &picker.cwd))
             .collect(),
         SessionScope::AllDirs => picker.sessions.iter().collect(),
     };
