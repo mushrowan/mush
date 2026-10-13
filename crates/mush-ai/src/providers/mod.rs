@@ -319,20 +319,40 @@ pub(crate) async fn refresh_rejected_oauth_key(
     provider_id: &str,
     account: Option<&AccountLabel>,
     rejected: &ApiKey,
-) -> Option<ApiKey> {
+) -> Result<Option<ApiKey>, crate::registry::ProviderError> {
     match crate::oauth::force_refresh_oauth_token(provider_id, account, rejected.expose()).await {
-        Ok(Some(fresh)) => ApiKey::new(fresh),
+        Ok(Some(fresh)) => Ok(ApiKey::new(fresh)),
         Ok(None) => {
             tracing::warn!(
                 provider = provider_id,
                 "oauth force refresh found no credentials"
             );
-            None
+            Ok(None)
         }
         Err(error) => {
             tracing::warn!(provider = provider_id, %error, "oauth force refresh failed");
-            None
+            Err(failed_refresh_error(provider_id, account, error))
         }
+    }
+}
+
+pub(crate) fn failed_refresh_error(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+    error: crate::oauth::OAuthError,
+) -> crate::registry::ProviderError {
+    if let crate::oauth::OAuthError::Http(error) = error {
+        return crate::registry::ProviderError::Request(error);
+    }
+    match crate::oauth::refresh_failure(provider_id, account) {
+        Some(failure) => crate::registry::ProviderError::LoginExpired {
+            provider: provider_id.to_string(),
+            account: failure.account,
+            reason: failure.reason,
+        },
+        None => crate::registry::ProviderError::Other(format!(
+            "the {provider_id} login was rejected and refreshing it failed: {error}"
+        )),
     }
 }
 
@@ -667,6 +687,27 @@ mod tests {
             ..reasoning_model()
         };
         assert_eq!(openai_reasoning_effort(&model, &EffortLevel::High), None);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_token_endpoint_is_retried_not_sent_to_login() {
+        let unreachable = reqwest::Client::new()
+            .get("http://127.0.0.1:1")
+            .send()
+            .await
+            .unwrap_err();
+
+        let error = failed_refresh_error(
+            "anthropic",
+            None,
+            crate::oauth::OAuthError::Http(unreachable),
+        );
+
+        assert!(
+            matches!(error, crate::registry::ProviderError::Request(_)),
+            "{error:?}"
+        );
+        assert!(error.is_retryable());
     }
 
     #[tokio::test]

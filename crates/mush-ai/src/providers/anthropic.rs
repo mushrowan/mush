@@ -270,7 +270,7 @@ impl ApiProvider for AnthropicProvider {
                 options.oauth_account.as_ref(),
                 &api_key,
             )
-            .await
+            .await?
             {
                 Some(fresh) => {
                     if let Ok(auth) = super::bearer_header(fresh.expose()) {

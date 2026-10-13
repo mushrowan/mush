@@ -267,6 +267,19 @@ pub fn last_refresh_failure(
     if !creds.is_expired() {
         return None;
     }
+    recorded_refresh_failure(provider_id, label)
+}
+
+pub fn refresh_failure(
+    provider_id: &str,
+    account: Option<&AccountLabel>,
+) -> Option<RefreshFailure> {
+    let store = load_credentials().ok()?;
+    let (label, _) = store.get(provider_id, account)?;
+    recorded_refresh_failure(provider_id, label)
+}
+
+fn recorded_refresh_failure(provider_id: &str, label: &AccountLabel) -> Option<RefreshFailure> {
     let reason = refresh_failures()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -424,6 +437,10 @@ mod tests {
     }
 
     async fn config_with_expired_login() -> ConfigDir {
+        config_with_login(0).await
+    }
+
+    async fn config_with_login(expires_at: u64) -> ConfigDir {
         let lock = CONFIG_DIR_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let saved = std::env::var_os("MUSH_CONFIG_DIR");
@@ -434,7 +451,7 @@ mod tests {
             OAuthCredentials {
                 access_token: "access-0".into(),
                 refresh_token: "refresh".into(),
-                expires_at: 0,
+                expires_at,
                 account_id: Some("acct".into()),
             },
         )
@@ -550,6 +567,35 @@ mod tests {
             .await
             .unwrap();
         assert!(last_refresh_failure("counting", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_revoked_token_with_a_dead_refresh_token_asks_for_a_new_login() {
+        let _config = config_with_login(u64::MAX).await;
+        let rejected = load_credentials()
+            .unwrap()
+            .get("counting", None)
+            .map(|(_, creds)| creds.access_token.clone())
+            .unwrap();
+
+        let error = refresh_stored(&RejectingProvider, None, Stale::Rejected(&rejected))
+            .await
+            .unwrap_err();
+        let error = crate::providers::failed_refresh_error("counting", None, error);
+
+        assert!(
+            last_refresh_failure("counting", None).is_none(),
+            "the clock says the token is still good, the server revoked it"
+        );
+        assert!(
+            matches!(&error, crate::registry::ProviderError::LoginExpired { reason, .. } if reason == "refresh token expired"),
+            "{error:?}"
+        );
+        assert!(!error.is_retryable());
+        assert!(
+            error.to_string().contains("/login counting default"),
+            "{error}"
+        );
     }
 
     #[test]

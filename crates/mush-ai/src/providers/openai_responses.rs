@@ -70,7 +70,7 @@ impl ApiProvider for OpenaiResponsesProvider {
                 options.oauth_account.as_ref(),
                 &api_key,
             )
-            .await
+            .await?
             {
                 Some(fresh) => {
                     let headers = build_headers(&fresh, options, is_codex)?;
