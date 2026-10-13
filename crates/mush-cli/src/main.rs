@@ -408,6 +408,7 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    #[command(about = mush_cli::sync::ABOUT, long_about = mush_cli::sync::LONG_ABOUT)]
     Sync {
         #[command(subcommand)]
         command: Option<mush_cli::sync::SyncCommand>,

@@ -14,6 +14,9 @@ const PATIENCE: Duration = Duration::from_secs(120);
 
 fn session_of(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
+    if crate::tool_output::saved_output(name) {
+        return Some(crate::tool_output::TOOL_OUTPUT.to_owned());
+    }
     let id = name
         .strip_suffix(".history.jsonl")
         .or_else(|| name.strip_suffix(".json"))?;
@@ -78,6 +81,13 @@ pub async fn watch(
     watcher
         .watch(
             &engine.layout().sessions,
+            notify::RecursiveMode::NonRecursive,
+        )
+        .map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(&engine.layout().tool_output)?;
+    watcher
+        .watch(
+            &engine.layout().tool_output,
             notify::RecursiveMode::NonRecursive,
         )
         .map_err(std::io::Error::other)?;

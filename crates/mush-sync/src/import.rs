@@ -148,8 +148,12 @@ pub fn import(layout: &Layout, source: &Path) -> std::io::Result<Imported> {
             imported.added.push(id);
             continue;
         }
-        let same_meta =
-            std::fs::read(&meta)? == std::fs::read(layout.meta(&id)).unwrap_or_default();
+        let (backed_up, here) = (
+            std::fs::read(&meta)?,
+            std::fs::read(layout.meta(&id)).unwrap_or_default(),
+        );
+        let same_meta = backed_up == here;
+        let meaningful = !same_meta && crate::engine::meta_differs(&here, &backed_up);
         let theirs_newer = updated_at(&meta) > updated_at(&layout.meta(&id));
         match relate(&layout.history(&id), &history)? {
             Relation::Diverged => match fork_in(layout, &id, &label, &meta, &history)? {
@@ -157,7 +161,7 @@ pub fn import(layout: &Layout, source: &Path) -> std::io::Result<Imported> {
                 None => imported.unchanged.push(id),
             },
             Relation::Ahead => {
-                if !same_meta && !theirs_newer {
+                if meaningful {
                     keep_beside(layout, &id, "here", &layout.meta(&id))?;
                     imported.kept_beside.push(id.clone());
                 }
@@ -166,12 +170,14 @@ pub fn import(layout: &Layout, source: &Path) -> std::io::Result<Imported> {
                 imported.advanced.push(id);
             }
             Relation::Equal if !same_meta && theirs_newer => {
-                keep_beside(layout, &id, "here", &layout.meta(&id))?;
+                if meaningful {
+                    keep_beside(layout, &id, "here", &layout.meta(&id))?;
+                    imported.kept_beside.push(id.clone());
+                }
                 copy_durably(&meta, &layout.meta(&id))?;
-                imported.kept_beside.push(id.clone());
                 imported.advanced.push(id);
             }
-            Relation::Equal | Relation::Behind if !same_meta && theirs_newer => {
+            Relation::Equal | Relation::Behind if meaningful && theirs_newer => {
                 keep_beside(layout, &id, &label, &meta)?;
                 imported.kept_beside.push(id.clone());
                 imported.unchanged.push(id);
@@ -200,5 +206,14 @@ pub fn import(layout: &Layout, source: &Path) -> std::io::Result<Imported> {
         write_file(&target, &merged)?;
         imported.harness = true;
     }
+    let why = format!("from {label}");
+    crate::status::remember(
+        layout,
+        imported
+            .forked
+            .iter()
+            .map(|(session, fork)| crate::status::fork(session, fork, &why))
+            .collect(),
+    )?;
     Ok(imported)
 }

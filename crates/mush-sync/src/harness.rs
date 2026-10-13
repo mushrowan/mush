@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 
 use crate::engine::{Direction, Engine, Report, SyncError};
 use crate::local::{SessionState, write_file};
-use crate::protocol::{Commit, FileRef, Manifest, blob_aad, manifest_aad, now_ms};
+use crate::protocol::{Commit, FileRef, Manifest, manifest_aad, now_ms};
 use crate::remote::Committed;
 
 pub const HARNESS: &str = "_harness";
@@ -92,19 +92,18 @@ pub fn merge(ours: &Value, theirs: &Value, base: Option<&Value>) -> Option<Value
             let before = base
                 .and_then(|base| table(base, "entries", &kind))
                 .and_then(|found| found.get(&id));
+            let untouched = |side: &Value| base.is_some() && before == Some(side);
             let winner = match (mine, other) {
                 (Some(mine), Some(other)) if mine == other => Some(mine.clone()),
+                (Some(mine), Some(other)) if untouched(mine) => Some(other.clone()),
+                (Some(mine), Some(other)) if untouched(other) => Some(mine.clone()),
                 (Some(mine), Some(other)) => {
                     let (winner, loser) = if recency(mine) >= recency(other) {
                         (mine, other)
                     } else {
                         (other, mine)
                     };
-                    let concurrent = match base {
-                        Some(_) => before != Some(loser),
-                        None => version(loser) >= version(winner),
-                    };
-                    if concurrent {
+                    if base.is_some() || version(loser) >= version(winner) {
                         let (copy_id, copy) = conflict_copy(&id, loser);
                         live.entry(copy_id).or_insert(copy);
                     }
@@ -118,12 +117,20 @@ pub fn merge(ours: &Value, theirs: &Value, base: Option<&Value>) -> Option<Value
                 .max_by(|left, right| text(left, "deleted_at").cmp(text(right, "deleted_at")))
                 .cloned();
             match (winner, tombstone) {
-                (Some(entry), Some(tombstone))
-                    if text(&tombstone, "deleted_at") >= text(&entry, "updated_at") =>
-                {
-                    dead.insert(id, tombstone);
+                (Some(entry), Some(tombstone)) => {
+                    let buried = if base.is_some() {
+                        [mine, other].into_iter().flatten().all(untouched)
+                    } else {
+                        version(&entry) <= version(&tombstone)
+                            && text(&tombstone, "deleted_at") >= text(&entry, "updated_at")
+                    };
+                    if buried {
+                        dead.insert(id, tombstone);
+                    } else {
+                        live.insert(id, entry);
+                    }
                 }
-                (Some(entry), _) => {
+                (Some(entry), None) => {
                     live.insert(id, entry);
                 }
                 (None, Some(tombstone)) => {
@@ -294,7 +301,7 @@ impl Engine {
         bytes: &[u8],
     ) -> Result<Option<crate::protocol::Head>, SyncError> {
         let blob = self.keys().blob_id(bytes);
-        let sealed = self.keys().seal(&blob_aad(sid, &blob), bytes)?;
+        let sealed = crate::blob::seal_all(self.shared_keys(), sid, &blob, bytes)?;
         self.remote().store_blob(sid, &blob, sealed).await?;
         let manifest = Manifest {
             session: HARNESS.to_owned(),
@@ -305,6 +312,7 @@ impl Engine {
                 FileRef {
                     blob: blob.clone(),
                     len: bytes.len() as u64,
+                    modified_ms: None,
                 },
             )]
             .into(),
@@ -322,6 +330,7 @@ impl Engine {
             seq: 0,
             blobs: vec![blob],
             manifest: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, sealed),
+            deleted: false,
         };
         match self.remote().commit(sid, &commit).await? {
             Committed::Accepted(head) => {
@@ -496,6 +505,67 @@ mod tests {
             .map(|event| text(event, "id"))
             .collect();
         assert_eq!(ids, ["r1", "r2"]);
+    }
+
+    #[test]
+    fn a_slow_clock_never_turns_an_edit_into_a_rollback() {
+        let base = state(&[entry("a", "old", 1, "2026-10-05T00:00:00.000Z")], None);
+        let edited_behind = state(
+            &[entry(
+                "a",
+                "edited on a machine whose clock is behind",
+                2,
+                "2026-10-01T00:00:00.000Z",
+            )],
+            None,
+        );
+        let merged = merge(&edited_behind, &base, Some(&base)).unwrap();
+        assert_eq!(
+            memories(&merged),
+            [(
+                "a".to_owned(),
+                "edited on a machine whose clock is behind".to_owned()
+            )]
+        );
+        assert_eq!(merged, merge(&base, &edited_behind, Some(&base)).unwrap());
+    }
+
+    #[test]
+    fn a_fast_clock_on_the_deleting_side_never_buries_a_concurrent_edit() {
+        let base = state(&[entry("a", "old", 1, "2026-10-02T00:00:00.000Z")], None);
+        let edited = state(&[entry("a", "kept", 2, "2026-10-01T00:00:00.000Z")], None);
+        let deleted = state(
+            &[],
+            Some(
+                json!({"memory": {"a": {"deleted_at": "2026-10-09T00:00:00.000Z", "version": 1}}}),
+            ),
+        );
+        for merged in [
+            merge(&edited, &deleted, Some(&base)).unwrap(),
+            merge(&deleted, &edited, Some(&base)).unwrap(),
+        ] {
+            assert_eq!(memories(&merged), [("a".to_owned(), "kept".to_owned())]);
+            assert!(merged.get("deleted").is_none());
+        }
+    }
+
+    #[test]
+    fn without_a_base_a_tombstone_needs_both_version_and_time_to_bury() {
+        let revived = state(
+            &[entry("a", "revived", 1, "2026-10-08T00:00:00.000Z")],
+            None,
+        );
+        let older_tombstone = state(
+            &[],
+            Some(
+                json!({"memory": {"a": {"deleted_at": "2026-10-07T00:00:00.000Z", "version": 3}}}),
+            ),
+        );
+        let merged = merge(&revived, &older_tombstone, None).unwrap();
+        assert_eq!(memories(&merged), [("a".to_owned(), "revived".to_owned())]);
+        let stale = state(&[entry("a", "stale", 3, "2026-10-01T00:00:00.000Z")], None);
+        let merged = merge(&stale, &older_tombstone, None).unwrap();
+        assert!(memories(&merged).is_empty());
     }
 
     #[test]

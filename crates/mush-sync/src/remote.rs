@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use crate::protocol::{
-    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, Refusal, ReleaseRequest,
+    Archived, Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, MachineReport,
+    Machines, PruneReport, PruneRequest, Refusal, ReleaseRequest,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +165,10 @@ impl Remote {
     }
 
     async fn upload(&self, path: &str, body: Vec<u8>) -> Result<(), RemoteError> {
+        self.upload_body(path, body.into()).await
+    }
+
+    async fn upload_body(&self, path: &str, body: reqwest::Body) -> Result<(), RemoteError> {
         let response = self
             .send(self.http.put(self.url(path)).body(body), TRANSFER_TIMEOUT)
             .await?;
@@ -200,6 +205,40 @@ impl Remote {
 
     pub async fn blob(&self, sid: &str, blob: &str) -> Result<Vec<u8>, RemoteError> {
         self.download(&format!("sessions/{sid}/blobs/{blob}")).await
+    }
+
+    pub async fn blob_stream(
+        &self,
+        sid: &str,
+        blob: &str,
+    ) -> Result<
+        impl futures::Stream<Item = Result<tokio_util::bytes::Bytes, RemoteError>> + Send + Unpin,
+        RemoteError,
+    > {
+        use futures::StreamExt;
+        let response = self
+            .send(
+                self.http
+                    .get(self.url(&format!("sessions/{sid}/blobs/{blob}"))),
+                TRANSFER_TIMEOUT,
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::failed(response).await);
+        }
+        Ok(response
+            .bytes_stream()
+            .map(|piece| piece.map_err(RemoteError::from)))
+    }
+
+    pub async fn store_blob_body(
+        &self,
+        sid: &str,
+        blob: &str,
+        body: reqwest::Body,
+    ) -> Result<(), RemoteError> {
+        self.upload_body(&format!("sessions/{sid}/blobs/{blob}"), body)
+            .await
     }
 
     pub async fn store_blob(
@@ -263,6 +302,55 @@ impl Remote {
             };
         }
         Self::json(response).await.map(Claimed::Granted)
+    }
+
+    pub async fn archive(&self, sid: &str) -> Result<Vec<Archived>, RemoteError> {
+        let response = self
+            .send(
+                self.http.get(self.url(&format!("sessions/{sid}/archive"))),
+                CALL_TIMEOUT,
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        Self::json(response).await
+    }
+
+    pub async fn machines(&self, timeout: Duration) -> Result<Machines, RemoteError> {
+        Self::json(
+            self.send(self.http.get(self.url("machines")), timeout)
+                .await?,
+        )
+        .await
+    }
+
+    pub async fn report(&self, machine: &str, report: &MachineReport) -> Result<(), RemoteError> {
+        let response = self
+            .send(
+                self.http
+                    .post(self.url(&format!("machines/{machine}")))
+                    .json(report),
+                CALL_TIMEOUT,
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(Self::failed(response).await);
+        }
+        Ok(())
+    }
+
+    pub async fn prune(&self, dry_run: bool) -> Result<PruneReport, RemoteError> {
+        Self::json(
+            self.send(
+                self.http
+                    .post(self.url("prune"))
+                    .json(&PruneRequest { dry_run }),
+                TRANSFER_TIMEOUT,
+            )
+            .await?,
+        )
+        .await
     }
 
     pub async fn release(&self, sid: &str, request: &ReleaseRequest) -> Result<(), RemoteError> {

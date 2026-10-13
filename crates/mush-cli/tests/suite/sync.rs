@@ -204,3 +204,60 @@ fn a_session_open_on_another_machine_refuses_to_open_here() {
         text(&missing)
     );
 }
+
+#[test]
+fn the_cli_restores_deleted_sessions_plans_pruning_and_says_logins_stay_put() {
+    let help = run(Path::new("/"), &["sync", "--help"]);
+    assert!(help.status.success(), "{}", text(&help));
+    assert!(
+        text(&help).contains("logins and keys never sync"),
+        "{}",
+        text(&help)
+    );
+    assert!(text(&help).contains("oauth.json"), "{}", text(&help));
+
+    let root = crate::tempdir().unwrap();
+    let key = root.path().join("shared/sync.key");
+    let keyring = machine(root.path(), "keyring", "http://unused", &key);
+    assert!(run(&keyring, &["sync", "key", "generate"]).status.success());
+    let server = start_server(root.path(), &keyring);
+    let dot = machine(root.path(), "dot", &server.url, &key);
+    let esme = machine(root.path(), "esme", &server.url, &key);
+    let id = session(&dot, "deleted by mistake");
+    assert!(run(&dot, &["sync"]).status.success());
+    assert!(run(&esme, &["sync"]).status.success());
+
+    let deleted = run(&dot, &["delete", id.as_str()]);
+    assert!(deleted.status.success(), "{}", text(&deleted));
+    assert!(run(&dot, &["sync"]).status.success());
+    let listed = run(&dot, &["sync", "restore"]);
+    assert!(text(&listed).contains("deleted"), "{}", text(&listed));
+    assert!(
+        text(&listed).contains(&id.as_str()[..8]),
+        "{}",
+        text(&listed)
+    );
+
+    let restored = run(&dot, &["sync", "restore", &id.as_str()[..8]]);
+    assert!(restored.status.success(), "{}", text(&restored));
+    assert!(text(&restored).contains("restored"), "{}", text(&restored));
+    let store = mush_session::SessionStore::new(dot.join("data/sessions"));
+    assert!(store.load(&id).is_ok());
+
+    let plan = run(&dot, &["sync", "prune", "--dry-run"]);
+    assert!(plan.status.success(), "{}", text(&plan));
+    assert!(
+        text(&plan).contains("would remove 0 replaced history generations and 0 deleted sessions"),
+        "{}",
+        text(&plan)
+    );
+
+    assert!(run(&esme, &["sync"]).status.success());
+    let status = run(&esme, &["sync", "status"]);
+    let shown = text(&status);
+    assert!(shown.contains("reachable"), "{shown}");
+    assert!(shown.contains("last sync:"), "{shown}");
+    assert!(shown.contains("machines"), "{shown}");
+    assert!(shown.contains("esme (this one)"), "{shown}");
+    assert!(shown.contains("0 to push, 0 to pull"), "{shown}");
+}

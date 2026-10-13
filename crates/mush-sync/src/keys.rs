@@ -115,6 +115,37 @@ impl Keys {
     }
 
     #[must_use]
+    pub fn blob_hasher(&self, len: u64) -> BlobHasher {
+        let mut hasher = blake3::Hasher::new_keyed(&self.content);
+        hasher.update(&(b"blob".len() as u64).to_le_bytes());
+        hasher.update(b"blob");
+        hasher.update(&len.to_le_bytes());
+        BlobHasher {
+            hasher,
+            expected: len,
+            seen: 0,
+        }
+    }
+
+    pub fn blob_id_of(&self, path: &Path) -> std::io::Result<(String, u64)> {
+        let mut file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let mut hasher = self.blob_hasher(len);
+        let mut block = vec![0u8; 256 * 1024];
+        loop {
+            let read = file.read(&mut block)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&block[..read]);
+        }
+        let id = hasher.finish().ok_or_else(|| {
+            std::io::Error::other(format!("{} changed while it was read", path.display()))
+        })?;
+        Ok((id, len))
+    }
+
+    #[must_use]
     pub fn fork_id(&self, session: &str, machine: &str, digest: &str) -> String {
         hex(&self
             .keyed(&[
@@ -178,6 +209,24 @@ impl Keys {
     }
 }
 
+pub struct BlobHasher {
+    hasher: blake3::Hasher,
+    expected: u64,
+    seen: u64,
+}
+
+impl BlobHasher {
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.seen += bytes.len() as u64;
+        self.hasher.update(bytes);
+    }
+
+    #[must_use]
+    pub fn finish(&self) -> Option<String> {
+        (self.seen == self.expected).then(|| hex(&self.hasher.finalize().as_bytes()[..16]))
+    }
+}
+
 #[must_use]
 pub fn token_hash(token: &str) -> String {
     blake3::hash(token.as_bytes()).to_hex().to_string()
@@ -225,6 +274,11 @@ mod tests {
         assert_eq!(sid, keys.sid("abc123"));
         assert_ne!(sid, Keys::from_master(&[8; 32]).sid("abc123"));
         assert_ne!(keys.blob_id(b"one"), keys.blob_id(b"two"));
+        let mut hasher = keys.blob_hasher(6);
+        hasher.update(b"one");
+        assert_eq!(hasher.finish(), None);
+        hasher.update(b"two");
+        assert_eq!(hasher.finish(), Some(keys.blob_id(b"onetwo")));
         assert_eq!(keys.fork_id("abc", "dot", "x").len(), 16);
     }
 

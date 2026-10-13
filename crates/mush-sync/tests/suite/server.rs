@@ -38,6 +38,7 @@ async fn a_stale_commit_is_refused_as_a_conflict() {
         seq: 0,
         blobs: Vec::new(),
         manifest: "e30=".into(),
+        deleted: false,
     };
     let Committed::Accepted(head) = remote.commit(&sid, &commit(0)).await.unwrap() else {
         panic!("the first commit lands");
@@ -136,4 +137,43 @@ async fn the_server_keeps_its_identity_and_data_across_restarts() {
     assert_eq!(esme.texts(&id), ["persisted"]);
     let dot = dot.moved_to(&second);
     assert!(dot.sync().await.quiet());
+}
+
+#[tokio::test]
+async fn appending_onto_history_the_server_no_longer_has_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let remote = remote(&server.url);
+    let sid = Keys::from_master(&MASTER).sid("session");
+    remote
+        .stage(&sid, "up1", 0, 0, b"first".to_vec())
+        .await
+        .unwrap();
+    let first = Commit {
+        expect: 0,
+        holder: "dot".into(),
+        upload: "up1".into(),
+        generation: 0,
+        seq: 1,
+        blobs: Vec::new(),
+        manifest: "e30=".into(),
+        deleted: false,
+    };
+    assert!(matches!(
+        remote.commit(&sid, &first).await.unwrap(),
+        Committed::Accepted(_)
+    ));
+    std::fs::remove_dir_all(root.path().join("sessions").join(&sid).join("chunks")).unwrap();
+    remote
+        .stage(&sid, "up2", 0, 1, b"second".to_vec())
+        .await
+        .unwrap();
+    let append = Commit {
+        expect: 1,
+        upload: "up2".into(),
+        seq: 2,
+        ..first
+    };
+    let refused = remote.commit(&sid, &append).await.unwrap_err();
+    assert!(refused.to_string().contains("pruned"), "{refused}");
 }

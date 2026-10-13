@@ -17,6 +17,16 @@ pub struct Head {
     pub lease: Option<Lease>,
     #[serde(default)]
     pub updated_at: u64,
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +52,87 @@ pub struct Commit {
     pub seq: u64,
     pub blobs: Vec<String>,
     pub manifest: String,
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Archived {
+    pub head: Head,
+    pub archived_at: u64,
+    pub superseded_rev: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachineReport {
+    pub rev: u64,
+    #[serde(default)]
+    pub sessions: u64,
+    #[serde(default)]
+    pub waiting: u64,
+    #[serde(default)]
+    pub failed: u64,
+    #[serde(default)]
+    pub review: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Machine {
+    pub name: String,
+    pub seen_at: u64,
+    pub report: MachineReport,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Machines {
+    pub now: u64,
+    pub machines: Vec<Machine>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PruneRequest {
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrunedGeneration {
+    pub sid: String,
+    pub generation: u64,
+    pub version: u64,
+    pub archived_at: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrunedSession {
+    pub sid: String,
+    pub deleted_at: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocked {
+    pub sid: String,
+    pub what: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PruneReport {
+    pub dry_run: bool,
+    pub now: u64,
+    pub keep_ms: u64,
+    pub generations: Vec<PrunedGeneration>,
+    pub sessions: Vec<PrunedSession>,
+    pub blocked: Vec<Blocked>,
+    pub stale_machines: Vec<String>,
+    pub swept_bytes: u64,
+    pub freed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +206,8 @@ pub struct HistoryRef {
 pub struct FileRef {
     pub blob: String,
     pub len: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ms: Option<u64>,
 }
 
 pub const META: &str = "meta";

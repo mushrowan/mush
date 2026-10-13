@@ -38,6 +38,17 @@ in {
       description = "interface whose firewall opens the port, null opens nothing";
     };
 
+    keepDays = lib.mkOption {
+      type = lib.types.ints.unsigned;
+      default = 30;
+      description = ''
+        days the server keeps replaced history generations and deleted sessions
+        before pruning them, so `mush sync restore` can still bring them back.
+        pruning never touches a session that is open somewhere or a change a
+        syncing machine has not seen yet. 0 keeps everything forever
+      '';
+    };
+
     tokenHash = lib.mkOption {
       type = lib.types.strMatching "[0-9a-f]{64}";
       example = "3b1f...";
@@ -59,7 +70,7 @@ in {
         RUST_LOG = "warn,mush_sync=info";
       };
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/mush sync serve --listen ${cfg.address}:${toString cfg.port} --root /var/lib/mush-sync";
+        ExecStart = "${cfg.package}/bin/mush sync serve --listen ${cfg.address}:${toString cfg.port} --root /var/lib/mush-sync --keep-days ${toString cfg.keepDays}";
         DynamicUser = true;
         StateDirectory = "mush-sync";
         StateDirectoryMode = "0700";

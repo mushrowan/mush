@@ -15,6 +15,7 @@ pub struct Layout {
     pub sessions: PathBuf,
     pub artifacts: PathBuf,
     pub harness: PathBuf,
+    pub tool_output: PathBuf,
     pub state: PathBuf,
 }
 
@@ -25,6 +26,7 @@ impl Layout {
             sessions: data_dir.join("sessions"),
             artifacts: data_dir.join("session-artifacts"),
             harness: data_dir.join("harness"),
+            tool_output: data_dir.join("tool-output"),
             state: data_dir.join("sync"),
         }
     }
@@ -68,6 +70,16 @@ impl Layout {
     #[must_use]
     pub fn cursor_file(&self) -> PathBuf {
         self.state.join("cursor.json")
+    }
+
+    #[must_use]
+    pub fn status_file(&self) -> PathBuf {
+        self.state.join("status.json")
+    }
+
+    #[must_use]
+    pub fn review_file(&self) -> PathBuf {
+        self.state.join("review.json")
     }
 
     #[must_use]
@@ -310,6 +322,7 @@ pub struct Limits {
     pub kernel_state: u64,
     pub kernel_state_age: std::time::Duration,
     pub chunk: u64,
+    pub tool_output: u64,
 }
 
 impl Default for Limits {
@@ -319,6 +332,7 @@ impl Default for Limits {
             kernel_state: 64 << 20,
             kernel_state_age: std::time::Duration::from_secs(14 * 24 * 60 * 60),
             chunk: 4 << 20,
+            tool_output: 16 << 20,
         }
     }
 }
@@ -356,6 +370,26 @@ fn transient(name: &str) -> bool {
         || name.starts_with(&format!("{KERNEL_STATE}.sync-conflict-"))
 }
 
+const CREDENTIALS: [&str; 6] = [
+    "oauth.json",
+    "oauth.json.lock",
+    "api-keys.json",
+    "sync.key",
+    "credentials.json",
+    "auth.json",
+];
+
+#[must_use]
+pub fn credential(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    CREDENTIALS.contains(&lower.as_str())
+        || lower.starts_with(".env")
+        || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ed25519")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+}
+
 pub fn artifact_files(dir: &Path) -> std::io::Result<BTreeMap<String, (PathBuf, Stamp)>> {
     let mut found = BTreeMap::new();
     let mut pending = vec![(dir.to_owned(), String::new())];
@@ -376,6 +410,7 @@ pub fn artifact_files(dir: &Path) -> std::io::Result<BTreeMap<String, (PathBuf, 
                 pending.push((entry.path(), format!("{relative}/")));
             } else if kind.is_file()
                 && !transient(&name)
+                && !credential(&name)
                 && let Some(stamp) = stamp(&entry.path())?
             {
                 found.insert(format!("{ARTIFACTS}{relative}"), (entry.path(), stamp));

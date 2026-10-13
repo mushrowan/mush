@@ -21,11 +21,16 @@ impl Drop for Server {
 }
 
 pub async fn server_at(root: &Path) -> Server {
+    server_with(root, None).await
+}
+
+pub async fn server_with(root: &Path, retention: Option<Duration>) -> Server {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let config = ServerConfig {
         root: root.to_owned(),
         token_hash: Keys::from_master(&MASTER).token_hash(),
+        retention,
     };
     let task = tokio::spawn(async move {
         serve(listener, config).await.unwrap();
@@ -154,6 +159,29 @@ impl Machine {
         ids.sort();
         ids
     }
+}
+
+pub fn bloated(machine: &Machine, after: &str) -> SessionId {
+    let mut session = Session::new("test-model", "/tmp");
+    session
+        .conversation
+        .append_message(Message::ToolResult(mush_ai::types::ToolResultMessage {
+            tool_call_id: mush_ai::types::ToolCallId::from("call"),
+            tool_name: mush_ai::types::ToolName::from("ipython"),
+            content: vec![mush_ai::types::ToolResultContentPart::Text(
+                mush_ai::types::TextContent {
+                    text: "shown to the model".into(),
+                },
+            )],
+            outcome: mush_ai::types::ToolOutcome::Success,
+            timestamp_ms: Timestamp::zero(),
+            details: Some(serde_json::json!({
+                "stdout": "x\n".repeat(mush_ai::types::DETAIL_TEXT_LIMIT)
+            })),
+        }));
+    session.push_message(user(after));
+    machine.store().save(&session).unwrap();
+    session.meta.id
 }
 
 pub fn files_under(root: &Path) -> Vec<PathBuf> {

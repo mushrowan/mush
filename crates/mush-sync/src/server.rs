@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,9 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::protocol::{
-    Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, Refusal, ReleaseRequest,
-    now_ms, valid_blob, valid_holder, valid_sid, valid_upload,
+    Archived, Blocked, Changes, Commit, Head, Lease, LeaseGrant, LeaseRequest, Leases, Machine,
+    MachineReport, Machines, PruneReport, PruneRequest, PrunedGeneration, PrunedSession, Refusal,
+    ReleaseRequest, now_ms, valid_blob, valid_holder, valid_sid, valid_upload,
 };
 
 const MAX_UPLOAD: u64 = 512 << 20;
@@ -24,15 +25,20 @@ const MAX_WAIT_SECS: u64 = 300;
 const PAGE: usize = 500;
 const UNREFERENCED_GRACE: Duration = Duration::from_secs(60 * 60);
 const STAGING_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+const PRUNE_FIRST: Duration = Duration::from_secs(10 * 60);
+const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub root: PathBuf,
     pub token_hash: String,
+    pub retention: Option<Duration>,
 }
 
 struct Shared {
     root: PathBuf,
+    retention: Option<Duration>,
     token_hash: blake3::Hash,
     id: String,
     inner: tokio::sync::Mutex<Inner>,
@@ -61,6 +67,12 @@ impl From<std::io::Error> for Failure {
     }
 }
 
+impl From<serde_json::Error> for Failure {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Io(error.into())
+    }
+}
+
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         match self {
@@ -83,21 +95,52 @@ fn invalid(reason: &str) -> Failure {
 
 pub async fn serve(listener: tokio::net::TcpListener, config: ServerConfig) -> std::io::Result<()> {
     use axum::serve::ListenerExt;
-    let app = router(config)?;
+    let (app, shared) = app(config)?;
+    let pruning = tokio::spawn(prune_daily(shared));
     let listener = listener.tap_io(|stream| {
         if let Err(error) = stream.set_nodelay(true) {
             tracing::debug!(%error, "could not turn off nagle");
         }
     });
-    axum::serve(listener, app).await
+    let served = axum::serve(listener, app).await;
+    pruning.abort();
+    served
+}
+
+async fn prune_daily(shared: Arc<Shared>) {
+    if shared.retention.is_none() {
+        return;
+    }
+    tokio::time::sleep(PRUNE_FIRST).await;
+    loop {
+        match shared.prune(false).await {
+            Ok(report) => tracing::info!(
+                generations = report.generations.len(),
+                sessions = report.sessions.len(),
+                blocked = report.blocked.len(),
+                freed = report.freed + report.swept_bytes,
+                "pruned old history"
+            ),
+            Err(error) => tracing::error!(%error, "pruning old history failed"),
+        }
+        tokio::time::sleep(PRUNE_EVERY).await;
+    }
 }
 
 pub fn router(config: ServerConfig) -> std::io::Result<Router> {
+    Ok(app(config)?.0)
+}
+
+fn app(config: ServerConfig) -> std::io::Result<(Router, Arc<Shared>)> {
     let shared = Arc::new(Shared::open(config)?);
-    Ok(Router::new()
+    let router = Router::new()
         .route("/v1/changes", get(changes))
         .route("/v1/leases", get(leases))
+        .route("/v1/machines", get(machines))
+        .route("/v1/machines/{name}", post(report_machine))
+        .route("/v1/prune", post(prune))
         .route("/v1/sessions/{sid}", get(head))
+        .route("/v1/sessions/{sid}/archive", get(archive))
         .route("/v1/sessions/{sid}/chunks/{generation}/{seq}", get(chunk))
         .route(
             "/v1/sessions/{sid}/uploads/{upload}/{generation}/{seq}",
@@ -111,7 +154,8 @@ pub fn router(config: ServerConfig) -> std::io::Result<Router> {
             Arc::clone(&shared),
             authorise,
         ))
-        .with_state(shared))
+        .with_state(Arc::clone(&shared));
+    Ok((router, shared))
 }
 
 fn private_dir(path: &Path) -> std::io::Result<()> {
@@ -160,6 +204,7 @@ impl Shared {
         let (sender, _) = tokio::sync::watch::channel(rev);
         Ok(Self {
             root: config.root,
+            retention: config.retention,
             token_hash,
             id,
             inner: tokio::sync::Mutex::new(Inner { heads, rev }),
@@ -176,6 +221,285 @@ impl Shared {
         private_dir(&dir)?;
         mush_ai::private_io::write_private(&dir.join("head.json"), serde_json::to_vec(head)?)
     }
+
+    fn archive_file(&self, sid: &str, version: u64) -> PathBuf {
+        self.session(sid)
+            .join("archive")
+            .join(format!("{version}.json"))
+    }
+
+    fn archived(&self, sid: &str) -> std::io::Result<Vec<Archived>> {
+        let entries = match std::fs::read_dir(self.session(sid).join("archive")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut archived = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && let Ok(found) = serde_json::from_slice::<Archived>(&std::fs::read(&path)?)
+            {
+                archived.push(found);
+            }
+        }
+        archived.sort_by_key(|entry| entry.head.version);
+        Ok(archived)
+    }
+
+    fn kept_blobs(&self, head: &Head, archived: &[Archived]) -> Vec<String> {
+        let mut keep: BTreeSet<String> = head.blobs.iter().cloned().collect();
+        for entry in archived {
+            keep.extend(entry.head.blobs.iter().cloned());
+        }
+        keep.into_iter().collect()
+    }
+
+    fn machines_dir(&self) -> PathBuf {
+        self.root.join("machines")
+    }
+
+    fn machines(&self) -> std::io::Result<Vec<Machine>> {
+        let entries = match std::fs::read_dir(self.machines_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut machines = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && let Ok(machine) = serde_json::from_slice::<Machine>(&std::fs::read(&path)?)
+            {
+                machines.push(machine);
+            }
+        }
+        machines.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(machines)
+    }
+
+    async fn prune(&self, dry_run: bool) -> std::io::Result<PruneReport> {
+        let now = now_ms();
+        let mut report = PruneReport {
+            dry_run,
+            now,
+            ..PruneReport::default()
+        };
+        let Some(retention) = self.retention else {
+            return Ok(report);
+        };
+        let keep_ms = u64::try_from(retention.as_millis()).unwrap_or(u64::MAX);
+        report.keep_ms = keep_ms;
+        let horizon = now.saturating_sub(keep_ms.saturating_mul(3));
+        let (live, stale): (Vec<Machine>, Vec<Machine>) = self
+            .machines()?
+            .into_iter()
+            .partition(|machine| machine.seen_at >= horizon);
+        report.stale_machines = stale.into_iter().map(|machine| machine.name).collect();
+        let behind = |rev: u64, writer: Option<&String>| {
+            live.iter()
+                .filter(|machine| Some(&machine.name) != writer && machine.report.rev < rev)
+                .min_by_key(|machine| machine.report.rev)
+                .map(|machine| machine.name.clone())
+        };
+        let mut inner = self.inner.lock().await;
+        let sids: Vec<String> = inner.heads.keys().cloned().collect();
+        for sid in sids {
+            let Some(mut head) = inner.heads.get(&sid).cloned() else {
+                continue;
+            };
+            let dir = self.session(&sid);
+            let open_on = head
+                .lease
+                .as_ref()
+                .filter(|lease| lease.active(now))
+                .map(|lease| lease.holder.clone());
+            let mut changed = false;
+            let mut blocked = |what: &str, reason: String| {
+                report.blocked.push(Blocked {
+                    sid: sid.clone(),
+                    what: what.to_owned(),
+                    reason,
+                });
+            };
+            if head.deleted
+                && head.pruned_at.is_none()
+                && let Some(deleted_at) = head.deleted_at
+                && deleted_at.saturating_add(keep_ms) <= now
+            {
+                if let Some(holder) = &open_on {
+                    blocked("deleted session", format!("open on {holder}"));
+                } else if let Some(machine) = behind(head.rev, head.writer.as_ref()) {
+                    blocked(
+                        "deleted session",
+                        format!("{machine} has not synced since it was deleted"),
+                    );
+                } else {
+                    let parts = ["chunks", "blobs", "archive", "staging"];
+                    let bytes = parts.iter().map(|part| dir_size(&dir.join(part))).sum();
+                    report.sessions.push(PrunedSession {
+                        sid: sid.clone(),
+                        deleted_at,
+                        bytes,
+                    });
+                    report.freed += bytes;
+                    if !dry_run {
+                        for part in parts {
+                            remove_tree(&dir.join(part))?;
+                        }
+                        head.pruned_at = Some(now);
+                        head.blobs.clear();
+                        head.archived.clear();
+                        self.persist(&head)?;
+                        inner.heads.insert(sid.clone(), head);
+                    }
+                    continue;
+                }
+            }
+            let archived = self.archived(&sid)?;
+            let mut kept = Vec::new();
+            let mut dropped = Vec::new();
+            for entry in archived {
+                if entry.archived_at.saturating_add(keep_ms) > now {
+                    kept.push(entry);
+                } else if let Some(holder) = &open_on {
+                    blocked(
+                        &format!("generation {}", entry.head.generation),
+                        format!("open on {holder}"),
+                    );
+                    kept.push(entry);
+                } else if let Some(machine) =
+                    behind(entry.superseded_rev, entry.superseded_by.as_ref())
+                {
+                    blocked(
+                        &format!("generation {}", entry.head.generation),
+                        format!("{machine} has not synced since it was replaced"),
+                    );
+                    kept.push(entry);
+                } else {
+                    dropped.push(entry);
+                }
+            }
+            let referenced: BTreeSet<u64> = std::iter::once(head.generation)
+                .chain(kept.iter().map(|entry| entry.head.generation))
+                .collect();
+            let mut generations: BTreeSet<u64> = BTreeSet::new();
+            for entry in &dropped {
+                let generation = entry.head.generation;
+                let bytes = if referenced.contains(&generation) || !generations.insert(generation) {
+                    0
+                } else {
+                    dir_size(&dir.join("chunks").join(generation.to_string()))
+                };
+                report.generations.push(PrunedGeneration {
+                    sid: sid.clone(),
+                    generation,
+                    version: entry.head.version,
+                    archived_at: entry.archived_at,
+                    bytes,
+                });
+                report.freed += bytes;
+            }
+            for (generation, path) in chunk_generations(&dir)? {
+                let orphaned = !referenced.contains(&generation)
+                    && !generations.contains(&generation)
+                    && !head.archived.iter().any(|version| {
+                        kept.iter().chain(&dropped).any(|entry| {
+                            entry.head.version == *version && entry.head.generation == generation
+                        })
+                    })
+                    && older_than(&path, retention);
+                if orphaned {
+                    let bytes = dir_size(&path);
+                    generations.insert(generation);
+                    report.generations.push(PrunedGeneration {
+                        sid: sid.clone(),
+                        generation,
+                        version: 0,
+                        archived_at: 0,
+                        bytes,
+                    });
+                    report.freed += bytes;
+                }
+            }
+            if !dry_run {
+                for generation in &generations {
+                    if !referenced.contains(generation) {
+                        remove_tree(&dir.join("chunks").join(generation.to_string()))?;
+                    }
+                }
+                for entry in &dropped {
+                    match std::fs::remove_file(self.archive_file(&sid, entry.head.version)) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(error);
+                        }
+                        _ => {}
+                    }
+                }
+                if !dropped.is_empty() {
+                    head.archived = kept.iter().map(|entry| entry.head.version).collect();
+                    changed = true;
+                }
+            }
+            let keep = self.kept_blobs(&head, &kept);
+            report.swept_bytes += sweep_blobs_at(&dir, &keep, dry_run);
+            report.swept_bytes += sweep_staging_at(&dir, dry_run);
+            if changed {
+                self.persist(&head)?;
+                inner.heads.insert(sid, head);
+            }
+        }
+        Ok(report)
+    }
+}
+
+fn dir_size(path: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![path.to_owned()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(entry.path()),
+                Ok(_) => total += entry.metadata().map_or(0, |meta| meta.len()),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
+fn remove_tree(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+fn chunk_generations(session: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
+    let entries = match std::fs::read_dir(session.join("chunks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if let Some(generation) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u64>().ok())
+        {
+            found.push((generation, entry.path()));
+        }
+    }
+    Ok(found)
 }
 
 fn older_than(path: &Path, age: Duration) -> bool {
@@ -187,26 +511,44 @@ fn older_than(path: &Path, age: Duration) -> bool {
 }
 
 fn sweep_staging(session: &Path) {
+    sweep_staging_at(session, false);
+}
+
+fn sweep_staging_at(session: &Path, dry_run: bool) -> u64 {
     let Ok(entries) = std::fs::read_dir(session.join("staging")) else {
-        return;
+        return 0;
     };
+    let mut swept = 0;
     for entry in entries.flatten() {
         if older_than(&entry.path(), STAGING_GRACE) {
-            let _ = std::fs::remove_file(entry.path());
+            swept += entry.metadata().map_or(0, |meta| meta.len());
+            if !dry_run {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
+    swept
 }
 
 fn sweep_blobs(session: &Path, keep: &[String]) {
+    sweep_blobs_at(session, keep, false);
+}
+
+fn sweep_blobs_at(session: &Path, keep: &[String], dry_run: bool) -> u64 {
     let Ok(entries) = std::fs::read_dir(session.join("blobs")) else {
-        return;
+        return 0;
     };
+    let mut swept = 0;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !keep.contains(&name) && older_than(&entry.path(), UNREFERENCED_GRACE) {
-            let _ = std::fs::remove_file(entry.path());
+            swept += entry.metadata().map_or(0, |meta| meta.len());
+            if !dry_run {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
+    swept
 }
 
 async fn authorise(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
@@ -471,6 +813,17 @@ async fn commit(
         return Err(invalid("history generation went backwards"));
     };
     let dir = shared.session(&sid);
+    if first > 0
+        && !dir
+            .join("chunks")
+            .join(commit.generation.to_string())
+            .join((first - 1).to_string())
+            .is_file()
+    {
+        return Err(invalid(
+            "the history this builds on was pruned from the server, it has to be sent afresh",
+        ));
+    }
     for seq in first..commit.seq {
         if !staged(&shared, &sid, &commit.upload, commit.generation, seq).is_file() {
             return Err(invalid("a history chunk was not uploaded"));
@@ -491,24 +844,105 @@ async fn commit(
             chunks.join(seq.to_string()),
         )?;
     }
+    let rev = inner.rev + 1;
+    let mut archived = current.archived.clone();
+    let supersedes = current.version > 0
+        && current.manifest.is_some()
+        && current.pruned_at.is_none()
+        && (commit.generation > current.generation || (commit.deleted && !current.deleted));
+    if supersedes {
+        let entry = Archived {
+            head: Head {
+                lease: None,
+                archived: Vec::new(),
+                ..current.clone()
+            },
+            archived_at: now,
+            superseded_rev: rev,
+            superseded_by: Some(commit.holder.clone()),
+        };
+        private_dir(&dir.join("archive"))?;
+        mush_ai::private_io::write_private(
+            &shared.archive_file(&sid, current.version),
+            serde_json::to_vec(&entry)?,
+        )?;
+        archived.push(current.version);
+    }
+    let deleted_at = match (commit.deleted, current.deleted) {
+        (false, _) => None,
+        (true, true) => current.deleted_at.or(Some(now)),
+        (true, false) => Some(now),
+    };
     let head = Head {
         sid: sid.clone(),
         version: current.version + 1,
-        rev: inner.rev + 1,
+        rev,
         generation: commit.generation,
         seq: commit.seq,
         blobs: commit.blobs,
         manifest: Some(commit.manifest),
         lease: current.lease,
         updated_at: now,
+        deleted: commit.deleted,
+        deleted_at,
+        pruned_at: None,
+        archived,
+        writer: Some(commit.holder.clone()),
     };
     shared.persist(&head)?;
     inner.rev = head.rev;
-    inner.heads.insert(sid, head.clone());
+    inner.heads.insert(sid.clone(), head.clone());
     shared.rev.send_replace(head.rev);
-    sweep_blobs(&dir, &head.blobs);
+    let keep = shared.kept_blobs(&head, &shared.archived(&sid)?);
+    sweep_blobs(&dir, &keep);
     sweep_staging(&dir);
     Ok(Json(head))
+}
+
+async fn archive(
+    State(shared): State<Arc<Shared>>,
+    Url(sid): Url<String>,
+) -> Result<Json<Vec<Archived>>, Failure> {
+    if !valid_sid(&sid) {
+        return Err(invalid("bad session"));
+    }
+    let _inner = shared.inner.lock().await;
+    Ok(Json(shared.archived(&sid)?))
+}
+
+async fn machines(State(shared): State<Arc<Shared>>) -> Result<Json<Machines>, Failure> {
+    Ok(Json(Machines {
+        now: now_ms(),
+        machines: shared.machines()?,
+    }))
+}
+
+async fn report_machine(
+    State(shared): State<Arc<Shared>>,
+    Url(name): Url<String>,
+    Json(report): Json<MachineReport>,
+) -> Result<StatusCode, Failure> {
+    if !valid_holder(&name) {
+        return Err(invalid("bad machine name"));
+    }
+    let machine = Machine {
+        name: name.clone(),
+        seen_at: now_ms(),
+        report,
+    };
+    private_dir(&shared.machines_dir())?;
+    mush_ai::private_io::write_private(
+        &shared.machines_dir().join(format!("{name}.json")),
+        serde_json::to_vec(&machine)?,
+    )?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn prune(
+    State(shared): State<Arc<Shared>>,
+    Json(request): Json<PruneRequest>,
+) -> Result<Json<PruneReport>, Failure> {
+    Ok(Json(shared.prune(request.dry_run).await?))
 }
 
 async fn lease(

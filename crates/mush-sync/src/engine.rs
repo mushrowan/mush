@@ -8,6 +8,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use mush_session::{SessionId, SessionLease};
 
+use crate::blob::{BlobError, Sealer, Unsealer};
 use crate::keys::Keys;
 use crate::local::{
     Cursor, HistoryStamp, Layout, Limits, SessionState, Stamp, append, artifact_files,
@@ -15,8 +16,8 @@ use crate::local::{
     temp_beside, write_file,
 };
 use crate::protocol::{
-    ARTIFACTS, Commit, FileRef, Head, HistoryRef, Lease, META, Manifest, blob_aad, chunk_aad,
-    manifest_aad, now_ms, valid_session,
+    ARTIFACTS, Commit, FileRef, Head, HistoryRef, Lease, META, Manifest, chunk_aad, manifest_aad,
+    now_ms, valid_session,
 };
 use crate::remote::{Committed, Remote, RemoteError};
 
@@ -88,6 +89,12 @@ impl Report {
 }
 
 #[derive(Debug, Default)]
+pub struct Queue {
+    pub up: Vec<String>,
+    pub down: Vec<String>,
+}
+
+#[derive(Debug, Default)]
 pub struct LocalSummary {
     pub sessions: usize,
     pub synced: usize,
@@ -116,6 +123,30 @@ enum Order {
     Diverged,
 }
 
+pub(crate) fn internal(session: &str) -> bool {
+    session == crate::harness::HARNESS || session == crate::tool_output::TOOL_OUTPUT
+}
+
+pub(crate) fn meta_differs(ours: &[u8], theirs: &[u8]) -> bool {
+    let essence = |bytes: &[u8]| {
+        let mut value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        let fields = value.as_object_mut()?;
+        fields.remove("tree");
+        if let Some(meta) = fields
+            .get_mut("meta")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            meta.remove("updated_at");
+            meta.remove("message_count");
+        }
+        Some(value)
+    };
+    match (essence(ours), essence(theirs)) {
+        (Some(ours), Some(theirs)) => ours != theirs,
+        _ => true,
+    }
+}
+
 fn updated_at_of(meta: &[u8]) -> u64 {
     serde_json::from_slice::<serde_json::Value>(meta)
         .ok()
@@ -142,6 +173,7 @@ impl Entry {
         FileRef {
             blob: self.blob.clone(),
             len: self.len,
+            modified_ms: None,
         }
     }
 }
@@ -260,11 +292,12 @@ fn delta(local: &Local, state: Option<&SessionState>, theirs: Option<&Manifest>)
         } else {
             local.files.get(key).map(|entry| &entry.blob)
         };
-        if ours != base_file(key) {
+        if local.exists() && ours != base_file(key) {
             changes.files_local.insert(key.clone());
         }
         let previous = base.and_then(|base| base.files.get(key));
         if let Some(theirs) = theirs
+            && !theirs.deleted
             && theirs.files.get(key) != previous
         {
             changes.files_remote.insert(key.clone());
@@ -279,9 +312,9 @@ struct Feed {
     unreadable: Vec<(Head, String)>,
 }
 
-struct Download {
-    start: u64,
-    path: PathBuf,
+pub(crate) struct Download {
+    pub(crate) start: u64,
+    pub(crate) path: PathBuf,
 }
 
 impl Drop for Download {
@@ -316,7 +349,7 @@ impl std::fmt::Debug for Engine {
     }
 }
 
-fn upload_token() -> std::io::Result<String> {
+pub(crate) fn upload_token() -> std::io::Result<String> {
     let mut bytes = [0u8; 12];
     getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -362,6 +395,14 @@ impl Engine {
         &self.keys
     }
 
+    pub(crate) fn shared_keys(&self) -> &Arc<Keys> {
+        &self.keys
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     #[must_use]
     pub fn remote(&self) -> &Remote {
         &self.remote
@@ -381,6 +422,74 @@ impl Engine {
     }
 
     pub async fn pass(
+        &self,
+        scope: Scope,
+        direction: Direction,
+        held: Option<&SessionLease>,
+        patience: Duration,
+    ) -> Result<Report, SyncError> {
+        let full = scope == Scope::All && direction == Direction::Both;
+        let result = self.pass_once(scope, direction, held, patience).await;
+        if let Ok(report) = &result {
+            let forks = report
+                .forked
+                .iter()
+                .map(|(session, fork)| crate::status::fork(session, fork, "diverged"))
+                .collect();
+            if let Err(error) = crate::status::remember(&self.layout, forks) {
+                tracing::warn!(%error, "could not note the forks for review");
+            }
+        }
+        if full {
+            self.record_pass(&result).await;
+        }
+        result
+    }
+
+    async fn record_pass(&self, result: &Result<Report, SyncError>) {
+        let mut status = crate::status::LocalStatus::load(&self.layout);
+        let now = now_ms();
+        status.last_attempt_ms = now;
+        match result {
+            Ok(report) => {
+                status.last_ok_ms = Some(now);
+                status.offline_since_ms = None;
+                status.last_error = report
+                    .failed
+                    .first()
+                    .map(|(session, error)| format!("{session}: {error}"));
+                status.waiting.clone_from(&report.waiting);
+                status.failed.clone_from(&report.failed);
+                status.rev = Cursor::load(&self.layout).map_or(status.rev, |cursor| cursor.rev);
+            }
+            Err(error) => {
+                if error.offline() {
+                    status.offline_since_ms.get_or_insert(now);
+                }
+                status.last_error = Some(error.to_string());
+            }
+        }
+        if let Err(error) = status.save(&self.layout) {
+            tracing::warn!(%error, "could not record the sync status");
+        }
+        if result.is_err() {
+            return;
+        }
+        let review = crate::status::review(&self.layout).map_or(0, |review| review.len());
+        let report = crate::protocol::MachineReport {
+            rev: status.rev,
+            sessions: self.layout.local_ids().map_or(0, |ids| ids.len() as u64),
+            waiting: status.waiting.len() as u64,
+            failed: status.failed.len() as u64,
+            review: review as u64,
+            last_error: status.last_error.clone(),
+        };
+        if let Err(error) = self.remote.report(&self.machine, &report).await {
+            tracing::debug!(%error, "the sync server did not take this machine's report");
+        }
+    }
+
+    async fn pass_once(
         &self,
         scope: Scope,
         direction: Direction,
@@ -417,6 +526,7 @@ impl Engine {
         }
         let mut feed = feed;
         let shared = feed.remove(crate::harness::HARNESS);
+        let outputs = feed.remove(crate::tool_output::TOOL_OUTPUT);
         let mut ids: Vec<String> = match &scope {
             Scope::All => {
                 let mut ids = self.layout.local_ids()?;
@@ -427,7 +537,7 @@ impl Engine {
             Scope::Family(root) => self.family(root, &feed)?,
             Scope::Sessions(ids) => ids.clone(),
         };
-        ids.retain(|id| id != crate::harness::HARNESS);
+        ids.retain(|id| id != crate::harness::HARNESS && id != crate::tool_output::TOOL_OUTPUT);
         let mut queue: VecDeque<String> = ids.into();
         let mut seen = HashSet::new();
         while let Some(id) = queue.pop_front() {
@@ -456,6 +566,17 @@ impl Engine {
                 }
             }
         }
+        match self
+            .reconcile_tool_output(outputs, direction, &mut report)
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if error.offline() => return Err(error),
+            Err(error) => report.failed.push((
+                crate::tool_output::TOOL_OUTPUT.to_owned(),
+                error.to_string(),
+            )),
+        }
         if scope == Scope::All {
             match self.reconcile_harness(shared, direction, &mut report).await {
                 Ok(()) => {}
@@ -477,6 +598,9 @@ impl Engine {
             ..LocalSummary::default()
         };
         for id in self.layout.state_ids()? {
+            if internal(&id) {
+                continue;
+            }
             let Some(state) = SessionState::load(&self.layout, &id)? else {
                 continue;
             };
@@ -490,6 +614,39 @@ impl Engine {
         Ok(summary)
     }
 
+    pub fn queue(&self) -> std::io::Result<Queue> {
+        let mut queue = Queue::default();
+        let local = self.layout.local_ids()?;
+        for id in &local {
+            match SessionState::load(&self.layout, id)? {
+                None => queue.up.push(id.clone()),
+                Some(state) => {
+                    if !self.untouched(id, &state)? {
+                        queue.up.push(id.clone());
+                    }
+                    if state.remote_version > state.version {
+                        queue.down.push(id.clone());
+                    }
+                }
+            }
+        }
+        for id in self.layout.state_ids()? {
+            if local.contains(&id) || internal(&id) {
+                continue;
+            }
+            let Some(state) = SessionState::load(&self.layout, &id)? else {
+                continue;
+            };
+            if base_exists(Some(&state)) {
+                queue.up.push(id.clone());
+            }
+            if state.remote_version > state.version {
+                queue.down.push(id);
+            }
+        }
+        Ok(queue)
+    }
+
     pub async fn overview(&self) -> Result<Overview, SyncError> {
         let mut overview = Overview::default();
         let mut since = 0;
@@ -500,7 +657,7 @@ impl Engine {
                     .open_head(head.clone())
                     .ok()
                     .flatten()
-                    .filter(|entry| entry.manifest.session != crate::harness::HARNESS);
+                    .filter(|entry| !internal(&entry.manifest.session));
                 if entry.as_ref().is_some_and(|entry| !entry.manifest.deleted) {
                     overview.sessions += 1;
                 }
@@ -737,10 +894,7 @@ impl Engine {
         let known = state.and_then(|state| Some((state.stamps.get(key)?, state.file(key)?)));
         let (blob, len) = match known {
             Some((seen, file)) if *seen == now => (file.blob.clone(), file.len),
-            _ => {
-                let bytes = std::fs::read(path)?;
-                (self.keys.blob_id(&bytes), bytes.len() as u64)
-            }
+            _ => self.keys.blob_id_of(path)?,
         };
         Ok(Entry {
             blob,
@@ -992,7 +1146,7 @@ impl Engine {
             .all(|(key, (_, now))| known.stamps.get(key) == Some(now)))
     }
 
-    async fn fetch_history(
+    pub(crate) async fn fetch_history(
         &self,
         id: &str,
         sid: &str,
@@ -1057,17 +1211,106 @@ impl Engine {
         sid: &str,
         file: &FileRef,
     ) -> Result<Vec<u8>, SyncError> {
-        let sealed = self.remote.blob(sid, &file.blob).await?;
-        let plain = self
-            .keys
-            .open(&blob_aad(sid, &file.blob), &sealed)
-            .map_err(|error| SyncError::Tampered(format!("a file of {id}: {error}")))?;
-        if self.keys.blob_id(&plain) != file.blob {
-            return Err(SyncError::Tampered(format!(
-                "a file of {id} does not match its name"
-            )));
-        }
+        let mut plain = Vec::with_capacity(usize::try_from(file.len).unwrap_or(0));
+        self.receive_blob(id, sid, file, &mut plain).await?;
         Ok(plain)
+    }
+
+    async fn receive_blob(
+        &self,
+        id: &str,
+        sid: &str,
+        file: &FileRef,
+        sink: &mut (dyn Write + Send),
+    ) -> Result<(), SyncError> {
+        use futures::StreamExt;
+        let broken = |error: BlobError| match error {
+            BlobError::Broken(why) => SyncError::Tampered(format!("a file of {id}: {why}")),
+            BlobError::Io(error) => SyncError::Io(error),
+        };
+        let mut stream = self.remote.blob_stream(sid, &file.blob).await?;
+        let mut unsealer = Unsealer::new(&self.keys, sid, &file.blob, file.len);
+        while let Some(piece) = stream.next().await {
+            let piece = piece?;
+            unsealer.feed(&piece, sink).map_err(broken)?;
+        }
+        unsealer.finish(sink).map_err(broken)
+    }
+
+    pub(crate) async fn fetch_blob_into(
+        &self,
+        id: &str,
+        sid: &str,
+        file: &FileRef,
+        target: &Path,
+    ) -> Result<(), SyncError> {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let partial = temp_beside(target, "sync-in")?;
+        let written = async {
+            let handle = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&partial)?
+            };
+            let mut writer = std::io::BufWriter::with_capacity(256 << 10, handle);
+            self.receive_blob(id, sid, file, &mut writer).await?;
+            let handle = writer
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)?;
+            handle.sync_all()?;
+            std::fs::rename(&partial, target)?;
+            Ok::<(), SyncError>(())
+        }
+        .await;
+        if written.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        written
+    }
+
+    pub(crate) async fn upload_file(
+        &self,
+        sid: &str,
+        blob: &str,
+        path: &Path,
+        len: u64,
+    ) -> Result<(), SyncError> {
+        let file = std::fs::File::open(path)?;
+        let (sender, receiver) = tokio::sync::mpsc::channel::<std::io::Result<Vec<u8>>>(2);
+        let keys = Arc::clone(&self.keys);
+        let (sid_owned, blob_owned) = (sid.to_owned(), blob.to_owned());
+        let producer = tokio::task::spawn_blocking(move || {
+            let reader = std::io::BufReader::with_capacity(256 << 10, file);
+            for frame in Sealer::new(keys, &sid_owned, &blob_owned, reader, len) {
+                let failure = frame.as_ref().err().map(std::io::Error::kind);
+                let message = frame.as_ref().err().map(ToString::to_string);
+                if sender.blocking_send(frame).is_err() {
+                    return None;
+                }
+                if let (Some(kind), Some(message)) = (failure, message) {
+                    return Some(std::io::Error::new(kind, message));
+                }
+            }
+            None
+        });
+        let frames = futures::stream::unfold(receiver, |mut receiver| async move {
+            receiver.recv().await.map(|frame| (frame, receiver))
+        });
+        let sent = self
+            .remote
+            .store_blob_body(sid, blob, reqwest::Body::wrap_stream(frames))
+            .await;
+        let failed = producer.await.ok().flatten();
+        match (sent, failed) {
+            (_, Some(error)) => Err(SyncError::Io(error)),
+            (Err(error), None) => Err(error.into()),
+            (Ok(()), None) => Ok(()),
+        }
     }
 
     fn fork(&self, id: &str, local: &Local) -> Result<String, SyncError> {
@@ -1209,20 +1452,23 @@ impl Engine {
                     download = fetched;
                     let ours = local.meta.as_ref().map(|meta| meta.blob.clone());
                     let remote_meta = theirs.files.get(META);
+                    let base_meta = state
+                        .as_ref()
+                        .and_then(|state| state.file(META))
+                        .map(|file| file.blob.clone());
                     let metas_equal = ours.as_ref() == remote_meta.map(|file| &file.blob);
-                    let (local_at, remote_bytes, remote_at) = if metas_equal {
-                        (0, Vec::new(), 0)
+                    let (local_bytes, remote_bytes) = if metas_equal {
+                        (Vec::new(), Vec::new())
                     } else {
                         let bytes = match remote_meta {
                             Some(file) => self.fetch_blob(id, sid, file).await?,
                             None => Vec::new(),
                         };
-                        (
-                            updated_at_of(&std::fs::read(self.layout.meta(id))?),
-                            bytes.clone(),
-                            updated_at_of(&bytes),
-                        )
+                        (std::fs::read(self.layout.meta(id))?, bytes)
                     };
+                    let meaningful = !metas_equal && meta_differs(&local_bytes, &remote_bytes);
+                    let ours_moved = ours != base_meta;
+                    let theirs_moved = remote_meta.map(|file| &file.blob) != base_meta.as_ref();
                     let mut keep_theirs_beside = false;
                     let mut keep_ours_beside = false;
                     match order {
@@ -1231,20 +1477,22 @@ impl Engine {
                             report.forked.push((id.to_owned(), copy.clone()));
                             fork = Some(copy);
                         }
-                        Order::Behind => keep_ours_beside = !metas_equal && local_at > remote_at,
+                        Order::Behind => keep_ours_beside = meaningful && ours_moved,
                         Order::Ahead => {
                             take_core = false;
                             keep_ours = true;
-                            keep_theirs_beside = !metas_equal && remote_at > local_at;
+                            keep_theirs_beside = meaningful && theirs_moved;
                         }
                         Order::Equal => {
                             settled = true;
-                            if !metas_equal && local_at > remote_at {
+                            if !metas_equal
+                                && updated_at_of(&local_bytes) > updated_at_of(&remote_bytes)
+                            {
                                 take_core = false;
                                 keep_ours = true;
-                                keep_theirs_beside = true;
+                                keep_theirs_beside = meaningful;
                             } else {
-                                keep_ours_beside = !metas_equal;
+                                keep_ours_beside = meaningful;
                             }
                         }
                     }
@@ -1358,14 +1606,17 @@ impl Engine {
                     now_ms()
                 ));
                 std::fs::rename(&path, &sidecar)?;
+                crate::status::remember(
+                    &self.layout,
+                    vec![crate::status::sidecar(id, sidecar.clone())],
+                )?;
                 report.sidecars.push((id.to_owned(), key.clone()));
             }
             skipped.remove(&key);
             stamps.remove(&key);
             match target {
                 Some(file) => {
-                    let bytes = self.fetch_blob(id, sid, file).await?;
-                    write_file(&path, &bytes)?;
+                    self.fetch_blob_into(id, sid, file, &path).await?;
                     if let Some(now) = stamp(&path)? {
                         stamps.insert(key, now);
                     }
@@ -1376,8 +1627,8 @@ impl Engine {
         if take_core && exists {
             match theirs.files.get(META) {
                 Some(file) if local.meta.as_ref().map(|meta| &meta.blob) != Some(&file.blob) => {
-                    let bytes = self.fetch_blob(id, sid, file).await?;
-                    write_file(&self.layout.meta(id), &bytes)?;
+                    self.fetch_blob_into(id, sid, file, &self.layout.meta(id))
+                        .await?;
                 }
                 Some(_) => {}
                 None => remove(&self.layout.meta(id))?,
@@ -1405,14 +1656,21 @@ impl Engine {
                 }),
                 _ => None,
             }
+        } else if !exists && local.exists() {
+            None
         } else {
             state.as_ref().and_then(|state| state.history.clone())
         };
+        let mut known = theirs.clone();
+        if entry.head.pruned_at.is_some() {
+            known.files.clear();
+            known.history = None;
+        }
         let merged = SessionState {
             version: entry.head.version,
             remote_version: entry.head.version,
             generation: entry.head.generation,
-            manifest: Some(theirs.clone()),
+            manifest: Some(known),
             skipped,
             history,
             stamps,
@@ -1523,14 +1781,14 @@ impl Engine {
             let Some(path) = self.layout.file(id, key) else {
                 continue;
             };
-            let bytes = std::fs::read(&path)?;
-            if self.keys.blob_id(&bytes) != file.blob {
-                return Err(SyncError::Io(std::io::Error::other(format!(
-                    "{key} changed while syncing, retrying next pass"
-                ))));
-            }
-            let sealed = self.keys.seal(&blob_aad(sid, &file.blob), &bytes)?;
-            self.remote.store_blob(sid, &file.blob, sealed).await?;
+            self.upload_file(sid, &file.blob, &path, file.len)
+                .await
+                .map_err(|error| match error {
+                    SyncError::Io(error) => {
+                        SyncError::Io(std::io::Error::other(format!("{key}: {error}")))
+                    }
+                    other => other,
+                })?;
         }
         let blobs: BTreeSet<String> = manifest
             .files
@@ -1552,6 +1810,7 @@ impl Engine {
             seq: manifest.history.as_ref().map_or(0, |history| history.seq),
             blobs: blobs.into_iter().collect(),
             manifest: STANDARD.encode(sealed),
+            deleted: manifest.deleted,
         };
         let head = match self.remote.commit(sid, &commit).await? {
             Committed::Accepted(head) => head,
