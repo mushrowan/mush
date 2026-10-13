@@ -1,0 +1,33 @@
+[package]
+name = "mush-sync"
+description = "end-to-end encrypted session sync between machines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+mush-ai.workspace = true
+mush-session.workspace = true
+axum.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chacha20poly1305.workspace = true
+flate2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+notify.workspace = true
+reqwest.workspace = true
+rustix = { workspace = true, features = ["system"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
