@@ -401,7 +401,9 @@ impl Engine {
                 report.failed.push((session.unwrap_or(head.sid), error));
             }
         }
-        let ids: Vec<String> = match &scope {
+        let mut feed = feed;
+        let shared = feed.remove(crate::harness::HARNESS);
+        let mut ids: Vec<String> = match &scope {
             Scope::All => {
                 let mut ids = self.layout.local_ids()?;
                 ids.extend(self.layout.state_ids()?);
@@ -411,6 +413,7 @@ impl Engine {
             Scope::Family(root) => self.family(root, &feed)?,
             Scope::Sessions(ids) => ids.clone(),
         };
+        ids.retain(|id| id != crate::harness::HARNESS);
         let mut queue: VecDeque<String> = ids.into();
         let mut seen = HashSet::new();
         while let Some(id) = queue.pop_front() {
@@ -434,6 +437,15 @@ impl Engine {
                     self.remember(&id, version)?;
                     report.failed.push((id, error.to_string()));
                 }
+            }
+        }
+        if scope == Scope::All {
+            match self.reconcile_harness(shared, direction, &mut report).await {
+                Ok(()) => {}
+                Err(error) if error.offline() => return Err(error),
+                Err(error) => report
+                    .failed
+                    .push((crate::harness::HARNESS.to_owned(), error.to_string())),
             }
         }
         if scope == Scope::All && direction == Direction::Both {
@@ -467,7 +479,11 @@ impl Engine {
         loop {
             let changes = self.remote.changes(since, Duration::ZERO, false).await?;
             for head in changes.heads {
-                let entry = self.open_head(head.clone()).ok().flatten();
+                let entry = self
+                    .open_head(head.clone())
+                    .ok()
+                    .flatten()
+                    .filter(|entry| entry.manifest.session != crate::harness::HARNESS);
                 if entry.as_ref().is_some_and(|entry| !entry.manifest.deleted) {
                     overview.sessions += 1;
                 }
@@ -588,7 +604,7 @@ impl Engine {
         Ok(Some(RemoteEntry { head, manifest }))
     }
 
-    async fn fetch_entry(&self, sid: &str) -> Result<Option<RemoteEntry>, SyncError> {
+    pub(crate) async fn fetch_entry(&self, sid: &str) -> Result<Option<RemoteEntry>, SyncError> {
         match self.remote.head(sid).await? {
             Some(head) => self.open_head(head),
             None => Ok(None),
@@ -1007,7 +1023,12 @@ impl Engine {
         }
     }
 
-    async fn fetch_blob(&self, id: &str, sid: &str, file: &FileRef) -> Result<Vec<u8>, SyncError> {
+    pub(crate) async fn fetch_blob(
+        &self,
+        id: &str,
+        sid: &str,
+        file: &FileRef,
+    ) -> Result<Vec<u8>, SyncError> {
         let sealed = self.remote.blob(sid, &file.blob).await?;
         let plain = self
             .keys
@@ -1100,6 +1121,29 @@ impl Engine {
             (true, std::cmp::Ordering::Greater) => Order::Ahead,
         };
         Ok((order, Some(download)))
+    }
+
+    async fn merge_artifact(
+        &self,
+        id: &str,
+        sid: &str,
+        key: &str,
+        path: &Path,
+        theirs: &FileRef,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        let lines = key.ends_with(".jsonl");
+        if !lines && !key.ends_with(mush_session::harness::STATE_FILE) {
+            return Ok(None);
+        }
+        let Ok(ours) = std::fs::read(path) else {
+            return Ok(None);
+        };
+        let remote = self.fetch_blob(id, sid, theirs).await?;
+        Ok(if lines {
+            Some(crate::harness::merge_lines(&ours, &remote))
+        } else {
+            crate::harness::merge_bytes(&ours, &remote, None)
+        })
     }
 
     fn keep_beside(&self, id: &str, who: &str, bytes: &[u8]) -> std::io::Result<()> {
@@ -1268,6 +1312,16 @@ impl Engine {
                 || (local.held_back.contains(&key)
                     && stamp(&path)?.is_some()
                     && stamp(&path)? != recorded);
+            if fork.is_none()
+                && dirty
+                && let Some(file) = target
+                && let Some(merged) = self.merge_artifact(id, sid, &key, &path, file).await?
+            {
+                write_file(&path, &merged)?;
+                skipped.remove(&key);
+                stamps.remove(&key);
+                continue;
+            }
             if fork.is_none() && dirty && stamp(&path)?.is_some() {
                 let sidecar = path.with_file_name(format!(
                     "{}.sync-conflict-{}-{}",

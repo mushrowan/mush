@@ -122,11 +122,19 @@ pub struct RefinementEvent {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub deleted_at: String,
+    pub version: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub schema: u32,
     pub entries: BTreeMap<Kind, BTreeMap<String, Entry>>,
     pub refinements: Vec<RefinementEvent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deleted: BTreeMap<Kind, BTreeMap<String, Tombstone>>,
     #[serde(skip)]
     skipped: Skipped,
 }
@@ -200,6 +208,7 @@ impl Default for State {
                 .map(|kind| (kind, BTreeMap::new()))
                 .collect(),
             refinements: Vec::new(),
+            deleted: BTreeMap::new(),
             skipped: Skipped::default(),
         }
     }
@@ -273,6 +282,12 @@ impl State {
                 .skipped
                 .unreadable
                 .push(format!("entries is a {}", json_type(&other))),
+        }
+        if let Some(deleted) = record
+            .remove("deleted")
+            .and_then(|deleted| serde_json::from_value(deleted).ok())
+        {
+            state.deleted = deleted;
         }
         match record.remove("refinements") {
             None => {}
@@ -437,6 +452,7 @@ impl State {
             _ => {}
         }
         let after = merge_entry(edit, &id, before.as_ref(), scope, source);
+        self.revive(edit.kind, &id);
         self.entries
             .entry(edit.kind)
             .or_default()
@@ -445,11 +461,33 @@ impl State {
     }
 
     pub fn remove(&mut self, kind: Kind, id: &str) -> Result<Entry, String> {
-        self.entries
+        let removed = self
+            .entries
             .entry(kind)
             .or_default()
             .remove(id)
-            .ok_or_else(|| format!("{id} not found"))
+            .ok_or_else(|| format!("{id} not found"))?;
+        self.bury(kind, id, removed.version);
+        Ok(removed)
+    }
+
+    fn bury(&mut self, kind: Kind, id: &str, version: u32) {
+        self.deleted.entry(kind).or_default().insert(
+            id.to_owned(),
+            Tombstone {
+                deleted_at: now(),
+                version,
+            },
+        );
+    }
+
+    fn revive(&mut self, kind: Kind, id: &str) {
+        if let Some(buried) = self.deleted.get_mut(&kind) {
+            buried.remove(id);
+            if buried.is_empty() {
+                self.deleted.remove(&kind);
+            }
+        }
     }
 
     #[must_use]
@@ -707,8 +745,10 @@ impl State {
                         "entry already exists".into(),
                     ));
                 }
-                (Action::Delete, Some(_)) => {
+                (Action::Delete, Some(gone)) => {
+                    let version = gone.version;
                     self.entries.entry(edit.kind).or_default().remove(&entry_id);
+                    self.bury(edit.kind, &entry_id, version);
                     applied.push(AppliedEdit {
                         edit: edit.clone(),
                         id: entry_id,
@@ -720,6 +760,7 @@ impl State {
                 }
                 (Action::Create | Action::Update, _) => {
                     let after = merge_entry(edit, &entry_id, before.as_ref(), scope, "refine");
+                    self.revive(edit.kind, &entry_id);
                     self.entries
                         .entry(edit.kind)
                         .or_default()
@@ -1834,6 +1875,40 @@ mod tests {
             state.remove(Kind::Memory, "tests"),
             Err("tests not found".into())
         );
+    }
+
+    #[test]
+    fn a_deletion_leaves_a_tombstone_that_survives_saving_until_the_entry_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = State::default();
+        state
+            .upsert(
+                &create(Kind::Memory, "gone", "soon"),
+                Scope::Global,
+                "agent",
+            )
+            .unwrap();
+        state.remove(Kind::Memory, "gone").unwrap();
+        state.save(dir.path()).unwrap();
+
+        let mut loaded = State::load(dir.path(), Scope::Global);
+        let tombstone = &loaded.deleted[&Kind::Memory]["gone"];
+        assert_eq!(tombstone.version, 1);
+        assert!(tombstone.deleted_at.ends_with('Z'));
+
+        loaded
+            .upsert(
+                &create(Kind::Memory, "gone", "back"),
+                Scope::Global,
+                "agent",
+            )
+            .unwrap();
+        loaded.save(dir.path()).unwrap();
+        let revived = State::load(dir.path(), Scope::Global);
+        assert!(revived.deleted.is_empty());
+        assert_eq!(revived.entry(Kind::Memory, "gone").unwrap().content, "back");
+        let raw = std::fs::read_to_string(dir.path().join(STATE_FILE)).unwrap();
+        assert!(!raw.contains("deleted"), "{raw}");
     }
 
     #[test]

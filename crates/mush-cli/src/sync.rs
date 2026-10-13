@@ -27,6 +27,9 @@ pub enum SyncCommand {
     Release {
         session: String,
     },
+    Import {
+        dir: PathBuf,
+    },
 }
 
 impl SyncCommand {
@@ -99,7 +102,58 @@ pub async fn run(command: Option<SyncCommand>, sync: &SyncConfig) -> Result<()> 
         }) => serve(&listen, root, token_hash).await,
         Some(SyncCommand::Key { action }) => key(sync, action),
         Some(SyncCommand::Release { session }) => release(sync, &session).await,
+        Some(SyncCommand::Import { dir }) => import(sync, &dir),
     }
+}
+
+fn import(sync: &SyncConfig, dir: &Path) -> Result<()> {
+    let layout = mush_sync::Layout::new(&mush_session::data_dir());
+    let report = mush_sync::import::import(&layout, dir)
+        .wrap_err_with(|| format!("could not import {}", dir.display()))?;
+    let counts = [
+        ("added", report.added.len()),
+        ("advanced", report.advanced.len()),
+        ("already here", report.unchanged.len()),
+        ("kept as forks", report.forked.len()),
+        ("open here, skipped", report.busy.len()),
+    ];
+    println!(
+        "{}",
+        counts
+            .iter()
+            .map(|(label, count)| format!("{label} {count}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (session, fork) in &report.forked {
+        println!(
+            "{}",
+            Style::Yellow.stdout(format_args!(
+                "{} differs from the copy here, the backup's version is now {}",
+                short_id(session),
+                short_id(fork)
+            ))
+        );
+    }
+    if !report.kept_beside.is_empty() {
+        println!(
+            "{}",
+            Style::Dim.stdout(format_args!(
+                "{} older or competing session headers were kept beside their sessions as .sync-conflict files",
+                report.kept_beside.len()
+            ))
+        );
+    }
+    if report.harness {
+        println!("merged the backed up harness state");
+    }
+    if sync.settings().is_some() {
+        println!(
+            "{}",
+            Style::Dim.stdout("mush sync shares it with your other machines")
+        );
+    }
+    Ok(())
 }
 
 fn print_report(report: &Report) {

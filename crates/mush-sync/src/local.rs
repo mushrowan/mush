@@ -14,6 +14,7 @@ const KERNEL_STATE: &str = "kernel-state.pickle";
 pub struct Layout {
     pub sessions: PathBuf,
     pub artifacts: PathBuf,
+    pub harness: PathBuf,
     pub state: PathBuf,
 }
 
@@ -23,6 +24,7 @@ impl Layout {
         Self {
             sessions: data_dir.join("sessions"),
             artifacts: data_dir.join("session-artifacts"),
+            harness: data_dir.join("harness"),
             state: data_dir.join("sync"),
         }
     }

@@ -715,3 +715,144 @@ async fn when_only_the_titles_differ_the_newer_wins_and_the_other_is_kept_beside
     let sidecar = std::fs::read_to_string(esme.data().join("sessions").join(&kept[0])).unwrap();
     assert!(sidecar.contains("first title"));
 }
+
+fn remember(machine: &crate::harness::Machine, id: &str, content: &str) {
+    use mush_session::harness::{Action, Edit, Kind, Scope, State};
+    let dir = machine.data().join("harness");
+    let mut state = State::load(&dir, Scope::Global);
+    let edit = Edit {
+        action: if state.entry(Kind::Memory, id).is_some() {
+            Action::Update
+        } else {
+            Action::Create
+        },
+        kind: Kind::Memory,
+        id: Some(id.to_owned()),
+        title: Some(id.to_owned()),
+        content: Some(content.to_owned()),
+        path: None,
+        reference: None,
+        arguments: None,
+        metadata: None,
+        reason: None,
+    };
+    state.upsert(&edit, Scope::Global, "agent").unwrap();
+    state.save(&dir).unwrap();
+}
+
+fn forget(machine: &crate::harness::Machine, id: &str) {
+    use mush_session::harness::{Kind, Scope, State};
+    let dir = machine.data().join("harness");
+    let mut state = State::load(&dir, Scope::Global);
+    state.remove(Kind::Memory, id).unwrap();
+    state.save(&dir).unwrap();
+}
+
+fn memories(machine: &crate::harness::Machine) -> Vec<(String, String)> {
+    use mush_session::harness::{Kind, Scope, State};
+    State::load(&machine.data().join("harness"), Scope::Global)
+        .list(Some(Kind::Memory))
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry.content.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn harness_memories_from_both_machines_merge_and_deletions_travel() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    remember(&dot, "jj", "use jj, not git");
+    remember(&esme, "kaomoji", "rowan likes kaomoji");
+    dot.sync().await;
+    esme.sync().await;
+    dot.sync().await;
+    let both = vec![
+        ("jj".to_owned(), "use jj, not git".to_owned()),
+        ("kaomoji".to_owned(), "rowan likes kaomoji".to_owned()),
+    ];
+    assert_eq!(memories(&dot), both);
+    assert_eq!(memories(&esme), both);
+
+    forget(&dot, "kaomoji");
+    remember(&esme, "jj", "use jj, never git");
+    dot.sync().await;
+    esme.sync().await;
+    dot.sync().await;
+    let expected = vec![("jj".to_owned(), "use jj, never git".to_owned())];
+    assert_eq!(memories(&esme), expected);
+    assert_eq!(memories(&dot), expected);
+    assert!(dot.sync().await.quiet());
+    assert!(esme.sync().await.quiet());
+}
+
+#[tokio::test]
+async fn the_same_memory_edited_on_both_machines_keeps_both_edits() {
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    remember(&dot, "style", "short");
+    dot.sync().await;
+    esme.sync().await;
+    remember(&dot, "style", "short and kind");
+    remember(&esme, "style", "short and precise");
+    dot.sync().await;
+    esme.sync().await;
+    dot.sync().await;
+    let kept = memories(&esme);
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(memories(&dot), kept);
+    let contents: std::collections::BTreeSet<&str> =
+        kept.iter().map(|(_, content)| content.as_str()).collect();
+    assert_eq!(
+        contents,
+        ["short and kind", "short and precise"]
+            .into_iter()
+            .collect()
+    );
+}
+
+#[tokio::test]
+async fn a_sessions_own_harness_entries_merge_when_both_sides_add_some() {
+    use mush_session::harness::{Action, Edit, Kind, Scope, State};
+    let root = tempfile::tempdir().unwrap();
+    let server = server_at(root.path()).await;
+    let (dot, esme) = (machine("dot", &server), machine("esme", &server));
+    let id = dot.create("local harness", &["start"]);
+    let add = |machine: &crate::harness::Machine, memory: &str| {
+        let dir = machine.artifact(&id, "harness");
+        let mut state = State::load(&dir, Scope::Local);
+        let edit = Edit {
+            action: Action::Create,
+            kind: Kind::Memory,
+            id: Some(memory.to_owned()),
+            title: Some(memory.to_owned()),
+            content: Some(memory.to_owned()),
+            path: None,
+            reference: None,
+            arguments: None,
+            metadata: None,
+            reason: None,
+        };
+        state.upsert(&edit, Scope::Local, "agent").unwrap();
+        state.save(&dir).unwrap();
+    };
+    add(&dot, "first");
+    dot.sync().await;
+    esme.sync().await;
+    add(&dot, "from dot");
+    add(&esme, "from esme");
+    dot.sync().await;
+    let report = esme.sync().await;
+    assert!(report.sidecars.is_empty(), "{report:?}");
+    dot.sync().await;
+    for machine in [&dot, &esme] {
+        let state = State::load(&machine.artifact(&id, "harness"), Scope::Local);
+        let ids: Vec<&str> = state
+            .list(Some(Kind::Memory))
+            .into_iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(ids, ["first", "from dot", "from esme"]);
+    }
+}
