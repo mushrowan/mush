@@ -91,6 +91,8 @@ pub struct ContextCompaction {
     pub messages: Vec<Message>,
     pub summary: String,
     pub summarised_count: usize,
+    #[serde(default)]
+    pub appended: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1943,6 +1945,7 @@ mod tests {
                             messages: vec![user("summary"), messages[2].clone()],
                             summary: "summary".into(),
                             summarised_count: 2,
+                            appended: 0,
                         })
                     } else {
                         ContextTransformResult::Unchanged
@@ -2054,6 +2057,7 @@ mod tests {
                             messages: vec![user("summary"), messages[2].clone()],
                             summary: "summary".into(),
                             summarised_count: 2,
+                            appended: 0,
                         })
                     };
                     Box::pin(async move { result })

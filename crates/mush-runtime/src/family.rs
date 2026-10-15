@@ -18,6 +18,7 @@ use crate::worker::WorkerConfig;
 
 mod host;
 pub use host::RlmHandler;
+pub use mush_session::brief::TASK_LABEL;
 
 pub const MAX_CHILDREN: usize = 32;
 pub const CHILD_NAME_MAX_CHARS: usize = 64;
@@ -27,7 +28,6 @@ pub const MESSAGE_MAX_CHARS: usize = 16 * 1024;
 pub const MAX_PENDING_MESSAGES: usize = 20;
 pub const MESSAGE_BURST: u32 = 3;
 pub const MESSAGE_REFILL: Duration = Duration::from_secs(1);
-pub const TASK_LABEL: &str = "[task from parent]";
 const DELETED_REASON: &str = "Deleted by parent orchestrator";
 const STOPPED_REASON: &str = "Stopped by the user";
 const TICK: Duration = Duration::from_millis(50);

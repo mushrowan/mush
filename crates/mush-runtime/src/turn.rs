@@ -283,6 +283,7 @@ impl SessionRuntime {
         let steering_queue = self.steering_queue.clone();
         self.deliver_pending_harness_digest();
         self.refresh_notes();
+        self.restate_task_brief();
         self.record_thinking_level();
         self.pending_prompt = Some(prompt);
         self.persist_pending_prompt();
@@ -306,7 +307,11 @@ impl SessionRuntime {
             injections.lifecycle_hooks.clone(),
             cwd.clone(),
             live,
-            self.kernel_state.clone(),
+            AfterCompaction {
+                kernel: self.kernel_state.clone(),
+                notes: self.notes.clone(),
+                task: self.conversation.task_brief(),
+            },
         );
 
         let steering = build_steering_callback(steering_queue.clone());
@@ -359,6 +364,33 @@ impl SessionRuntime {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct AfterCompaction {
+    pub kernel: Option<Arc<dyn mush_kernel::KernelState>>,
+    pub notes: Option<Arc<crate::notes::Notes>>,
+    pub task: Option<String>,
+}
+
+impl AfterCompaction {
+    pub async fn messages(&self, compacted: &[Message]) -> Vec<Message> {
+        let mut messages = Vec::new();
+        if let Some(notice) = crate::kernel_notice::after_compaction(self.kernel.as_deref()).await {
+            messages.push(notice);
+        }
+        if let Some(task) = &self.task
+            && !mush_session::brief::in_context(task, compacted)
+        {
+            messages.push(mush_session::brief::restated(task));
+        }
+        if let Some(delivery) = self.notes.as_ref().and_then(|notes| {
+            notes.delivery(crate::notes::latest_fingerprint(compacted).as_deref())
+        }) {
+            messages.push(delivery.message);
+        }
+        messages
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_context_transform(
     target: CompactionTarget,
@@ -371,7 +403,7 @@ pub fn build_context_transform(
     lifecycle_hooks: mush_agent::LifecycleHooks,
     cwd: std::path::PathBuf,
     live: Option<mush_session::compact::LiveContext>,
-    kernel: Option<Arc<dyn mush_kernel::KernelState>>,
+    after: AfterCompaction,
 ) -> Option<mush_agent::TransformFn> {
     if !do_auto_compact {
         return None;
@@ -391,7 +423,7 @@ pub fn build_context_transform(
         let cwd = cwd.clone();
         let registry = registry.clone();
         let live = live.clone();
-        let kernel = kernel.clone();
+        let after = after.clone();
         Box::pin(async move {
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
@@ -436,11 +468,11 @@ pub fn build_context_transform(
                 &settings,
             )
             .await;
-            if result.summarised_count > 0
-                && let Some(notice) =
-                    crate::kernel_notice::after_compaction(kernel.as_deref()).await
-            {
-                result.messages.push(notice);
+            let mut appended = 0;
+            if result.summarised_count > 0 {
+                let restored = after.messages(&result.messages).await;
+                appended = restored.len();
+                result.messages.extend(restored);
             }
             measured_len.store(result.messages.len(), std::sync::atomic::Ordering::Relaxed);
             if result.summarised_count > 0 {
@@ -452,6 +484,7 @@ pub fn build_context_transform(
                     messages: result.messages,
                     summary: result.summary,
                     summarised_count: result.summarised_count,
+                    appended,
                 })
             } else {
                 mush_agent::ContextTransformResult::Unchanged
@@ -739,7 +772,7 @@ mod tests {
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
             None,
-            None,
+            AfterCompaction::default(),
         )
         .expect("auto-compaction enabled should build a transform");
 
@@ -792,7 +825,10 @@ mod tests {
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
             None,
-            Some(Arc::new(NamedKernel)),
+            AfterCompaction {
+                kernel: Some(Arc::new(NamedKernel)),
+                ..AfterCompaction::default()
+            },
         )
         .expect("auto-compaction enabled should build a transform");
         let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
@@ -828,6 +864,134 @@ mod tests {
         );
     }
 
+    fn user_text_of(message: &Message) -> String {
+        let Message::User(user) = message else {
+            panic!("{message:?}");
+        };
+        user.text()
+    }
+
+    fn grown_child_transform(after: AfterCompaction) -> mush_agent::TransformFn {
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap();
+        build_context_transform(
+            CompactionTarget::session_model(model, StreamOptions::default()),
+            true,
+            mush_session::compact::CompactionSettings {
+                keep_recent_tokens: 2_000,
+                ..mush_session::compact::CompactionSettings::default()
+            },
+            TokenCount::new(10_000),
+            ApiRegistry::new(),
+            Arc::new(std::sync::atomic::AtomicU64::new(6_000)),
+            0,
+            mush_agent::LifecycleHooks::default(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+            after,
+        )
+        .expect("auto-compaction enabled should build a transform")
+    }
+
+    #[tokio::test]
+    async fn an_auto_compaction_restates_the_task_and_shows_the_notes_again() {
+        let task = "[task from parent]\n\nwrite the report";
+        let notes = crate::notes::Notes::new(None);
+        notes.append("the draft lives in /tmp/report.md").unwrap();
+        let transform = grown_child_transform(AfterCompaction {
+            notes: Some(notes),
+            task: Some(task.into()),
+            ..AfterCompaction::default()
+        });
+        let mut grown = vec![user_msg(task)];
+        grown.extend((0..20).map(|i| user_msg(format!("small {i}"))));
+        grown.push(user_msg("x".repeat(16_000)));
+
+        let mush_agent::ContextTransformResult::Compacted(compaction) =
+            transform(&grown, mush_agent::ContextPressure::Normal).await
+        else {
+            panic!("expected a compaction");
+        };
+
+        assert_eq!(compaction.appended, 2);
+        let tail: Vec<String> = compaction.messages[compaction.messages.len() - 2..]
+            .iter()
+            .map(user_text_of)
+            .collect();
+        assert!(mush_session::brief::is_restated(&tail[0]), "{tail:?}");
+        assert!(tail[0].ends_with("\n\nwrite the report"), "{tail:?}");
+        assert!(tail[1].contains("/tmp/report.md"), "{tail:?}");
+
+        let mut conversation = mush_session::ConversationState::from_messages(grown.clone());
+        let applied = crate::apply_agent_event(
+            &mut conversation,
+            &mush_agent::AgentEvent::ContextCompacted {
+                before_count: grown.len(),
+                compaction: compaction.clone(),
+            },
+        );
+        assert!(matches!(applied, crate::Applied::Compacted { .. }));
+        let context = conversation.context();
+        assert_eq!(context.len(), compaction.messages.len());
+        assert_eq!(
+            context[context.len() - 2..],
+            compaction.messages[compaction.messages.len() - 2..]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_the_compaction_kept_is_not_restated() {
+        let task = "[task from parent]\n\nwrite the report";
+        let transform = grown_child_transform(AfterCompaction {
+            task: Some(task.into()),
+            ..AfterCompaction::default()
+        });
+        let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
+        grown.push(user_msg("x".repeat(16_000)));
+        grown.push(user_msg(task));
+
+        let mush_agent::ContextTransformResult::Compacted(compaction) =
+            transform(&grown, mush_agent::ContextPressure::Normal).await
+        else {
+            panic!("expected a compaction");
+        };
+
+        assert_eq!(compaction.appended, 0);
+        assert!(
+            !compaction
+                .messages
+                .iter()
+                .any(|message| mush_session::brief::is_restated(&user_text_of(message)))
+        );
+    }
+
+    #[test]
+    fn the_first_turn_after_a_compaction_restates_the_task_once() {
+        let task = "[task from parent]\n\nwrite the report";
+        let mut messages = vec![user_msg(task)];
+        messages.extend((0..12).map(|i| user_msg(format!("step {i}"))));
+        let mut runtime = SessionRuntime::new(mush_session::ConversationState::from_messages(
+            messages.clone(),
+        ));
+        assert!(!runtime.restate_task_brief());
+
+        let compacted = [vec![user_msg("summary")], messages[10..].to_vec()].concat();
+        assert!(
+            runtime
+                .apply_compaction("summary".into(), 10, &compacted)
+                .is_some()
+        );
+
+        assert!(runtime.restate_task_brief());
+        assert!(!runtime.restate_task_brief());
+        let context = runtime.conversation.context();
+        let last = user_text_of(context.last().unwrap());
+        assert!(mush_session::brief::is_restated(&last), "{last}");
+        assert!(last.ends_with("\n\nwrite the report"));
+    }
+
     #[tokio::test]
     async fn context_transform_does_not_double_count_initial_payload_estimate() {
         let model = mush_ai::models::all_models_with_user()
@@ -849,7 +1013,7 @@ mod tests {
             mush_agent::LifecycleHooks::default(),
             std::path::PathBuf::from("/tmp"),
             None,
-            None,
+            AfterCompaction::default(),
         )
         .expect("auto-compaction enabled should build a transform");
 

@@ -71,6 +71,7 @@ fn push_rebuilt_user_message(app: &mut App, user: &mush_ai::types::UserMessage) 
     } else if mush_session::harness::extract_digest(&text).is_some()
         || mush_runtime::notes::extract(&text).is_some()
         || mush_runtime::kernel_notice::is_notice(&text)
+        || mush_session::brief::is_restated(&text)
     {
     } else if mush_session::harness::is_refinement_notice(&text) {
         app.push_system_message(text);
@@ -467,6 +468,17 @@ mod tests {
         let mut app = app();
 
         rebuild_display(&mut app, &[notice, user_message("hello")]);
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].content, "hello");
+    }
+
+    #[test]
+    fn a_restated_task_stays_out_of_the_transcript() {
+        let restated = mush_session::brief::restated("[task from parent]\n\nwrite the report");
+        let mut app = app();
+
+        rebuild_display(&mut app, &[user_message("hello"), restated]);
 
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].content, "hello");

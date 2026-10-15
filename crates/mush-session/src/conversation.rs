@@ -154,6 +154,20 @@ impl ConversationState {
         self.tree.user_messages_in_branch()
     }
 
+    #[must_use]
+    pub fn task_brief(&self) -> Option<String> {
+        self.tree
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                crate::tree::EntryKind::Message {
+                    message: Message::User(user),
+                } => Some(user.text()),
+                _ => None,
+            })
+            .filter(|text| crate::brief::is_task(text))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tree.is_empty()
     }
@@ -237,6 +251,21 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         )
+    }
+
+    #[test]
+    fn the_task_brief_is_the_first_user_message_when_a_parent_sent_it() {
+        let task = "[task from parent]\n\nwrite the report";
+        let mut child = ConversationState::new();
+        child.record_thinking_level(&ThinkingLevel::High);
+        child.append_message(user_message(task));
+        child.append_message(user_message("[task from parent]\n\na later message"));
+        let root =
+            ConversationState::from_messages(vec![user_message("hello"), user_message(task)]);
+
+        assert_eq!(child.task_brief().as_deref(), Some(task));
+        assert_eq!(root.task_brief(), None);
+        assert_eq!(ConversationState::new().task_brief(), None);
     }
 
     #[test]

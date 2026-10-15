@@ -818,13 +818,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
                 before_count,
                 compaction,
             } => {
-                if session
-                    .conversation
-                    .apply_compaction(
-                        compaction.summary,
-                        compaction.summarised_count,
-                        &compaction.messages,
-                    )
+                if mush_runtime::apply_context_compaction(&mut session.conversation, &compaction)
                     .is_err()
                 {
                     eprintln!(
@@ -1034,11 +1028,14 @@ fn compaction_transform(
             )
             .await;
             if result.summarised_count > 0 {
-                if let Some(notice) =
-                    mush_runtime::kernel_notice::after_compaction(kernel.as_deref()).await
-                {
-                    result.messages.push(notice);
+                let restored = mush_runtime::AfterCompaction {
+                    kernel: kernel.clone(),
+                    ..Default::default()
                 }
+                .messages(&result.messages)
+                .await;
+                let appended = restored.len();
+                result.messages.extend(restored);
                 ctx.store(
                     mush_session::compact::estimate_tokens(&result.messages) as u64,
                     std::sync::atomic::Ordering::Relaxed,
@@ -1047,6 +1044,7 @@ fn compaction_transform(
                     messages: result.messages,
                     summary: result.summary,
                     summarised_count: result.summarised_count,
+                    appended,
                 })
             } else {
                 mush_agent::ContextTransformResult::Unchanged

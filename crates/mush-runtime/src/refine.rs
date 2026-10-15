@@ -45,6 +45,18 @@ impl SessionRuntime {
         Some(delivery.text)
     }
 
+    pub fn restate_task_brief(&mut self) -> bool {
+        let Some(task) = self.conversation.task_brief() else {
+            return false;
+        };
+        if mush_session::brief::in_context(&task, &self.conversation.context()) {
+            return false;
+        }
+        self.conversation
+            .append_message(mush_session::brief::restated(&task));
+        true
+    }
+
     #[must_use]
     pub fn refinement_history(&self) -> Vec<RefinementResult> {
         let mut history = harness::load_history(&harness::global_dir());

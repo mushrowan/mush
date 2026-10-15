@@ -513,7 +513,7 @@ mod tests {
                 mush_agent::LifecycleHooks::default(),
                 std::path::PathBuf::from("/tmp"),
                 None,
-                None,
+                mush_runtime::AfterCompaction::default(),
             );
             let config = AgentConfig {
                 model: model.clone(),

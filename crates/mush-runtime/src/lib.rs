@@ -54,7 +54,7 @@ pub use session::{
     TurnStream,
 };
 pub use snapshot::{PaneSnapshot, SessionSaver, SessionSnapshot};
-pub use turn::{CompactionTarget, TurnConfig, TurnDeps, TurnRequest};
+pub use turn::{AfterCompaction, CompactionTarget, TurnConfig, TurnDeps, TurnRequest};
 pub use worker::{HostedWorker, WorkerConfig, host_worker};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -107,27 +107,25 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
     }
 }
 
-fn apply_context_compaction(
+pub fn apply_context_compaction(
     conversation: &mut ConversationState,
     compaction: &mush_agent::ContextCompaction,
 ) -> Result<Option<mush_session::EntryId>, mush_session::StaleCompaction> {
-    let summary = || compaction.summary.clone();
-    let stale = match conversation.apply_compaction(
-        summary(),
+    let compacted_len = compaction
+        .messages
+        .len()
+        .saturating_sub(compaction.appended);
+    let (compacted, appended) = compaction.messages.split_at(compacted_len);
+    let applied = conversation.apply_compaction(
+        compaction.summary.clone(),
         compaction.summarised_count,
-        &compaction.messages,
-    ) {
-        Err(stale) => stale,
-        applied => return applied,
-    };
-    let Some((notice @ Message::User(last), kept)) = compaction.messages.split_last() else {
-        return Err(stale);
-    };
-    if !kernel_notice::is_notice(&last.text()) {
-        return Err(stale);
+        compacted,
+    )?;
+    if applied.is_some() {
+        for message in appended {
+            conversation.append_message(message.clone());
+        }
     }
-    let applied = conversation.apply_compaction(summary(), compaction.summarised_count, kept)?;
-    conversation.append_message(notice.clone());
     Ok(applied)
 }
 
@@ -264,6 +262,7 @@ mod tests {
                     messages,
                     summary: "summary".into(),
                     summarised_count: 2,
+                    appended: 1,
                 },
             },
         );

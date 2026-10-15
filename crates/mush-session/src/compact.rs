@@ -1048,7 +1048,9 @@ fn is_regenerated(message: &Message) -> bool {
         return false;
     };
     let text = user.text();
-    crate::harness::extract_digest(&text).is_some() || crate::notes::extract(&text).is_some()
+    crate::harness::extract_digest(&text).is_some()
+        || crate::notes::extract(&text).is_some()
+        || crate::brief::is_restated(&text)
 }
 
 fn fallback_summary_from_reason(
@@ -1390,6 +1392,29 @@ mod tests {
         assert!(text.contains("[User]: fix the bug"));
         assert!(!text.contains(crate::harness::DIGEST_PREFIX));
         assert!(!text.contains("mush-daemon"));
+    }
+
+    #[test]
+    fn the_summariser_reads_the_task_once_and_skips_its_restatements() {
+        let task = "[task from parent]\n\nwrite the report";
+        let context = compaction_context(
+            &[
+                user_msg(task),
+                assistant_msg("halfway"),
+                crate::brief::restated(task),
+                assistant_msg("nearly there"),
+            ],
+            &[],
+            &CompactionFocus::default(),
+            None,
+        );
+        let Message::User(request) = &context.messages[0] else {
+            panic!()
+        };
+        let text = request.text();
+        assert_eq!(text.matches("write the report").count(), 1, "{text}");
+        assert!(!text.contains(crate::brief::RESTATED_LABEL));
+        assert!(text.contains("nearly there"));
     }
 
     #[test]
