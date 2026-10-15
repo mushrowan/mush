@@ -307,6 +307,9 @@ impl RlmHandler {
     }
 
     fn refine(&self, payload: Payload<'_>, scheduling: bool) -> Result<Value, HostError> {
+        if self.identity.depth > 0 {
+            return Err(HostError("refinement is not available here".into()));
+        }
         let commands = self.commands("refinement is not available here")?;
         let pending = commands.pending_refine();
         if !scheduling {

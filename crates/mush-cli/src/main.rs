@@ -1352,6 +1352,27 @@ struct ChildSeed {
     models: mush_runtime::ModelSelection,
     session_dir: std::path::PathBuf,
     prompt_overrides: setup::PromptOverrides,
+    compaction: CompactionSeed,
+}
+
+#[derive(Clone)]
+struct CompactionSeed {
+    auto: bool,
+    settings: mush_session::compact::CompactionSettings,
+    model: Option<(Model, StreamOptions)>,
+    agent_callable: bool,
+}
+
+impl CompactionSeed {
+    fn from_setup(setup: &AppSetup) -> Self {
+        let cfg = &setup.client.cfg.compaction;
+        Self {
+            auto: cfg.enabled,
+            settings: cfg.settings(),
+            model: setup.client.compaction_model.clone(),
+            agent_callable: cfg.agent_callable,
+        }
+    }
 }
 
 fn rlm_system_prompt(
@@ -1380,12 +1401,15 @@ fn turn_config(
         max_turns: seed.max_turns,
         provider_api_keys: seed.provider_api_keys.clone(),
         confirm_tools: seed.confirm_tools,
-        auto_compact: false,
-        compaction: Default::default(),
+        auto_compact: seed.compaction.auto,
+        compaction: seed.compaction.settings,
         branch_summary: Default::default(),
         auto_refine: Default::default(),
         auto_fork_compact: false,
-        compaction_model: None,
+        compaction_model: seed.compaction.model.clone().map(|(model, mut options)| {
+            options.session_id = Some(session_id.clone());
+            (model, options)
+        }),
         forbidden_chars: seed.forbidden_chars.clone(),
         tool_allowlist: Some(vec!["ipython".into()]),
         generate_title: false,
@@ -1464,6 +1488,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(None));
             let notes =
                 mush_runtime::Notes::new(child_artifacts(seed.saver.is_some(), &session.meta.id));
+            let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
             if let Some(host) = ipython.mush_host() {
                 host.set_extension(std::sync::Arc::new(
                     mush_runtime::RlmHandler::new(family.clone(), identity)
@@ -1472,7 +1497,9 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                         .with_notes(notes.clone())
                         .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
                             &session.meta.id,
-                        ))),
+                        )))
+                        .with_host_commands(host_commands.clone())
+                        .with_compaction_callable(seed.compaction.agent_callable),
                 ));
             }
             let max_depth = family.max_depth();
@@ -1517,6 +1544,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             worker.goal = Some(goal);
             worker.scheduler = Some(scheduler);
             worker.notes = Some(notes);
+            worker.host_commands = Some(host_commands);
             worker.family_member = Some((family, spec.id.clone()));
             Ok(mush_runtime::ChildParts {
                 config: worker,
@@ -1576,6 +1604,7 @@ fn worker_config(
         subagent_model: setup.client.cfg.subagent_model.clone(),
         session_dir: SessionStore::default_dir(),
         prompt_overrides: prompt_overrides.clone(),
+        compaction: CompactionSeed::from_setup(setup),
     };
     let mut turn = turn_config(
         &seed,
@@ -1583,19 +1612,9 @@ fn worker_config(
         setup.client.model.clone(),
         setup.client.options.clone(),
     );
-    turn.auto_compact = setup.client.cfg.compaction.enabled;
-    turn.compaction = setup.client.cfg.compaction.settings();
     turn.branch_summary = setup.client.cfg.branch_summary.settings();
     turn.auto_refine = setup.client.cfg.auto_refine.settings();
     turn.auto_fork_compact = setup.client.cfg.auto_fork_compact;
-    turn.compaction_model = setup
-        .client
-        .compaction_model
-        .clone()
-        .map(|(model, mut opts)| {
-            opts.session_id = Some(session.meta.id.clone());
-            (model, opts)
-        });
     turn.tool_allowlist = if setup.client.rlm {
         Some(vec!["ipython".into()])
     } else {
@@ -2090,6 +2109,80 @@ mod tests {
             prompt.trim_end().ends_with("tail from the flag"),
             "{prompt}"
         );
+    }
+
+    fn child_seed(compaction: CompactionSeed) -> ChildSeed {
+        let cfg = config::Config::default();
+        let model = models::all_models_with_user().into_iter().next().unwrap();
+        ChildSeed {
+            models: mush_runtime::ModelSelection::new(model.id.to_string(), None),
+            model,
+            options: StreamOptions::default(),
+            max_turns: 4,
+            provider_api_keys: std::collections::HashMap::new(),
+            confirm_tools: false,
+            forbidden_chars: Default::default(),
+            kernel: cfg.kernel.clone(),
+            web_search: cfg.web_search.clone(),
+            kernel_packages: Vec::new(),
+            cwd: std::env::temp_dir(),
+            discovery: Default::default(),
+            registry: mush_ai::registry::ApiRegistry::new(),
+            lifecycle_hooks: Default::default(),
+            file_rules: None,
+            lsp_diagnostics: None,
+            saver: None,
+            rlm_max_depth: 2,
+            subagent_model: None,
+            session_dir: std::env::temp_dir(),
+            prompt_overrides: Default::default(),
+            compaction,
+        }
+    }
+
+    #[test]
+    fn a_child_compacts_with_the_settings_and_summariser_of_its_session() {
+        let summariser = models::all_models_with_user().into_iter().nth(1).unwrap();
+        let settings = mush_session::compact::CompactionSettings {
+            reserve_tokens: 8_000,
+            keep_recent_tokens: 12_000,
+        };
+        let seed = child_seed(CompactionSeed {
+            auto: true,
+            settings,
+            model: Some((summariser.clone(), StreamOptions::default())),
+            agent_callable: true,
+        });
+        let child = SessionId::new();
+
+        let turn = turn_config(&seed, &child, seed.model.clone(), StreamOptions::default());
+
+        assert!(turn.auto_compact);
+        assert_eq!(turn.compaction, settings);
+        let (model, options) = turn.compaction_model.unwrap();
+        assert_eq!(model.id, summariser.id);
+        assert_eq!(options.session_id, Some(child.clone()));
+        assert_eq!(turn.options.session_id, Some(child));
+    }
+
+    #[test]
+    fn a_child_does_not_compact_when_its_session_turned_compaction_off() {
+        let seed = child_seed(CompactionSeed {
+            auto: false,
+            settings: Default::default(),
+            model: None,
+            agent_callable: false,
+        });
+
+        let turn = turn_config(
+            &seed,
+            &SessionId::new(),
+            seed.model.clone(),
+            StreamOptions::default(),
+        );
+
+        assert!(!turn.auto_compact);
+        assert!(turn.compaction_model.is_none());
     }
 
     #[test]

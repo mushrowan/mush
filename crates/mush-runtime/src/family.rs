@@ -3903,6 +3903,209 @@ mod tests {
         assert!(commands.compaction_queued());
     }
 
+    struct FillsThenOverflows {
+        overflowed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for FillsThenOverflows {
+        fn api(&self) -> mush_ai::types::Api {
+            mush_ai::types::Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &mush_ai::types::Model,
+            context: &mush_ai::registry::LlmContext,
+            _options: &mush_ai::types::StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            use mush_ai::types::{AssistantContentPart, StopReason, TextContent, ToolCall};
+            let user_texts: Vec<String> = context
+                .messages
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User(user) => Some(user.text()),
+                    _ => None,
+                })
+                .collect();
+            let summarising = user_texts
+                .last()
+                .is_some_and(|text| text.starts_with("[context checkpoint]"));
+            let compacted = user_texts
+                .iter()
+                .any(|text| mush_ai::types::strip_compaction_summary_prefix(text).is_some());
+            let content = if summarising {
+                vec![AssistantContentPart::Text(TextContent {
+                    text: "## Goal\nwrite the report".into(),
+                })]
+            } else if compacted {
+                vec![AssistantContentPart::Text(TextContent {
+                    text: "report done".into(),
+                })]
+            } else if context.messages.len() >= 13 {
+                self.overflowed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(mush_ai::registry::ProviderError::Other(
+                    "anthropic returned 400 Bad Request: prompt is too long: 1000336 tokens > \
+                     1000000 maximum"
+                        .into(),
+                ));
+            } else {
+                vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: mush_ai::types::ToolCallId::from(format!(
+                        "call_{}",
+                        context.messages.len()
+                    )),
+                    name: mush_ai::types::ToolName::from("note"),
+                    arguments: serde_json::json!({}),
+                })]
+            };
+            let stop_reason = if matches!(content[0], AssistantContentPart::ToolCall(_)) {
+                StopReason::ToolUse
+            } else {
+                StopReason::Stop
+            };
+            let message = mush_ai::types::AssistantMessage::builder()
+                .content(content)
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .stop_reason(stop_reason)
+                .timestamp_ms(Timestamp::zero())
+                .build();
+            Ok(Box::pin(futures::stream::iter([
+                mush_ai::stream::StreamEvent::Done {
+                    reason: stop_reason,
+                    message,
+                },
+            ])))
+        }
+    }
+
+    fn overflowing_factory(
+        auto_compact: bool,
+        overflowed: Arc<std::sync::atomic::AtomicBool>,
+    ) -> ChildFactory {
+        Arc::new(move |_spec: ChildSpec, _family: Arc<Family>| {
+            let overflowed = Arc::clone(&overflowed);
+            Box::pin(async move {
+                let mut registry = ApiRegistry::new();
+                registry.register(Box::new(FillsThenOverflows { overflowed }));
+                let mut tools = ToolRegistry::new();
+                tools.register_shared(Arc::new(crate::testing::NoteTool));
+                let mut turn = echo_config(echo_model());
+                turn.max_turns = 20;
+                turn.auto_compact = auto_compact;
+                turn.compaction = mush_session::compact::CompactionSettings {
+                    keep_recent_tokens: 10,
+                    ..Default::default()
+                };
+                Ok(ChildParts {
+                    config: WorkerConfig::new(turn),
+                    tools,
+                    registry,
+                })
+            })
+        })
+    }
+
+    async fn run_overflowing_child(auto_compact: bool) -> (ChildSummary, Vec<String>, bool) {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(overflowing_factory(auto_compact, Arc::clone(&overflowed))),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        family
+            .spawn(
+                &root,
+                "write the report".into(),
+                "newspapers".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        let child = settle(&family, &root).await.remove(0);
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.is_empty() {
+            assert!(Instant::now() < deadline, "the parent was never told");
+            seen.extend(notices(&mut root_inbox));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (
+            child,
+            seen,
+            overflowed.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_child_that_overflows_its_context_compacts_retries_and_answers() {
+        let (child, seen, overflowed) = run_overflowing_child(true).await;
+
+        assert!(overflowed);
+        assert_eq!(child.status, ChildStatus::Idle, "{child:?}");
+        assert_eq!(child.answer.as_deref(), Some("report done"));
+        assert_eq!(
+            seen,
+            vec![
+                "[child-exited: no-reply child:newspapers]\n\nLast assistant text: report done"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_without_compaction_fails_on_a_context_overflow() {
+        let (child, seen, overflowed) = run_overflowing_child(false).await;
+
+        assert!(overflowed);
+        assert_eq!(child.status, ChildStatus::Failed, "{child:?}");
+        assert!(
+            seen[0].starts_with("[child-failed child:newspapers]"),
+            "{seen:?}"
+        );
+        assert!(seen[0].contains("prompt is too long"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_child_compacts_from_its_kernel_but_leaves_refinement_to_the_root() {
+        use mush_kernel::HostRequestHandler;
+
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let commands = Arc::new(crate::connection::HostCommands::default());
+        let child = Identity {
+            id: Some("sub-1".into()),
+            name: "worker".into(),
+            depth: 1,
+        };
+        let handler =
+            RlmHandler::new(Arc::clone(&family), child).with_host_commands(Arc::clone(&commands));
+
+        let scheduled = handler
+            .handle("compact.run", serde_json::json!({}))
+            .await
+            .unwrap();
+        let refused = handler
+            .handle("refine.run", serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(scheduled["scheduled"], true);
+        assert!(commands.compaction_queued());
+        assert_eq!(refused.0, "refinement is not available here");
+        assert!(!commands.pending_refine());
+    }
+
     #[tokio::test]
     async fn the_harness_crud_reaches_the_store_and_reports_what_it_wrote() {
         use mush_kernel::HostRequestHandler;
