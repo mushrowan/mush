@@ -1701,6 +1701,13 @@ impl Family {
             Some(child) if self.asleep(child) => self.wake(child, this).await,
             _ => Ok(()),
         };
+        if let Some(child) = target.child.as_deref()
+            && let Some(node) = self.lock().children.get_mut(child)
+            && node.summary.parent == caller.id
+        {
+            node.notified = false;
+            node.replied = false;
+        }
         let delivered = match woken {
             Ok(()) => match self.send_delivery(target.child.as_deref(), event).await {
                 Ok(Receipt::Rejected) => Err(format!(
@@ -4150,6 +4157,88 @@ mod tests {
             "{seen:?}"
         );
         assert_eq!(child.context, None);
+    }
+
+    struct FailsOnce {
+        failed: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for FailsOnce {
+        fn api(&self) -> mush_ai::types::Api {
+            mush_ai::types::Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &mush_ai::types::Model,
+            context: &mush_ai::registry::LlmContext,
+            options: &mush_ai::types::StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(mush_ai::registry::ProviderError::Other(
+                    "provider exploded".into(),
+                ));
+            }
+            Echo {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                reply: "done after all".into(),
+            }
+            .stream(model, context, options)
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parent_message_to_a_failed_child_brings_back_its_exit_notice() {
+        let factory: ChildFactory = Arc::new(|_spec: ChildSpec, _family: Arc<Family>| {
+            Box::pin(async move {
+                let mut registry = ApiRegistry::new();
+                registry.register(Box::new(FailsOnce {
+                    failed: std::sync::atomic::AtomicBool::new(false),
+                }));
+                Ok(ChildParts {
+                    config: WorkerConfig::new(echo_config(echo_model())),
+                    tools: ToolRegistry::new(),
+                    registry,
+                })
+            })
+        });
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(factory),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let flaky = family
+            .spawn(&root, "task".into(), "flaky".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &flaky.rlm_child_id, ChildStatus::Failed).await;
+
+        family
+            .send_message(&root, "child", Some("flaky"), "try again", &family)
+            .await
+            .unwrap();
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.len() < 2 {
+            assert!(Instant::now() < deadline, "{seen:?}");
+            seen.extend(notices(&mut root_inbox));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                "[child-failed child:flaky]\n\nrequest failed: provider exploded".to_string(),
+                "[child-exited: no-reply child:flaky]\n\nLast assistant text: done after all"
+                    .to_string(),
+            ]
+        );
     }
 
     fn reply_with_usage(text: &str, input_tokens: u64) -> ClientEvent {
