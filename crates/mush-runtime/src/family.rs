@@ -159,6 +159,15 @@ pub struct ChildSummary {
     pub awaiting_confirmation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<mush_session::Pause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ChildContext>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildContext {
+    pub tokens: u64,
+    pub window: u64,
+    pub compactions: u32,
 }
 
 impl ChildSummary {
@@ -963,6 +972,7 @@ impl Family {
             tool_running: None,
             awaiting_confirmation: None,
             paused: None,
+            context: None,
         };
         let live = Self::launch(this, &id, parts, Some(format!("{TASK_LABEL}\n\n{prompt}")));
         let mut inner = self.lock();
@@ -1208,10 +1218,14 @@ impl Family {
                 let text = message.text();
                 let usage = message.usage;
                 let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
+                let tokens = usage.total_input_tokens().get();
                 self.record_update(id, |child| {
                     child.streaming = false;
                     if !text.trim().is_empty() {
                         child.answer = Some(text);
+                    }
+                    if tokens > 0 {
+                        record_context(child, model, tokens, false);
                     }
                     child.usage.input_tokens += usage.input_tokens;
                     child.usage.output_tokens += usage.output_tokens;
@@ -1224,6 +1238,19 @@ impl Family {
                         child.cost.cache_write += cost.cache_write;
                     }
                 });
+            }
+            ClientEvent::Agent {
+                event: AgentEvent::ContextCompacted { compaction, .. },
+                ..
+            } => {
+                let tokens = mush_session::compact::estimate_tokens(&compaction.messages);
+                self.record_update(id, |child| {
+                    record_context(child, model, tokens as u64, true);
+                });
+            }
+            ClientEvent::Compacted(applied) => {
+                let tokens = applied.tokens_after as u64;
+                self.record_update(id, |child| record_context(child, model, tokens, true));
             }
             ClientEvent::Agent {
                 event: AgentEvent::Error { error },
@@ -1827,10 +1854,7 @@ impl Family {
                     Some(reason) => format!("[child-exited: cancelled child:{name}]\n\n{reason}"),
                     None => format!("[child-exited: cancelled child:{name}]"),
                 },
-                ExitNotice::Failed => format!(
-                    "[child-failed child:{name}]\n\n{}",
-                    node.summary.error.as_deref().unwrap_or("unknown error")
-                ),
+                ExitNotice::Failed => failed_notice(&name, &node.summary),
             };
             let inbox = match &parent {
                 Some(parent) => inner
@@ -1862,6 +1886,50 @@ impl Family {
             },
             receipt: None,
         });
+    }
+}
+
+fn failed_notice(name: &str, child: &ChildSummary) -> String {
+    let error = child.error.as_deref().unwrap_or("unknown error");
+    let mut notice = format!("[child-failed child:{name}]\n\n{error}");
+    if mush_ai::registry::is_context_overflow_message(error) {
+        notice.push_str(
+            "\n\nIt ran out of context window. Its transcript, notes and kernel are kept, so a \
+             message to it can carry on from there.",
+        );
+    }
+    if let Some(note) = child
+        .progress_note
+        .as_deref()
+        .filter(|note| !note.trim().is_empty())
+    {
+        notice.push_str("\n\nProgress note: ");
+        notice.push_str(note);
+    }
+    if let Some(answer) = child
+        .answer
+        .as_deref()
+        .filter(|answer| !answer.trim().is_empty())
+    {
+        notice.push_str("\n\nLast assistant text: ");
+        notice.push_str(&compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS));
+    }
+    notice
+}
+
+fn record_context(
+    child: &mut ChildSummary,
+    model: Option<&mush_ai::types::Model>,
+    tokens: u64,
+    compacted: bool,
+) {
+    let context = child.context.get_or_insert_default();
+    context.tokens = tokens;
+    if let Some(model) = model {
+        context.window = model.context_window.get();
+    }
+    if compacted {
+        context.compactions += 1;
     }
 }
 
@@ -3404,6 +3472,7 @@ mod tests {
                 tool_running: None,
                 awaiting_confirmation: None,
                 paused: None,
+                context: None,
             }],
         };
         std::fs::write(&path, serde_json::to_vec(&registry).unwrap()).unwrap();
@@ -3641,6 +3710,7 @@ mod tests {
             tool_running: None,
             awaiting_confirmation: None,
             paused: None,
+            context: None,
         }
     }
 
@@ -4054,6 +4124,7 @@ mod tests {
         assert!(overflowed);
         assert_eq!(child.status, ChildStatus::Idle, "{child:?}");
         assert_eq!(child.answer.as_deref(), Some("report done"));
+        assert_eq!(child.context.map(|context| context.compactions), Some(1));
         assert_eq!(
             seen,
             vec![
@@ -4074,6 +4145,145 @@ mod tests {
             "{seen:?}"
         );
         assert!(seen[0].contains("prompt is too long"), "{seen:?}");
+        assert!(
+            seen[0].contains("It ran out of context window."),
+            "{seen:?}"
+        );
+        assert_eq!(child.context, None);
+    }
+
+    fn reply_with_usage(text: &str, input_tokens: u64) -> ClientEvent {
+        let model = echo_model();
+        ClientEvent::Agent {
+            generation: crate::session::StreamGeneration(0),
+            event: AgentEvent::MessageEnd {
+                message: mush_ai::types::AssistantMessage::builder()
+                    .content(vec![mush_ai::types::AssistantContentPart::Text(
+                        mush_ai::types::TextContent { text: text.into() },
+                    )])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .usage(Usage {
+                        input_tokens: mush_ai::types::TokenCount::new(input_tokens),
+                        ..Usage::default()
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            },
+            applied: crate::Applied::Nothing,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parent_sees_how_full_a_child_is_and_how_often_it_compacted() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+        let model = echo_model();
+
+        family.record(
+            &slow.rlm_child_id,
+            &reply_with_usage("reading the sources", 912_000),
+            Some(&model),
+        );
+        let before = family.children_of(&root)[0].context;
+        family.record(
+            &slow.rlm_child_id,
+            &ClientEvent::Agent {
+                generation: crate::session::StreamGeneration(0),
+                event: AgentEvent::ContextCompacted {
+                    before_count: 40,
+                    compaction: mush_agent::ContextCompaction {
+                        messages: vec![mush_session::compact::outcome_message("x", "y")],
+                        summary: "summary".into(),
+                        summarised_count: 39,
+                        appended: 0,
+                    },
+                },
+                applied: crate::Applied::Nothing,
+            },
+            Some(&model),
+        );
+        let after = family.children_of(&root)[0].context.unwrap();
+
+        assert_eq!(
+            before,
+            Some(ChildContext {
+                tokens: 912_000,
+                window: model.context_window.get(),
+                compactions: 0,
+            })
+        );
+        assert_eq!(after.compactions, 1);
+        assert!(after.tokens < 1_000, "{after:?}");
+        let listed = serde_json::to_value(&family.children_of(&root)[0]).unwrap();
+        assert_eq!(listed["context"]["compactions"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_child_tells_its_parent_how_far_it_got() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+        let slow_identity = Identity {
+            id: Some(slow.rlm_child_id.clone()),
+            name: "slow".into(),
+            depth: 1,
+        };
+        family
+            .progress_note(&slow_identity, "section 4 drafted, section 5 next")
+            .unwrap();
+        family.record(
+            &slow.rlm_child_id,
+            &reply_with_usage("adding the sources to section 5", 990_000),
+            None,
+        );
+
+        family.record(
+            &slow.rlm_child_id,
+            &ClientEvent::Agent {
+                generation: crate::session::StreamGeneration(0),
+                event: AgentEvent::Error {
+                    error: "prompt is too long: 1000336 tokens > 1000000 maximum".into(),
+                },
+                applied: crate::Applied::Nothing,
+            },
+            None,
+        );
+
+        assert_eq!(
+            notices(&mut root_inbox),
+            vec![
+                "[child-failed child:slow]\n\nprompt is too long: 1000336 tokens > 1000000 \
+                 maximum\n\nIt ran out of context window. Its transcript, notes and kernel are \
+                 kept, so a message to it can carry on from there.\n\nProgress note: section 4 \
+                 drafted, section 5 next\n\nLast assistant text: adding the sources to section 5"
+            ]
+        );
     }
 
     #[tokio::test]

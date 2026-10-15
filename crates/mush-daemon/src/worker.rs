@@ -777,6 +777,7 @@ mod tests {
             tool_running: None,
             awaiting_confirmation: None,
             paused: None,
+            context: None,
         }
     }
 

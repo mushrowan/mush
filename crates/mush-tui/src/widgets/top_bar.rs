@@ -86,6 +86,7 @@ mod tests {
     fn child_with_cost(dollars: f64) -> mush_runtime::ChildSummary {
         mush_runtime::ChildSummary {
             paused: None,
+            context: None,
             id: "sub-a".into(),
             name: "a".into(),
             parent: None,

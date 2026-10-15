@@ -1317,6 +1317,7 @@ mod tests {
     fn child(name: &str, status: mush_runtime::ChildStatus) -> mush_runtime::ChildSummary {
         mush_runtime::ChildSummary {
             paused: None,
+            context: None,
             id: format!("sub-{name}"),
             name: name.into(),
             parent: None,
