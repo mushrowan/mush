@@ -214,17 +214,29 @@ pub fn classify_stream_error_message(message: &str) -> StreamErrorKind {
 #[must_use]
 pub fn is_context_overflow_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    [
-        "context_length_exceeded",
-        "context length exceeded",
-        "context window",
-        "too many input tokens",
-        "input tokens exceed",
-        "maximum context",
-        "prompt is too long",
-    ]
-    .iter()
-    .any(|pat| lower.contains(pat))
+    let rate_limited = ["rate limit", "rate_limit", "too many requests"]
+        .iter()
+        .any(|pat| lower.contains(pat));
+    !rate_limited
+        && [
+            "context_length_exceeded",
+            "context length exceeded",
+            "context window",
+            "context_window_exceeded",
+            "too many input tokens",
+            "input tokens exceed",
+            "maximum context",
+            "max context length",
+            "prompt is too long",
+            "prompt too long",
+            "request_too_large",
+            "maximum prompt length",
+            "reduce the length of the messages",
+            "exceeds the available context size",
+            "greater than the context length",
+        ]
+        .iter()
+        .any(|pat| lower.contains(pat))
 }
 
 #[must_use]
@@ -623,6 +635,28 @@ mod tests {
         assert!(!is_context_overflow_message(
             "invalid_request_error: missing field"
         ));
+    }
+
+    #[test]
+    fn other_providers_overflow_wordings_are_context_overflows_but_rate_limits_are_not() {
+        for message in [
+            r#"anthropic returned 413 Payload Too Large: {"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}"#,
+            "the request exceeds the available context size, try increasing it",
+            "The number of tokens to keep from the initial prompt is greater than the context length",
+            "prompt too long; exceeded max context length by 4 tokens",
+            "This model's maximum prompt length is 131072 but the request contains 140000 tokens.",
+            "Please reduce the length of the messages or completion.",
+            "model_context_window_exceeded",
+        ] {
+            assert!(is_context_overflow_message(message), "{message}");
+        }
+        for message in [
+            "rate_limit_error: This request would exceed the rate limit for your organization of \
+             2,000,000 input tokens per minute",
+            "429 Too Many Requests: too many input tokens per minute",
+        ] {
+            assert!(!is_context_overflow_message(message), "{message}");
+        }
     }
 
     #[test]
