@@ -20,6 +20,7 @@ pub(crate) enum Motion {
     WordEnd(Word),
     WordEndBack(Word),
     Find(Find),
+    MatchPair,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,8 @@ impl Find {
         }
     }
 }
+
+const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -154,6 +157,51 @@ impl Text {
             Some(previous) if self.chars[previous] == '\n' => (previous, Step::Crossed),
             Some(previous) => (previous, Step::Within),
         }
+    }
+
+    fn matching_pair(&self, at: usize) -> Option<usize> {
+        let end = self.line_end(self.line_of(at));
+        let (from, open, close, forward) = (at..end).find_map(|i| {
+            let c = self.chars[i];
+            PAIRS.iter().find_map(|&(open, close)| {
+                (c == open || c == close).then_some((i, open, close, c == open))
+            })
+        })?;
+        if forward {
+            self.unmatched_close(from, open, close)
+        } else {
+            self.unmatched_open(from, open, close)
+        }
+    }
+
+    fn unmatched_close(&self, from: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in self.chars.iter().copied().enumerate().skip(from + 1) {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+        }
+        None
+    }
+
+    fn unmatched_open(&self, from: usize, open: char, close: char) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in self.chars[..from].iter().copied().enumerate().rev() {
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+        }
+        None
     }
 
     fn rest(&self, index: usize) -> (usize, usize) {
@@ -353,6 +401,11 @@ pub(crate) fn destination(
         }),
         Motion::WordEndBack(word) => word_motion(word, Text::back_end_word),
         Motion::Find(find) => Some((line, find_in_row(row(line), column, find, count)?)),
+        Motion::MatchPair => {
+            let text = Text::new(rows);
+            let from = text.index_of(at)?;
+            Some(text.position(text.matching_pair(from)?))
+        }
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
 }
@@ -536,6 +589,37 @@ mod tests {
             destination(&rows, (0, 0), Motion::Find(find('x', true, false)), 1),
             None
         );
+    }
+
+    #[test]
+    fn percent_jumps_between_a_bracket_and_its_partner() {
+        let rows = rows(&["call(a, (b), c)"]);
+
+        assert_eq!(go(&rows, (0, 4), Motion::MatchPair), (0, 14));
+        assert_eq!(go(&rows, (0, 14), Motion::MatchPair), (0, 4));
+        assert_eq!(go(&rows, (0, 8), Motion::MatchPair), (0, 10));
+    }
+
+    #[test]
+    fn percent_looks_ahead_on_the_line_for_a_bracket() {
+        let rows = rows(&["x = [1, 2]"]);
+
+        assert_eq!(go(&rows, (0, 0), Motion::MatchPair), (0, 9));
+    }
+
+    #[test]
+    fn percent_crosses_lines() {
+        let rows = rows(&["fn main() {", "    body();", "}"]);
+
+        assert_eq!(go(&rows, (0, 10), Motion::MatchPair), (2, 0));
+        assert_eq!(go(&rows, (2, 0), Motion::MatchPair), (0, 10));
+    }
+
+    #[test]
+    fn percent_without_a_bracket_ahead_stays_put() {
+        let rows = rows(&["(a) b", "c)"]);
+
+        assert_eq!(destination(&rows, (0, 4), Motion::MatchPair, 1), None);
     }
 
     #[test]

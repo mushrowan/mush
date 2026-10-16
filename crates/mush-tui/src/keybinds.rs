@@ -170,6 +170,7 @@ pub enum Action {
     TillCharBack,
     RepeatFind,
     RepeatFindBack,
+    MatchPair,
 }
 
 impl Action {
@@ -236,6 +237,7 @@ impl Action {
             Self::TillCharBack => "till_char_back",
             Self::RepeatFind => "repeat_find",
             Self::RepeatFindBack => "repeat_find_back",
+            Self::MatchPair => "match_pair",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -306,6 +308,7 @@ impl Action {
         Self::TillCharBack,
         Self::RepeatFind,
         Self::RepeatFindBack,
+        Self::MatchPair,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -470,7 +473,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::TillChar
         | Action::TillCharBack
         | Action::RepeatFind
-        | Action::RepeatFindBack => KeyScope::Normal,
+        | Action::RepeatFindBack
+        | Action::MatchPair => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -963,6 +967,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::RepeatFindBack,
         &[(KeyCode::Char(','), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::MatchPair,
+        &[(KeyCode::Char('%'), KeyModifiers::NONE)],
     ),
 ];
 

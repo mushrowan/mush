@@ -43,6 +43,12 @@ pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion, count
             Some(line) => target.to_line(line.saturating_sub(1)),
             None => target.to_bottom(),
         },
+        Motion::MatchPair if let Some(percent) = count => {
+            if percent <= 100 {
+                let lines = target.rows().len();
+                target.to_line((percent * lines).div_ceil(100).saturating_sub(1));
+            }
+        }
         motion => {
             if let Some(to) = motion::destination(target.rows(), target.cursor(), motion, times) {
                 target.place_cursor(to);

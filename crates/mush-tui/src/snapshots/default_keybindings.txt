@@ -44,6 +44,7 @@ normal::half_page_down = Ctrl-d
 normal::half_page_up = Ctrl-u
 normal::line_down = Ctrl-j
 normal::line_up = Ctrl-k
+normal::match_pair = %
 normal::navigate_top = Home
 normal::page_down = Ctrl-f | PageDown
 normal::page_up = Ctrl-b | PageUp

@@ -1859,6 +1859,29 @@ fn a_find_that_misses_leaves_the_caret() {
 }
 
 #[test]
+fn percent_jumps_to_the_matching_bracket_in_the_composer() {
+    let mut app = composer_in_normal("fn go() {\n    call(1, [2]);\n}");
+    press(&mut app, KeyCode::Char('$'));
+
+    press(&mut app, KeyCode::Char('%'));
+    assert_eq!(app.input.cursor, 28);
+
+    press(&mut app, KeyCode::Char('%'));
+    assert_eq!(app.input.cursor, 8);
+}
+
+#[test]
+fn a_count_before_percent_goes_that_far_down() {
+    let mut app = composer_in_normal("one\ntwo\nthree\nfour");
+
+    press(&mut app, KeyCode::Char('5'));
+    press(&mut app, KeyCode::Char('0'));
+    press(&mut app, KeyCode::Char('%'));
+
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

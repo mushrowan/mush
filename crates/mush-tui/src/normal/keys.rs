@@ -28,6 +28,7 @@ const MOTIONS: &[(Action, Motion)] = &[
     (Action::CursorChunkBack, Motion::WordBack(Word::Big)),
     (Action::CursorWordEnd, Motion::WordEnd(Word::Small)),
     (Action::CursorChunkEnd, Motion::WordEnd(Word::Big)),
+    (Action::MatchPair, Motion::MatchPair),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
