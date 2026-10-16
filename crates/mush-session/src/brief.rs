@@ -3,12 +3,12 @@ use mush_ai::types::{Message, Timestamp};
 use crate::user_text::user_text;
 
 pub const TASK_LABEL: &str = "[task from parent]";
-pub const RESTATED_LABEL: &str = "[task from parent, kept through a compaction]";
+pub(crate) const RESTATED_LABEL: &str = "[task from parent, kept through a compaction]";
 const MAX_RESTATED_CHARS: usize = 80_000;
 const RESTATED_TAIL_CHARS: usize = 16_000;
 
 #[must_use]
-pub fn is_task(text: &str) -> bool {
+pub(crate) fn is_task(text: &str) -> bool {
     text.strip_prefix(TASK_LABEL)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
 }
@@ -47,7 +47,11 @@ fn bounded(brief: &str) -> String {
 }
 
 #[must_use]
-pub fn in_context(task: &str, messages: &[Message]) -> bool {
+pub fn restatement(task: &str, context: &[Message]) -> Option<Message> {
+    (!in_context(task, context)).then(|| restated(task))
+}
+
+fn in_context(task: &str, messages: &[Message]) -> bool {
     messages.iter().any(|message| match message {
         Message::User(user) => {
             let text = user.text();

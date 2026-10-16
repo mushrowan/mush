@@ -46,14 +46,14 @@ impl SessionRuntime {
     }
 
     pub fn restate_task_brief(&mut self) -> bool {
-        let Some(task) = self.conversation.task_brief() else {
+        let Some(restated) = self
+            .conversation
+            .task_brief()
+            .and_then(|task| mush_session::brief::restatement(&task, &self.conversation.context()))
+        else {
             return false;
         };
-        if mush_session::brief::in_context(&task, &self.conversation.context()) {
-            return false;
-        }
-        self.conversation
-            .append_message(mush_session::brief::restated(&task));
+        self.conversation.append_message(restated);
         true
     }
 

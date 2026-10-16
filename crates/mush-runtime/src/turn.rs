@@ -377,11 +377,11 @@ impl AfterCompaction {
         if let Some(notice) = crate::kernel_notice::after_compaction(self.kernel.as_deref()).await {
             messages.push(notice);
         }
-        if let Some(task) = &self.task
-            && !mush_session::brief::in_context(task, compacted)
-        {
-            messages.push(mush_session::brief::restated(task));
-        }
+        messages.extend(
+            self.task
+                .as_deref()
+                .and_then(|task| mush_session::brief::restatement(task, compacted)),
+        );
         if let Some(delivery) = self.notes.as_ref().and_then(|notes| {
             notes.delivery(crate::notes::latest_fingerprint(compacted).as_deref())
         }) {
