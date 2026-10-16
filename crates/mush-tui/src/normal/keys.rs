@@ -127,6 +127,7 @@ pub(crate) enum Target {
     Motion(Motion),
     Lines,
     Object(Object),
+    Selection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,7 @@ pub(crate) enum Command {
     Redo,
     Insert(Entry),
     Select(Object),
+    SwapEnds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,7 +261,10 @@ impl Keys {
             self.prefix = Some(Prefix::Object { around: *around });
             return Step::Pending;
         }
-        if self.operator.is_some() || !context.editable || context.visual {
+        if context.visual && self.operator.is_none() {
+            return self.on_selection(bound, context);
+        }
+        if self.operator.is_some() || !context.editable {
             return Step::Dropped;
         }
         if let Some((_, operator)) = OPERATORS.iter().find(|(action, _)| bound(*action)) {
@@ -285,6 +290,27 @@ impl Keys {
             return self.run(Command::Insert(*entry));
         }
         Step::Dropped
+    }
+
+    fn on_selection(&mut self, bound: impl Fn(Action) -> bool, context: Context) -> Step {
+        if bound(Action::SwapSelectionEnds) {
+            return self.run(Command::SwapEnds);
+        }
+        if !context.editable {
+            return Step::Dropped;
+        }
+        let command = if bound(Action::Delete) || bound(Action::DeleteUnderCursor) {
+            Command::Operate(Operator::Delete, Target::Selection)
+        } else if bound(Action::Change) || bound(Action::Substitute) {
+            Command::Operate(Operator::Change, Target::Selection)
+        } else if bound(Action::PutAfter) {
+            Command::Put { before: false }
+        } else if bound(Action::PutBefore) {
+            Command::Put { before: true }
+        } else {
+            return Step::Dropped;
+        };
+        self.run(command)
     }
 
     fn reach(&mut self, motion: Motion) -> Step {
@@ -776,6 +802,47 @@ mod tests {
             steps[1],
             Step::Run(Command::Select(object(Kind::Block('{', '}'), false)), None)
         );
+    }
+
+    fn visual(typed: &str, context: Context) -> Step {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        let mut step = Step::Dropped;
+        for c in typed.chars() {
+            let modifiers = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            step = keys.feed(&keymap, KeyEvent::new(KeyCode::Char(c), modifiers), context);
+        }
+        step
+    }
+
+    #[test]
+    fn operators_act_on_a_selection_at_once() {
+        let selection = Context::COMPOSER.visual();
+        let delete = Step::Run(operate(Operator::Delete, Target::Selection), None);
+        let change = Step::Run(operate(Operator::Change, Target::Selection), None);
+
+        assert_eq!(visual("d", selection), delete);
+        assert_eq!(visual("x", selection), delete);
+        assert_eq!(visual("c", selection), change);
+        assert_eq!(visual("s", selection), change);
+        assert_eq!(
+            visual("P", selection),
+            Step::Run(Command::Put { before: true }, None)
+        );
+        assert_eq!(visual("o", selection), Step::Run(Command::SwapEnds, None));
+    }
+
+    #[test]
+    fn a_log_selection_only_swaps_ends() {
+        let selection = Context::LOG.visual();
+
+        assert_eq!(visual("o", selection), Step::Run(Command::SwapEnds, None));
+        assert_eq!(visual("d", selection), Step::Dropped);
+        assert_eq!(visual("p", selection), Step::Dropped);
     }
 
     #[test]

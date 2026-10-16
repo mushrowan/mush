@@ -190,6 +190,7 @@ pub enum Action {
     OpenAbove,
     InnerObject,
     AroundObject,
+    SwapSelectionEnds,
 }
 
 impl Action {
@@ -276,6 +277,7 @@ impl Action {
             Self::OpenAbove => "open_above",
             Self::InnerObject => "inner_object",
             Self::AroundObject => "around_object",
+            Self::SwapSelectionEnds => "swap_selection_ends",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -366,6 +368,7 @@ impl Action {
         Self::OpenAbove,
         Self::InnerObject,
         Self::AroundObject,
+        Self::SwapSelectionEnds,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -550,7 +553,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::OpenBelow
         | Action::OpenAbove
         | Action::InnerObject
-        | Action::AroundObject => KeyScope::Normal,
+        | Action::AroundObject
+        | Action::SwapSelectionEnds => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1143,6 +1147,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::AroundObject,
         &[(KeyCode::Char('a'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SwapSelectionEnds,
+        &[(KeyCode::Char('o'), KeyModifiers::NONE)],
     ),
 ];
 

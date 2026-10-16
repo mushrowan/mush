@@ -469,7 +469,7 @@ fn typing_does_nothing_while_the_selection_is_live() {
     app.input.cursor = app.input.text.len();
     press_with(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
 
-    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Char('z'));
 
     assert_eq!(app.input.text, "explain the borrow checker");
 }
@@ -1416,6 +1416,23 @@ fn viw_in_the_log_selects_a_word_to_copy() {
 
     assert!(
         matches!(&event, Some(AppEvent::Copy { text }) if text == "brave"),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn o_swaps_the_ends_of_a_log_selection() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('e'));
+
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('b'));
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "hello brave"),
         "{event:?}"
     );
 }
@@ -2446,6 +2463,93 @@ fn va_paren_selects_the_whole_pair() {
     type_keys(&mut app, "va(");
 
     assert_eq!(tinted_text(&app), "(a, b)");
+}
+
+#[test]
+fn d_and_x_delete_the_composer_selection_into_the_register() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wvee");
+    type_keys(&mut app, "d");
+    assert_eq!(app.input.text, "one ");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Normal);
+
+    type_keys(&mut app, "0P");
+    assert_eq!(app.input.text, "two threeone ");
+
+    let mut app = composer_in_normal("abc");
+    type_keys(&mut app, "vlx");
+    assert_eq!(app.input.text, "c");
+}
+
+#[test]
+fn capital_v_then_d_takes_whole_lines() {
+    let mut app = composer_in_normal("a\nb\nc");
+
+    type_keys(&mut app, "Vjd");
+
+    assert_eq!(app.input.text, "c");
+}
+
+#[test]
+fn c_and_s_change_the_composer_selection() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "wvecX");
+    assert_eq!(app.input.text, "one X");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Insert);
+
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "veslast");
+    assert_eq!(app.input.text, "last two");
+}
+
+#[test]
+fn p_over_a_selection_swaps_it_for_the_register() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "yiwwviwp");
+    assert_eq!(app.input.text, "one one");
+
+    type_keys(&mut app, "0viwp");
+    assert_eq!(
+        app.input.text, "two one",
+        "the register held what p replaced"
+    );
+}
+
+#[test]
+fn capital_p_over_a_selection_keeps_the_register() {
+    let mut app = composer_in_normal("a b c");
+    type_keys(&mut app, "yiwwviwP");
+    type_keys(&mut app, "wviwP");
+
+    assert_eq!(app.input.text, "a a a");
+}
+
+#[test]
+fn a_line_put_over_a_word_lands_on_its_own_line() {
+    let mut app = composer_in_normal("head\none two");
+    type_keys(&mut app, "yyjwviwp");
+
+    assert_eq!(app.input.text, "head\none \nhead\n");
+}
+
+#[test]
+fn y_leaves_the_caret_at_the_start_of_the_selection() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wvey");
+
+    assert_eq!(app.input.cursor, 4);
+    type_keys(&mut app, "$p");
+    assert_eq!(app.input.text, "one two threetwo");
+}
+
+#[test]
+fn o_swaps_the_ends_of_the_composer_selection() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wve");
+
+    type_keys(&mut app, "ob");
+
+    assert_eq!(tinted_text(&app), "one two");
 }
 
 #[test]

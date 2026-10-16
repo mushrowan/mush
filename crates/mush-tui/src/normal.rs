@@ -17,6 +17,7 @@ pub(crate) trait NormalTarget {
     fn start_selection(&mut self, kind: crate::screen::SelectionKind);
     fn clear_selection(&mut self);
     fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool);
+    fn swap_selection_ends(&mut self);
 
     fn to_top(&mut self) {
         self.place_cursor((0, 0));
@@ -125,6 +126,10 @@ impl NormalTarget for LogTarget<'_> {
         self.viewport.select(anchor, head, kind);
     }
 
+    fn swap_selection_ends(&mut self) {
+        self.viewport.swap_selection_ends();
+    }
+
     fn to_top(&mut self) {
         self.viewport.to_top();
     }
@@ -218,6 +223,12 @@ impl NormalTarget for ComposerTarget<'_> {
         } else {
             crate::screen::SelectionKind::Char
         };
+    }
+
+    fn swap_selection_ends(&mut self) {
+        if let Some(anchor) = self.input.anchor.replace(self.input.cursor) {
+            self.input.cursor = anchor;
+        }
     }
 }
 

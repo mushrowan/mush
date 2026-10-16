@@ -188,6 +188,14 @@ impl Viewport {
         self.cursor_to_column(head.1);
     }
 
+    pub(crate) fn swap_selection_ends(&self) {
+        let cursor = self.cursor.get();
+        if let Some((line, column)) = self.anchor.replace(Some((cursor.line, cursor.column))) {
+            self.cursor_to(line);
+            self.cursor_to_column(column);
+        }
+    }
+
     #[must_use]
     pub fn selection_kind(&self) -> SelectionKind {
         self.kind.get()

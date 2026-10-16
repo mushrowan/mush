@@ -25,6 +25,10 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
         }
         Command::Scroll(_) => None,
         Command::Operate(operator, target) => operate(app, operator, target, count),
+        Command::Put { before } if app.interaction.mode == AppMode::Visual => {
+            put_over_selection(app, before, count);
+            None
+        }
         Command::Put { before } => {
             put(app, before, count);
             None
@@ -55,6 +59,10 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
             super::select_object(&mut ComposerTarget::new(&mut app.input), object, count);
             None
         }
+        Command::SwapEnds => {
+            ComposerTarget::new(&mut app.input).swap_selection_ends();
+            None
+        }
     };
     app.input.ensure_cursor_visible();
     event
@@ -78,6 +86,15 @@ fn operate(
             Region::Lines(at.0..=end)
         }
         Target::Object(object) => motion::object::span(&rows, at, object, count)?,
+        Target::Selection => {
+            let region = selection_region(&app.input)?;
+            app.interaction.mode = AppMode::Normal;
+            app.input.cursor = app
+                .input
+                .anchor
+                .map_or(app.input.cursor, |anchor| anchor.min(app.input.cursor));
+            region
+        }
     };
     match region {
         Region::Chars(range) => {
@@ -98,7 +115,7 @@ fn on_chars(app: &mut App, operator: Operator, bytes: Range<usize>) -> Option<Ap
         return None;
     }
     if operator == Operator::Yank {
-        let event = yank(app, bytes.clone(), false);
+        let event = yank(app, bytes.clone(), false, true);
         app.input.cursor = bytes.start;
         rest_on_a_character(&mut app.input);
         return event;
@@ -125,7 +142,7 @@ fn on_lines(app: &mut App, operator: Operator, lines: &RangeInclusive<usize>) ->
     match operator {
         Operator::Yank => {
             let (_, column) = composer_position(&app.input);
-            let event = yank(app, start..end, true);
+            let event = yank(app, start..end, true, true);
             ComposerTarget::new(&mut app.input).place_cursor((*lines.start(), column));
             event
         }
@@ -268,9 +285,105 @@ fn step_history(
     rest_on_a_character(&mut app.input);
 }
 
-fn yank(app: &mut App, bytes: Range<usize>, linewise: bool) -> Option<AppEvent> {
+pub(crate) fn yank_selection(app: &mut App, strip: bool) -> Option<AppEvent> {
+    let region = selection_region(&app.input)?;
+    let start = app
+        .input
+        .anchor
+        .map_or(app.input.cursor, |anchor| anchor.min(app.input.cursor));
+    let (bytes, linewise) = region_bytes(&app.input.text, &region);
+    let event = yank(app, bytes, linewise, strip);
+    app.interaction.mode = AppMode::Normal;
+    app.input.anchor = None;
+    app.input.cursor = start;
+    rest_on_a_character(&mut app.input);
+    event
+}
+
+fn put_over_selection(app: &mut App, keep_register: bool, count: Option<usize>) {
+    let Some(region) = selection_region(&app.input) else {
+        return;
+    };
+    let register = app.interaction.normal.register.clone();
+    if register.text.is_empty() && !register.linewise {
+        return;
+    }
+    let (bytes, linewise) = region_bytes(&app.input.text, &region);
+    let times = count.unwrap_or(1).min(MAX_REPEAT);
+    let block = if register.linewise {
+        vec![register.text.as_str(); times].join("\n")
+    } else {
+        register.text.repeat(times)
+    };
+    let block = if register.linewise && !linewise {
+        format!("\n{block}\n")
+    } else {
+        block
+    };
+    let images = (0..times)
+        .flat_map(|_| register.images.iter().cloned())
+        .collect();
+    let taken = app.input.take_images_in(bytes.clone());
+    let text: String = app.input.text.drain(bytes.clone()).collect();
+    app.input.insert_with_images(bytes.start, &block, images);
+    if !keep_register {
+        app.interaction.normal.register = Register {
+            text,
+            linewise,
+            images: taken,
+        };
+    }
+    app.interaction.mode = AppMode::Normal;
+    edited(app);
+    if register.linewise {
+        let line = app.input.text[..bytes.start].matches('\n').count() + usize::from(!linewise);
+        let mut target = ComposerTarget::new(&mut app.input);
+        target.place_cursor((line, 0));
+        super::apply_motion(&mut target, motion::Motion::FirstNonBlank, None);
+    } else {
+        app.input.cursor = if block.contains('\n') {
+            bytes.start
+        } else {
+            bytes.start + block.len() - block.chars().next_back().map_or(0, char::len_utf8)
+        };
+    }
+}
+
+fn selection_region(input: &InputBuffer) -> Option<Region> {
+    let anchor = input.anchor?;
+    let (from, to) = (anchor.min(input.cursor), anchor.max(input.cursor));
+    if input.selection_kind == crate::screen::SelectionKind::Line {
+        let line = |byte: usize| input.text[..byte].matches('\n').count();
+        return Some(Region::Lines(line(from)..=line(to)));
+    }
+    let end = input.text[to..]
+        .chars()
+        .next()
+        .map_or(to, |c| to + c.len_utf8());
+    let index = |byte: usize| input.text[..byte].chars().count();
+    Some(Region::Chars(index(from)..index(end)))
+}
+
+fn region_bytes(text: &str, region: &Region) -> (Range<usize>, bool) {
+    match region {
+        Region::Chars(range) => (
+            byte_offset(text, range.start)..byte_offset(text, range.end),
+            false,
+        ),
+        Region::Lines(lines) => {
+            let (start, end) = line_bounds(text, lines);
+            (start..end, true)
+        }
+    }
+}
+
+fn yank(app: &mut App, bytes: Range<usize>, linewise: bool, strip: bool) -> Option<AppEvent> {
     let text = app.input.text[bytes.clone()].to_string();
-    let copied = crate::selection::strip_padding(&text);
+    let copied = if strip {
+        crate::selection::strip_padding(&text)
+    } else {
+        text.clone()
+    };
     app.interaction.normal.register = Register {
         text,
         linewise,

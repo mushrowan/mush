@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 
 use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::InputBuffer;
@@ -775,16 +775,6 @@ fn select_all_composer(app: &mut App) -> Option<AppEvent> {
     None
 }
 
-fn composer_selected_text(app: &App, strip_indent: bool) -> Option<String> {
-    let selected = app.input.selected_bytes()?;
-    let text = app.input.text.get(selected)?.to_string();
-    Some(if strip_indent {
-        crate::selection::strip_padding(&text)
-    } else {
-        text
-    })
-}
-
 fn clear_selection(app: &mut App) {
     if app.interaction.focus.is_log() {
         app.viewport.clear_selection();
@@ -901,9 +891,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if !app.interaction.focus.is_log() {
         app.input.checkpoint();
         if !pending {
-            if crate::keybinds::is_backspace(key)
-                || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
-            {
+            if crate::keybinds::is_backspace(key) {
                 crate::normal::ComposerTarget::new(&mut app.input).delete_selection();
                 app.interaction.mode = AppMode::Insert;
                 app.input.ensure_cursor_visible();
@@ -911,10 +899,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
                 if app.keymap.matches_in(KeyScope::Normal, action, key) {
-                    let text = composer_selected_text(app, strip_indent)?;
-                    crate::normal::ComposerTarget::new(&mut app.input).clear_selection();
-                    app.interaction.mode = AppMode::Normal;
-                    return Some(AppEvent::Copy { text });
+                    return crate::normal::edit::yank_selection(app, strip_indent);
                 }
             }
         }
@@ -964,6 +949,10 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         Command::Select(object) => {
             let mut target = crate::normal::LogTarget::new(app);
             crate::normal::select_object(&mut target, object, count);
+            return;
+        }
+        Command::SwapEnds => {
+            app.viewport.swap_selection_ends();
             return;
         }
         Command::Operate(..)
