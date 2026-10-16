@@ -16,6 +16,7 @@ pub(crate) struct History {
     past: Vec<Snapshot>,
     future: Vec<Snapshot>,
     settled: Snapshot,
+    typing: Option<(String, usize)>,
 }
 
 impl InputBuffer {
@@ -68,6 +69,18 @@ impl InputBuffer {
 
     pub(crate) fn forget_history(&mut self) {
         self.history = History::default();
+    }
+
+    pub(crate) fn watch_typing(&mut self) {
+        self.history.typing = Some((self.text.clone(), self.cursor));
+    }
+
+    pub(crate) fn typed(&mut self) -> Option<String> {
+        let (before, at) = self.history.typing.take()?;
+        let end = at + self.text.len().checked_sub(before.len())?;
+        let untouched = self.text.get(..at)? == before.get(..at)?
+            && self.text.get(end..)? == before.get(at..)?;
+        untouched.then(|| self.text[at..end].to_string())
     }
 
     fn restore(&mut self) {
@@ -180,6 +193,29 @@ mod tests {
 
         assert_eq!(input.images.len(), 1);
         assert_eq!(input.images[0].data, vec![7]);
+    }
+
+    #[test]
+    fn typing_after_a_watch_is_what_was_typed() {
+        let mut input = buffer("ac");
+        input.cursor = 1;
+        input.watch_typing();
+        input.insert_str("bb");
+
+        assert_eq!(input.typed(), Some("bb".into()));
+        assert_eq!(input.typed(), None);
+    }
+
+    #[test]
+    fn edits_away_from_the_typing_spot_are_not_typing() {
+        let mut input = buffer("ac");
+        input.cursor = 1;
+        input.watch_typing();
+        input.insert_str("b");
+        input.cursor = 0;
+        input.insert_str("x");
+
+        assert_eq!(input.typed(), None);
     }
 
     #[test]

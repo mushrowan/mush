@@ -16,8 +16,121 @@ pub(crate) struct Register {
     images: Vec<PendingImage>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Extent {
+    Chars(usize),
+    Lines(usize),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Change {
+    command: Command,
+    count: Option<usize>,
+    selection: Option<Extent>,
+    typed: Option<String>,
+}
+
+pub(crate) fn settle(app: &mut App) {
+    if let Some(typed) = app.input.typed()
+        && let Some(change) = app.interaction.normal.last_change.as_mut()
+    {
+        change.typed = Some(typed);
+    }
+    app.input.checkpoint();
+}
+
 pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Option<AppEvent> {
     let event = match command {
+        Command::Repeat => repeat(app, count),
+        command if repeatable(command) => {
+            let before = app.input.text.clone();
+            let selection = extent_of_selection(app);
+            let event = execute(app, command, count);
+            let typing = app.interaction.mode == AppMode::Insert;
+            if typing || app.input.text != before {
+                app.interaction.normal.last_change = Some(Change {
+                    command,
+                    count,
+                    selection,
+                    typed: None,
+                });
+                if typing {
+                    app.input.watch_typing();
+                }
+            }
+            event
+        }
+        command => execute(app, command, count),
+    };
+    app.input.ensure_cursor_visible();
+    event
+}
+
+fn repeatable(command: Command) -> bool {
+    matches!(
+        command,
+        Command::Operate(Operator::Delete | Operator::Change, _)
+            | Command::Put { .. }
+            | Command::Insert(_)
+            | Command::Replace(_)
+            | Command::Join
+            | Command::ToggleCase
+    )
+}
+
+fn repeat(app: &mut App, count: Option<usize>) -> Option<AppEvent> {
+    let mut change = app.interaction.normal.last_change.clone()?;
+    if count.is_some() {
+        change.count = count;
+    }
+    if let Some(extent) = change.selection {
+        select_extent(app, extent);
+    }
+    let event = execute(app, change.command, change.count);
+    if app.interaction.mode == AppMode::Insert {
+        if let Some(typed) = &change.typed {
+            app.input.insert_str(&typed.replace(IMAGE_PLACEHOLDER, ""));
+        }
+        app.input.step_back_one_char();
+    }
+    app.interaction.mode = AppMode::Normal;
+    app.input.anchor = None;
+    app.interaction.normal.last_change = Some(change);
+    event
+}
+
+fn extent_of_selection(app: &App) -> Option<Extent> {
+    if app.interaction.mode != AppMode::Visual {
+        return None;
+    }
+    Some(match selection_region(&app.input)? {
+        Region::Chars(range) => Extent::Chars(range.len()),
+        Region::Lines(lines) => Extent::Lines(lines.end() - lines.start() + 1),
+    })
+}
+
+fn select_extent(app: &mut App, extent: Extent) {
+    let cursor = app.input.cursor;
+    app.input.anchor = Some(cursor);
+    app.interaction.mode = AppMode::Visual;
+    match extent {
+        Extent::Chars(chars) => {
+            app.input.selection_kind = crate::screen::SelectionKind::Char;
+            app.input.cursor = app.input.text[cursor..]
+                .char_indices()
+                .take(chars)
+                .last()
+                .map_or(cursor, |(i, _)| cursor + i);
+        }
+        Extent::Lines(lines) => {
+            app.input.selection_kind = crate::screen::SelectionKind::Line;
+            ComposerTarget::new(&mut app.input).move_line(lines as isize - 1);
+        }
+    }
+}
+
+fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppEvent> {
+    match command {
         Command::Move(motion) => {
             let mut target = ComposerTarget::new(&mut app.input);
             super::apply_motion(&mut target, motion, count);
@@ -75,9 +188,8 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
             toggle_case(app, count);
             None
         }
-    };
-    app.input.ensure_cursor_visible();
-    event
+        Command::Repeat => None,
+    }
 }
 
 fn operate(

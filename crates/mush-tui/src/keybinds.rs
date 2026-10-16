@@ -194,6 +194,7 @@ pub enum Action {
     ReplaceChar,
     JoinLines,
     ToggleCase,
+    RepeatChange,
 }
 
 impl Action {
@@ -284,6 +285,7 @@ impl Action {
             Self::ReplaceChar => "replace_char",
             Self::JoinLines => "join_lines",
             Self::ToggleCase => "toggle_case",
+            Self::RepeatChange => "repeat_change",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -378,6 +380,7 @@ impl Action {
         Self::ReplaceChar,
         Self::JoinLines,
         Self::ToggleCase,
+        Self::RepeatChange,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -566,7 +569,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::SwapSelectionEnds
         | Action::ReplaceChar
         | Action::JoinLines
-        | Action::ToggleCase => KeyScope::Normal,
+        | Action::ToggleCase
+        | Action::RepeatChange => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1179,6 +1183,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::ToggleCase,
         &[(KeyCode::Char('~'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::RepeatChange,
+        &[(KeyCode::Char('.'), KeyModifiers::NONE)],
     ),
 ];
 

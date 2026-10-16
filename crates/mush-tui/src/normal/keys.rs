@@ -144,6 +144,7 @@ pub(crate) enum Command {
     Replace(char),
     Join,
     ToggleCase,
+    Repeat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +295,9 @@ impl Keys {
         }
         if let Some((_, entry)) = ENTRIES.iter().find(|(action, _)| bound(*action)) {
             return self.run(Command::Insert(*entry));
+        }
+        if bound(Action::RepeatChange) {
+            return self.run(Command::Repeat);
         }
         self.shared_edit(bound).unwrap_or(Step::Dropped)
     }
@@ -890,6 +894,13 @@ mod tests {
             visual("rq", Context::COMPOSER.visual()),
             Step::Run(Command::Replace('q'), None)
         );
+    }
+
+    #[test]
+    fn dot_repeats_with_its_own_count() {
+        assert_eq!(last("."), Step::Run(Command::Repeat, None));
+        assert_eq!(last("4."), Step::Run(Command::Repeat, Some(4)));
+        assert_eq!(visual(".", Context::COMPOSER.visual()), Step::Dropped);
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub(crate) mod keys;
 pub(crate) struct NormalState {
     pub(crate) keys: keys::Keys,
     pub(crate) register: edit::Register,
+    pub(crate) last_change: Option<edit::Change>,
 }
 
 pub(crate) trait NormalTarget {

@@ -2648,6 +2648,129 @@ fn tilde_in_visual_mode_toggles_the_selection() {
 }
 
 #[test]
+fn dot_repeats_a_delete() {
+    let mut app = composer_in_normal("one two three four");
+
+    type_keys(&mut app, "dw..");
+
+    assert_eq!(app.input.text, "four");
+}
+
+#[test]
+fn a_count_before_dot_replaces_the_old_count() {
+    let mut app = composer_in_normal("abcdefghij");
+
+    type_keys(&mut app, "2x");
+    assert_eq!(app.input.text, "cdefghij");
+
+    type_keys(&mut app, "3.");
+    assert_eq!(app.input.text, "fghij");
+
+    type_keys(&mut app, ".");
+    assert_eq!(app.input.text, "ij", "the new count stuck");
+}
+
+#[test]
+fn dot_repeats_a_change_with_what_was_typed() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "cwnew");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "w.");
+
+    assert_eq!(app.input.text, "new new three");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Normal);
+    assert_eq!(app.input.cursor, 6);
+}
+
+#[test]
+fn dot_repeats_an_append_at_the_line_end() {
+    let mut app = composer_in_normal("one\ntwo");
+    type_keys(&mut app, "A!");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "j.");
+
+    assert_eq!(app.input.text, "one!\ntwo!");
+}
+
+#[test]
+fn dot_repeats_an_opened_line() {
+    let mut app = composer_in_normal("top");
+    type_keys(&mut app, "onext");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, ".");
+
+    assert_eq!(app.input.text, "top\nnext\nnext");
+}
+
+#[test]
+fn dot_repeats_dd_and_p() {
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "dd.");
+    assert_eq!(app.input.text, "c\nd");
+
+    type_keys(&mut app, "p.");
+    assert_eq!(app.input.text, "c\nb\nb\nd");
+}
+
+#[test]
+fn dot_repeats_r_j_and_tilde() {
+    let mut app = composer_in_normal("abcd");
+    type_keys(&mut app, "rxl.");
+    assert_eq!(app.input.text, "xxcd");
+
+    let mut app = composer_in_normal("a\nb\nc");
+    type_keys(&mut app, "J.");
+    assert_eq!(app.input.text, "a b c");
+
+    let mut app = composer_in_normal("abcd");
+    type_keys(&mut app, "~.");
+    assert_eq!(app.input.text, "ABcd");
+}
+
+#[test]
+fn dot_repeats_a_visual_delete_over_as_much_text() {
+    let mut app = composer_in_normal("abcdefgh");
+
+    type_keys(&mut app, "vld");
+    type_keys(&mut app, ".");
+
+    assert_eq!(app.input.text, "efgh");
+}
+
+#[test]
+fn a_yank_is_not_a_change_to_repeat() {
+    let mut app = composer_in_normal("abc");
+
+    type_keys(&mut app, "xyl.");
+
+    assert_eq!(app.input.text, "c");
+}
+
+#[test]
+fn dot_with_nothing_to_repeat_does_nothing() {
+    let mut app = composer_in_normal("abc");
+
+    type_keys(&mut app, ".");
+
+    assert_eq!(app.input.text, "abc");
+}
+
+#[test]
+fn a_repeated_change_undoes_in_one_step() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "cwnew");
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "w.");
+
+    type_keys(&mut app, "u");
+
+    assert_eq!(app.input.text, "new two three");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

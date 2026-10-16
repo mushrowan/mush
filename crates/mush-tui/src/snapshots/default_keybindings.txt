@@ -65,6 +65,7 @@ normal::page_up = Ctrl-b | PageUp
 normal::put_after = p
 normal::put_before = Shift-p
 normal::redo = Ctrl-r
+normal::repeat_change = .
 normal::repeat_find = ;
 normal::repeat_find_back = ,
 normal::replace_char = r
