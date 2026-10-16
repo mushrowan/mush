@@ -1340,27 +1340,8 @@ struct ChildSeed {
     models: mush_runtime::ModelSelection,
     session_dir: std::path::PathBuf,
     prompt_overrides: setup::PromptOverrides,
-    compaction: CompactionSeed,
-}
-
-#[derive(Clone)]
-struct CompactionSeed {
-    auto: bool,
-    settings: mush_session::compact::CompactionSettings,
-    model: Option<(Model, StreamOptions)>,
-    agent_callable: bool,
-}
-
-impl CompactionSeed {
-    fn from_setup(setup: &AppSetup) -> Self {
-        let cfg = &setup.client.cfg.compaction;
-        Self {
-            auto: cfg.enabled,
-            settings: cfg.settings(),
-            model: setup.client.compaction_model.clone(),
-            agent_callable: cfg.agent_callable,
-        }
-    }
+    compaction: config::CompactionConfig,
+    compaction_model: Option<(Model, StreamOptions)>,
 }
 
 fn rlm_system_prompt(
@@ -1389,12 +1370,12 @@ fn turn_config(
         max_turns: seed.max_turns,
         provider_api_keys: seed.provider_api_keys.clone(),
         confirm_tools: seed.confirm_tools,
-        auto_compact: seed.compaction.auto,
-        compaction: seed.compaction.settings,
+        auto_compact: seed.compaction.enabled,
+        compaction: seed.compaction.settings(),
         branch_summary: Default::default(),
         auto_refine: Default::default(),
         auto_fork_compact: false,
-        compaction_model: seed.compaction.model.clone().map(|(model, mut options)| {
+        compaction_model: seed.compaction_model.clone().map(|(model, mut options)| {
             options.session_id = Some(session_id.clone());
             (model, options)
         }),
@@ -1609,7 +1590,8 @@ fn worker_config(
         subagent_model: setup.client.cfg.subagent_model.clone(),
         session_dir: SessionStore::default_dir(),
         prompt_overrides: prompt_overrides.clone(),
-        compaction: CompactionSeed::from_setup(setup),
+        compaction: setup.client.cfg.compaction,
+        compaction_model: setup.client.compaction_model.clone(),
     };
     let mut turn = turn_config(
         &seed,
@@ -2102,7 +2084,10 @@ mod tests {
         );
     }
 
-    fn child_seed(compaction: CompactionSeed) -> ChildSeed {
+    fn child_seed(
+        compaction: config::CompactionConfig,
+        compaction_model: Option<(Model, StreamOptions)>,
+    ) -> ChildSeed {
         let cfg = config::Config::default();
         let model = models::all_models_with_user().into_iter().next().unwrap();
         ChildSeed {
@@ -2128,28 +2113,34 @@ mod tests {
             session_dir: std::env::temp_dir(),
             prompt_overrides: Default::default(),
             compaction,
+            compaction_model,
         }
     }
 
     #[test]
     fn a_child_compacts_with_the_settings_and_summariser_of_its_session() {
         let summariser = models::all_models_with_user().into_iter().nth(1).unwrap();
-        let settings = mush_session::compact::CompactionSettings {
-            reserve_tokens: 8_000,
-            keep_recent_tokens: 12_000,
-        };
-        let seed = child_seed(CompactionSeed {
-            auto: true,
-            settings,
-            model: Some((summariser.clone(), StreamOptions::default())),
-            agent_callable: true,
-        });
+        let seed = child_seed(
+            config::CompactionConfig {
+                enabled: true,
+                reserve_tokens: 8_000,
+                keep_recent_tokens: 12_000,
+                agent_callable: true,
+            },
+            Some((summariser.clone(), StreamOptions::default())),
+        );
         let child = SessionId::new();
 
         let turn = turn_config(&seed, &child, seed.model.clone(), StreamOptions::default());
 
         assert!(turn.auto_compact);
-        assert_eq!(turn.compaction, settings);
+        assert_eq!(
+            turn.compaction,
+            mush_session::compact::CompactionSettings {
+                reserve_tokens: 8_000,
+                keep_recent_tokens: 12_000,
+            }
+        );
         let (model, options) = turn.compaction_model.unwrap();
         assert_eq!(model.id, summariser.id);
         assert_eq!(options.session_id, Some(child.clone()));
@@ -2158,12 +2149,14 @@ mod tests {
 
     #[test]
     fn a_child_does_not_compact_when_its_session_turned_compaction_off() {
-        let seed = child_seed(CompactionSeed {
-            auto: false,
-            settings: Default::default(),
-            model: None,
-            agent_callable: false,
-        });
+        let seed = child_seed(
+            config::CompactionConfig {
+                enabled: false,
+                agent_callable: false,
+                ..Default::default()
+            },
+            None,
+        );
 
         let turn = turn_config(
             &seed,
