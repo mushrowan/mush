@@ -10,6 +10,7 @@ use mush_ai::registry::ApiRegistry;
 use mush_ai::types::{
     Cost, EventKind, EventMessage, EventOrigin, EventReceipt, ThinkingLevel, Timestamp, Usage,
 };
+use mush_session::brief::TASK_LABEL;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,7 +19,6 @@ use crate::worker::WorkerConfig;
 
 mod host;
 pub use host::RlmHandler;
-pub use mush_session::brief::TASK_LABEL;
 
 pub const MAX_CHILDREN: usize = 32;
 pub const CHILD_NAME_MAX_CHARS: usize = 64;

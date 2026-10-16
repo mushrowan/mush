@@ -45,7 +45,7 @@ impl SessionRuntime {
         Some(delivery.text)
     }
 
-    pub fn restate_task_brief(&mut self) -> bool {
+    pub(crate) fn restate_task_brief(&mut self) -> bool {
         let Some(restated) = self
             .conversation
             .task_brief()
