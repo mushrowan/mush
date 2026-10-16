@@ -3293,6 +3293,74 @@ fn capital_h_and_l_follow_a_scrolled_composer() {
 }
 
 #[test]
+fn a_count_before_i_types_the_text_that_many_times() {
+    let mut app = composer_in_normal("");
+
+    type_keys(&mut app, "3ix");
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.text, "xxx");
+    assert_eq!(app.input.cursor, 2);
+}
+
+#[test]
+fn counts_on_a_and_capital_a_repeat_too() {
+    let mut app = composer_in_normal("ab");
+    type_keys(&mut app, "2ahi");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.input.text, "ahihib");
+
+    type_keys(&mut app, "3A!");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.input.text, "ahihib!!!");
+}
+
+#[test]
+fn a_count_before_o_opens_that_many_lines() {
+    let mut app = composer_in_normal("  top");
+
+    type_keys(&mut app, "3ofoo");
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.text, "  top\n  foo\n  foo\n  foo");
+    assert_eq!(app.input.cursor, app.input.text.len() - 1);
+}
+
+#[test]
+fn a_count_before_capital_o_opens_lines_above() {
+    let mut app = composer_in_normal("end");
+
+    type_keys(&mut app, "2Oup");
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.text, "up\nup\nend");
+}
+
+#[test]
+fn dot_repeats_a_counted_insert_with_its_count() {
+    let mut app = composer_in_normal("");
+    type_keys(&mut app, "2iab");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, ".");
+
+    assert_eq!(app.input.text, "abaababb");
+}
+
+#[test]
+fn leaving_a_counted_insert_some_other_way_drops_the_count() {
+    let mut app = composer_in_normal("");
+    type_keys(&mut app, "3ix");
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    press_with(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    type_keys(&mut app, "iy");
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.text, "xy");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

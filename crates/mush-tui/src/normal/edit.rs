@@ -84,12 +84,47 @@ pub(crate) struct Change {
 }
 
 pub(crate) fn settle(app: &mut App) {
-    if let Some(typed) = app.input.typed()
-        && let Some(change) = app.interaction.normal.last_change.as_mut()
-    {
-        change.typed = Some(typed);
-    }
+    take_typed(app);
     app.input.checkpoint();
+}
+
+pub(crate) fn leave_insert(app: &mut App) {
+    let repeat = app.interaction.normal.insert_repeat.take();
+    if let Some(typed) = take_typed(app)
+        && let Some((entry, count)) = repeat
+    {
+        type_again(app, entry, &typed, count - 1);
+    }
+}
+
+fn take_typed(app: &mut App) -> Option<String> {
+    let typed = app.input.typed()?;
+    if let Some(change) = app.interaction.normal.last_change.as_mut() {
+        change.typed = Some(typed.clone());
+    }
+    Some(typed)
+}
+
+fn type_again(app: &mut App, entry: Entry, typed: &str, copies: usize) {
+    let typed = typed.replace(IMAGE_PLACEHOLDER, "");
+    let copies = copies.min(MAX_REPEAT);
+    if typed.is_empty() || copies == 0 {
+        return;
+    }
+    if matches!(entry, Entry::Below | Entry::Above) {
+        let (line, _) = composer_position(&app.input);
+        let (start, end) = line_bounds(&app.input.text, &(line..=line));
+        let indent: String = app.input.text[start..end]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect();
+        let block: String = (0..copies).map(|_| format!("\n{indent}{typed}")).collect();
+        app.input.text.insert_str(end, &block);
+        app.input.cursor = end + block.len();
+    } else {
+        app.input.insert_str(&typed.repeat(copies));
+    }
+    edited(app);
 }
 
 pub(crate) fn run(app: &mut App, order: Order) -> Option<AppEvent> {
@@ -109,6 +144,12 @@ pub(crate) fn run(app: &mut App, order: Order) -> Option<AppEvent> {
                 if typing {
                     app.input.watch_typing();
                 }
+            }
+            if typing
+                && let Command::Insert(entry) = command
+                && let Some(count @ 2..) = order.count
+            {
+                app.interaction.normal.insert_repeat = Some((entry, count));
             }
             event
         }
@@ -161,6 +202,10 @@ fn repeat(app: &mut App, count: Option<usize>) -> Option<AppEvent> {
     if app.interaction.mode == AppMode::Insert {
         if let Some(typed) = &change.typed {
             app.input.insert_str(&typed.replace(IMAGE_PLACEHOLDER, ""));
+            if let Command::Insert(entry) = change.order.command {
+                let copies = change.order.count.unwrap_or(1) - 1;
+                type_again(app, entry, typed, copies);
+            }
         }
         app.input.step_back_one_char();
     }

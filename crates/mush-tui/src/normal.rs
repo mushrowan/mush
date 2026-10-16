@@ -11,6 +11,7 @@ pub(crate) struct NormalState {
     pub(crate) last_change: Option<edit::Change>,
     pub(crate) last_selection: LastSelection,
     pub(crate) marks: Marks,
+    pub(crate) insert_repeat: Option<(keys::Entry, usize)>,
 }
 
 #[derive(Debug, Default)]

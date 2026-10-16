@@ -23,6 +23,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.interaction.mode != mode || app.interaction.focus != focus {
         app.interaction.normal.keys.clear();
     }
+    if app.interaction.mode != AppMode::Insert {
+        app.interaction.normal.insert_repeat = None;
+    }
     if app.interaction.mode != AppMode::Visual
         && let Some(selection) = selection
     {
@@ -91,6 +94,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     if is_cancel_key(app, key) {
         app.interaction.mode = AppMode::Normal;
+        crate::normal::edit::leave_insert(app);
         app.input.step_back_one_char();
         return None;
     }
