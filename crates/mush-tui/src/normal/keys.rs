@@ -101,6 +101,25 @@ impl Operator {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Entry {
+    Before,
+    After,
+    LineStart,
+    LineEnd,
+    Below,
+    Above,
+}
+
+const ENTRIES: &[(Action, Entry)] = &[
+    (Action::EnterInsert, Entry::Before),
+    (Action::Append, Entry::After),
+    (Action::InsertLineStart, Entry::LineStart),
+    (Action::AppendLineEnd, Entry::LineEnd),
+    (Action::OpenBelow, Entry::Below),
+    (Action::OpenAbove, Entry::Above),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Target {
     Motion(Motion),
     Lines,
@@ -114,6 +133,7 @@ pub(crate) enum Command {
     Put { before: bool },
     Undo,
     Redo,
+    Insert(Entry),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +262,9 @@ impl Keys {
         }
         if bound(Action::Redo) {
             return self.run(Command::Redo);
+        }
+        if let Some((_, entry)) = ENTRIES.iter().find(|(action, _)| bound(*action)) {
+            return self.run(Command::Insert(*entry));
         }
         Step::Dropped
     }
@@ -637,6 +660,25 @@ mod tests {
             Context::COMPOSER,
         );
         assert_eq!(step, Step::Run(Command::Redo, None));
+    }
+
+    #[test]
+    fn insert_keys_say_where_typing_starts() {
+        let cases = [
+            ("i", Entry::Before),
+            ("a", Entry::After),
+            ("I", Entry::LineStart),
+            ("A", Entry::LineEnd),
+            ("o", Entry::Below),
+            ("O", Entry::Above),
+        ];
+        for (typed, entry) in cases {
+            assert_eq!(
+                last(typed),
+                Step::Run(Command::Insert(entry), None),
+                "{typed}"
+            );
+        }
     }
 
     #[test]

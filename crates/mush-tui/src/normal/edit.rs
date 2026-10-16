@@ -4,7 +4,7 @@ use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::{InputBuffer, PendingImage};
 use crate::motion::{self, Region};
 
-use super::keys::{Command, Operator, Target};
+use super::keys::{Command, Entry, Operator, Target};
 use super::{ComposerTarget, NormalTarget, composer_position};
 
 const MAX_REPEAT: usize = 1_000;
@@ -45,6 +45,10 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
                 InputBuffer::redo,
                 "already at the newest change",
             );
+            None
+        }
+        Command::Insert(entry) => {
+            insert_at(app, entry);
             None
         }
     };
@@ -203,6 +207,39 @@ fn put(app: &mut App, before: bool, count: Option<usize>) {
         };
     }
     edited(app);
+}
+
+fn insert_at(app: &mut App, entry: Entry) {
+    let (line, _) = composer_position(&app.input);
+    let (start, end) = line_bounds(&app.input.text, &(line..=line));
+    let indent: String = app.input.text[start..end]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    let input = &mut app.input;
+    match entry {
+        Entry::Before => {}
+        Entry::After => {
+            if let Some(c) = input.text[input.cursor..].chars().next()
+                && c != '\n'
+            {
+                input.cursor += c.len_utf8();
+            }
+        }
+        Entry::LineStart => input.cursor = start + indent.len(),
+        Entry::LineEnd => input.cursor = end,
+        Entry::Below => {
+            input.text.insert_str(end, &format!("\n{indent}"));
+            input.cursor = end + 1 + indent.len();
+            edited(app);
+        }
+        Entry::Above => {
+            input.text.insert_str(start, &format!("{indent}\n"));
+            input.cursor = start + indent.len();
+            edited(app);
+        }
+    }
+    enter_insert(app);
 }
 
 fn step_history(

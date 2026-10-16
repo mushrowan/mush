@@ -2266,6 +2266,62 @@ fn a_sent_prompt_leaves_nothing_to_undo() {
 }
 
 #[test]
+fn a_appends_after_the_caret() {
+    let mut app = composer_in_normal("ab");
+
+    type_keys(&mut app, "ax");
+
+    assert_eq!(app.input.text, "axb");
+}
+
+#[test]
+fn a_on_an_empty_composer_just_inserts() {
+    let mut app = composer_in_normal("");
+
+    type_keys(&mut app, "ax");
+
+    assert_eq!(app.input.text, "x");
+}
+
+#[test]
+fn capital_a_appends_at_the_end_of_the_line() {
+    let mut app = composer_in_normal("one\ntwo");
+
+    type_keys(&mut app, "A!");
+
+    assert_eq!(app.input.text, "one!\ntwo");
+}
+
+#[test]
+fn capital_i_inserts_before_the_first_non_blank() {
+    let mut app = composer_in_normal("  foo");
+    type_keys(&mut app, "$");
+
+    type_keys(&mut app, "Ix");
+
+    assert_eq!(app.input.text, "  xfoo");
+}
+
+#[test]
+fn o_opens_a_line_below_with_the_same_indent() {
+    let mut app = composer_in_normal("  foo\nbar");
+
+    type_keys(&mut app, "ox");
+
+    assert_eq!(app.input.text, "  foo\n  x\nbar");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Insert);
+}
+
+#[test]
+fn capital_o_opens_a_line_above() {
+    let mut app = composer_in_normal("foo\nbar");
+
+    type_keys(&mut app, "jOx");
+
+    assert_eq!(app.input.text, "foo\nx\nbar");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

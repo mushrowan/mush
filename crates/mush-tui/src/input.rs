@@ -827,13 +827,6 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
         if is_cancel_key(app, key) || app.keymap.matches(Action::FocusLog, key) {
             return focus_log(app);
         }
-        if app
-            .keymap
-            .matches_in(KeyScope::Normal, Action::EnterInsert, key)
-        {
-            app.interaction.mode = AppMode::Insert;
-            return None;
-        }
         if app.keymap.matches(Action::SelectAll, key) {
             return select_all_composer(app);
         }
@@ -968,7 +961,11 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
             return;
         }
         Command::Scroll(scroll) => scroll,
-        Command::Operate(..) | Command::Put { .. } | Command::Undo | Command::Redo => return,
+        Command::Operate(..)
+        | Command::Put { .. }
+        | Command::Undo
+        | Command::Redo
+        | Command::Insert(_) => return,
     };
     for _ in 0..count.unwrap_or(1) {
         let page = app.viewport.page() as isize;

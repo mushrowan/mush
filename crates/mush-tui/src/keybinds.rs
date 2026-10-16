@@ -183,6 +183,11 @@ pub enum Action {
     PutBefore,
     Undo,
     Redo,
+    Append,
+    AppendLineEnd,
+    InsertLineStart,
+    OpenBelow,
+    OpenAbove,
 }
 
 impl Action {
@@ -262,6 +267,11 @@ impl Action {
             Self::PutBefore => "put_before",
             Self::Undo => "undo",
             Self::Redo => "redo",
+            Self::Append => "append",
+            Self::AppendLineEnd => "append_line_end",
+            Self::InsertLineStart => "insert_line_start",
+            Self::OpenBelow => "open_below",
+            Self::OpenAbove => "open_above",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -345,6 +355,11 @@ impl Action {
         Self::PutBefore,
         Self::Undo,
         Self::Redo,
+        Self::Append,
+        Self::AppendLineEnd,
+        Self::InsertLineStart,
+        Self::OpenBelow,
+        Self::OpenAbove,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -522,7 +537,12 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::PutAfter
         | Action::PutBefore
         | Action::Undo
-        | Action::Redo => KeyScope::Normal,
+        | Action::Redo
+        | Action::Append
+        | Action::AppendLineEnd
+        | Action::InsertLineStart
+        | Action::OpenBelow
+        | Action::OpenAbove => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1080,6 +1100,31 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::Redo,
         &[(KeyCode::Char('r'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Append,
+        &[(KeyCode::Char('a'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::AppendLineEnd,
+        &[(KeyCode::Char('A'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::InsertLineStart,
+        &[(KeyCode::Char('I'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::OpenBelow,
+        &[(KeyCode::Char('o'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::OpenAbove,
+        &[(KeyCode::Char('O'), KeyModifiers::SHIFT)],
     ),
 ];
 
