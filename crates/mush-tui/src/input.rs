@@ -16,11 +16,32 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     let mode = app.interaction.mode.clone();
     let focus = app.interaction.focus;
+    let selection = (mode == AppMode::Visual)
+        .then(|| current_selection(app))
+        .flatten();
     let event = dispatch_key(app, key);
     if app.interaction.mode != mode || app.interaction.focus != focus {
         app.interaction.normal.keys.clear();
     }
+    if app.interaction.mode != AppMode::Visual
+        && let Some(selection) = selection
+    {
+        let last = &mut app.interaction.normal.last_selection;
+        if focus.is_log() {
+            last.log = Some(selection);
+        } else {
+            last.composer = Some(selection);
+        }
+    }
     event
+}
+
+fn current_selection(app: &mut App) -> Option<crate::normal::Selection> {
+    if app.interaction.focus.is_log() {
+        crate::normal::LogTarget::new(app).selection()
+    } else {
+        crate::normal::ComposerTarget::new(&mut app.input).selection()
+    }
 }
 
 fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -953,6 +974,13 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         }
         Command::SwapEnds => {
             app.viewport.swap_selection_ends();
+            return;
+        }
+        Command::Reselect => {
+            if let Some(selection) = app.interaction.normal.last_selection.log {
+                crate::normal::LogTarget::new(app).select(selection);
+                app.interaction.mode = AppMode::Visual;
+            }
             return;
         }
         Command::Operate(..)

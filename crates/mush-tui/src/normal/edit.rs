@@ -188,6 +188,13 @@ fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppE
             toggle_case(app, count);
             None
         }
+        Command::Reselect => {
+            if let Some(selection) = app.interaction.normal.last_selection.composer {
+                ComposerTarget::new(&mut app.input).select(selection);
+                app.interaction.mode = AppMode::Visual;
+            }
+            None
+        }
         Command::Repeat => None,
     }
 }

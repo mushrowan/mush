@@ -1452,6 +1452,25 @@ fn braces_hop_between_paragraphs_in_the_log() {
 }
 
 #[test]
+fn gv_reselects_the_last_log_selection() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('w'));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('e'));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('0'));
+
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('v'));
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "brave"),
+        "{event:?}"
+    );
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -2919,6 +2938,39 @@ fn dat_deletes_the_whole_element() {
     type_keys(&mut app, "ftdat");
 
     assert_eq!(app.input.text, "keep  word");
+}
+
+#[test]
+fn gv_reselects_the_last_composer_selection() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wve");
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "0");
+
+    type_keys(&mut app, "gv");
+
+    assert_eq!(tinted_text(&app), "two");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Visual);
+}
+
+#[test]
+fn gv_after_a_yank_selects_what_was_yanked() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wviwy$");
+
+    type_keys(&mut app, "gv");
+
+    assert_eq!(tinted_text(&app), "two");
+}
+
+#[test]
+fn gv_with_no_earlier_selection_does_nothing() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "gv");
+
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Normal);
+    assert_eq!(tinted_text(&app), "");
 }
 
 #[test]

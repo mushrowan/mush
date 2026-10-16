@@ -152,6 +152,7 @@ pub(crate) enum Command {
     Join,
     ToggleCase,
     Repeat,
+    Reselect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,7 +197,7 @@ enum Prefix {
 enum Reach {
     Motion(Motion),
     Object(Object),
-    Replace(char),
+    Command(Command),
 }
 
 #[derive(Debug, Default)]
@@ -234,8 +235,8 @@ impl Keys {
             return match self.complete(prefix, key, bound) {
                 Some(Reach::Motion(motion)) => self.reach(motion),
                 Some(Reach::Object(object)) => self.take_object(object),
-                Some(Reach::Replace(with)) => self.run(Command::Replace(with)),
-                None => Step::Dropped,
+                Some(Reach::Command(command)) if self.operator.is_none() => self.run(command),
+                Some(Reach::Command(_)) | None => Step::Dropped,
             };
         }
         if self.take_digit(key) {
@@ -370,6 +371,9 @@ impl Keys {
             Prefix::G if bound(Action::GPrefix) => Motion::Top,
             Prefix::G if bound(Action::CursorWordEnd) => Motion::WordEndBack(Word::Small),
             Prefix::G if bound(Action::CursorChunkEnd) => Motion::WordEndBack(Word::Big),
+            Prefix::G if bound(Action::StartSelection) => {
+                return Some(Reach::Command(Command::Reselect));
+            }
             Prefix::G => return None,
             Prefix::Find { forward, till } => {
                 let find = Find {
@@ -385,7 +389,11 @@ impl Keys {
                 let kind = Kind::for_char(crate::keybinds::typed_char(key)?)?;
                 return Some(Reach::Object(Object { kind, around }));
             }
-            Prefix::Replace => return Some(Reach::Replace(crate::keybinds::typed_char(key)?)),
+            Prefix::Replace => {
+                return Some(Reach::Command(Command::Replace(
+                    crate::keybinds::typed_char(key)?,
+                )));
+            }
         };
         Some(Reach::Motion(motion))
     }
@@ -909,6 +917,16 @@ mod tests {
         assert_eq!(last("."), Step::Run(Command::Repeat, None));
         assert_eq!(last("4."), Step::Run(Command::Repeat, Some(4)));
         assert_eq!(visual(".", Context::COMPOSER.visual()), Step::Dropped);
+    }
+
+    #[test]
+    fn gv_reselects_but_not_after_an_operator() {
+        assert_eq!(last("gv"), Step::Run(Command::Reselect, None));
+        assert_eq!(
+            visual("gv", Context::LOG.visual()),
+            Step::Run(Command::Reselect, None)
+        );
+        assert_eq!(last("dgv"), Step::Dropped);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::motion::{self, Motion};
+use crate::screen::SelectionKind;
 
 pub(crate) mod edit;
 pub(crate) mod keys;
@@ -8,6 +9,20 @@ pub(crate) struct NormalState {
     pub(crate) keys: keys::Keys,
     pub(crate) register: edit::Register,
     pub(crate) last_change: Option<edit::Change>,
+    pub(crate) last_selection: LastSelection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Selection {
+    pub(crate) anchor: (usize, usize),
+    pub(crate) head: (usize, usize),
+    pub(crate) kind: SelectionKind,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct LastSelection {
+    pub(crate) composer: Option<Selection>,
+    pub(crate) log: Option<Selection>,
 }
 
 pub(crate) trait NormalTarget {
@@ -17,7 +32,8 @@ pub(crate) trait NormalTarget {
     fn move_line(&mut self, delta: isize);
     fn start_selection(&mut self, kind: crate::screen::SelectionKind);
     fn clear_selection(&mut self);
-    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool);
+    fn select(&mut self, selection: Selection);
+    fn selection(&self) -> Option<Selection>;
     fn swap_selection_ends(&mut self);
 
     fn to_top(&mut self) {
@@ -70,7 +86,15 @@ pub(crate) fn select_object(
     if let Some(selection) =
         motion::object::selection(target.rows(), target.cursor(), object, count)
     {
-        target.select(selection.anchor, selection.head, selection.linewise);
+        target.select(Selection {
+            anchor: selection.anchor,
+            head: selection.head,
+            kind: if selection.linewise {
+                SelectionKind::Line
+            } else {
+                SelectionKind::Char
+            },
+        });
     }
 }
 
@@ -118,13 +142,18 @@ impl NormalTarget for LogTarget<'_> {
         self.viewport.clear_selection();
     }
 
-    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool) {
-        let kind = if linewise {
-            crate::screen::SelectionKind::Line
-        } else {
-            crate::screen::SelectionKind::Char
-        };
-        self.viewport.select(anchor, head, kind);
+    fn select(&mut self, selection: Selection) {
+        self.viewport
+            .select(selection.anchor, selection.head, selection.kind);
+    }
+
+    fn selection(&self) -> Option<Selection> {
+        let (anchor, head) = self.viewport.selection_ends()?;
+        Some(Selection {
+            anchor,
+            head,
+            kind: self.viewport.selection_kind(),
+        })
     }
 
     fn swap_selection_ends(&mut self) {
@@ -145,7 +174,11 @@ impl NormalTarget for LogTarget<'_> {
 }
 
 pub(crate) fn composer_position(input: &crate::input_buffer::InputBuffer) -> (usize, usize) {
-    let before = &input.text[..input.cursor];
+    byte_position(&input.text, input.cursor)
+}
+
+fn byte_position(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset.min(text.len())];
     let line = before.matches('\n').count();
     let column = before
         .rsplit('\n')
@@ -163,6 +196,10 @@ impl<'a> ComposerTarget<'a> {
     pub(crate) fn new(input: &'a mut crate::input_buffer::InputBuffer) -> Self {
         let rows = input.text.split('\n').map(str::to_string).collect();
         Self { rows, input }
+    }
+
+    fn position_of(&self, offset: usize) -> (usize, usize) {
+        byte_position(&self.input.text, offset)
     }
 
     fn offset_of(&self, (line, column): (usize, usize)) -> usize {
@@ -216,14 +253,24 @@ impl NormalTarget for ComposerTarget<'_> {
         self.input.anchor = None;
     }
 
-    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool) {
-        self.input.anchor = Some(self.offset_of(anchor));
-        self.input.cursor = self.offset_of(head);
-        self.input.selection_kind = if linewise {
-            crate::screen::SelectionKind::Line
-        } else {
-            crate::screen::SelectionKind::Char
+    fn select(&mut self, selection: Selection) {
+        let last = self.rows.len().saturating_sub(1);
+        let clamp = |(line, column): (usize, usize)| (line.min(last), column);
+        self.input.anchor = Some(self.offset_of(clamp(selection.anchor)));
+        self.place_cursor(clamp(selection.head));
+        self.input.selection_kind = match selection.kind {
+            SelectionKind::Block => SelectionKind::Char,
+            kind => kind,
         };
+    }
+
+    fn selection(&self) -> Option<Selection> {
+        let anchor = self.input.anchor?;
+        Some(Selection {
+            anchor: self.position_of(anchor),
+            head: self.cursor(),
+            kind: self.input.selection_kind,
+        })
     }
 
     fn swap_selection_ends(&mut self) {
