@@ -425,6 +425,11 @@ struct Node {
 }
 
 impl Node {
+    fn rearm_exit_notice(&mut self) {
+        self.replied = false;
+        self.notified = false;
+    }
+
     fn stop(&mut self, settled: ChildStatus) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -1119,8 +1124,7 @@ impl Family {
             node.control = Some(live.control);
             node.shutdown = Some(live.shutdown);
             node.task = Some(live.task);
-            node.replied = false;
-            node.notified = false;
+            node.rearm_exit_notice();
             node.awaiting_quiet = false;
             node.cancel_reason = None;
             node.summary.status = ChildStatus::Idle;
@@ -1720,8 +1724,7 @@ impl Family {
             && let Some(node) = self.lock().children.get_mut(child)
             && node.summary.parent == caller.id
         {
-            node.notified = false;
-            node.replied = false;
+            node.rearm_exit_notice();
         }
         let delivered = match woken {
             Ok(()) => match self.send_delivery(target.child.as_deref(), event).await {
