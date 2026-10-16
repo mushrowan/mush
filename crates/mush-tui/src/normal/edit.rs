@@ -4,7 +4,7 @@ use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 use crate::motion::{self, Region};
 
-use super::keys::{Command, Entry, Operator, Target};
+use super::keys::{Command, Entry, Operator, Order, Target};
 use super::{ComposerTarget, NormalTarget, composer_position};
 
 const MAX_REPEAT: usize = 1_000;
@@ -16,6 +16,60 @@ pub(crate) struct Register {
     images: Vec<PendingImage>,
 }
 
+impl Register {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && !self.linewise
+    }
+
+    fn append(&mut self, more: Self) {
+        if self.is_empty() {
+            *self = more;
+            return;
+        }
+        if self.linewise || more.linewise {
+            self.text.push('\n');
+            self.linewise = true;
+        }
+        self.text.push_str(&more.text);
+        self.images.extend(more.images);
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Registers {
+    unnamed: Register,
+    named: [Register; 26],
+}
+
+impl Registers {
+    fn read(&self, name: Option<char>) -> Option<Register> {
+        match name {
+            None => Some(self.unnamed.clone()),
+            Some(name) => Some(self.named[named_slot(name)?].clone()),
+        }
+    }
+
+    fn write(&mut self, name: Option<char>, taken: Register) {
+        match name.and_then(|name| Some((name, named_slot(name)?))) {
+            Some((name, slot)) if name.is_ascii_uppercase() => {
+                self.named[slot].append(taken);
+                self.unnamed = self.named[slot].clone();
+            }
+            Some((_, slot)) => {
+                self.named[slot] = taken.clone();
+                self.unnamed = taken;
+            }
+            None if name == Some('_') => {}
+            None => self.unnamed = taken,
+        }
+    }
+}
+
+fn named_slot(name: char) -> Option<usize> {
+    name.is_ascii_alphabetic()
+        .then(|| usize::from(name.to_ascii_lowercase() as u8 - b'a'))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Extent {
     Chars(usize),
@@ -24,8 +78,7 @@ enum Extent {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Change {
-    command: Command,
-    count: Option<usize>,
+    order: Order,
     selection: Option<Extent>,
     typed: Option<String>,
 }
@@ -39,18 +92,17 @@ pub(crate) fn settle(app: &mut App) {
     app.input.checkpoint();
 }
 
-pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Option<AppEvent> {
-    let event = match command {
-        Command::Repeat => repeat(app, count),
+pub(crate) fn run(app: &mut App, order: Order) -> Option<AppEvent> {
+    let event = match order.command {
+        Command::Repeat => repeat(app, order.count),
         command if repeatable(command) => {
             let before = app.input.text.clone();
             let selection = extent_of_selection(app);
-            let event = execute(app, command, count);
+            let event = execute(app, order);
             let typing = app.interaction.mode == AppMode::Insert;
             if typing || app.input.text != before {
                 app.interaction.normal.last_change = Some(Change {
-                    command,
-                    count,
+                    order,
                     selection,
                     typed: None,
                 });
@@ -60,10 +112,29 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
             }
             event
         }
-        command => execute(app, command, count),
+        _ => execute(app, order),
     };
     app.input.ensure_cursor_visible();
     event
+}
+
+pub(crate) fn put_text(app: &mut App, text: String, before: bool, count: Option<usize>) {
+    let linewise = text.ends_with('\n');
+    let register = Register {
+        text: if linewise {
+            text[..text.len() - 1].to_string()
+        } else {
+            text
+        },
+        linewise,
+        images: Vec::new(),
+    };
+    if app.interaction.mode == AppMode::Visual {
+        put_over_selection(app, register, before, count);
+    } else {
+        put(app, register, before, count);
+    }
+    app.input.ensure_cursor_visible();
 }
 
 fn repeatable(command: Command) -> bool {
@@ -81,12 +152,12 @@ fn repeatable(command: Command) -> bool {
 fn repeat(app: &mut App, count: Option<usize>) -> Option<AppEvent> {
     let mut change = app.interaction.normal.last_change.clone()?;
     if count.is_some() {
-        change.count = count;
+        change.order.count = count;
     }
     if let Some(extent) = change.selection {
         select_extent(app, extent);
     }
-    let event = execute(app, change.command, change.count);
+    let event = execute(app, change.order);
     if app.interaction.mode == AppMode::Insert {
         if let Some(typed) = &change.typed {
             app.input.insert_str(&typed.replace(IMAGE_PLACEHOLDER, ""));
@@ -129,11 +200,12 @@ fn select_extent(app: &mut App, extent: Extent) {
     }
 }
 
-fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppEvent> {
-    let Some(command) = app.interaction.normal.marks.composer.resolve(command) else {
+fn execute(app: &mut App, order: Order) -> Option<AppEvent> {
+    let Some(command) = app.interaction.normal.marks.composer.resolve(order.command) else {
         app.status = Some("mark not set".into());
         return None;
     };
+    let (count, register) = (order.count, order.register);
     match command {
         Command::Move(motion) => {
             let mut target = ComposerTarget::new(&mut app.input);
@@ -141,13 +213,17 @@ fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppE
             None
         }
         Command::Scroll(_) => None,
-        Command::Operate(operator, target) => operate(app, operator, target, count),
-        Command::Put { before } if app.interaction.mode == AppMode::Visual => {
-            put_over_selection(app, before, count);
-            None
+        Command::Operate(operator, target) => operate(app, operator, target, order),
+        Command::Put { before } if register == Some('+') => {
+            Some(AppEvent::PutClipboard { before, count })
         }
         Command::Put { before } => {
-            put(app, before, count);
+            let held = app.interaction.normal.registers.read(register)?;
+            if app.interaction.mode == AppMode::Visual {
+                put_over_selection(app, held, before, count);
+            } else {
+                put(app, held, before, count);
+            }
             None
         }
         Command::Undo => {
@@ -208,12 +284,8 @@ fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppE
     }
 }
 
-fn operate(
-    app: &mut App,
-    operator: Operator,
-    target: Target,
-    count: Option<usize>,
-) -> Option<AppEvent> {
+fn operate(app: &mut App, operator: Operator, target: Target, order: Order) -> Option<AppEvent> {
+    let (count, register) = (order.count, order.register);
     let rows = rows(&app.input.text);
     let at = composer_position(&app.input);
     let region = match target {
@@ -240,13 +312,18 @@ fn operate(
         Region::Chars(range) => {
             let start = byte_offset(&app.input.text, range.start);
             let end = byte_offset(&app.input.text, range.end);
-            on_chars(app, operator, start..end)
+            on_chars(app, operator, start..end, register)
         }
-        Region::Lines(lines) => on_lines(app, operator, &lines),
+        Region::Lines(lines) => on_lines(app, operator, &lines, register),
     }
 }
 
-fn on_chars(app: &mut App, operator: Operator, bytes: Range<usize>) -> Option<AppEvent> {
+fn on_chars(
+    app: &mut App,
+    operator: Operator,
+    bytes: Range<usize>,
+    register: Option<char>,
+) -> Option<AppEvent> {
     if bytes.is_empty() {
         if operator == Operator::Change {
             app.input.cursor = bytes.start;
@@ -255,18 +332,23 @@ fn on_chars(app: &mut App, operator: Operator, bytes: Range<usize>) -> Option<Ap
         return None;
     }
     if operator == Operator::Yank {
-        let event = yank(app, bytes.clone(), false, true);
+        let event = yank(app, bytes.clone(), false, register, true);
         app.input.cursor = bytes.start;
         rest_on_a_character(&mut app.input);
         return event;
     }
     let images = app.input.take_images_in(bytes.clone());
     let text: String = app.input.text.drain(bytes.clone()).collect();
-    app.interaction.normal.register = Register {
-        text,
-        linewise: false,
-        images,
-    };
+    let event = keep(
+        app,
+        register,
+        Register {
+            text,
+            linewise: false,
+            images,
+        },
+        None,
+    );
     app.input.cursor = bytes.start;
     edited(app);
     if operator == Operator::Change {
@@ -274,15 +356,20 @@ fn on_chars(app: &mut App, operator: Operator, bytes: Range<usize>) -> Option<Ap
     } else {
         rest_on_a_character(&mut app.input);
     }
-    None
+    event
 }
 
-fn on_lines(app: &mut App, operator: Operator, lines: &RangeInclusive<usize>) -> Option<AppEvent> {
+fn on_lines(
+    app: &mut App,
+    operator: Operator,
+    lines: &RangeInclusive<usize>,
+    register: Option<char>,
+) -> Option<AppEvent> {
     let (start, end) = line_bounds(&app.input.text, lines);
     match operator {
         Operator::Yank => {
             let (_, column) = composer_position(&app.input);
-            let event = yank(app, start..end, true, true);
+            let event = yank(app, start..end, true, register, true);
             ComposerTarget::new(&mut app.input).place_cursor((*lines.start(), column));
             event
         }
@@ -298,17 +385,22 @@ fn on_lines(app: &mut App, operator: Operator, lines: &RangeInclusive<usize>) ->
             let block = text[start..end].to_string();
             let images = app.input.take_images_in(removal.clone());
             app.input.text.drain(removal);
-            app.interaction.normal.register = Register {
-                text: block,
-                linewise: true,
-                images,
-            };
+            let event = keep(
+                app,
+                register,
+                Register {
+                    text: block,
+                    linewise: true,
+                    images,
+                },
+                None,
+            );
             edited(app);
             let line = *lines.start();
             let mut target = ComposerTarget::new(&mut app.input);
             target.place_cursor((line, 0));
             super::apply_motion(&mut target, motion::Motion::FirstNonBlank, None);
-            None
+            event
         }
         Operator::Change => {
             let indent = app.input.text[start..end]
@@ -319,22 +411,26 @@ fn on_lines(app: &mut App, operator: Operator, lines: &RangeInclusive<usize>) ->
             let images = app.input.take_images_in(start..end);
             let block = app.input.text[start..end].to_string();
             app.input.text.drain(start + indent..end);
-            app.interaction.normal.register = Register {
-                text: block,
-                linewise: true,
-                images,
-            };
+            let event = keep(
+                app,
+                register,
+                Register {
+                    text: block,
+                    linewise: true,
+                    images,
+                },
+                None,
+            );
             app.input.cursor = start + indent;
             edited(app);
             enter_insert(app);
-            None
+            event
         }
     }
 }
 
-fn put(app: &mut App, before: bool, count: Option<usize>) {
-    let register = app.interaction.normal.register.clone();
-    if register.text.is_empty() && !register.linewise {
+fn put(app: &mut App, register: Register, before: bool, count: Option<usize>) {
+    if register.is_empty() {
         return;
     }
     let times = count.unwrap_or(1).min(MAX_REPEAT);
@@ -432,7 +528,7 @@ pub(crate) fn yank_selection(app: &mut App, strip: bool) -> Option<AppEvent> {
         .anchor
         .map_or(app.input.cursor, |anchor| anchor.min(app.input.cursor));
     let (bytes, linewise) = region_bytes(&app.input.text, &region);
-    let event = yank(app, bytes, linewise, strip);
+    let event = yank(app, bytes, linewise, None, strip);
     app.interaction.mode = AppMode::Normal;
     app.input.anchor = None;
     app.input.cursor = start;
@@ -440,12 +536,16 @@ pub(crate) fn yank_selection(app: &mut App, strip: bool) -> Option<AppEvent> {
     event
 }
 
-fn put_over_selection(app: &mut App, keep_register: bool, count: Option<usize>) {
+fn put_over_selection(
+    app: &mut App,
+    register: Register,
+    keep_register: bool,
+    count: Option<usize>,
+) {
     let Some(region) = selection_region(&app.input) else {
         return;
     };
-    let register = app.interaction.normal.register.clone();
-    if register.text.is_empty() && !register.linewise {
+    if register.is_empty() {
         return;
     }
     let (bytes, linewise) = region_bytes(&app.input.text, &region);
@@ -467,11 +567,14 @@ fn put_over_selection(app: &mut App, keep_register: bool, count: Option<usize>) 
     let text: String = app.input.text.drain(bytes.clone()).collect();
     app.input.insert_with_images(bytes.start, &block, images);
     if !keep_register {
-        app.interaction.normal.register = Register {
-            text,
-            linewise,
-            images: taken,
-        };
+        app.interaction.normal.registers.write(
+            None,
+            Register {
+                text,
+                linewise,
+                images: taken,
+            },
+        );
     }
     app.interaction.mode = AppMode::Normal;
     edited(app);
@@ -622,19 +725,34 @@ fn region_bytes(text: &str, region: &Region) -> (Range<usize>, bool) {
     }
 }
 
-fn yank(app: &mut App, bytes: Range<usize>, linewise: bool, strip: bool) -> Option<AppEvent> {
-    let text = app.input.text[bytes.clone()].to_string();
-    let copied = if strip {
-        crate::selection::strip_padding(&text)
-    } else {
-        text.clone()
-    };
-    app.interaction.normal.register = Register {
-        text,
+fn yank(
+    app: &mut App,
+    bytes: Range<usize>,
+    linewise: bool,
+    register: Option<char>,
+    strip: bool,
+) -> Option<AppEvent> {
+    let taken = Register {
+        text: app.input.text[bytes.clone()].to_string(),
         linewise,
         images: app.input.images_in(bytes),
     };
-    Some(AppEvent::Copy { text: copied })
+    keep(app, register, taken, Some(strip))
+}
+
+fn keep(
+    app: &mut App,
+    register: Option<char>,
+    taken: Register,
+    yanked_with_strip: Option<bool>,
+) -> Option<AppEvent> {
+    let copied = match (register, yanked_with_strip) {
+        (Some('+'), _) | (None, Some(false)) => Some(taken.text.clone()),
+        (None, Some(true)) => Some(crate::selection::strip_padding(&taken.text)),
+        _ => None,
+    };
+    app.interaction.normal.registers.write(register, taken);
+    copied.map(|text| AppEvent::Copy { text })
 }
 
 fn edited(app: &mut App) {

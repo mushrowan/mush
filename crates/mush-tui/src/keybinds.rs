@@ -201,6 +201,7 @@ pub enum Action {
     SetMark,
     GotoMark,
     GotoMarkLine,
+    SelectRegister,
 }
 
 impl Action {
@@ -298,6 +299,7 @@ impl Action {
             Self::SetMark => "set_mark",
             Self::GotoMark => "goto_mark",
             Self::GotoMarkLine => "goto_mark_line",
+            Self::SelectRegister => "select_register",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -399,6 +401,7 @@ impl Action {
         Self::SetMark,
         Self::GotoMark,
         Self::GotoMarkLine,
+        Self::SelectRegister,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -594,7 +597,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::ParagraphBack
         | Action::SetMark
         | Action::GotoMark
-        | Action::GotoMarkLine => KeyScope::Normal,
+        | Action::GotoMarkLine
+        | Action::SelectRegister => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1242,6 +1246,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::GotoMarkLine,
         &[(KeyCode::Char('\''), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SelectRegister,
+        &[(KeyCode::Char('"'), KeyModifiers::NONE)],
     ),
 ];
 

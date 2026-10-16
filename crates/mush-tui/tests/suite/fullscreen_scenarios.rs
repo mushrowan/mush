@@ -3031,6 +3031,99 @@ fn a_mark_that_was_never_set_says_so() {
 }
 
 #[test]
+fn a_named_register_keeps_its_text_through_other_deletes() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "\"ayiw");
+    type_keys(&mut app, "wx");
+
+    type_keys(&mut app, "$\"ap");
+
+    assert_eq!(app.input.text, "one woone");
+}
+
+#[test]
+fn a_capital_register_appends() {
+    let mut app = composer_in_normal("one\ntwo\nthree");
+    type_keys(&mut app, "\"ayyj\"Ayy");
+
+    type_keys(&mut app, "G\"ap");
+
+    assert_eq!(app.input.text, "one\ntwo\nthree\none\ntwo");
+}
+
+#[test]
+fn the_black_hole_register_leaves_the_unnamed_one_alone() {
+    let mut app = composer_in_normal("keep\ndrop\nend");
+    type_keys(&mut app, "yyj\"_dd");
+
+    type_keys(&mut app, "p");
+
+    assert_eq!(app.input.text, "keep\nend\nkeep");
+}
+
+#[test]
+fn a_named_yank_stays_off_the_clipboard_and_plus_goes_on_it() {
+    let mut app = composer_in_normal("  hello");
+    type_keys(&mut app, "\"ay");
+    let named = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+    type_keys(&mut app, "\"+y");
+    let plus = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(named.is_none(), "{named:?}");
+    assert!(
+        matches!(&plus, Some(AppEvent::Copy { text }) if text == "  hello"),
+        "{plus:?}"
+    );
+}
+
+#[test]
+fn deleting_into_plus_copies_what_was_deleted() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "\"+d");
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('w')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "one "),
+        "{event:?}"
+    );
+    assert_eq!(app.input.text, "two");
+}
+
+#[test]
+fn putting_from_plus_asks_for_the_clipboard() {
+    let mut app = composer_in_normal("one");
+    type_keys(&mut app, "\"+");
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+    );
+
+    assert!(
+        matches!(
+            event,
+            Some(AppEvent::PutClipboard {
+                before: true,
+                count: None
+            })
+        ),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn a_register_works_on_a_composer_selection() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "wviw\"by");
+    type_keys(&mut app, "0x");
+
+    type_keys(&mut app, "\"bP");
+
+    assert_eq!(app.input.text, "twone two");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

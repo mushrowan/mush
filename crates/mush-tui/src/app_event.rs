@@ -29,6 +29,10 @@ pub enum AppEvent {
     Copy {
         text: String,
     },
+    PutClipboard {
+        before: bool,
+        count: Option<usize>,
+    },
     CompactionRecoverySelected {
         action: crate::app_state::CompactionRecoveryAction,
     },

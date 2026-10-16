@@ -2768,3 +2768,16 @@ fn r_over_an_image_drops_the_image() {
     assert_eq!(app.input.text, "axb");
     assert!(app.input.images.is_empty());
 }
+
+#[test]
+fn clipboard_text_puts_like_a_register() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.text = "ab".into();
+    app.interaction.mode = AppMode::Normal;
+
+    crate::normal::edit::put_text(&mut app, "XY".into(), false, Some(2));
+    assert_eq!(app.input.text, "aXYXYb");
+
+    crate::normal::edit::put_text(&mut app, "line\n".into(), false, None);
+    assert_eq!(app.input.text, "aXYXYb\nline");
+}

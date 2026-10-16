@@ -7,7 +7,7 @@ pub(crate) mod keys;
 #[derive(Debug, Default)]
 pub(crate) struct NormalState {
     pub(crate) keys: keys::Keys,
-    pub(crate) register: edit::Register,
+    pub(crate) registers: edit::Registers,
     pub(crate) last_change: Option<edit::Change>,
     pub(crate) last_selection: LastSelection,
     pub(crate) marks: Marks,

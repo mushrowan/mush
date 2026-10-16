@@ -73,6 +73,7 @@ normal::repeat_change = .
 normal::repeat_find = ;
 normal::repeat_find_back = ,
 normal::replace_char = r
+normal::select_register = "
 normal::set_mark = m
 normal::start_block_selection = Ctrl-v
 normal::start_line_selection = Shift-v

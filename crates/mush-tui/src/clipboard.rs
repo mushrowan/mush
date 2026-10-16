@@ -127,6 +127,26 @@ fn is_wayland() -> bool {
             .unwrap_or(false)
 }
 
+pub fn read_clipboard_text() -> Option<String> {
+    const XCLIP: (&str, &[&str]) = ("xclip", &["-selection", "clipboard", "-o"]);
+    const WL_PASTE: (&str, &[&str]) = ("wl-paste", &["--no-newline"]);
+    let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else if is_wayland() {
+        &[WL_PASTE, XCLIP]
+    } else {
+        &[XCLIP, WL_PASTE]
+    };
+    tools.iter().find_map(|(tool, args)| {
+        let output = Command::new(tool).args(*args).output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).ok())
+            .flatten()
+    })
+}
+
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
     if cfg!(target_os = "macos") {
         read_macos()

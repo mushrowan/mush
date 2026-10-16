@@ -205,6 +205,10 @@ async fn handle_common_app_event(
             copy_to_clipboard(&mut session.app, text, &env, &mut std::io::stdout());
             Some(LoopAction::Redraw)
         }
+        AppEvent::PutClipboard { before, count } => {
+            put_clipboard_text(&mut session.app, *before, *count).await;
+            Some(LoopAction::Redraw)
+        }
         AppEvent::ValidateAndSaveApiKey {
             entry_id,
             provider_name,
@@ -655,6 +659,13 @@ fn copy_to_clipboard(
 ) {
     if let Err(error) = crate::clipboard::copy(text, env, out) {
         app.show_error(error.to_string());
+    }
+}
+
+async fn put_clipboard_text(app: &mut App, before: bool, count: Option<usize>) {
+    match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_text).await {
+        Ok(Some(text)) => crate::normal::edit::put_text(app, text, before, count),
+        Ok(None) | Err(_) => app.status = Some("no text in the clipboard".into()),
     }
 }
 

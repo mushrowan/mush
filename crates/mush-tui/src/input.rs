@@ -4,7 +4,7 @@ use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::InputBuffer;
 use crate::keybinds::{Action, KeyScope};
 use crate::normal::NormalTarget;
-use crate::normal::keys::{Command, Context, Scroll, Step};
+use crate::normal::keys::{Command, Context, Order, Scroll, Step};
 
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     let (before, after) = app.input.text.split_at(app.input.cursor);
@@ -850,16 +850,16 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     handle_composer_keys(app, key, Context::COMPOSER)
 }
 
-fn feed_keys(app: &mut App, key: KeyEvent, context: Context) -> Option<(Command, Option<usize>)> {
+fn feed_keys(app: &mut App, key: KeyEvent, context: Context) -> Option<Order> {
     match app.interaction.normal.keys.feed(&app.keymap, key, context) {
-        Step::Run(command, count) => Some((command, count)),
+        Step::Run(order) => Some(order),
         Step::Pending | Step::Dropped => None,
     }
 }
 
 fn handle_composer_keys(app: &mut App, key: KeyEvent, context: Context) -> Option<AppEvent> {
-    let (command, count) = feed_keys(app, key, context)?;
-    crate::normal::edit::run(app, command, count)
+    let order = feed_keys(app, key, context)?;
+    crate::normal::edit::run(app, order)
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -954,8 +954,8 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
 }
 
 fn handle_log_motion(app: &mut App, key: KeyEvent, context: Context) {
-    if let Some((command, count)) = feed_keys(app, key, context) {
-        run_log_motion(app, command, count);
+    if let Some(order) = feed_keys(app, key, context) {
+        run_log_motion(app, order.command, order.count);
     }
 }
 

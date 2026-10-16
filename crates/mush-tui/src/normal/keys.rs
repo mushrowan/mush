@@ -159,9 +159,16 @@ pub(crate) enum Command {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Order {
+    pub(crate) command: Command,
+    pub(crate) count: Option<usize>,
+    pub(crate) register: Option<char>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
     Pending,
-    Run(Command, Option<usize>),
+    Run(Order),
     Dropped,
 }
 
@@ -197,12 +204,14 @@ enum Prefix {
     Replace,
     SetMark,
     Mark { exact: bool },
+    Register,
 }
 
 enum Reach {
     Motion(Motion),
     Object(Object),
     Command(Command),
+    Register(Option<char>),
 }
 
 #[derive(Debug, Default)]
@@ -210,12 +219,13 @@ pub(crate) struct Keys {
     count: Option<usize>,
     operator: Option<(Operator, Option<usize>)>,
     prefix: Option<Prefix>,
+    register: Option<char>,
     last_find: Option<Find>,
 }
 
 impl Keys {
     pub(crate) fn is_pending(&self) -> bool {
-        self.prefix.is_some() || self.operator.is_some()
+        self.prefix.is_some() || self.operator.is_some() || self.register.is_some()
     }
 
     pub(crate) fn clear(&mut self) -> bool {
@@ -223,6 +233,7 @@ impl Keys {
         self.count = None;
         self.operator = None;
         self.prefix = None;
+        self.register = None;
         pending
     }
 
@@ -238,6 +249,10 @@ impl Keys {
         let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
         if let Some(prefix) = self.prefix.take() {
             return match self.complete(prefix, key, bound) {
+                Some(Reach::Register(name)) => {
+                    self.register = name;
+                    Step::Pending
+                }
                 Some(Reach::Motion(motion)) => self.reach(motion),
                 Some(Reach::Object(object)) => self.take_object(object),
                 Some(Reach::Command(command)) if self.operator.is_none() => self.run(command),
@@ -265,6 +280,10 @@ impl Keys {
         }
         if let Some((_, exact)) = MARK_JUMPS.iter().find(|(action, _)| bound(*action)) {
             self.prefix = Some(Prefix::Mark { exact: *exact });
+            return Step::Pending;
+        }
+        if self.operator.is_none() && context.editable && bound(Action::SelectRegister) {
+            self.prefix = Some(Prefix::Register);
             return Step::Pending;
         }
         if self.operator.is_none() && bound(Action::SetMark) {
@@ -330,7 +349,9 @@ impl Keys {
         if !context.editable {
             return Step::Dropped;
         }
-        let command = if bound(Action::Delete) || bound(Action::DeleteUnderCursor) {
+        let command = if bound(Action::Yank) || bound(Action::YankRaw) {
+            Command::Operate(Operator::Yank, Target::Selection)
+        } else if bound(Action::Delete) || bound(Action::DeleteUnderCursor) {
             Command::Operate(Operator::Delete, Target::Selection)
         } else if bound(Action::Change) || bound(Action::Substitute) {
             Command::Operate(Operator::Change, Target::Selection)
@@ -415,6 +436,15 @@ impl Keys {
                 name: crate::keybinds::typed_char(key)?,
                 exact,
             },
+            Prefix::Register => {
+                return match crate::keybinds::typed_char(key)? {
+                    '"' => Some(Reach::Register(None)),
+                    name if name.is_ascii_alphabetic() || matches!(name, '+' | '_') => {
+                        Some(Reach::Register(Some(name)))
+                    }
+                    _ => None,
+                };
+            }
         };
         Some(Reach::Motion(motion))
     }
@@ -436,7 +466,11 @@ impl Keys {
             Some((_, Some(outer))) => Some(outer.saturating_mul(count.unwrap_or(1)).min(MAX_COUNT)),
             _ => count,
         };
-        Step::Run(command, count)
+        Step::Run(Order {
+            command,
+            count,
+            register: self.register.take(),
+        })
     }
 
     fn take_digit(&mut self, key: KeyEvent) -> bool {
@@ -488,6 +522,14 @@ mod tests {
             .collect()
     }
 
+    fn ran(command: Command, count: Option<usize>) -> Step {
+        Step::Run(Order {
+            command,
+            count,
+            register: None,
+        })
+    }
+
     fn last(typed: &str) -> Step {
         let mut keys = Keys::default();
         feed(&mut keys, typed).pop().unwrap_or(Step::Dropped)
@@ -497,25 +539,19 @@ mod tests {
     fn a_motion_key_runs_at_once() {
         assert_eq!(
             last("w"),
-            Step::Run(Command::Move(Motion::WordForward(Word::Small)), None)
+            ran(Command::Move(Motion::WordForward(Word::Small)), None)
         );
     }
 
     #[test]
     fn digits_build_a_count_for_the_motion() {
-        assert_eq!(
-            last("12j"),
-            Step::Run(Command::Move(Motion::Down), Some(12))
-        );
+        assert_eq!(last("12j"), ran(Command::Move(Motion::Down), Some(12)));
     }
 
     #[test]
     fn a_leading_zero_is_the_line_start() {
-        assert_eq!(last("0"), Step::Run(Command::Move(Motion::LineStart), None));
-        assert_eq!(
-            last("10l"),
-            Step::Run(Command::Move(Motion::Right), Some(10))
-        );
+        assert_eq!(last("0"), ran(Command::Move(Motion::LineStart), None));
+        assert_eq!(last("10l"), ran(Command::Move(Motion::Right), Some(10)));
     }
 
     #[test]
@@ -527,7 +563,7 @@ mod tests {
         assert_eq!(steps[1], Step::Dropped);
         assert_eq!(
             steps[2],
-            Step::Run(Command::Move(Motion::WordForward(Word::Small)), None)
+            ran(Command::Move(Motion::WordForward(Word::Small)), None)
         );
     }
 
@@ -538,30 +574,24 @@ mod tests {
         let steps = feed(&mut keys, "gg");
 
         assert_eq!(steps[0], Step::Pending);
-        assert_eq!(steps[1], Step::Run(Command::Move(Motion::Top), None));
+        assert_eq!(steps[1], ran(Command::Move(Motion::Top), None));
     }
 
     #[test]
     fn a_count_before_gg_or_g_names_a_line() {
-        assert_eq!(
-            last("12gg"),
-            Step::Run(Command::Move(Motion::Top), Some(12))
-        );
-        assert_eq!(
-            last("7G"),
-            Step::Run(Command::Move(Motion::Bottom), Some(7))
-        );
+        assert_eq!(last("12gg"), ran(Command::Move(Motion::Top), Some(12)));
+        assert_eq!(last("7G"), ran(Command::Move(Motion::Bottom), Some(7)));
     }
 
     #[test]
     fn ge_and_g_e_go_back_to_word_ends() {
         assert_eq!(
             last("2ge"),
-            Step::Run(Command::Move(Motion::WordEndBack(Word::Small)), Some(2))
+            ran(Command::Move(Motion::WordEndBack(Word::Small)), Some(2))
         );
         assert_eq!(
             last("gE"),
-            Step::Run(Command::Move(Motion::WordEndBack(Word::Big)), None)
+            ran(Command::Move(Motion::WordEndBack(Word::Big)), None)
         );
     }
 
@@ -572,7 +602,7 @@ mod tests {
         let steps = feed(&mut keys, "3gzj");
 
         assert_eq!(steps[2], Step::Dropped);
-        assert_eq!(steps[3], Step::Run(Command::Move(Motion::Down), None));
+        assert_eq!(steps[3], ran(Command::Move(Motion::Down), None));
     }
 
     fn found(target: char, forward: bool, till: bool, repeat: bool) -> Command {
@@ -600,14 +630,14 @@ mod tests {
         let steps = feed(&mut keys, "3fx");
 
         assert_eq!(steps[1], Step::Pending);
-        assert_eq!(steps[2], Step::Run(found('x', true, false, false), Some(3)));
+        assert_eq!(steps[2], ran(found('x', true, false, false), Some(3)));
     }
 
     #[test]
     fn each_find_key_has_its_direction_and_reach() {
-        assert_eq!(last("Fx"), Step::Run(found('x', false, false, false), None));
-        assert_eq!(last("tx"), Step::Run(found('x', true, true, false), None));
-        assert_eq!(last("TX"), Step::Run(found('X', false, true, false), None));
+        assert_eq!(last("Fx"), ran(found('x', false, false, false), None));
+        assert_eq!(last("tx"), ran(found('x', true, true, false), None));
+        assert_eq!(last("TX"), ran(found('X', false, true, false), None));
     }
 
     #[test]
@@ -616,8 +646,8 @@ mod tests {
 
         let steps = feed(&mut keys, "tx;2,");
 
-        assert_eq!(steps[2], Step::Run(found('x', true, true, true), None));
-        assert_eq!(steps[4], Step::Run(found('x', false, true, true), Some(2)));
+        assert_eq!(steps[2], ran(found('x', true, true, true), None));
+        assert_eq!(steps[4], ran(found('x', false, true, true), Some(2)));
     }
 
     #[test]
@@ -650,7 +680,7 @@ mod tests {
         assert_eq!(steps[0], Step::Pending);
         assert_eq!(
             steps[1],
-            Step::Run(
+            ran(
                 operate(
                     Operator::Delete,
                     Target::Motion(Motion::WordForward(Word::Small))
@@ -664,15 +694,15 @@ mod tests {
     fn doubling_an_operator_takes_whole_lines() {
         assert_eq!(
             last("dd"),
-            Step::Run(operate(Operator::Delete, Target::Lines), None)
+            ran(operate(Operator::Delete, Target::Lines), None)
         );
         assert_eq!(
             last("3cc"),
-            Step::Run(operate(Operator::Change, Target::Lines), Some(3))
+            ran(operate(Operator::Change, Target::Lines), Some(3))
         );
         assert_eq!(
             last("yy"),
-            Step::Run(operate(Operator::Yank, Target::Lines), None)
+            ran(operate(Operator::Yank, Target::Lines), None)
         );
     }
 
@@ -680,7 +710,7 @@ mod tests {
     fn counts_before_and_after_an_operator_multiply() {
         assert_eq!(
             last("2d3w"),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Delete,
                     Target::Motion(Motion::WordForward(Word::Small))
@@ -690,7 +720,7 @@ mod tests {
         );
         assert_eq!(
             last("d3w"),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Delete,
                     Target::Motion(Motion::WordForward(Word::Small))
@@ -704,7 +734,7 @@ mod tests {
     fn an_operator_reaches_through_finds_and_g_motions() {
         assert_eq!(
             last("ctx"),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Change,
                     Target::Motion(found('x', true, true, false).motion())
@@ -714,7 +744,7 @@ mod tests {
         );
         assert_eq!(
             last("dgg"),
-            Step::Run(operate(Operator::Delete, Target::Motion(Motion::Top)), None)
+            ran(operate(Operator::Delete, Target::Motion(Motion::Top)), None)
         );
     }
 
@@ -753,7 +783,7 @@ mod tests {
         for (typed, operator, target) in cases {
             assert_eq!(
                 last(&format!("2{typed}")),
-                Step::Run(operate(operator, target), Some(2)),
+                ran(operate(operator, target), Some(2)),
                 "{typed}"
             );
         }
@@ -761,11 +791,8 @@ mod tests {
 
     #[test]
     fn p_and_capital_p_put_after_and_before() {
-        assert_eq!(
-            last("3p"),
-            Step::Run(Command::Put { before: false }, Some(3))
-        );
-        assert_eq!(last("P"), Step::Run(Command::Put { before: true }, None));
+        assert_eq!(last("3p"), ran(Command::Put { before: false }, Some(3)));
+        assert_eq!(last("P"), ran(Command::Put { before: true }, None));
     }
 
     #[test]
@@ -773,13 +800,13 @@ mod tests {
         let mut keys = Keys::default();
         let keymap = KeyMap::default();
 
-        assert_eq!(last("2u"), Step::Run(Command::Undo, Some(2)));
+        assert_eq!(last("2u"), ran(Command::Undo, Some(2)));
         let step = keys.feed(
             &keymap,
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
             Context::COMPOSER,
         );
-        assert_eq!(step, Step::Run(Command::Redo, None));
+        assert_eq!(step, ran(Command::Redo, None));
     }
 
     #[test]
@@ -793,11 +820,7 @@ mod tests {
             ("O", Entry::Above),
         ];
         for (typed, entry) in cases {
-            assert_eq!(
-                last(typed),
-                Step::Run(Command::Insert(entry), None),
-                "{typed}"
-            );
+            assert_eq!(last(typed), ran(Command::Insert(entry), None), "{typed}");
         }
     }
 
@@ -809,7 +832,7 @@ mod tests {
     fn an_operator_takes_a_text_object() {
         assert_eq!(
             last("diw"),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Delete,
                     Target::Object(object(Kind::Word(Word::Small), false))
@@ -819,7 +842,7 @@ mod tests {
         );
         assert_eq!(
             last("2ca("),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Change,
                     Target::Object(object(Kind::Block('(', ')'), true))
@@ -829,7 +852,7 @@ mod tests {
         );
         assert_eq!(
             last("yi\""),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Yank,
                     Target::Object(object(Kind::Quote('"'), false))
@@ -864,7 +887,7 @@ mod tests {
 
         assert_eq!(
             steps[1],
-            Step::Run(Command::Select(object(Kind::Block('{', '}'), false)), None)
+            ran(Command::Select(object(Kind::Block('{', '}'), false)), None)
         );
     }
 
@@ -886,8 +909,8 @@ mod tests {
     #[test]
     fn operators_act_on_a_selection_at_once() {
         let selection = Context::COMPOSER.visual();
-        let delete = Step::Run(operate(Operator::Delete, Target::Selection), None);
-        let change = Step::Run(operate(Operator::Change, Target::Selection), None);
+        let delete = ran(operate(Operator::Delete, Target::Selection), None);
+        let change = ran(operate(Operator::Change, Target::Selection), None);
 
         assert_eq!(visual("d", selection), delete);
         assert_eq!(visual("x", selection), delete);
@@ -895,16 +918,16 @@ mod tests {
         assert_eq!(visual("s", selection), change);
         assert_eq!(
             visual("P", selection),
-            Step::Run(Command::Put { before: true }, None)
+            ran(Command::Put { before: true }, None)
         );
-        assert_eq!(visual("o", selection), Step::Run(Command::SwapEnds, None));
+        assert_eq!(visual("o", selection), ran(Command::SwapEnds, None));
     }
 
     #[test]
     fn a_log_selection_only_swaps_ends() {
         let selection = Context::LOG.visual();
 
-        assert_eq!(visual("o", selection), Step::Run(Command::SwapEnds, None));
+        assert_eq!(visual("o", selection), ran(Command::SwapEnds, None));
         assert_eq!(visual("d", selection), Step::Dropped);
         assert_eq!(visual("p", selection), Step::Dropped);
     }
@@ -916,47 +939,47 @@ mod tests {
         let steps = feed(&mut keys, "3rx");
 
         assert_eq!(steps[1], Step::Pending);
-        assert_eq!(steps[2], Step::Run(Command::Replace('x'), Some(3)));
+        assert_eq!(steps[2], ran(Command::Replace('x'), Some(3)));
     }
 
     #[test]
     fn capital_j_and_tilde_join_and_toggle() {
-        assert_eq!(last("3J"), Step::Run(Command::Join, Some(3)));
-        assert_eq!(last("~"), Step::Run(Command::ToggleCase, None));
+        assert_eq!(last("3J"), ran(Command::Join, Some(3)));
+        assert_eq!(last("~"), ran(Command::ToggleCase, None));
         assert_eq!(
             visual("~", Context::COMPOSER.visual()),
-            Step::Run(Command::ToggleCase, None)
+            ran(Command::ToggleCase, None)
         );
         assert_eq!(
             visual("rq", Context::COMPOSER.visual()),
-            Step::Run(Command::Replace('q'), None)
+            ran(Command::Replace('q'), None)
         );
     }
 
     #[test]
     fn dot_repeats_with_its_own_count() {
-        assert_eq!(last("."), Step::Run(Command::Repeat, None));
-        assert_eq!(last("4."), Step::Run(Command::Repeat, Some(4)));
+        assert_eq!(last("."), ran(Command::Repeat, None));
+        assert_eq!(last("4."), ran(Command::Repeat, Some(4)));
         assert_eq!(visual(".", Context::COMPOSER.visual()), Step::Dropped);
     }
 
     #[test]
     fn gv_reselects_but_not_after_an_operator() {
-        assert_eq!(last("gv"), Step::Run(Command::Reselect, None));
+        assert_eq!(last("gv"), ran(Command::Reselect, None));
         assert_eq!(
             visual("gv", Context::LOG.visual()),
-            Step::Run(Command::Reselect, None)
+            ran(Command::Reselect, None)
         );
         assert_eq!(last("dgv"), Step::Dropped);
     }
 
     #[test]
     fn marks_are_set_and_reached_by_name() {
-        assert_eq!(last("ma"), Step::Run(Command::SetMark('a'), None));
+        assert_eq!(last("ma"), ran(Command::SetMark('a'), None));
         assert_eq!(last("mA"), Step::Dropped);
         assert_eq!(
             last("`b"),
-            Step::Run(
+            ran(
                 Command::Move(Motion::Mark {
                     name: 'b',
                     exact: true
@@ -966,7 +989,7 @@ mod tests {
         );
         assert_eq!(
             last("d'c"),
-            Step::Run(
+            ran(
                 operate(
                     Operator::Delete,
                     Target::Motion(Motion::Mark {
@@ -976,6 +999,51 @@ mod tests {
                 ),
                 None
             )
+        );
+    }
+
+    #[test]
+    fn a_register_name_rides_along_with_the_next_command() {
+        assert_eq!(
+            last("\"a2yy"),
+            Step::Run(Order {
+                command: operate(Operator::Yank, Target::Lines),
+                count: Some(2),
+                register: Some('a'),
+            })
+        );
+        assert_eq!(
+            last("3\"_dd"),
+            Step::Run(Order {
+                command: operate(Operator::Delete, Target::Lines),
+                count: Some(3),
+                register: Some('_'),
+            })
+        );
+        assert_eq!(last("\"\"p"), ran(Command::Put { before: false }, None));
+        assert_eq!(feed(&mut Keys::default(), "\"!")[1], Step::Dropped);
+    }
+
+    #[test]
+    fn a_register_works_on_a_selection_too() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        let mut step = Step::Dropped;
+        for c in "\"+y".chars() {
+            step = keys.feed(
+                &keymap,
+                KeyEvent::from(KeyCode::Char(c)),
+                Context::COMPOSER.visual(),
+            );
+        }
+
+        assert_eq!(
+            step,
+            Step::Run(Order {
+                command: operate(Operator::Yank, Target::Selection),
+                count: None,
+                register: Some('+'),
+            })
         );
     }
 
@@ -993,7 +1061,7 @@ mod tests {
     fn a_huge_count_saturates() {
         assert_eq!(
             last("99999999999999999999999j"),
-            Step::Run(Command::Move(Motion::Down), Some(MAX_COUNT))
+            ran(Command::Move(Motion::Down), Some(MAX_COUNT))
         );
     }
 }
