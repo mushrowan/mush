@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keybinds::{Action, KeyMap, KeyScope};
+use crate::motion::object::{Kind, Object};
 use crate::motion::{Find, Motion, Word};
 
 const SCROLLS: &[(Action, Scroll)] = &[
@@ -37,6 +38,8 @@ const FINDS: &[(Action, bool, bool)] = &[
     (Action::TillChar, true, true),
     (Action::TillCharBack, false, true),
 ];
+
+const OBJECTS: &[(Action, bool)] = &[(Action::InnerObject, false), (Action::AroundObject, true)];
 
 const OPERATORS: &[(Action, Operator)] = &[
     (Action::Delete, Operator::Delete),
@@ -123,6 +126,7 @@ const ENTRIES: &[(Action, Entry)] = &[
 pub(crate) enum Target {
     Motion(Motion),
     Lines,
+    Object(Object),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +138,7 @@ pub(crate) enum Command {
     Undo,
     Redo,
     Insert(Entry),
+    Select(Object),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +176,12 @@ impl Context {
 enum Prefix {
     G,
     Find { forward: bool, till: bool },
+    Object { around: bool },
+}
+
+enum Reach {
+    Motion(Motion),
+    Object(Object),
 }
 
 #[derive(Debug, Default)]
@@ -205,10 +216,11 @@ impl Keys {
     fn step(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
         let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
         if let Some(prefix) = self.prefix.take() {
-            let Some(motion) = self.complete(prefix, key, bound) else {
-                return Step::Dropped;
+            return match self.complete(prefix, key, bound) {
+                Some(Reach::Motion(motion)) => self.reach(motion),
+                Some(Reach::Object(object)) => self.take_object(object),
+                None => Step::Dropped,
             };
-            return self.reach(motion);
         }
         if self.take_digit(key) {
             return Step::Pending;
@@ -240,6 +252,12 @@ impl Keys {
         }
         if let Some((_, motion)) = MOTIONS.iter().find(|(action, _)| bound(*action)) {
             return self.reach(*motion);
+        }
+        if (self.operator.is_some() || context.visual)
+            && let Some((_, around)) = OBJECTS.iter().find(|(action, _)| bound(*action))
+        {
+            self.prefix = Some(Prefix::Object { around: *around });
+            return Step::Pending;
         }
         if self.operator.is_some() || !context.editable || context.visual {
             return Step::Dropped;
@@ -276,17 +294,24 @@ impl Keys {
         }
     }
 
+    fn take_object(&mut self, object: Object) -> Step {
+        match self.operator {
+            Some((operator, _)) => self.run(Command::Operate(operator, Target::Object(object))),
+            None => self.run(Command::Select(object)),
+        }
+    }
+
     fn complete(
         &mut self,
         prefix: Prefix,
         key: KeyEvent,
         bound: impl Fn(Action) -> bool,
-    ) -> Option<Motion> {
-        match prefix {
-            Prefix::G if bound(Action::GPrefix) => Some(Motion::Top),
-            Prefix::G if bound(Action::CursorWordEnd) => Some(Motion::WordEndBack(Word::Small)),
-            Prefix::G if bound(Action::CursorChunkEnd) => Some(Motion::WordEndBack(Word::Big)),
-            Prefix::G => None,
+    ) -> Option<Reach> {
+        let motion = match prefix {
+            Prefix::G if bound(Action::GPrefix) => Motion::Top,
+            Prefix::G if bound(Action::CursorWordEnd) => Motion::WordEndBack(Word::Small),
+            Prefix::G if bound(Action::CursorChunkEnd) => Motion::WordEndBack(Word::Big),
+            Prefix::G => return None,
             Prefix::Find { forward, till } => {
                 let find = Find {
                     target: crate::keybinds::typed_char(key)?,
@@ -295,9 +320,14 @@ impl Keys {
                     repeat: false,
                 };
                 self.last_find = Some(find);
-                Some(Motion::Find(find))
+                Motion::Find(find)
             }
-        }
+            Prefix::Object { around } => {
+                let kind = Kind::for_char(crate::keybinds::typed_char(key)?)?;
+                return Some(Reach::Object(Object { kind, around }));
+            }
+        };
+        Some(Reach::Motion(motion))
     }
 
     fn repeat_find(&self, bound: impl Fn(Action) -> bool) -> Option<Motion> {
@@ -679,6 +709,73 @@ mod tests {
                 "{typed}"
             );
         }
+    }
+
+    fn object(kind: Kind, around: bool) -> Object {
+        Object { kind, around }
+    }
+
+    #[test]
+    fn an_operator_takes_a_text_object() {
+        assert_eq!(
+            last("diw"),
+            Step::Run(
+                operate(
+                    Operator::Delete,
+                    Target::Object(object(Kind::Word(Word::Small), false))
+                ),
+                None
+            )
+        );
+        assert_eq!(
+            last("2ca("),
+            Step::Run(
+                operate(
+                    Operator::Change,
+                    Target::Object(object(Kind::Block('(', ')'), true))
+                ),
+                Some(2)
+            )
+        );
+        assert_eq!(
+            last("yi\""),
+            Step::Run(
+                operate(
+                    Operator::Yank,
+                    Target::Object(object(Kind::Quote('"'), false))
+                ),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn an_unknown_object_drops_the_command() {
+        assert_eq!(last("diq"), Step::Dropped);
+    }
+
+    #[test]
+    fn visual_mode_selects_a_text_object() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        let mut steps = Vec::new();
+        for c in "iB".chars() {
+            let modifiers = if c.is_ascii_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            steps.push(keys.feed(
+                &keymap,
+                KeyEvent::new(KeyCode::Char(c), modifiers),
+                Context::LOG.visual(),
+            ));
+        }
+
+        assert_eq!(
+            steps[1],
+            Step::Run(Command::Select(object(Kind::Block('{', '}'), false)), None)
+        );
     }
 
     #[test]

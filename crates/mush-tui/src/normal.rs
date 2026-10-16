@@ -16,6 +16,7 @@ pub(crate) trait NormalTarget {
     fn move_line(&mut self, delta: isize);
     fn start_selection(&mut self, kind: crate::screen::SelectionKind);
     fn clear_selection(&mut self);
+    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool);
 
     fn to_top(&mut self) {
         self.place_cursor((0, 0));
@@ -56,6 +57,18 @@ pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion, count
                 target.place_cursor(to);
             }
         }
+    }
+}
+
+pub(crate) fn select_object(
+    target: &mut impl NormalTarget,
+    object: motion::object::Object,
+    count: Option<usize>,
+) {
+    if let Some(selection) =
+        motion::object::selection(target.rows(), target.cursor(), object, count)
+    {
+        target.select(selection.anchor, selection.head, selection.linewise);
     }
 }
 
@@ -101,6 +114,15 @@ impl NormalTarget for LogTarget<'_> {
 
     fn clear_selection(&mut self) {
         self.viewport.clear_selection();
+    }
+
+    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool) {
+        let kind = if linewise {
+            crate::screen::SelectionKind::Line
+        } else {
+            crate::screen::SelectionKind::Char
+        };
+        self.viewport.select(anchor, head, kind);
     }
 
     fn to_top(&mut self) {
@@ -186,6 +208,16 @@ impl NormalTarget for ComposerTarget<'_> {
 
     fn clear_selection(&mut self) {
         self.input.anchor = None;
+    }
+
+    fn select(&mut self, anchor: (usize, usize), head: (usize, usize), linewise: bool) {
+        self.input.anchor = Some(self.offset_of(anchor));
+        self.input.cursor = self.offset_of(head);
+        self.input.selection_kind = if linewise {
+            crate::screen::SelectionKind::Line
+        } else {
+            crate::screen::SelectionKind::Char
+        };
     }
 }
 

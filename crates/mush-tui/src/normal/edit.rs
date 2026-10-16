@@ -51,6 +51,10 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
             insert_at(app, entry);
             None
         }
+        Command::Select(object) => {
+            super::select_object(&mut ComposerTarget::new(&mut app.input), object, count);
+            None
+        }
     };
     app.input.ensure_cursor_visible();
     event
@@ -73,6 +77,7 @@ fn operate(
             let end = (at.0 + count.unwrap_or(1) - 1).min(last);
             Region::Lines(at.0..=end)
         }
+        Target::Object(object) => motion::object::span(&rows, at, object, count)?,
     };
     match region {
         Region::Chars(range) => {

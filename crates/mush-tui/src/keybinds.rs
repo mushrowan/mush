@@ -188,6 +188,8 @@ pub enum Action {
     InsertLineStart,
     OpenBelow,
     OpenAbove,
+    InnerObject,
+    AroundObject,
 }
 
 impl Action {
@@ -272,6 +274,8 @@ impl Action {
             Self::InsertLineStart => "insert_line_start",
             Self::OpenBelow => "open_below",
             Self::OpenAbove => "open_above",
+            Self::InnerObject => "inner_object",
+            Self::AroundObject => "around_object",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -360,6 +364,8 @@ impl Action {
         Self::InsertLineStart,
         Self::OpenBelow,
         Self::OpenAbove,
+        Self::InnerObject,
+        Self::AroundObject,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -542,7 +548,9 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::AppendLineEnd
         | Action::InsertLineStart
         | Action::OpenBelow
-        | Action::OpenAbove => KeyScope::Normal,
+        | Action::OpenAbove
+        | Action::InnerObject
+        | Action::AroundObject => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1125,6 +1133,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::OpenAbove,
         &[(KeyCode::Char('O'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::InnerObject,
+        &[(KeyCode::Char('i'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::AroundObject,
+        &[(KeyCode::Char('a'), KeyModifiers::NONE)],
     ),
 ];
 

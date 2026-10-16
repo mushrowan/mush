@@ -1,3 +1,5 @@
+pub(crate) mod object;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Word {
     Small,
@@ -60,6 +62,12 @@ enum Class {
     Blank,
     Word,
     Punct,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Ends {
+    stay: bool,
+    empty_lines: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +218,32 @@ impl Text {
         None
     }
 
+    fn incl(&self, at: usize) -> (usize, Step) {
+        let (next, step) = self.inc(at);
+        if step.left_the_line() && self.column(next) > 0 {
+            self.inc(next)
+        } else {
+            (next, step)
+        }
+    }
+
+    fn decl(&self, at: usize) -> (usize, Step) {
+        let (previous, step) = self.dec(at);
+        if step == Step::Crossed && self.column(previous) > 0 {
+            self.dec(previous)
+        } else {
+            (previous, step)
+        }
+    }
+
+    fn on_indent(&self, index: usize) -> bool {
+        self.in_indent(index)
+            && self
+                .chars
+                .get(index)
+                .is_some_and(|c| c.is_whitespace() && *c != '\n')
+    }
+
     fn in_indent(&self, index: usize) -> bool {
         let start = self.starts[self.line_of(index)];
         self.chars[start..index]
@@ -306,7 +340,8 @@ impl Text {
         at
     }
 
-    fn end_word(&self, mut at: usize, word: Word, count: usize, mut stop: bool) -> usize {
+    fn end_word(&self, mut at: usize, word: Word, count: usize, ends: Ends) -> usize {
+        let mut stay = ends.stay;
         for _ in 0..count {
             let class = self.class(at, word);
             let (next, step) = self.inc(at);
@@ -316,18 +351,25 @@ impl Text {
             at = next;
             if self.class(at, word) == class && class != Class::Blank {
                 at = self.skip_forward(at, word, class);
-            } else if !stop || class == Class::Blank {
+            } else if !stay || class == Class::Blank {
                 while self.class(at, word) == Class::Blank {
+                    if ends.empty_lines && self.on_empty_line(at) {
+                        break;
+                    }
                     let (next, step) = self.inc(at);
                     if step == Step::Stuck {
                         return at;
                     }
                     at = next;
                 }
+                if self.class(at, word) == Class::Blank {
+                    stay = false;
+                    continue;
+                }
                 at = self.skip_forward(at, word, self.class(at, word));
             }
             at = self.dec(at).0;
-            stop = false;
+            stay = false;
         }
         at
     }
@@ -428,7 +470,7 @@ pub(crate) fn destination(
         }),
         Motion::WordBack(word) => word_motion(word, Text::back_word),
         Motion::WordEnd(word) => word_motion(word, |text, from, word, count| {
-            text.end_word(from, word, count, false)
+            text.end_word(from, word, count, Ends::default())
         }),
         Motion::WordEndBack(word) => word_motion(word, Text::back_end_word),
         Motion::Find(find) => Some((line, find_in_row(row(line), column, find, count)?)),
@@ -481,12 +523,21 @@ pub(crate) fn span(
                 (end - 1, true)
             }
         }
-        Motion::WordForward(word) if change && text.class(from, word) != Class::Blank => {
-            (text.end_word(from, word, times, true), true)
-        }
+        Motion::WordForward(word) if change && text.class(from, word) != Class::Blank => (
+            text.end_word(
+                from,
+                word,
+                times,
+                Ends {
+                    stay: true,
+                    empty_lines: false,
+                },
+            ),
+            true,
+        ),
         Motion::WordForward(word) => (text.forward_word(from, word, times, true), false),
         Motion::WordBack(word) => (text.back_word(from, word, times), false),
-        Motion::WordEnd(word) => (text.end_word(from, word, times, false), true),
+        Motion::WordEnd(word) => (text.end_word(from, word, times, Ends::default()), true),
         Motion::WordEndBack(word) => (text.back_end_word(from, word, times), true),
         Motion::Find(find) => {
             let column = find_in_row(&rows[line], column, find, times)?;

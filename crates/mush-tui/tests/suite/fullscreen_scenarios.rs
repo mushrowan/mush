@@ -1405,6 +1405,22 @@ fn f_finds_a_character_in_the_log_row() {
 }
 
 #[test]
+fn viw_in_the_log_selects_a_word_to_copy() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('w'));
+
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('i'));
+    press(&mut app, KeyCode::Char('w'));
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "brave"),
+        "{event:?}"
+    );
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -2319,6 +2335,117 @@ fn capital_o_opens_a_line_above() {
     type_keys(&mut app, "jOx");
 
     assert_eq!(app.input.text, "foo\nx\nbar");
+}
+
+#[test]
+fn diw_and_daw_delete_a_word() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wdiw");
+    assert_eq!(app.input.text, "one  three");
+
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wdaw");
+    assert_eq!(app.input.text, "one three");
+}
+
+#[test]
+fn ciw_changes_the_word_under_the_caret() {
+    let mut app = composer_in_normal("one two three");
+
+    type_keys(&mut app, "wlciwX");
+
+    assert_eq!(app.input.text, "one X three");
+}
+
+#[test]
+fn quote_objects_take_the_inside_or_the_whole_string() {
+    let mut app = composer_in_normal(r#"say "hi there" now"#);
+    type_keys(&mut app, "fhdi\"");
+    assert_eq!(app.input.text, r#"say "" now"#);
+
+    let mut app = composer_in_normal(r#"say "hi there" now"#);
+    type_keys(&mut app, "fhda\"");
+    assert_eq!(app.input.text, "say now");
+}
+
+#[test]
+fn ci_quote_on_an_empty_string_types_between_the_quotes() {
+    let mut app = composer_in_normal(r#"x = """#);
+
+    type_keys(&mut app, "f\"ci\"a");
+
+    assert_eq!(app.input.text, r#"x = "a""#);
+}
+
+#[test]
+fn bracket_objects_take_what_is_between_or_the_whole_pair() {
+    let mut app = composer_in_normal("call(a, [b]) x");
+    type_keys(&mut app, "fa;di(");
+    assert_eq!(app.input.text, "call() x");
+
+    let mut app = composer_in_normal("call(a, [b]) x");
+    type_keys(&mut app, "fbda[");
+    assert_eq!(app.input.text, "call(a, ) x");
+
+    let mut app = composer_in_normal("call(a, [b]) x");
+    type_keys(&mut app, "fbdib");
+    assert_eq!(app.input.text, "call() x");
+
+    let mut app = composer_in_normal("f(g(x))");
+    type_keys(&mut app, "fxd2ib");
+    assert_eq!(app.input.text, "f()");
+}
+
+#[test]
+fn di_brace_over_lines_takes_the_lines_inside() {
+    let mut app = composer_in_normal("fn f() {\n    a();\n    b();\n}");
+
+    type_keys(&mut app, "jdi{");
+
+    assert_eq!(app.input.text, "fn f() {\n}");
+}
+
+#[test]
+fn ci_brace_over_lines_leaves_an_indented_line_to_type_on() {
+    let mut app = composer_in_normal("fn f() {\n    a();\n    b();\n}");
+
+    type_keys(&mut app, "jci{x");
+
+    assert_eq!(app.input.text, "fn f() {\n    x\n}");
+}
+
+#[test]
+fn yi_bracket_then_p_puts_the_inside() {
+    let mut app = composer_in_normal("[ab] ");
+
+    type_keys(&mut app, "lyi[$p");
+
+    assert_eq!(app.input.text, "[ab] ab");
+}
+
+#[test]
+fn viw_selects_the_word_in_the_composer() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wl");
+
+    type_keys(&mut app, "viw");
+    assert_eq!(tinted_text(&app), "two");
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "two"),
+        "{event:?}"
+    );
+}
+
+#[test]
+fn va_paren_selects_the_whole_pair() {
+    let mut app = composer_in_normal("f(a, b) c");
+    type_keys(&mut app, "fa");
+
+    type_keys(&mut app, "va(");
+
+    assert_eq!(tinted_text(&app), "(a, b)");
 }
 
 #[test]

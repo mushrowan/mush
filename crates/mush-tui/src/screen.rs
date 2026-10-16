@@ -181,6 +181,13 @@ impl Viewport {
         self.kind.set(kind);
     }
 
+    pub(crate) fn select(&self, anchor: (usize, usize), head: (usize, usize), kind: SelectionKind) {
+        self.anchor.set(Some(anchor));
+        self.kind.set(kind);
+        self.cursor_to(head.0);
+        self.cursor_to_column(head.1);
+    }
+
     #[must_use]
     pub fn selection_kind(&self) -> SelectionKind {
         self.kind.get()

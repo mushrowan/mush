@@ -961,6 +961,11 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
             return;
         }
         Command::Scroll(scroll) => scroll,
+        Command::Select(object) => {
+            let mut target = crate::normal::LogTarget::new(app);
+            crate::normal::select_object(&mut target, object, count);
+            return;
+        }
         Command::Operate(..)
         | Command::Put { .. }
         | Command::Undo
