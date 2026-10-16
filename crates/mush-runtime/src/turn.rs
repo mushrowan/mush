@@ -372,22 +372,35 @@ pub struct AfterCompaction {
 }
 
 impl AfterCompaction {
-    pub async fn messages(&self, compacted: &[Message]) -> Vec<Message> {
-        let mut messages = Vec::new();
-        if let Some(notice) = crate::kernel_notice::after_compaction(self.kernel.as_deref()).await {
-            messages.push(notice);
+    pub async fn restore(
+        &self,
+        result: mush_session::compact::AutoCompactResult,
+    ) -> mush_agent::ContextCompaction {
+        let mut messages = result.messages;
+        let restored = self.messages(&messages).await;
+        let appended = restored.len();
+        messages.extend(restored);
+        mush_agent::ContextCompaction {
+            messages,
+            summary: result.summary,
+            summarised_count: result.summarised_count,
+            appended,
         }
-        messages.extend(
-            self.task
-                .as_deref()
-                .and_then(|task| mush_session::brief::restatement(task, compacted)),
-        );
-        if let Some(delivery) = self.notes.as_ref().and_then(|notes| {
+    }
+
+    async fn messages(&self, compacted: &[Message]) -> Vec<Message> {
+        let notice = crate::kernel_notice::after_compaction(self.kernel.as_deref()).await;
+        let task = self
+            .task
+            .as_deref()
+            .and_then(|task| mush_session::brief::restatement(task, compacted));
+        let notes = self.notes.as_ref().and_then(|notes| {
             notes.delivery(crate::notes::latest_fingerprint(compacted).as_deref())
-        }) {
-            messages.push(delivery.message);
-        }
-        messages
+        });
+        [notice, task, notes.map(|delivery| delivery.message)]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -453,7 +466,7 @@ pub fn build_context_transform(
                     &settings,
                 )
             });
-            let mut result = auto_compact(
+            let result = auto_compact(
                 owned_messages,
                 effective_compaction_tokens,
                 compaction_window,
@@ -468,27 +481,20 @@ pub fn build_context_transform(
                 &settings,
             )
             .await;
-            let mut appended = 0;
-            if result.summarised_count > 0 {
-                let restored = after.messages(&result.messages).await;
-                appended = restored.len();
-                result.messages.extend(restored);
+            if result.summarised_count == 0 {
+                measured_len.store(result.messages.len(), std::sync::atomic::Ordering::Relaxed);
+                return mush_agent::ContextTransformResult::Unchanged;
             }
-            measured_len.store(result.messages.len(), std::sync::atomic::Ordering::Relaxed);
-            if result.summarised_count > 0 {
-                ctx_tokens.store(
-                    estimated_tokens_u64(&result.messages),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
-                    messages: result.messages,
-                    summary: result.summary,
-                    summarised_count: result.summarised_count,
-                    appended,
-                })
-            } else {
-                mush_agent::ContextTransformResult::Unchanged
-            }
+            let compaction = after.restore(result).await;
+            measured_len.store(
+                compaction.messages.len(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            ctx_tokens.store(
+                estimated_tokens_u64(&compaction.messages),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            mush_agent::ContextTransformResult::Compacted(compaction)
         })
     }))
 }

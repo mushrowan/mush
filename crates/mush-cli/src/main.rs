@@ -990,7 +990,10 @@ fn compaction_transform(
         tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
     });
     let compaction_settings = setup.client.cfg.compaction.settings();
-    let kernel = setup.kernel_state.clone();
+    let after = mush_runtime::AfterCompaction {
+        kernel: setup.kernel_state.clone(),
+        ..Default::default()
+    };
     Some(Box::new(move |msgs, pressure| {
         let target = target.clone();
         let ctx = context_tokens.clone();
@@ -999,7 +1002,7 @@ fn compaction_transform(
         let cwd = cwd.clone();
         let reg = reg_ref.clone();
         let live = live.clone();
-        let kernel = kernel.clone();
+        let after = after.clone();
         Box::pin(async move {
             let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
             let tokens = match pressure {
@@ -1014,7 +1017,7 @@ fn compaction_transform(
                     &compaction_settings,
                 )
             });
-            let mut result = auto_compact(
+            let result = auto_compact(
                 owned,
                 tokens,
                 context_window,
@@ -1027,28 +1030,15 @@ fn compaction_transform(
                 &compaction_settings,
             )
             .await;
-            if result.summarised_count > 0 {
-                let restored = mush_runtime::AfterCompaction {
-                    kernel: kernel.clone(),
-                    ..Default::default()
-                }
-                .messages(&result.messages)
-                .await;
-                let appended = restored.len();
-                result.messages.extend(restored);
-                ctx.store(
-                    mush_session::compact::estimate_tokens(&result.messages) as u64,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                mush_agent::ContextTransformResult::Compacted(mush_agent::ContextCompaction {
-                    messages: result.messages,
-                    summary: result.summary,
-                    summarised_count: result.summarised_count,
-                    appended,
-                })
-            } else {
-                mush_agent::ContextTransformResult::Unchanged
+            if result.summarised_count == 0 {
+                return mush_agent::ContextTransformResult::Unchanged;
             }
+            let compaction = after.restore(result).await;
+            ctx.store(
+                mush_session::compact::estimate_tokens(&compaction.messages) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            mush_agent::ContextTransformResult::Compacted(compaction)
         })
     }))
 }
