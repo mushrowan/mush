@@ -163,6 +163,7 @@ pub enum Action {
     StartBlockSelection,
     Yank,
     YankRaw,
+    GPrefix,
 }
 
 impl Action {
@@ -222,6 +223,7 @@ impl Action {
             Self::StartBlockSelection => "start_block_selection",
             Self::Yank => "yank",
             Self::YankRaw => "yank_raw",
+            Self::GPrefix => "g_prefix",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -285,6 +287,7 @@ impl Action {
         Self::StartBlockSelection,
         Self::Yank,
         Self::YankRaw,
+        Self::GPrefix,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -442,7 +445,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::StartLineSelection
         | Action::StartBlockSelection
         | Action::Yank
-        | Action::YankRaw => KeyScope::Normal,
+        | Action::YankRaw
+        | Action::GPrefix => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -895,6 +899,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
             ),
             (KeyCode::Char('d'), KeyModifiers::ALT),
         ],
+    ),
+    (
+        KeyScope::Normal,
+        Action::GPrefix,
+        &[(KeyCode::Char('g'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::NavigateTop,
+        &[(KeyCode::Home, KeyModifiers::NONE)],
     ),
 ];
 

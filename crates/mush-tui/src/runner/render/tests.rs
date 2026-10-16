@@ -266,6 +266,7 @@ fn log_cursor_stays_scrolled_away_from_the_streaming_tail() {
         draw(&mut terminal, &mut screen, &mut app);
         switch_focus(&mut app);
         key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('g'));
         repeat_frames(&mut terminal, &mut screen, &mut app, Owner::Log);
         assert_eq!(app.viewport.cursor().line, 0);
         assert!(!app.viewport.is_following());

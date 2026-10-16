@@ -14,6 +14,16 @@ fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    let mode = app.interaction.mode.clone();
+    let focus = app.interaction.focus;
+    let event = dispatch_key(app, key);
+    if app.interaction.mode != mode || app.interaction.focus != focus {
+        app.interaction.normal.keys.clear();
+    }
+    event
+}
+
+fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.subagents.handle_key(&app.keymap, key) {
         return None;
     }
@@ -806,61 +816,71 @@ fn focus_log(app: &mut App) -> Option<AppEvent> {
 
 fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::QuitOrAbort, key) {
+        app.interaction.normal.keys.clear();
         return handle_quit_or_abort(app);
     }
-    if is_cancel_key(app, key) || app.keymap.matches(Action::FocusLog, key) {
-        return focus_log(app);
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Normal, Action::EnterInsert, key)
-    {
-        app.interaction.mode = AppMode::Insert;
+    if is_cancel_key(app, key) && app.interaction.normal.keys.clear() {
         return None;
     }
-    if app.keymap.matches(Action::SelectAll, key) {
-        return select_all_composer(app);
-    }
-    if let Some(kind) = selection_kind_for(app, key) {
-        crate::normal::ComposerTarget::new(&mut app.input).start_selection(kind);
-        app.interaction.mode = AppMode::Visual;
-        return None;
+    if !app.interaction.normal.keys.is_pending() {
+        if is_cancel_key(app, key) || app.keymap.matches(Action::FocusLog, key) {
+            return focus_log(app);
+        }
+        if app
+            .keymap
+            .matches_in(KeyScope::Normal, Action::EnterInsert, key)
+        {
+            app.interaction.mode = AppMode::Insert;
+            return None;
+        }
+        if app.keymap.matches(Action::SelectAll, key) {
+            return select_all_composer(app);
+        }
+        if let Some(kind) = selection_kind_for(app, key) {
+            crate::normal::ComposerTarget::new(&mut app.input).start_selection(kind);
+            app.interaction.mode = AppMode::Visual;
+            return None;
+        }
     }
     with_count(app, key, run_composer_motion);
     None
 }
 
-fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Command, usize)) {
+fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Command, Option<usize>)) {
     let Step::Run(command, count) = app.interaction.normal.keys.feed(&app.keymap, key) else {
         return;
     };
-    run(app, command, count.unwrap_or(1));
+    run(app, command, count);
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::QuitOrAbort, key) {
+        app.interaction.normal.keys.clear();
         return handle_quit_or_abort(app);
     }
     if is_cancel_key(app, key) {
+        app.interaction.normal.keys.clear();
         return None;
     }
-    if app.keymap.matches(Action::FocusLog, key) {
-        return focus_composer(app, false);
-    }
-    if app.keymap.matches(Action::CycleDetail, key) {
-        app.cycle_detail();
-        return None;
-    }
-    if app
-        .keymap
-        .matches_in(KeyScope::Normal, Action::EnterInsert, key)
-    {
-        return focus_composer(app, true);
-    }
-    if let Some(kind) = selection_kind_for(app, key) {
-        app.viewport.start_selection(kind);
-        app.interaction.mode = AppMode::Visual;
-        return None;
+    if !app.interaction.normal.keys.is_pending() {
+        if app.keymap.matches(Action::FocusLog, key) {
+            return focus_composer(app, false);
+        }
+        if app.keymap.matches(Action::CycleDetail, key) {
+            app.cycle_detail();
+            return None;
+        }
+        if app
+            .keymap
+            .matches_in(KeyScope::Normal, Action::EnterInsert, key)
+        {
+            return focus_composer(app, true);
+        }
+        if let Some(kind) = selection_kind_for(app, key) {
+            app.viewport.start_selection(kind);
+            app.interaction.mode = AppMode::Visual;
+            return None;
+        }
     }
     handle_log_motion(app, key);
     None
@@ -868,39 +888,48 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
 fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.keymap.matches(Action::QuitOrAbort, key) {
+        app.interaction.normal.keys.clear();
         return handle_quit_or_abort(app);
     }
     if is_cancel_key(app, key) {
+        if app.interaction.normal.keys.clear() {
+            return None;
+        }
         clear_selection(app);
         app.interaction.mode = AppMode::Normal;
         return None;
     }
+    let pending = app.interaction.normal.keys.is_pending();
     if !app.interaction.focus.is_log() {
-        if crate::keybinds::is_backspace(key)
-            || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
-        {
-            crate::normal::ComposerTarget::new(&mut app.input).delete_selection();
-            app.interaction.mode = AppMode::Insert;
-            app.input.ensure_cursor_visible();
-            return None;
-        }
-        for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
-            if app.keymap.matches_in(KeyScope::Normal, action, key) {
-                let text = composer_selected_text(app, strip_indent)?;
-                crate::normal::ComposerTarget::new(&mut app.input).clear_selection();
-                app.interaction.mode = AppMode::Normal;
-                return Some(AppEvent::Copy { text });
+        if !pending {
+            if crate::keybinds::is_backspace(key)
+                || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
+            {
+                crate::normal::ComposerTarget::new(&mut app.input).delete_selection();
+                app.interaction.mode = AppMode::Insert;
+                app.input.ensure_cursor_visible();
+                return None;
+            }
+            for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
+                if app.keymap.matches_in(KeyScope::Normal, action, key) {
+                    let text = composer_selected_text(app, strip_indent)?;
+                    crate::normal::ComposerTarget::new(&mut app.input).clear_selection();
+                    app.interaction.mode = AppMode::Normal;
+                    return Some(AppEvent::Copy { text });
+                }
             }
         }
         with_count(app, key, run_composer_motion);
         return None;
     }
-    for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
-        if app.keymap.matches_in(KeyScope::Normal, action, key) {
-            let text = crate::selection::selected_text(app, strip_indent)?;
-            app.viewport.clear_selection();
-            app.interaction.mode = AppMode::Normal;
-            return Some(AppEvent::Copy { text });
+    if !pending {
+        for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
+            if app.keymap.matches_in(KeyScope::Normal, action, key) {
+                let text = crate::selection::selected_text(app, strip_indent)?;
+                app.viewport.clear_selection();
+                app.interaction.mode = AppMode::Normal;
+                return Some(AppEvent::Copy { text });
+            }
         }
     }
     handle_log_motion(app, key);
@@ -924,28 +953,32 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
     with_count(app, key, run_log_motion);
 }
 
-fn run_composer_motion(app: &mut App, command: Command, count: usize) {
+fn run_composer_motion(app: &mut App, command: Command, count: Option<usize>) {
     let Command::Move(motion) = command else {
         return;
     };
     let mut target = crate::normal::ComposerTarget::new(&mut app.input);
-    for _ in 0..count {
-        crate::normal::apply_motion(&mut target, motion);
-    }
+    crate::normal::apply_motion(&mut target, motion, count);
 }
 
-fn run_log_motion(app: &mut App, command: Command, count: usize) {
-    let mut target = crate::normal::LogTarget::new(app);
-    for _ in 0..count {
+fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
+    let scroll = match command {
+        Command::Move(motion) => {
+            let mut target = crate::normal::LogTarget::new(app);
+            crate::normal::apply_motion(&mut target, motion, count);
+            return;
+        }
+        Command::Scroll(scroll) => scroll,
+    };
+    for _ in 0..count.unwrap_or(1) {
         let page = app.viewport.page() as isize;
-        match command {
-            Command::Scroll(Scroll::LineUp) => app.viewport.scroll_by(-1),
-            Command::Scroll(Scroll::LineDown) => app.viewport.scroll_by(1),
-            Command::Scroll(Scroll::HalfPageUp) => app.viewport.page_by(-page / 2),
-            Command::Scroll(Scroll::HalfPageDown) => app.viewport.page_by(page / 2),
-            Command::Scroll(Scroll::PageUp) => app.viewport.page_by(-page),
-            Command::Scroll(Scroll::PageDown) => app.viewport.page_by(page),
-            Command::Move(motion) => crate::normal::apply_motion(&mut target, motion),
+        match scroll {
+            Scroll::LineUp => app.viewport.scroll_by(-1),
+            Scroll::LineDown => app.viewport.scroll_by(1),
+            Scroll::HalfPageUp => app.viewport.page_by(-page / 2),
+            Scroll::HalfPageDown => app.viewport.page_by(page / 2),
+            Scroll::PageUp => app.viewport.page_by(-page),
+            Scroll::PageDown => app.viewport.page_by(page),
         }
     }
 }

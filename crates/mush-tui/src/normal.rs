@@ -1,4 +1,4 @@
-use crate::motion::{self, Motion, Word};
+use crate::motion::{self, Motion};
 
 pub(crate) mod keys;
 
@@ -23,39 +23,32 @@ pub(crate) trait NormalTarget {
         let last = self.rows().len().saturating_sub(1);
         self.place_cursor((last, 0));
     }
-}
 
-pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion) {
-    let (line, column) = target.cursor();
-    match motion {
-        Motion::LineStart => target.place_cursor((line, 0)),
-        Motion::FirstNonBlank => {
-            let column = motion::first_non_blank(row_at(target, line));
-            target.place_cursor((line, column));
-        }
-        Motion::LineEnd => {
-            let column = motion::last_cell(row_at(target, line));
-            target.place_cursor((line, column));
-        }
-        Motion::Left => target.place_cursor((line, column.saturating_sub(1))),
-        Motion::Right => target.place_cursor((line, column + 1)),
-        Motion::Up => target.move_line(-1),
-        Motion::Down => target.move_line(1),
-        Motion::Top => target.to_top(),
-        Motion::Bottom => target.to_bottom(),
-        Motion::WordForward(size) => word(target, motion::word_forward, size),
-        Motion::WordBack(size) => word(target, motion::word_back, size),
-        Motion::WordEnd(size) => word(target, motion::word_end, size),
+    fn to_line(&mut self, line: usize) {
+        let last = self.rows().len().saturating_sub(1);
+        self.place_cursor((line.min(last), 0));
     }
 }
 
-fn row_at(target: &impl NormalTarget, line: usize) -> &str {
-    target.rows().get(line).map_or("", String::as_str)
-}
-
-fn word(target: &mut impl NormalTarget, motion: motion::WordMotion, size: Word) {
-    let to = motion(target.rows(), target.cursor(), size);
-    target.place_cursor(to);
+pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion, count: Option<usize>) {
+    let times = count.unwrap_or(1);
+    match motion {
+        Motion::Up => target.move_line(-(times as isize)),
+        Motion::Down => target.move_line(times as isize),
+        Motion::Top => match count {
+            Some(line) => target.to_line(line.saturating_sub(1)),
+            None => target.to_top(),
+        },
+        Motion::Bottom => match count {
+            Some(line) => target.to_line(line.saturating_sub(1)),
+            None => target.to_bottom(),
+        },
+        motion => {
+            if let Some(to) = motion::destination(target.rows(), target.cursor(), motion, times) {
+                target.place_cursor(to);
+            }
+        }
+    }
 }
 
 pub(crate) struct LogTarget<'a> {
@@ -108,6 +101,10 @@ impl NormalTarget for LogTarget<'_> {
 
     fn to_bottom(&mut self) {
         self.viewport.to_bottom();
+    }
+
+    fn to_line(&mut self, line: usize) {
+        self.viewport.cursor_to(line);
     }
 }
 

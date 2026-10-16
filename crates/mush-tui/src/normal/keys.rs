@@ -53,27 +53,71 @@ pub(crate) enum Step {
     Dropped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefix {
+    G,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Keys {
     count: Option<usize>,
+    prefix: Option<Prefix>,
 }
 
 impl Keys {
+    pub(crate) fn is_pending(&self) -> bool {
+        self.prefix.is_some()
+    }
+
+    pub(crate) fn clear(&mut self) -> bool {
+        let pending = self.count.is_some() || self.prefix.is_some();
+        self.count = None;
+        self.prefix = None;
+        pending
+    }
+
     pub(crate) fn feed(&mut self, keymap: &KeyMap, key: KeyEvent) -> Step {
+        let step = self.step(keymap, key);
+        if step != Step::Pending {
+            self.clear();
+        }
+        step
+    }
+
+    fn step(&mut self, keymap: &KeyMap, key: KeyEvent) -> Step {
+        let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
+        if let Some(Prefix::G) = self.prefix.take() {
+            let motion = if bound(Action::GPrefix) {
+                Motion::Top
+            } else if bound(Action::CursorWordEnd) {
+                Motion::WordEndBack(Word::Small)
+            } else if bound(Action::CursorChunkEnd) {
+                Motion::WordEndBack(Word::Big)
+            } else {
+                return Step::Dropped;
+            };
+            return self.run(Command::Move(motion));
+        }
         if self.take_digit(key) {
             return Step::Pending;
         }
-        let count = self.count.take();
-        let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
+        if bound(Action::GPrefix) {
+            self.prefix = Some(Prefix::G);
+            return Step::Pending;
+        }
         if let Some((_, scroll)) = SCROLLS.iter().find(|(action, _)| bound(*action)) {
-            return Step::Run(Command::Scroll(*scroll), count);
+            return self.run(Command::Scroll(*scroll));
         }
         MOTIONS
             .iter()
             .find(|(action, _)| bound(*action))
             .map_or(Step::Dropped, |(_, motion)| {
-                Step::Run(Command::Move(*motion), count)
+                self.run(Command::Move(*motion))
             })
+    }
+
+    fn run(&mut self, command: Command) -> Step {
+        Step::Run(command, self.count.take())
     }
 
     fn take_digit(&mut self, key: KeyEvent) -> bool {
@@ -162,6 +206,50 @@ mod tests {
             steps[2],
             Step::Run(Command::Move(Motion::WordForward(Word::Small)), None)
         );
+    }
+
+    #[test]
+    fn gg_waits_for_the_second_g() {
+        let mut keys = Keys::default();
+
+        let steps = feed(&mut keys, "gg");
+
+        assert_eq!(steps[0], Step::Pending);
+        assert_eq!(steps[1], Step::Run(Command::Move(Motion::Top), None));
+    }
+
+    #[test]
+    fn a_count_before_gg_or_g_names_a_line() {
+        assert_eq!(
+            last("12gg"),
+            Step::Run(Command::Move(Motion::Top), Some(12))
+        );
+        assert_eq!(
+            last("7G"),
+            Step::Run(Command::Move(Motion::Bottom), Some(7))
+        );
+    }
+
+    #[test]
+    fn ge_and_g_e_go_back_to_word_ends() {
+        assert_eq!(
+            last("2ge"),
+            Step::Run(Command::Move(Motion::WordEndBack(Word::Small)), Some(2))
+        );
+        assert_eq!(
+            last("gE"),
+            Step::Run(Command::Move(Motion::WordEndBack(Word::Big)), None)
+        );
+    }
+
+    #[test]
+    fn g_then_an_unknown_key_drops_everything() {
+        let mut keys = Keys::default();
+
+        let steps = feed(&mut keys, "3gzj");
+
+        assert_eq!(steps[2], Step::Dropped);
+        assert_eq!(steps[3], Step::Run(Command::Move(Motion::Down), None));
     }
 
     #[test]

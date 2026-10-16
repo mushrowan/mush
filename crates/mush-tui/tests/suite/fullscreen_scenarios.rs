@@ -330,11 +330,12 @@ fn the_page_keys_move_by_their_vim_amounts() {
 }
 
 #[test]
-fn g_and_shift_g_jump_to_the_ends() {
+fn gg_and_shift_g_jump_to_the_ends() {
     let mut app = conversation(20);
     let bottom = window_rows(&app);
     start_reading(&mut app);
 
+    press(&mut app, KeyCode::Char('g'));
     press(&mut app, KeyCode::Char('g'));
     let top = window_rows(&app);
     press(&mut app, KeyCode::Char('G'));
@@ -344,6 +345,30 @@ fn g_and_shift_g_jump_to_the_ends() {
         "{top:?}"
     );
     assert_eq!(window_rows(&app), bottom, "back at the end");
+}
+
+#[test]
+fn a_count_before_shift_g_goes_to_that_row() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('G'));
+
+    assert_eq!(app.viewport.cursor().line, 2);
+}
+
+#[test]
+fn esc_drops_a_half_typed_g_in_the_log() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    let start = app.viewport.cursor().line;
+
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(app.viewport.cursor().line, start - 1);
 }
 
 #[test]
@@ -1610,6 +1635,7 @@ fn selected_panel_row(app: &mut App, y: u16) {
     press(&mut *app, KeyCode::Esc);
     rows(app, 80, SCREEN);
     press(&mut *app, KeyCode::Char('g'));
+    press(&mut *app, KeyCode::Char('g'));
     for _ in 0..y {
         press(&mut *app, KeyCode::Char('j'));
     }
@@ -1700,6 +1726,66 @@ fn j_moves_down_a_logical_line_not_a_wrapped_one() {
     press(&mut app, KeyCode::Char('j'));
 
     assert_eq!(app.input.cursor, 201);
+}
+
+#[test]
+fn gg_and_shift_g_reach_the_first_and_last_composer_lines() {
+    let mut app = composer_in_normal("one\ntwo\nthree");
+
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.input.cursor, 8);
+
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn a_count_before_g_names_the_composer_line() {
+    let mut app = composer_in_normal("one\ntwo\nthree");
+
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('G'));
+    assert_eq!(app.input.cursor, 4);
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.input.cursor, 8);
+}
+
+#[test]
+fn ge_goes_back_to_the_end_of_the_previous_composer_word() {
+    let mut app = composer_in_normal("hello brave world");
+    press(&mut app, KeyCode::Char('$'));
+
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('e'));
+
+    assert_eq!(app.input.cursor, 10);
+}
+
+#[test]
+fn w_stops_on_an_empty_composer_line() {
+    let mut app = composer_in_normal("one\n\ntwo");
+
+    press(&mut app, KeyCode::Char('w'));
+
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
+fn esc_drops_a_half_typed_command_and_keeps_the_composer() {
+    let mut app = composer_in_normal("one\ntwo");
+    press(&mut app, KeyCode::Char('j'));
+
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('k'));
+
+    assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
+    assert!(!app.interaction.focus.is_log());
+    assert_eq!(app.input.cursor, 0);
 }
 
 #[test]
