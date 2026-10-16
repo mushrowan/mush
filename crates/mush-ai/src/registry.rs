@@ -211,32 +211,31 @@ pub fn classify_stream_error_message(message: &str) -> StreamErrorKind {
     }
 }
 
+const RATE_LIMIT_WORDINGS: &[&str] = &["rate limit", "rate_limit", "too many requests"];
+
+const CONTEXT_OVERFLOW_WORDINGS: &[&str] = &[
+    "context_length_exceeded",
+    "context length exceeded",
+    "context window",
+    "context_window_exceeded",
+    "too many input tokens",
+    "input tokens exceed",
+    "maximum context",
+    "max context length",
+    "prompt is too long",
+    "prompt too long",
+    "request_too_large",
+    "maximum prompt length",
+    "reduce the length of the messages",
+    "exceeds the available context size",
+    "greater than the context length",
+];
+
 #[must_use]
 pub fn is_context_overflow_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    let rate_limited = ["rate limit", "rate_limit", "too many requests"]
-        .iter()
-        .any(|pat| lower.contains(pat));
-    !rate_limited
-        && [
-            "context_length_exceeded",
-            "context length exceeded",
-            "context window",
-            "context_window_exceeded",
-            "too many input tokens",
-            "input tokens exceed",
-            "maximum context",
-            "max context length",
-            "prompt is too long",
-            "prompt too long",
-            "request_too_large",
-            "maximum prompt length",
-            "reduce the length of the messages",
-            "exceeds the available context size",
-            "greater than the context length",
-        ]
-        .iter()
-        .any(|pat| lower.contains(pat))
+    let mentions = |wordings: &[&str]| wordings.iter().any(|wording| lower.contains(wording));
+    !mentions(RATE_LIMIT_WORDINGS) && mentions(CONTEXT_OVERFLOW_WORDINGS)
 }
 
 #[must_use]
