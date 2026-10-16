@@ -1,7 +1,7 @@
 use std::ops::{Range, RangeInclusive};
 
 use crate::app::{App, AppEvent, AppMode};
-use crate::input_buffer::{InputBuffer, PendingImage};
+use crate::input_buffer::{IMAGE_PLACEHOLDER, InputBuffer, PendingImage};
 use crate::motion::{self, Region};
 
 use super::keys::{Command, Entry, Operator, Target};
@@ -61,6 +61,18 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
         }
         Command::SwapEnds => {
             ComposerTarget::new(&mut app.input).swap_selection_ends();
+            None
+        }
+        Command::Replace(with) => {
+            replace(app, with, count);
+            None
+        }
+        Command::Join => {
+            join(app, count);
+            None
+        }
+        Command::ToggleCase => {
+            toggle_case(app, count);
             None
         }
     };
@@ -347,6 +359,111 @@ fn put_over_selection(app: &mut App, keep_register: bool, count: Option<usize>) 
             bytes.start + block.len() - block.chars().next_back().map_or(0, char::len_utf8)
         };
     }
+}
+
+fn line_span(input: &InputBuffer, count: Option<usize>) -> Range<usize> {
+    let cursor = input.cursor;
+    let end = input.text[cursor..]
+        .char_indices()
+        .take_while(|(_, c)| *c != '\n')
+        .take(count.unwrap_or(1))
+        .last()
+        .map_or(cursor, |(i, c)| cursor + i + c.len_utf8());
+    cursor..end
+}
+
+fn selected_bytes(app: &mut App) -> Option<Range<usize>> {
+    if app.interaction.mode != AppMode::Visual {
+        return None;
+    }
+    let region = selection_region(&app.input)?;
+    let (bytes, _) = region_bytes(&app.input.text, &region);
+    app.interaction.mode = AppMode::Normal;
+    Some(bytes)
+}
+
+fn rewrite(app: &mut App, bytes: Range<usize>, change: impl Fn(char) -> String) -> usize {
+    let rewritten: String = app.input.text[bytes.clone()].chars().map(&change).collect();
+    if change(IMAGE_PLACEHOLDER) != IMAGE_PLACEHOLDER.to_string() {
+        app.input.take_images_in(bytes.clone());
+    }
+    app.input.text.replace_range(bytes, &rewritten);
+    edited(app);
+    rewritten.len()
+}
+
+fn replace(app: &mut App, with: char, count: Option<usize>) {
+    if let Some(bytes) = selected_bytes(app) {
+        let start = bytes.start;
+        rewrite(app, bytes, |c| if c == '\n' { c } else { with }.to_string());
+        app.input.cursor = start;
+        return;
+    }
+    let times = count.unwrap_or(1);
+    let bytes = line_span(&app.input, count);
+    if app.input.text[bytes.clone()].chars().count() < times {
+        return;
+    }
+    let start = bytes.start;
+    rewrite(app, bytes, |_| with.to_string());
+    app.input.cursor = start + (times - 1) * with.len_utf8();
+}
+
+fn toggle_case(app: &mut App, count: Option<usize>) {
+    let flip = |c: char| {
+        if c.is_lowercase() {
+            c.to_uppercase().collect()
+        } else if c.is_uppercase() {
+            c.to_lowercase().collect()
+        } else {
+            c.to_string()
+        }
+    };
+    if let Some(bytes) = selected_bytes(app) {
+        let start = bytes.start;
+        rewrite(app, bytes, flip);
+        app.input.cursor = start;
+        return;
+    }
+    let bytes = line_span(&app.input, count);
+    let start = bytes.start;
+    app.input.cursor = start + rewrite(app, bytes, flip);
+    rest_on_a_character(&mut app.input);
+}
+
+fn join(app: &mut App, count: Option<usize>) {
+    let (first, lines) = match selected_bytes(app) {
+        Some(bytes) => {
+            let line = |byte: usize| app.input.text[..byte].matches('\n').count();
+            let (first, last) = (line(bytes.start), line(bytes.end));
+            (first, last - first + 1)
+        }
+        None => (composer_position(&app.input).0, count.unwrap_or(2)),
+    };
+    let total = app.input.text.matches('\n').count() + 1;
+    if first + 1 >= total {
+        return;
+    }
+    let joins = lines.max(2).min(total - first) - 1;
+    for _ in 0..joins {
+        let (start, end) = line_bounds(&app.input.text, &(first..=first));
+        let text = &app.input.text;
+        let next = &text[end + 1..];
+        let next = &next[..next.find('\n').unwrap_or(next.len())];
+        let indent = next.len() - next.trim_start_matches([' ', '\t']).len();
+        let rest = &next[indent..];
+        let current = &text[start..end];
+        let space = !rest.is_empty()
+            && !rest.starts_with(')')
+            && !current.is_empty()
+            && !current.ends_with([' ', '\t']);
+        app.input
+            .text
+            .replace_range(end..end + 1 + indent, if space { " " } else { "" });
+        app.input.cursor = end;
+    }
+    edited(app);
+    rest_on_a_character(&mut app.input);
 }
 
 fn selection_region(input: &InputBuffer) -> Option<Region> {

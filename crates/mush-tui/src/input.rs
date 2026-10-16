@@ -959,7 +959,10 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         | Command::Put { .. }
         | Command::Undo
         | Command::Redo
-        | Command::Insert(_) => return,
+        | Command::Insert(_)
+        | Command::Replace(_)
+        | Command::Join
+        | Command::ToggleCase => return,
     };
     for _ in 0..count.unwrap_or(1) {
         let page = app.viewport.page() as isize;

@@ -2553,6 +2553,101 @@ fn o_swaps_the_ends_of_the_composer_selection() {
 }
 
 #[test]
+fn r_replaces_characters_under_the_caret() {
+    let mut app = composer_in_normal("abcd");
+    type_keys(&mut app, "rx");
+    assert_eq!(app.input.text, "xbcd");
+    assert_eq!(app.input.cursor, 0);
+
+    type_keys(&mut app, "l3ry");
+    assert_eq!(app.input.text, "xyyy");
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn r_past_the_end_of_the_line_does_nothing() {
+    let mut app = composer_in_normal("ab\ncd");
+
+    type_keys(&mut app, "3rx");
+
+    assert_eq!(app.input.text, "ab\ncd");
+}
+
+#[test]
+fn r_in_visual_mode_replaces_the_selection() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "ver-");
+
+    assert_eq!(app.input.text, "--- two");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Normal);
+}
+
+#[test]
+fn capital_j_joins_the_next_line_with_one_space() {
+    let mut app = composer_in_normal("one\n    two\nthree");
+    type_keys(&mut app, "J");
+    assert_eq!(app.input.text, "one two\nthree");
+    assert_eq!(app.input.cursor, 3);
+
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "3J");
+    assert_eq!(app.input.text, "a b c\nd");
+}
+
+#[test]
+fn capital_j_adds_no_space_after_a_space_or_before_a_paren() {
+    let mut app = composer_in_normal("one \ntwo");
+    type_keys(&mut app, "J");
+    assert_eq!(app.input.text, "one two");
+
+    let mut app = composer_in_normal("f(a\n)");
+    type_keys(&mut app, "J");
+    assert_eq!(app.input.text, "f(a)");
+}
+
+#[test]
+fn capital_j_on_the_last_line_does_nothing() {
+    let mut app = composer_in_normal("one");
+
+    type_keys(&mut app, "J");
+
+    assert_eq!(app.input.text, "one");
+}
+
+#[test]
+fn capital_j_in_visual_mode_joins_the_selected_lines() {
+    let mut app = composer_in_normal("a\nb\nc\nd");
+
+    type_keys(&mut app, "Vjj");
+    type_keys(&mut app, "J");
+
+    assert_eq!(app.input.text, "a b c\nd");
+}
+
+#[test]
+fn tilde_toggles_case_and_moves_on() {
+    let mut app = composer_in_normal("Hello");
+    type_keys(&mut app, "~");
+    assert_eq!(app.input.text, "hello");
+    assert_eq!(app.input.cursor, 1);
+
+    type_keys(&mut app, "9~");
+    assert_eq!(app.input.text, "hELLO");
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
+fn tilde_in_visual_mode_toggles_the_selection() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "wve~");
+
+    assert_eq!(app.input.text, "one TWO");
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

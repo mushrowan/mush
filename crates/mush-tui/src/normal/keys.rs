@@ -141,6 +141,9 @@ pub(crate) enum Command {
     Insert(Entry),
     Select(Object),
     SwapEnds,
+    Replace(char),
+    Join,
+    ToggleCase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,11 +182,13 @@ enum Prefix {
     G,
     Find { forward: bool, till: bool },
     Object { around: bool },
+    Replace,
 }
 
 enum Reach {
     Motion(Motion),
     Object(Object),
+    Replace(char),
 }
 
 #[derive(Debug, Default)]
@@ -221,6 +226,7 @@ impl Keys {
             return match self.complete(prefix, key, bound) {
                 Some(Reach::Motion(motion)) => self.reach(motion),
                 Some(Reach::Object(object)) => self.take_object(object),
+                Some(Reach::Replace(with)) => self.run(Command::Replace(with)),
                 None => Step::Dropped,
             };
         }
@@ -289,7 +295,7 @@ impl Keys {
         if let Some((_, entry)) = ENTRIES.iter().find(|(action, _)| bound(*action)) {
             return self.run(Command::Insert(*entry));
         }
-        Step::Dropped
+        self.shared_edit(bound).unwrap_or(Step::Dropped)
     }
 
     fn on_selection(&mut self, bound: impl Fn(Action) -> bool, context: Context) -> Step {
@@ -307,10 +313,26 @@ impl Keys {
             Command::Put { before: false }
         } else if bound(Action::PutBefore) {
             Command::Put { before: true }
+        } else if let Some(step) = self.shared_edit(bound) {
+            return step;
         } else {
             return Step::Dropped;
         };
         self.run(command)
+    }
+
+    fn shared_edit(&mut self, bound: impl Fn(Action) -> bool) -> Option<Step> {
+        if bound(Action::ReplaceChar) {
+            self.prefix = Some(Prefix::Replace);
+            return Some(Step::Pending);
+        }
+        if bound(Action::JoinLines) {
+            return Some(self.run(Command::Join));
+        }
+        if bound(Action::ToggleCase) {
+            return Some(self.run(Command::ToggleCase));
+        }
+        None
     }
 
     fn reach(&mut self, motion: Motion) -> Step {
@@ -352,6 +374,7 @@ impl Keys {
                 let kind = Kind::for_char(crate::keybinds::typed_char(key)?)?;
                 return Some(Reach::Object(Object { kind, around }));
             }
+            Prefix::Replace => return Some(Reach::Replace(crate::keybinds::typed_char(key)?)),
         };
         Some(Reach::Motion(motion))
     }
@@ -843,6 +866,30 @@ mod tests {
         assert_eq!(visual("o", selection), Step::Run(Command::SwapEnds, None));
         assert_eq!(visual("d", selection), Step::Dropped);
         assert_eq!(visual("p", selection), Step::Dropped);
+    }
+
+    #[test]
+    fn r_waits_for_the_replacement() {
+        let mut keys = Keys::default();
+
+        let steps = feed(&mut keys, "3rx");
+
+        assert_eq!(steps[1], Step::Pending);
+        assert_eq!(steps[2], Step::Run(Command::Replace('x'), Some(3)));
+    }
+
+    #[test]
+    fn capital_j_and_tilde_join_and_toggle() {
+        assert_eq!(last("3J"), Step::Run(Command::Join, Some(3)));
+        assert_eq!(last("~"), Step::Run(Command::ToggleCase, None));
+        assert_eq!(
+            visual("~", Context::COMPOSER.visual()),
+            Step::Run(Command::ToggleCase, None)
+        );
+        assert_eq!(
+            visual("rq", Context::COMPOSER.visual()),
+            Step::Run(Command::Replace('q'), None)
+        );
     }
 
     #[test]

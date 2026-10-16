@@ -191,6 +191,9 @@ pub enum Action {
     InnerObject,
     AroundObject,
     SwapSelectionEnds,
+    ReplaceChar,
+    JoinLines,
+    ToggleCase,
 }
 
 impl Action {
@@ -278,6 +281,9 @@ impl Action {
             Self::InnerObject => "inner_object",
             Self::AroundObject => "around_object",
             Self::SwapSelectionEnds => "swap_selection_ends",
+            Self::ReplaceChar => "replace_char",
+            Self::JoinLines => "join_lines",
+            Self::ToggleCase => "toggle_case",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -369,6 +375,9 @@ impl Action {
         Self::InnerObject,
         Self::AroundObject,
         Self::SwapSelectionEnds,
+        Self::ReplaceChar,
+        Self::JoinLines,
+        Self::ToggleCase,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -554,7 +563,10 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::OpenAbove
         | Action::InnerObject
         | Action::AroundObject
-        | Action::SwapSelectionEnds => KeyScope::Normal,
+        | Action::SwapSelectionEnds
+        | Action::ReplaceChar
+        | Action::JoinLines
+        | Action::ToggleCase => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1152,6 +1164,21 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::SwapSelectionEnds,
         &[(KeyCode::Char('o'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ReplaceChar,
+        &[(KeyCode::Char('r'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::JoinLines,
+        &[(KeyCode::Char('J'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ToggleCase,
+        &[(KeyCode::Char('~'), KeyModifiers::NONE)],
     ),
 ];
 

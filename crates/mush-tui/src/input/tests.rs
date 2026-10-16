@@ -2742,3 +2742,29 @@ fn yanking_an_image_line_and_putting_it_doubles_the_image() {
         2
     );
 }
+
+#[test]
+fn tilde_over_an_image_keeps_the_image() {
+    let mut app = composer_normal_with_an_image();
+    app.input.cursor = 0;
+
+    handle_key(&mut app, key(KeyCode::Char('3')));
+    handle_key(&mut app, key(KeyCode::Char('~')));
+
+    assert_eq!(
+        app.input.text,
+        format!("A{}B", crate::input_buffer::IMAGE_PLACEHOLDER)
+    );
+    assert_eq!(app.input.images.len(), 1);
+}
+
+#[test]
+fn r_over_an_image_drops_the_image() {
+    let mut app = composer_normal_with_an_image();
+
+    handle_key(&mut app, key(KeyCode::Char('r')));
+    handle_key(&mut app, key(KeyCode::Char('x')));
+
+    assert_eq!(app.input.text, "axb");
+    assert!(app.input.images.is_empty());
+}
