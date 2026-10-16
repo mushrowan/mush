@@ -1918,6 +1918,276 @@ fn esc_at_the_start_of_a_line_keeps_the_caret_on_that_line() {
     assert_eq!(app.input.cursor, 3);
 }
 
+fn type_keys(app: &mut App, keys: &str) {
+    for c in keys.chars() {
+        if c.is_ascii_uppercase() {
+            press_with(app, KeyCode::Char(c), KeyModifiers::SHIFT);
+        } else {
+            press(app, KeyCode::Char(c));
+        }
+    }
+}
+
+fn composer_mode(app: &App) -> mush_tui::app::AppMode {
+    app.interaction.mode.clone()
+}
+
+#[test]
+fn dw_deletes_a_word_and_its_space() {
+    let mut app = composer_in_normal("one two three");
+
+    type_keys(&mut app, "dw");
+
+    assert_eq!(app.input.text, "two three");
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn dw_on_the_last_word_of_a_line_keeps_the_break() {
+    let mut app = composer_in_normal("one two\nthree");
+
+    type_keys(&mut app, "wdw");
+
+    assert_eq!(app.input.text, "one \nthree");
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn a_count_on_either_side_of_d_multiplies() {
+    let mut app = composer_in_normal("a b c d e f g h");
+
+    type_keys(&mut app, "2d3w");
+
+    assert_eq!(app.input.text, "g h");
+}
+
+#[test]
+fn cw_changes_to_the_end_of_the_word_and_enters_insert() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "cw1");
+
+    assert_eq!(app.input.text, "1 two");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Insert);
+}
+
+#[test]
+fn dd_takes_the_line_and_p_puts_it_below() {
+    let mut app = composer_in_normal("a\nb\nc");
+
+    type_keys(&mut app, "dd");
+    assert_eq!(app.input.text, "b\nc");
+    assert_eq!(app.input.cursor, 0);
+
+    type_keys(&mut app, "p");
+    assert_eq!(app.input.text, "b\na\nc");
+    assert_eq!(app.input.cursor, 2);
+}
+
+#[test]
+fn a_count_before_dd_takes_more_lines() {
+    let mut app = composer_in_normal("a\nb\nc");
+
+    type_keys(&mut app, "2dd");
+
+    assert_eq!(app.input.text, "c");
+}
+
+#[test]
+fn dd_on_the_last_line_takes_the_break_before_it() {
+    let mut app = composer_in_normal("a\n  b");
+
+    type_keys(&mut app, "jdd");
+
+    assert_eq!(app.input.text, "a");
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn dd_lands_on_the_first_non_blank_of_the_next_line() {
+    let mut app = composer_in_normal("a\n  b");
+
+    type_keys(&mut app, "dd");
+
+    assert_eq!(app.input.text, "  b");
+    assert_eq!(app.input.cursor, 2);
+}
+
+#[test]
+fn cc_empties_the_line_but_keeps_its_indent() {
+    let mut app = composer_in_normal("  foo\nbar");
+
+    type_keys(&mut app, "ccx");
+
+    assert_eq!(app.input.text, "  x\nbar");
+    assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Insert);
+}
+
+#[test]
+fn yy_copies_the_line_and_p_puts_a_copy_below() {
+    let mut app = composer_in_normal("a\nb");
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+    assert!(event.is_none());
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+    type_keys(&mut app, "p");
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "a"),
+        "{event:?}"
+    );
+    assert_eq!(app.input.text, "a\na\nb");
+}
+
+#[test]
+fn yw_then_capital_p_puts_the_word_before_the_caret() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "ywP");
+
+    assert_eq!(app.input.text, "one one two");
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn a_count_before_p_puts_that_many_copies() {
+    let mut app = composer_in_normal("ab");
+
+    type_keys(&mut app, "x3p");
+
+    assert_eq!(app.input.text, "baaa");
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn p_with_nothing_taken_does_nothing() {
+    let mut app = composer_in_normal("ab");
+
+    type_keys(&mut app, "pP");
+
+    assert_eq!(app.input.text, "ab");
+}
+
+#[test]
+fn x_takes_the_character_and_p_puts_it_back_after() {
+    let mut app = composer_in_normal("ab");
+
+    type_keys(&mut app, "xp");
+
+    assert_eq!(app.input.text, "ba");
+}
+
+#[test]
+fn x_on_the_last_character_steps_the_caret_back() {
+    let mut app = composer_in_normal("ab");
+
+    type_keys(&mut app, "$x");
+
+    assert_eq!(app.input.text, "a");
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn a_counted_x_stays_on_its_line() {
+    let mut app = composer_in_normal("ab\ncd");
+
+    type_keys(&mut app, "5x");
+
+    assert_eq!(app.input.text, "\ncd");
+}
+
+#[test]
+fn capital_x_deletes_before_the_caret() {
+    let mut app = composer_in_normal("abc");
+
+    type_keys(&mut app, "$X");
+
+    assert_eq!(app.input.text, "ac");
+    assert_eq!(app.input.cursor, 1);
+}
+
+#[test]
+fn capital_d_deletes_to_the_end_of_the_line() {
+    let mut app = composer_in_normal("one two\nthree");
+
+    type_keys(&mut app, "wD");
+
+    assert_eq!(app.input.text, "one \nthree");
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
+fn capital_c_changes_to_the_end_of_the_line() {
+    let mut app = composer_in_normal("one two\nthree");
+
+    type_keys(&mut app, "wCx");
+
+    assert_eq!(app.input.text, "one x\nthree");
+}
+
+#[test]
+fn s_and_capital_s_substitute() {
+    let mut app = composer_in_normal("abc\ndef");
+    type_keys(&mut app, "sx");
+    assert_eq!(app.input.text, "xbc\ndef");
+
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "jSy");
+    assert_eq!(app.input.text, "xbc\ny");
+}
+
+#[test]
+fn linewise_motions_delete_whole_lines() {
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "jdj");
+    assert_eq!(app.input.text, "a\nd");
+
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "jdG");
+    assert_eq!(app.input.text, "a");
+
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "jjdgg");
+    assert_eq!(app.input.text, "d");
+}
+
+#[test]
+fn d_takes_a_find_and_a_bracket_match() {
+    let mut app = composer_in_normal("foo(bar) baz");
+    type_keys(&mut app, "dt(");
+    assert_eq!(app.input.text, "(bar) baz");
+
+    type_keys(&mut app, "d%");
+    assert_eq!(app.input.text, " baz");
+
+    let mut app = composer_in_normal("a-b-c");
+    type_keys(&mut app, "d2f-");
+    assert_eq!(app.input.text, "c");
+}
+
+#[test]
+fn esc_drops_a_pending_operator() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "d");
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "w");
+
+    assert_eq!(app.input.text, "one two");
+    assert_eq!(app.input.cursor, 4);
+    assert!(!app.interaction.focus.is_log());
+}
+
+#[test]
+fn dd_on_the_only_line_empties_the_composer() {
+    let mut app = composer_in_normal("hello");
+
+    type_keys(&mut app, "dd");
+
+    assert_eq!(app.input.text, "");
+    assert_eq!(app.input.cursor, 0);
+}
+
 #[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
@@ -2069,7 +2339,7 @@ fn y_copies_the_composer_selection_and_returns_to_normal() {
     press(&mut app, KeyCode::Char('e'));
 
     let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
-    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Char('z'));
 
     assert!(
         matches!(&event, Some(AppEvent::Copy { text }) if text == "world"),

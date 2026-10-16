@@ -31,6 +31,48 @@ const MOTIONS: &[(Action, Motion)] = &[
     (Action::MatchPair, Motion::MatchPair),
 ];
 
+const FINDS: &[(Action, bool, bool)] = &[
+    (Action::FindChar, true, false),
+    (Action::FindCharBack, false, false),
+    (Action::TillChar, true, true),
+    (Action::TillCharBack, false, true),
+];
+
+const OPERATORS: &[(Action, Operator)] = &[
+    (Action::Delete, Operator::Delete),
+    (Action::Change, Operator::Change),
+    (Action::Yank, Operator::Yank),
+];
+
+const SHORTHANDS: &[(Action, Operator, Target)] = &[
+    (
+        Action::DeleteUnderCursor,
+        Operator::Delete,
+        Target::Motion(Motion::Right),
+    ),
+    (
+        Action::DeleteBeforeCursor,
+        Operator::Delete,
+        Target::Motion(Motion::Left),
+    ),
+    (
+        Action::DeleteToLineEnd,
+        Operator::Delete,
+        Target::Motion(Motion::LineEnd),
+    ),
+    (
+        Action::ChangeToLineEnd,
+        Operator::Change,
+        Target::Motion(Motion::LineEnd),
+    ),
+    (
+        Action::Substitute,
+        Operator::Change,
+        Target::Motion(Motion::Right),
+    ),
+    (Action::SubstituteLine, Operator::Change, Target::Lines),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scroll {
     LineUp,
@@ -42,9 +84,34 @@ pub(crate) enum Scroll {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Operator {
+    Delete,
+    Change,
+    Yank,
+}
+
+impl Operator {
+    fn action(self) -> Action {
+        match self {
+            Self::Delete => Action::Delete,
+            Self::Change => Action::Change,
+            Self::Yank => Action::Yank,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Target {
+    Motion(Motion),
+    Lines,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
     Move(Motion),
     Scroll(Scroll),
+    Operate(Operator, Target),
+    Put { before: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +121,29 @@ pub(crate) enum Step {
     Dropped,
 }
 
-const FINDS: &[(Action, bool, bool)] = &[
-    (Action::FindChar, true, false),
-    (Action::FindCharBack, false, false),
-    (Action::TillChar, true, true),
-    (Action::TillCharBack, false, true),
-];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Context {
+    editable: bool,
+    visual: bool,
+}
+
+impl Context {
+    pub(crate) const LOG: Self = Self {
+        editable: false,
+        visual: false,
+    };
+    pub(crate) const COMPOSER: Self = Self {
+        editable: true,
+        visual: false,
+    };
+
+    pub(crate) fn visual(self) -> Self {
+        Self {
+            visual: true,
+            ..self
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prefix {
@@ -70,40 +154,47 @@ enum Prefix {
 #[derive(Debug, Default)]
 pub(crate) struct Keys {
     count: Option<usize>,
+    operator: Option<(Operator, Option<usize>)>,
     prefix: Option<Prefix>,
     last_find: Option<Find>,
 }
 
 impl Keys {
     pub(crate) fn is_pending(&self) -> bool {
-        self.prefix.is_some()
+        self.prefix.is_some() || self.operator.is_some()
     }
 
     pub(crate) fn clear(&mut self) -> bool {
-        let pending = self.count.is_some() || self.prefix.is_some();
+        let pending = self.count.is_some() || self.is_pending();
         self.count = None;
+        self.operator = None;
         self.prefix = None;
         pending
     }
 
-    pub(crate) fn feed(&mut self, keymap: &KeyMap, key: KeyEvent) -> Step {
-        let step = self.step(keymap, key);
+    pub(crate) fn feed(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
+        let step = self.step(keymap, key, context);
         if step != Step::Pending {
             self.clear();
         }
         step
     }
 
-    fn step(&mut self, keymap: &KeyMap, key: KeyEvent) -> Step {
+    fn step(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
         let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
         if let Some(prefix) = self.prefix.take() {
             let Some(motion) = self.complete(prefix, key, bound) else {
                 return Step::Dropped;
             };
-            return self.run(Command::Move(motion));
+            return self.reach(motion);
         }
         if self.take_digit(key) {
             return Step::Pending;
+        }
+        if let Some((operator, _)) = self.operator
+            && bound(operator.action())
+        {
+            return self.run(Command::Operate(operator, Target::Lines));
         }
         if bound(Action::GPrefix) {
             self.prefix = Some(Prefix::G);
@@ -117,17 +208,41 @@ impl Keys {
             return Step::Pending;
         }
         if let Some((_, scroll)) = SCROLLS.iter().find(|(action, _)| bound(*action)) {
+            if self.operator.is_some() {
+                return Step::Dropped;
+            }
             return self.run(Command::Scroll(*scroll));
         }
         if let Some(motion) = self.repeat_find(bound) {
-            return self.run(Command::Move(motion));
+            return self.reach(motion);
         }
-        MOTIONS
-            .iter()
-            .find(|(action, _)| bound(*action))
-            .map_or(Step::Dropped, |(_, motion)| {
-                self.run(Command::Move(*motion))
-            })
+        if let Some((_, motion)) = MOTIONS.iter().find(|(action, _)| bound(*action)) {
+            return self.reach(*motion);
+        }
+        if self.operator.is_some() || !context.editable || context.visual {
+            return Step::Dropped;
+        }
+        if let Some((_, operator)) = OPERATORS.iter().find(|(action, _)| bound(*action)) {
+            self.operator = Some((*operator, self.count.take()));
+            return Step::Pending;
+        }
+        if let Some((_, operator, target)) = SHORTHANDS.iter().find(|(action, ..)| bound(*action)) {
+            return self.run(Command::Operate(*operator, *target));
+        }
+        if bound(Action::PutAfter) {
+            return self.run(Command::Put { before: false });
+        }
+        if bound(Action::PutBefore) {
+            return self.run(Command::Put { before: true });
+        }
+        Step::Dropped
+    }
+
+    fn reach(&mut self, motion: Motion) -> Step {
+        match self.operator {
+            Some((operator, _)) => self.run(Command::Operate(operator, Target::Motion(motion))),
+            None => self.run(Command::Move(motion)),
+        }
     }
 
     fn complete(
@@ -166,7 +281,12 @@ impl Keys {
     }
 
     fn run(&mut self, command: Command) -> Step {
-        Step::Run(command, self.count.take())
+        let count = self.count.take();
+        let count = match self.operator.take() {
+            Some((_, Some(outer))) => Some(outer.saturating_mul(count.unwrap_or(1)).min(MAX_COUNT)),
+            _ => count,
+        };
+        Step::Run(command, count)
     }
 
     fn take_digit(&mut self, key: KeyEvent) -> bool {
@@ -209,7 +329,11 @@ mod tests {
                 } else {
                     KeyModifiers::NONE
                 };
-                keys.feed(&keymap, KeyEvent::new(KeyCode::Char(c), modifiers))
+                keys.feed(
+                    &keymap,
+                    KeyEvent::new(KeyCode::Char(c), modifiers),
+                    Context::COMPOSER,
+                )
             })
             .collect()
     }
@@ -310,6 +434,15 @@ mod tests {
         }))
     }
 
+    impl Command {
+        fn motion(self) -> Motion {
+            match self {
+                Self::Move(motion) => motion,
+                _ => Motion::Left,
+            }
+        }
+    }
+
     #[test]
     fn f_waits_for_the_character_to_find() {
         let mut keys = Keys::default();
@@ -348,10 +481,150 @@ mod tests {
         let keymap = KeyMap::default();
         feed(&mut keys, "f");
 
-        let step = keys.feed(&keymap, KeyEvent::from(KeyCode::Enter));
+        let step = keys.feed(&keymap, KeyEvent::from(KeyCode::Enter), Context::COMPOSER);
 
         assert_eq!(step, Step::Dropped);
         assert_eq!(feed(&mut keys, ";"), [Step::Dropped]);
+    }
+
+    fn operate(operator: Operator, target: Target) -> Command {
+        Command::Operate(operator, target)
+    }
+
+    #[test]
+    fn an_operator_waits_for_its_motion() {
+        let mut keys = Keys::default();
+
+        let steps = feed(&mut keys, "dw");
+
+        assert_eq!(steps[0], Step::Pending);
+        assert_eq!(
+            steps[1],
+            Step::Run(
+                operate(
+                    Operator::Delete,
+                    Target::Motion(Motion::WordForward(Word::Small))
+                ),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn doubling_an_operator_takes_whole_lines() {
+        assert_eq!(
+            last("dd"),
+            Step::Run(operate(Operator::Delete, Target::Lines), None)
+        );
+        assert_eq!(
+            last("3cc"),
+            Step::Run(operate(Operator::Change, Target::Lines), Some(3))
+        );
+        assert_eq!(
+            last("yy"),
+            Step::Run(operate(Operator::Yank, Target::Lines), None)
+        );
+    }
+
+    #[test]
+    fn counts_before_and_after_an_operator_multiply() {
+        assert_eq!(
+            last("2d3w"),
+            Step::Run(
+                operate(
+                    Operator::Delete,
+                    Target::Motion(Motion::WordForward(Word::Small))
+                ),
+                Some(6)
+            )
+        );
+        assert_eq!(
+            last("d3w"),
+            Step::Run(
+                operate(
+                    Operator::Delete,
+                    Target::Motion(Motion::WordForward(Word::Small))
+                ),
+                Some(3)
+            )
+        );
+    }
+
+    #[test]
+    fn an_operator_reaches_through_finds_and_g_motions() {
+        assert_eq!(
+            last("ctx"),
+            Step::Run(
+                operate(
+                    Operator::Change,
+                    Target::Motion(found('x', true, true, false).motion())
+                ),
+                None
+            )
+        );
+        assert_eq!(
+            last("dgg"),
+            Step::Run(operate(Operator::Delete, Target::Motion(Motion::Top)), None)
+        );
+    }
+
+    #[test]
+    fn mismatched_operators_drop_the_command() {
+        assert_eq!(last("dc"), Step::Dropped);
+        assert_eq!(last("dz"), Step::Dropped);
+    }
+
+    #[test]
+    fn a_scroll_key_cancels_an_operator() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        feed(&mut keys, "d");
+
+        let step = keys.feed(
+            &keymap,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            Context::COMPOSER,
+        );
+
+        assert_eq!(step, Step::Dropped);
+    }
+
+    #[test]
+    fn shorthands_stand_for_an_operator_and_a_motion() {
+        let cases = [
+            ("x", Operator::Delete, Target::Motion(Motion::Right)),
+            ("X", Operator::Delete, Target::Motion(Motion::Left)),
+            ("D", Operator::Delete, Target::Motion(Motion::LineEnd)),
+            ("C", Operator::Change, Target::Motion(Motion::LineEnd)),
+            ("s", Operator::Change, Target::Motion(Motion::Right)),
+            ("S", Operator::Change, Target::Lines),
+        ];
+        for (typed, operator, target) in cases {
+            assert_eq!(
+                last(&format!("2{typed}")),
+                Step::Run(operate(operator, target), Some(2)),
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn p_and_capital_p_put_after_and_before() {
+        assert_eq!(
+            last("3p"),
+            Step::Run(Command::Put { before: false }, Some(3))
+        );
+        assert_eq!(last("P"), Step::Run(Command::Put { before: true }, None));
+    }
+
+    #[test]
+    fn the_log_takes_no_operators() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+
+        let step = keys.feed(&keymap, KeyEvent::from(KeyCode::Char('d')), Context::LOG);
+
+        assert_eq!(step, Step::Dropped);
     }
 
     #[test]

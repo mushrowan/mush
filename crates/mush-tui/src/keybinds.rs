@@ -171,6 +171,16 @@ pub enum Action {
     RepeatFind,
     RepeatFindBack,
     MatchPair,
+    Delete,
+    Change,
+    DeleteUnderCursor,
+    DeleteBeforeCursor,
+    DeleteToLineEnd,
+    ChangeToLineEnd,
+    Substitute,
+    SubstituteLine,
+    PutAfter,
+    PutBefore,
 }
 
 impl Action {
@@ -238,6 +248,16 @@ impl Action {
             Self::RepeatFind => "repeat_find",
             Self::RepeatFindBack => "repeat_find_back",
             Self::MatchPair => "match_pair",
+            Self::Delete => "delete",
+            Self::Change => "change",
+            Self::DeleteUnderCursor => "delete_under_cursor",
+            Self::DeleteBeforeCursor => "delete_before_cursor",
+            Self::DeleteToLineEnd => "delete_to_line_end",
+            Self::ChangeToLineEnd => "change_to_line_end",
+            Self::Substitute => "substitute",
+            Self::SubstituteLine => "substitute_line",
+            Self::PutAfter => "put_after",
+            Self::PutBefore => "put_before",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -309,6 +329,16 @@ impl Action {
         Self::RepeatFind,
         Self::RepeatFindBack,
         Self::MatchPair,
+        Self::Delete,
+        Self::Change,
+        Self::DeleteUnderCursor,
+        Self::DeleteBeforeCursor,
+        Self::DeleteToLineEnd,
+        Self::ChangeToLineEnd,
+        Self::Substitute,
+        Self::SubstituteLine,
+        Self::PutAfter,
+        Self::PutBefore,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -474,7 +504,17 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::TillCharBack
         | Action::RepeatFind
         | Action::RepeatFindBack
-        | Action::MatchPair => KeyScope::Normal,
+        | Action::MatchPair
+        | Action::Delete
+        | Action::Change
+        | Action::DeleteUnderCursor
+        | Action::DeleteBeforeCursor
+        | Action::DeleteToLineEnd
+        | Action::ChangeToLineEnd
+        | Action::Substitute
+        | Action::SubstituteLine
+        | Action::PutAfter
+        | Action::PutBefore => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -972,6 +1012,56 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::MatchPair,
         &[(KeyCode::Char('%'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Delete,
+        &[(KeyCode::Char('d'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Change,
+        &[(KeyCode::Char('c'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::DeleteUnderCursor,
+        &[(KeyCode::Char('x'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::DeleteBeforeCursor,
+        &[(KeyCode::Char('X'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::DeleteToLineEnd,
+        &[(KeyCode::Char('D'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ChangeToLineEnd,
+        &[(KeyCode::Char('C'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Substitute,
+        &[(KeyCode::Char('s'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SubstituteLine,
+        &[(KeyCode::Char('S'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::PutAfter,
+        &[(KeyCode::Char('p'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::PutBefore,
+        &[(KeyCode::Char('P'), KeyModifiers::SHIFT)],
     ),
 ];
 

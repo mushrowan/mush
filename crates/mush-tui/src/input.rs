@@ -4,7 +4,7 @@ use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::InputBuffer;
 use crate::keybinds::{Action, KeyScope};
 use crate::normal::NormalTarget;
-use crate::normal::keys::{Command, Scroll, Step};
+use crate::normal::keys::{Command, Context, Scroll, Step};
 
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     let (before, after) = app.input.text.split_at(app.input.cursor);
@@ -842,15 +842,19 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
             return None;
         }
     }
-    with_count(app, key, run_composer_motion);
-    None
+    handle_composer_keys(app, key, Context::COMPOSER)
 }
 
-fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Command, Option<usize>)) {
-    let Step::Run(command, count) = app.interaction.normal.keys.feed(&app.keymap, key) else {
-        return;
-    };
-    run(app, command, count);
+fn feed_keys(app: &mut App, key: KeyEvent, context: Context) -> Option<(Command, Option<usize>)> {
+    match app.interaction.normal.keys.feed(&app.keymap, key, context) {
+        Step::Run(command, count) => Some((command, count)),
+        Step::Pending | Step::Dropped => None,
+    }
+}
+
+fn handle_composer_keys(app: &mut App, key: KeyEvent, context: Context) -> Option<AppEvent> {
+    let (command, count) = feed_keys(app, key, context)?;
+    crate::normal::edit::run(app, command, count)
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -882,7 +886,7 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             return None;
         }
     }
-    handle_log_motion(app, key);
+    handle_log_motion(app, key, Context::LOG);
     None
 }
 
@@ -919,8 +923,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 }
             }
         }
-        with_count(app, key, run_composer_motion);
-        return None;
+        return handle_composer_keys(app, key, Context::COMPOSER.visual());
     }
     if !pending {
         for (action, strip_indent) in [(Action::Yank, true), (Action::YankRaw, false)] {
@@ -932,7 +935,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
         }
     }
-    handle_log_motion(app, key);
+    handle_log_motion(app, key, Context::LOG.visual());
     None
 }
 
@@ -949,16 +952,10 @@ fn selection_kind_for(app: &App, key: KeyEvent) -> Option<crate::screen::Selecti
     .map(|(_, kind)| kind)
 }
 
-fn handle_log_motion(app: &mut App, key: KeyEvent) {
-    with_count(app, key, run_log_motion);
-}
-
-fn run_composer_motion(app: &mut App, command: Command, count: Option<usize>) {
-    let Command::Move(motion) = command else {
-        return;
-    };
-    let mut target = crate::normal::ComposerTarget::new(&mut app.input);
-    crate::normal::apply_motion(&mut target, motion, count);
+fn handle_log_motion(app: &mut App, key: KeyEvent, context: Context) {
+    if let Some((command, count)) = feed_keys(app, key, context) {
+        run_log_motion(app, command, count);
+    }
 }
 
 fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
@@ -969,6 +966,7 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
             return;
         }
         Command::Scroll(scroll) => scroll,
+        Command::Operate(..) | Command::Put { .. } => return,
     };
     for _ in 0..count.unwrap_or(1) {
         let page = app.viewport.page() as isize;

@@ -1,10 +1,12 @@
 use crate::motion::{self, Motion};
 
+pub(crate) mod edit;
 pub(crate) mod keys;
 
 #[derive(Debug, Default)]
 pub(crate) struct NormalState {
     pub(crate) keys: keys::Keys,
+    pub(crate) register: edit::Register,
 }
 
 pub(crate) trait NormalTarget {
@@ -114,6 +116,16 @@ impl NormalTarget for LogTarget<'_> {
     }
 }
 
+pub(crate) fn composer_position(input: &crate::input_buffer::InputBuffer) -> (usize, usize) {
+    let before = &input.text[..input.cursor];
+    let line = before.matches('\n').count();
+    let column = before
+        .rsplit('\n')
+        .next()
+        .map_or(0, |row| row.chars().count());
+    (line, column)
+}
+
 pub(crate) struct ComposerTarget<'a> {
     rows: Vec<String>,
     input: &'a mut crate::input_buffer::InputBuffer,
@@ -145,13 +157,7 @@ impl NormalTarget for ComposerTarget<'_> {
     }
 
     fn cursor(&self) -> (usize, usize) {
-        let before = &self.input.text[..self.input.cursor];
-        let line = before.matches('\n').count();
-        let column = before
-            .rsplit('\n')
-            .next()
-            .map_or(0, |row| row.chars().count());
-        (line, column)
+        composer_position(self.input)
     }
 
     fn place_cursor(&mut self, (line, column): (usize, usize)) {

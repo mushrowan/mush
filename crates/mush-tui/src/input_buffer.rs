@@ -297,21 +297,36 @@ impl InputBuffer {
     }
 
     fn remove_images_in_range(&mut self, start: usize, end: usize) {
-        let range = &self.text[start..end];
-        if !range.contains(IMAGE_PLACEHOLDER) {
-            return;
+        self.take_images_in(start..end);
+    }
+
+    fn image_slots(&self, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let placeholders = |text: &str| text.chars().filter(|c| *c == IMAGE_PLACEHOLDER).count();
+        let inside = placeholders(&self.text[range.clone()]);
+        if inside == 0 {
+            return 0..0;
         }
-        let prior = self.text[..start]
+        let prior = placeholders(&self.text[..range.start]).min(self.images.len());
+        prior..(prior + inside).min(self.images.len())
+    }
+
+    pub(crate) fn images_in(&self, range: std::ops::Range<usize>) -> Vec<PendingImage> {
+        self.images[self.image_slots(range)].to_vec()
+    }
+
+    pub(crate) fn take_images_in(&mut self, range: std::ops::Range<usize>) -> Vec<PendingImage> {
+        let slots = self.image_slots(range);
+        self.images.drain(slots).collect()
+    }
+
+    pub(crate) fn insert_with_images(&mut self, at: usize, text: &str, images: Vec<PendingImage>) {
+        let prior = self.text[..at]
             .chars()
             .filter(|c| *c == IMAGE_PLACEHOLDER)
-            .count();
-        let count = range.chars().filter(|c| *c == IMAGE_PLACEHOLDER).count();
-        for i in (0..count).rev() {
-            let idx = prior + i;
-            if idx < self.images.len() {
-                self.images.remove(idx);
-            }
-        }
+            .count()
+            .min(self.images.len());
+        self.images.splice(prior..prior, images);
+        self.text.insert_str(at, text);
     }
 }
 

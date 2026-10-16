@@ -49,6 +49,12 @@ impl Find {
 
 const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Region {
+    Chars(std::ops::Range<usize>),
+    Lines(std::ops::RangeInclusive<usize>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
     Blank,
@@ -202,6 +208,31 @@ impl Text {
             }
         }
         None
+    }
+
+    fn in_indent(&self, index: usize) -> bool {
+        let start = self.starts[self.line_of(index)];
+        self.chars[start..index]
+            .iter()
+            .all(|c| c.is_whitespace() && *c != '\n')
+    }
+
+    fn region(&self, from: usize, to: usize, inclusive: bool) -> Region {
+        let (start, mut end) = (from.min(to), from.max(to));
+        if inclusive {
+            if !self.is_line_end(end) {
+                end += 1;
+            }
+            return Region::Chars(start..end);
+        }
+        let (first, last) = (self.line_of(start), self.line_of(end));
+        if self.column(end) == 0 && last > first {
+            if self.in_indent(start) {
+                return Region::Lines(first..=last - 1);
+            }
+            end = self.line_end(last - 1);
+        }
+        Region::Chars(start..end)
     }
 
     fn rest(&self, index: usize) -> (usize, usize) {
@@ -408,6 +439,62 @@ pub(crate) fn destination(
         }
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
+}
+
+pub(crate) fn span(
+    rows: &[String],
+    at: (usize, usize),
+    motion: Motion,
+    count: Option<usize>,
+    change: bool,
+) -> Option<Region> {
+    let text = Text::new(rows);
+    let from = text.index_of(at)?;
+    let (line, column) = text.position(from);
+    let times = count.unwrap_or(1);
+    let last = rows.len().saturating_sub(1);
+    let lines = |to: usize| Some(Region::Lines(line.min(to)..=line.max(to)));
+    let (to, inclusive) = match motion {
+        Motion::Up if line == 0 => return None,
+        Motion::Up => return lines(line.saturating_sub(times)),
+        Motion::Down if line == last => return None,
+        Motion::Down => return lines((line + times).min(last)),
+        Motion::Top => return lines(count.map_or(0, |n| n.saturating_sub(1)).min(last)),
+        Motion::Bottom => return lines(count.map_or(last, |n| n.saturating_sub(1)).min(last)),
+        Motion::MatchPair if let Some(percent) = count => {
+            if percent > 100 {
+                return None;
+            }
+            return lines((percent * rows.len()).div_ceil(100).saturating_sub(1));
+        }
+        Motion::Left if column == 0 => return None,
+        Motion::Left => (from - times.min(column), false),
+        Motion::Right => (text.index_of((line, column + times))?, false),
+        Motion::LineStart => (text.starts[line], false),
+        Motion::FirstNonBlank => (text.index_of((line, first_non_blank(&rows[line])))?, false),
+        Motion::LineEnd => {
+            let end_line = (line + times - 1).min(last);
+            let end = text.line_end(end_line);
+            if end == text.starts[end_line] {
+                (end, false)
+            } else {
+                (end - 1, true)
+            }
+        }
+        Motion::WordForward(word) if change && text.class(from, word) != Class::Blank => {
+            (text.end_word(from, word, times, true), true)
+        }
+        Motion::WordForward(word) => (text.forward_word(from, word, times, true), false),
+        Motion::WordBack(word) => (text.back_word(from, word, times), false),
+        Motion::WordEnd(word) => (text.end_word(from, word, times, false), true),
+        Motion::WordEndBack(word) => (text.back_end_word(from, word, times), true),
+        Motion::Find(find) => {
+            let column = find_in_row(&rows[line], column, find, times)?;
+            (text.index_of((line, column))?, find.forward)
+        }
+        Motion::MatchPair => (text.matching_pair(from)?, true),
+    };
+    Some(text.region(from, to, inclusive))
 }
 
 #[cfg(test)]
@@ -620,6 +707,182 @@ mod tests {
         let rows = rows(&["(a) b", "c)"]);
 
         assert_eq!(destination(&rows, (0, 4), Motion::MatchPair, 1), None);
+    }
+
+    fn chars(text: &[&str], at: (usize, usize), motion: Motion, count: usize) -> String {
+        let rows = rows(text);
+        let joined = rows.join("\n");
+        match span(&rows, at, motion, (count > 1).then_some(count), false) {
+            Some(Region::Chars(range)) => {
+                joined.chars().skip(range.start).take(range.len()).collect()
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn dw_stops_at_the_end_of_the_line() {
+        assert_eq!(
+            chars(&["one two"], (0, 4), Motion::WordForward(Word::Small), 1),
+            "two"
+        );
+        assert_eq!(
+            chars(
+                &["one two", "three"],
+                (0, 4),
+                Motion::WordForward(Word::Small),
+                1
+            ),
+            "two"
+        );
+        assert_eq!(
+            chars(
+                &["one two  ", "three"],
+                (0, 4),
+                Motion::WordForward(Word::Small),
+                1
+            ),
+            "two  "
+        );
+    }
+
+    #[test]
+    fn a_counted_dw_crosses_lines() {
+        assert_eq!(
+            chars(
+                &["one two", "three four"],
+                (0, 4),
+                Motion::WordForward(Word::Small),
+                2
+            ),
+            "two\nthree "
+        );
+    }
+
+    #[test]
+    fn cw_on_a_word_changes_only_to_its_end() {
+        let rows = rows(&["one two"]);
+
+        assert_eq!(
+            span(&rows, (0, 0), Motion::WordForward(Word::Small), None, true),
+            Some(Region::Chars(0..3))
+        );
+        assert_eq!(
+            span(&rows, (0, 2), Motion::WordForward(Word::Small), None, true),
+            Some(Region::Chars(2..3))
+        );
+        assert_eq!(
+            span(&rows, (0, 3), Motion::WordForward(Word::Small), None, true),
+            Some(Region::Chars(3..4))
+        );
+    }
+
+    #[test]
+    fn inclusive_motions_take_the_character_they_land_on() {
+        assert_eq!(
+            chars(&["one two"], (0, 0), Motion::WordEnd(Word::Small), 1),
+            "one"
+        );
+        assert_eq!(
+            chars(&["a,b,c"], (0, 0), Motion::Find(find(',', true, false)), 2),
+            "a,b,"
+        );
+        assert_eq!(
+            chars(&["a,b,c"], (0, 0), Motion::Find(find('c', true, true)), 1),
+            "a,b,"
+        );
+        assert_eq!(chars(&["f(a)"], (0, 1), Motion::MatchPair, 1), "(a)");
+    }
+
+    #[test]
+    fn backward_motions_leave_the_cursor_character() {
+        assert_eq!(
+            chars(&["one two"], (0, 4), Motion::WordBack(Word::Small), 1),
+            "one "
+        );
+        assert_eq!(
+            chars(&["a,b,c"], (0, 4), Motion::Find(find(',', false, false)), 1),
+            ","
+        );
+        assert_eq!(chars(&["one two"], (0, 3), Motion::LineStart, 1), "one");
+    }
+
+    #[test]
+    fn dge_takes_the_cursor_character_too() {
+        assert_eq!(
+            chars(&["one two"], (0, 5), Motion::WordEndBack(Word::Small), 1),
+            "e tw"
+        );
+    }
+
+    #[test]
+    fn dollar_takes_the_rest_of_the_line_but_not_the_break() {
+        assert_eq!(chars(&["one two", "x"], (0, 4), Motion::LineEnd, 1), "two");
+        assert_eq!(chars(&["one", "", "x"], (1, 0), Motion::LineEnd, 1), "");
+    }
+
+    #[test]
+    fn l_reaches_past_the_last_character_for_an_operator() {
+        assert_eq!(chars(&["ab"], (0, 1), Motion::Right, 1), "b");
+        assert_eq!(chars(&["ab"], (0, 0), Motion::Right, 5), "ab");
+        assert_eq!(chars(&[""], (0, 0), Motion::Right, 1), "");
+    }
+
+    #[test]
+    fn h_at_the_start_of_a_line_is_no_region() {
+        assert_eq!(
+            span(&rows(&["ab"]), (0, 0), Motion::Left, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn vertical_motions_take_whole_lines() {
+        let rows = rows(&["a", "b", "c", "d"]);
+
+        assert_eq!(
+            span(&rows, (1, 0), Motion::Down, None, false),
+            Some(Region::Lines(1..=2))
+        );
+        assert_eq!(
+            span(&rows, (1, 0), Motion::Up, Some(5), false),
+            Some(Region::Lines(0..=1))
+        );
+        assert_eq!(
+            span(&rows, (1, 0), Motion::Bottom, None, false),
+            Some(Region::Lines(1..=3))
+        );
+        assert_eq!(
+            span(&rows, (2, 0), Motion::Top, None, false),
+            Some(Region::Lines(0..=2))
+        );
+        assert_eq!(span(&rows, (3, 0), Motion::Down, None, false), None);
+    }
+
+    #[test]
+    fn an_exclusive_end_at_a_line_start_backs_up_or_goes_linewise() {
+        let rows = rows(&["one", "two"]);
+
+        assert_eq!(
+            span(&rows, (1, 0), Motion::WordBack(Word::Small), None, false),
+            Some(Region::Lines(0..=0))
+        );
+
+        let rows2 = super::tests::rows(&["x one", "two"]);
+        assert_eq!(
+            span(&rows2, (1, 0), Motion::WordBack(Word::Small), None, false),
+            Some(Region::Chars(2..5))
+        );
+    }
+
+    #[test]
+    fn dw_on_an_empty_line_takes_the_line() {
+        let rows = rows(&["one", "", "two"]);
+
+        assert_eq!(
+            span(&rows, (1, 0), Motion::WordForward(Word::Small), None, false),
+            Some(Region::Lines(1..=1))
+        );
     }
 
     #[test]

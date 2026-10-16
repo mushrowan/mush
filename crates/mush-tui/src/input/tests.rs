@@ -2694,3 +2694,51 @@ fn yanking_across_a_soft_wrap_copies_one_line() {
         other => panic!("expected a copy, got {other:?}"),
     }
 }
+
+fn composer_normal_with_an_image() -> App {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.text = format!("a{}b", crate::input_buffer::IMAGE_PLACEHOLDER);
+    app.input.images.push(crate::app::PendingImage {
+        data: vec![1, 2, 3],
+        mime_type: mush_ai::types::ImageMimeType::Png,
+        dimensions: None,
+    });
+    app.input.cursor = 1;
+    app.interaction.mode = AppMode::Normal;
+    app
+}
+
+#[test]
+fn x_on_an_image_carries_the_image_into_the_register_and_p_brings_it_back() {
+    let mut app = composer_normal_with_an_image();
+
+    handle_key(&mut app, key(KeyCode::Char('x')));
+    assert_eq!(app.input.text, "ab");
+    assert!(app.input.images.is_empty());
+
+    handle_key(&mut app, key(KeyCode::Char('p')));
+    assert_eq!(
+        app.input.text,
+        format!("ab{}", crate::input_buffer::IMAGE_PLACEHOLDER)
+    );
+    assert_eq!(app.input.images.len(), 1);
+    assert_eq!(app.input.images[0].data, vec![1, 2, 3]);
+}
+
+#[test]
+fn yanking_an_image_line_and_putting_it_doubles_the_image() {
+    let mut app = composer_normal_with_an_image();
+
+    handle_key(&mut app, key(KeyCode::Char('y')));
+    handle_key(&mut app, key(KeyCode::Char('y')));
+    handle_key(&mut app, key(KeyCode::Char('p')));
+
+    assert_eq!(app.input.images.len(), 2);
+    assert_eq!(
+        app.input
+            .text
+            .matches(crate::input_buffer::IMAGE_PLACEHOLDER)
+            .count(),
+        2
+    );
+}
