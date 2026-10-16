@@ -154,16 +154,20 @@ impl NormalTarget for ComposerTarget<'_> {
         (line, column)
     }
 
-    fn place_cursor(&mut self, at: (usize, usize)) {
-        self.input.cursor = self.offset_of(at);
+    fn place_cursor(&mut self, (line, column): (usize, usize)) {
+        let line = line.min(self.rows.len().saturating_sub(1));
+        let row = self.rows.get(line).map_or("", String::as_str);
+        self.input.cursor = self.offset_of((line, column.min(motion::last_cell(row))));
     }
 
     fn move_line(&mut self, delta: isize) {
         let (line, column) = self.cursor();
+        let goal = self.input.goal_column().unwrap_or(column);
         let line = line
             .saturating_add_signed(delta)
             .min(self.rows.len().saturating_sub(1));
-        self.place_cursor((line, column));
+        self.place_cursor((line, goal));
+        self.input.hold_goal_column(goal);
     }
 
     fn start_selection(&mut self, kind: crate::screen::SelectionKind) {

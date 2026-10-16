@@ -1882,6 +1882,43 @@ fn a_count_before_percent_goes_that_far_down() {
 }
 
 #[test]
+fn l_stops_on_the_last_composer_character() {
+    let mut app = composer_in_normal("hello");
+
+    press(&mut app, KeyCode::Char('9'));
+    press(&mut app, KeyCode::Char('l'));
+
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
+fn j_and_k_keep_the_column_across_a_short_line() {
+    let mut app = composer_in_normal("hello\nhi\nworld");
+    press(&mut app, KeyCode::Char('$'));
+
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.input.cursor, 7, "rests on the last character of hi");
+
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.input.cursor, 13);
+
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.input.cursor, 4);
+}
+
+#[test]
+fn esc_at_the_start_of_a_line_keeps_the_caret_on_that_line() {
+    let mut app = conversation(1);
+    app.input.text = "ab\n".into();
+    app.input.cursor = 3;
+
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.input.cursor, 3);
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

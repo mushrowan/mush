@@ -21,6 +21,14 @@ pub struct InputBuffer {
     pub(crate) layout_cache: RefCell<Option<crate::widgets::input_box::InputLayoutCache>>,
     #[cfg(test)]
     pub(crate) layout_builds: Cell<u32>,
+    goal: Option<Goal>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Goal {
+    cursor: usize,
+    len: usize,
+    column: usize,
 }
 
 impl InputBuffer {
@@ -43,7 +51,9 @@ impl InputBuffer {
     }
 
     pub fn step_back_one_char(&mut self) {
-        self.cursor = self.prev_char_boundary();
+        if !self.text[..self.cursor].ends_with('\n') {
+            self.cursor = self.prev_char_boundary();
+        }
     }
 
     fn prev_char_boundary(&self) -> usize {
@@ -75,7 +85,22 @@ impl InputBuffer {
             layout_cache: RefCell::new(None),
             #[cfg(test)]
             layout_builds: Cell::new(0),
+            goal: None,
         }
+    }
+
+    pub(crate) fn goal_column(&self) -> Option<usize> {
+        self.goal
+            .filter(|goal| goal.cursor == self.cursor && goal.len == self.text.len())
+            .map(|goal| goal.column)
+    }
+
+    pub(crate) fn hold_goal_column(&mut self, column: usize) {
+        self.goal = Some(Goal {
+            cursor: self.cursor,
+            len: self.text.len(),
+            column,
+        });
     }
 
     pub fn insert_char(&mut self, c: char) {
