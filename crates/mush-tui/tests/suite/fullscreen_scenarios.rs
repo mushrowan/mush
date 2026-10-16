@@ -2904,6 +2904,24 @@ fn cis_changes_a_sentence_and_das_deletes_one() {
 }
 
 #[test]
+fn cit_changes_what_is_between_tags() {
+    let mut app = composer_in_normal("<p>old text</p>");
+
+    type_keys(&mut app, "focitnew");
+
+    assert_eq!(app.input.text, "<p>new</p>");
+}
+
+#[test]
+fn dat_deletes_the_whole_element() {
+    let mut app = composer_in_normal("keep <b>this</b> word");
+
+    type_keys(&mut app, "ftdat");
+
+    assert_eq!(app.input.text, "keep  word");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

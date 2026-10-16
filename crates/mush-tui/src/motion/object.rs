@@ -7,6 +7,7 @@ pub(crate) enum Kind {
     Block(char, char),
     Paragraph,
     Sentence,
+    Tag,
 }
 
 impl Kind {
@@ -21,6 +22,7 @@ impl Kind {
             '<' | '>' => Self::Block('<', '>'),
             'p' => Self::Paragraph,
             's' => Self::Sentence,
+            't' => Self::Tag,
             _ => return None,
         })
     }
@@ -54,6 +56,7 @@ pub(crate) fn span(
         Kind::Block(open, close) => block(&text, at, (open, close), object.around, count),
         Kind::Paragraph => paragraph(rows, text.line_of(at), object.around, count),
         Kind::Sentence => sentence(&text, rows, at, object.around, count),
+        Kind::Tag => tag(&text.chars, at, object.around, count),
     }
 }
 
@@ -246,6 +249,90 @@ fn sentences(chars: &[char], span: std::ops::Range<usize>) -> Vec<(std::ops::Ran
         pieces.push((from..i, false));
     }
     pieces
+}
+
+struct Tag {
+    name: String,
+    span: std::ops::Range<usize>,
+    closing: bool,
+}
+
+fn tag(chars: &[char], at: usize, around: bool, count: usize) -> Option<Region> {
+    let mut open: Vec<Tag> = Vec::new();
+    let mut elements = Vec::new();
+    for tag in tags(chars) {
+        if !tag.closing {
+            open.push(tag);
+            continue;
+        }
+        if let Some(depth) = open
+            .iter()
+            .rposition(|o| o.name.eq_ignore_ascii_case(&tag.name))
+        {
+            let opening = open.swap_remove(depth);
+            open.truncate(depth);
+            elements.push((opening.span, tag.span));
+        }
+    }
+    elements.retain(|(opening, closing)| opening.start <= at && at < closing.end);
+    elements.sort_by_key(|(opening, closing)| closing.end - opening.start);
+    let (opening, closing) = elements.get(count.checked_sub(1)?)?;
+    Some(Region::Chars(if around {
+        opening.start..closing.end
+    } else {
+        opening.end..closing.start
+    }))
+}
+
+fn tags(chars: &[char]) -> Vec<Tag> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '<' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let closing = chars.get(i + 1) == Some(&'/');
+        let name_start = i + 1 + usize::from(closing);
+        let mut j = name_start;
+        while chars
+            .get(j)
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+        {
+            j += 1;
+        }
+        if j == name_start || !chars[name_start].is_alphabetic() {
+            i += 1;
+            continue;
+        }
+        let name: String = chars[name_start..j].iter().collect();
+        let mut quote = None;
+        while let Some(&c) = chars.get(j) {
+            match quote {
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == '"' || c == '\'' => quote = Some(c),
+                None if c == '>' || c == '<' => break,
+                None => {}
+            }
+            j += 1;
+        }
+        if chars.get(j) != Some(&'>') {
+            i += 1;
+            continue;
+        }
+        let self_closing = chars[j - 1] == '/';
+        if !self_closing {
+            found.push(Tag {
+                name,
+                span: start..j + 1,
+                closing,
+            });
+        }
+        i = j + 1;
+    }
+    found
 }
 
 fn quoted(text: &Text, at: usize, quote: char, around: bool, count: usize) -> Option<Region> {
@@ -580,6 +667,41 @@ mod tests {
         assert_eq!(take(&text, (0, 4), 's', true, 2), "  Two. Three.");
         assert_eq!(take(&text, (0, 6), 's', true, 2), "  Two. Three.");
         assert_eq!(take(&text, (0, 6), 's', true, 3), "None");
+    }
+
+    #[test]
+    fn it_is_inside_the_tag_and_at_takes_the_tags() {
+        let text = ["<a href=\"x>y\"><b>bold</b> rest</a>"];
+
+        assert_eq!(take(&text, (0, 19), 't', false, 1), "bold");
+        assert_eq!(take(&text, (0, 19), 't', true, 1), "<b>bold</b>");
+        assert_eq!(take(&text, (0, 19), 't', false, 2), "<b>bold</b> rest");
+        assert_eq!(take(&text, (0, 1), 't', false, 1), "<b>bold</b> rest");
+    }
+
+    #[test]
+    fn a_closing_tag_under_the_caret_belongs_to_its_element() {
+        assert_eq!(take(&["<p>hi</p>"], (0, 6), 't', false, 1), "hi");
+    }
+
+    #[test]
+    fn self_closing_and_unclosed_tags_are_skipped() {
+        let text = ["<div>a<br/>b<img src=x>c</div>"];
+
+        assert_eq!(take(&text, (0, 12), 't', false, 1), "a<br/>b<img src=x>c");
+    }
+
+    #[test]
+    fn tags_reach_across_lines_and_ignore_case() {
+        let text = ["<DIV>", "  text", "</div>"];
+
+        assert_eq!(take(&text, (1, 3), 't', false, 1), "\n  text\n");
+    }
+
+    #[test]
+    fn empty_and_missing_tags() {
+        assert_eq!(take(&["<i></i>"], (0, 1), 't', false, 1), "");
+        assert_eq!(take(&["a < b > c"], (0, 0), 't', false, 1), "None");
     }
 
     #[test]
