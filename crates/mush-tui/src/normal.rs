@@ -1,5 +1,11 @@
-use crate::keybinds::Action;
-use crate::motion::{self, Word};
+use crate::motion::{self, Motion, Word};
+
+pub(crate) mod keys;
+
+#[derive(Debug, Default)]
+pub(crate) struct NormalState {
+    pub(crate) keys: keys::Keys,
+}
 
 pub(crate) trait NormalTarget {
     fn rows(&self) -> &[String];
@@ -19,42 +25,36 @@ pub(crate) trait NormalTarget {
     }
 }
 
-pub(crate) fn apply_motion(target: &mut impl NormalTarget, action: Action) -> bool {
-    let at = target.cursor();
-    let (line, column) = at;
-    match action {
-        Action::CursorLineStart => target.place_cursor((line, 0)),
-        Action::CursorFirstNonBlank => {
+pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion) {
+    let (line, column) = target.cursor();
+    match motion {
+        Motion::LineStart => target.place_cursor((line, 0)),
+        Motion::FirstNonBlank => {
             let column = motion::first_non_blank(row_at(target, line));
             target.place_cursor((line, column));
         }
-        Action::CursorLineEnd => {
+        Motion::LineEnd => {
             let column = motion::last_cell(row_at(target, line));
             target.place_cursor((line, column));
         }
-        Action::CursorLeft => target.place_cursor((line, column.saturating_sub(1))),
-        Action::CursorRight => target.place_cursor((line, column + 1)),
-        Action::PreviousItem => target.move_line(-1),
-        Action::NextItem => target.move_line(1),
-        Action::NavigateTop => target.to_top(),
-        Action::NavigateBottom => target.to_bottom(),
-        Action::CursorWordForward => word(target, motion::word_forward, at, Word::Small),
-        Action::CursorChunkForward => word(target, motion::word_forward, at, Word::Big),
-        Action::CursorWordBack => word(target, motion::word_back, at, Word::Small),
-        Action::CursorChunkBack => word(target, motion::word_back, at, Word::Big),
-        Action::CursorWordEnd => word(target, motion::word_end, at, Word::Small),
-        Action::CursorChunkEnd => word(target, motion::word_end, at, Word::Big),
-        _ => return false,
+        Motion::Left => target.place_cursor((line, column.saturating_sub(1))),
+        Motion::Right => target.place_cursor((line, column + 1)),
+        Motion::Up => target.move_line(-1),
+        Motion::Down => target.move_line(1),
+        Motion::Top => target.to_top(),
+        Motion::Bottom => target.to_bottom(),
+        Motion::WordForward(size) => word(target, motion::word_forward, size),
+        Motion::WordBack(size) => word(target, motion::word_back, size),
+        Motion::WordEnd(size) => word(target, motion::word_end, size),
     }
-    true
 }
 
 fn row_at(target: &impl NormalTarget, line: usize) -> &str {
     target.rows().get(line).map_or("", String::as_str)
 }
 
-fn word(target: &mut impl NormalTarget, motion: motion::Motion, at: (usize, usize), word: Word) {
-    let to = motion(target.rows(), at, word);
+fn word(target: &mut impl NormalTarget, motion: motion::WordMotion, size: Word) {
+    let to = motion(target.rows(), target.cursor(), size);
     target.place_cursor(to);
 }
 

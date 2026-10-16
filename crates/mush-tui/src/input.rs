@@ -4,6 +4,7 @@ use crate::app::{App, AppEvent, AppMode};
 use crate::input_buffer::InputBuffer;
 use crate::keybinds::{Action, KeyScope};
 use crate::normal::NormalTarget;
+use crate::normal::keys::{Command, Scroll, Step};
 
 fn should_escape_enter_to_newline(app: &App, key: KeyEvent) -> bool {
     let (before, after) = app.input.text.split_at(app.input.cursor);
@@ -829,43 +830,11 @@ fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> 
     None
 }
 
-fn resolve_motion(app: &App, key: KeyEvent) -> Option<Action> {
-    [
-        Action::LineUp,
-        Action::LineDown,
-        Action::HalfPageUp,
-        Action::HalfPageDown,
-        Action::PageUp,
-        Action::PageDown,
-        Action::CursorLineStart,
-        Action::CursorFirstNonBlank,
-        Action::CursorLineEnd,
-        Action::CursorLeft,
-        Action::CursorRight,
-        Action::PreviousItem,
-        Action::NextItem,
-        Action::NavigateTop,
-        Action::NavigateBottom,
-        Action::CursorWordForward,
-        Action::CursorChunkForward,
-        Action::CursorWordBack,
-        Action::CursorChunkBack,
-        Action::CursorWordEnd,
-        Action::CursorChunkEnd,
-    ]
-    .into_iter()
-    .find(|action| app.keymap.matches_in(KeyScope::Normal, *action, key))
-}
-
-fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Action, usize)) {
-    if take_count_digit(app, key) {
-        return;
-    }
-    let count = app.interaction.pending_count.take().unwrap_or(1);
-    let Some(action) = resolve_motion(app, key) else {
+fn with_count(app: &mut App, key: KeyEvent, run: impl Fn(&mut App, Command, usize)) {
+    let Step::Run(command, count) = app.interaction.normal.keys.feed(&app.keymap, key) else {
         return;
     };
-    run(app, action, count);
+    run(app, command, count.unwrap_or(1));
 }
 
 fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
@@ -955,45 +924,28 @@ fn handle_log_motion(app: &mut App, key: KeyEvent) {
     with_count(app, key, run_log_motion);
 }
 
-fn take_count_digit(app: &mut App, key: KeyEvent) -> bool {
-    let KeyCode::Char(c) = key.code else {
-        return false;
+fn run_composer_motion(app: &mut App, command: Command, count: usize) {
+    let Command::Move(motion) = command else {
+        return;
     };
-    if !key.modifiers.is_empty() {
-        return false;
-    }
-    let Some(digit) = c.to_digit(10).map(|d| d as usize) else {
-        return false;
-    };
-    let pending = app.interaction.pending_count;
-    if digit == 0 && pending.is_none() {
-        return false;
-    }
-    app.interaction.pending_count = Some(pending.unwrap_or(0) * 10 + digit);
-    true
-}
-
-fn run_composer_motion(app: &mut App, action: Action, count: usize) {
     let mut target = crate::normal::ComposerTarget::new(&mut app.input);
     for _ in 0..count {
-        crate::normal::apply_motion(&mut target, action);
+        crate::normal::apply_motion(&mut target, motion);
     }
 }
 
-fn run_log_motion(app: &mut App, action: Action, count: usize) {
+fn run_log_motion(app: &mut App, command: Command, count: usize) {
     let mut target = crate::normal::LogTarget::new(app);
     for _ in 0..count {
         let page = app.viewport.page() as isize;
-        match action {
-            Action::LineUp => app.viewport.scroll_by(-1),
-            Action::LineDown => app.viewport.scroll_by(1),
-            Action::HalfPageUp => app.viewport.page_by(-page / 2),
-            Action::HalfPageDown => app.viewport.page_by(page / 2),
-            Action::PageUp => app.viewport.page_by(-page),
-            Action::PageDown => app.viewport.page_by(page),
-            action => {
-                crate::normal::apply_motion(&mut target, action);
-            }
+        match command {
+            Command::Scroll(Scroll::LineUp) => app.viewport.scroll_by(-1),
+            Command::Scroll(Scroll::LineDown) => app.viewport.scroll_by(1),
+            Command::Scroll(Scroll::HalfPageUp) => app.viewport.page_by(-page / 2),
+            Command::Scroll(Scroll::HalfPageDown) => app.viewport.page_by(page / 2),
+            Command::Scroll(Scroll::PageUp) => app.viewport.page_by(-page),
+            Command::Scroll(Scroll::PageDown) => app.viewport.page_by(page),
+            Command::Move(motion) => crate::normal::apply_motion(&mut target, motion),
         }
     }
 }

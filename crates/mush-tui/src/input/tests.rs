@@ -2604,9 +2604,10 @@ fn a_digit_holds_a_count_for_the_next_motion() {
 
     handle_key(&mut app, key(KeyCode::Char('3')));
     handle_key(&mut app, key(KeyCode::Char('j')));
-
     assert_eq!(app.viewport.cursor().line, 193);
-    assert_eq!(app.interaction.pending_count, None);
+
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(app.viewport.cursor().line, 194, "the count was spent");
 }
 
 #[test]

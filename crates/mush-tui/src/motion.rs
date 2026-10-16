@@ -1,9 +1,25 @@
-pub(crate) type Motion = fn(&[String], (usize, usize), Word) -> (usize, usize);
+pub(crate) type WordMotion = fn(&[String], (usize, usize), Word) -> (usize, usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Word {
     Small,
     Big,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Motion {
+    Left,
+    Right,
+    Up,
+    Down,
+    LineStart,
+    FirstNonBlank,
+    LineEnd,
+    Top,
+    Bottom,
+    WordForward(Word),
+    WordBack(Word),
+    WordEnd(Word),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
