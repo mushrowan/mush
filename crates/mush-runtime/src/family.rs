@@ -1234,6 +1234,7 @@ impl Family {
             } => self.record_reply(id, message, model),
             ClientEvent::Agent {
                 event: AgentEvent::ContextCompacted { compaction, .. },
+                applied: crate::Applied::Compacted { .. },
                 ..
             } => {
                 let tokens = mush_session::compact::estimate_tokens(&compaction.messages) as u64;
@@ -4300,9 +4301,9 @@ mod tests {
             Some(&model),
         );
         let before = family.children_of(&root)[0].context;
-        family.record(
-            &slow.rlm_child_id,
-            &agent_event(AgentEvent::ContextCompacted {
+        let compacted = |applied| ClientEvent::Agent {
+            generation: crate::session::StreamGeneration(0),
+            event: AgentEvent::ContextCompacted {
                 before_count: 40,
                 compaction: mush_agent::ContextCompaction {
                     messages: vec![mush_session::compact::outcome_message("x", "y")],
@@ -4310,7 +4311,18 @@ mod tests {
                     summarised_count: 39,
                     appended: 0,
                 },
-            }),
+            },
+            applied,
+        };
+        family.record(
+            &slow.rlm_child_id,
+            &compacted(crate::Applied::Nothing),
+            Some(&model),
+        );
+        let after_stale = family.children_of(&root)[0].context;
+        family.record(
+            &slow.rlm_child_id,
+            &compacted(crate::Applied::Compacted { after_count: 1 }),
             Some(&model),
         );
         let after = family.children_of(&root)[0].context.unwrap();
@@ -4323,6 +4335,7 @@ mod tests {
                 compactions: 0,
             })
         );
+        assert_eq!(after_stale, before);
         assert_eq!(after.compactions, 1);
         assert!(after.tokens < 1_000, "{after:?}");
         let listed = serde_json::to_value(&family.children_of(&root)[0]).unwrap();

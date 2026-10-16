@@ -395,8 +395,10 @@ impl SessionRuntime {
                 self.context_tokens = message.usage.total_input_tokens();
             }
             AgentEvent::ContextCompacted { compaction, .. } => {
-                let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
-                self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
+                if matches!(applied, crate::Applied::Compacted { .. }) {
+                    let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
+                    self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
+                }
                 self.harness_digest_pending = true;
             }
             _ => {}
@@ -517,6 +519,41 @@ mod tests {
         ));
         let prompt = runtime.pending_prompt.as_ref().expect("a queued prompt");
         assert!(prompt.is_persisted());
+    }
+
+    #[test]
+    fn a_stale_compaction_leaves_the_context_tokens_alone() {
+        let user = |text: &str| {
+            Message::User(
+                mush_ai::types::UserMessage::builder()
+                    .content(mush_ai::types::UserContent::Text(text.into()))
+                    .timestamp_ms(mush_ai::types::Timestamp::zero())
+                    .build(),
+            )
+        };
+        let mut runtime = SessionRuntime::new(ConversationState::from_messages(vec![
+            user("a"),
+            user("b"),
+            user("c"),
+        ]));
+        runtime.context_tokens = mush_ai::types::TokenCount::new(123_456);
+
+        let applied = runtime.apply_event(&AgentEvent::ContextCompacted {
+            before_count: 3,
+            compaction: mush_agent::ContextCompaction {
+                messages: vec![user("summary"), user("never in this conversation")],
+                summary: "summary".into(),
+                summarised_count: 2,
+                appended: 0,
+            },
+        });
+
+        assert_eq!(applied, crate::Applied::Nothing);
+        assert_eq!(
+            runtime.context_tokens,
+            mush_ai::types::TokenCount::new(123_456)
+        );
+        assert_eq!(runtime.conversation.context_len(), 3);
     }
 
     fn events(n: usize) -> TurnStream<'static> {
