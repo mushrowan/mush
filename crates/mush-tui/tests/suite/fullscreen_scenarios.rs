@@ -1516,6 +1516,22 @@ fn capital_h_m_and_l_move_within_the_log_window() {
 }
 
 #[test]
+fn repeating_iw_grows_a_log_selection() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('w'));
+    for c in "viwiwiw".chars() {
+        press(&mut app, KeyCode::Char(c));
+    }
+
+    let event = handle_key(&mut app, KeyEvent::from(KeyCode::Char('y')));
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "brave new"),
+        "{event:?}"
+    );
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -3358,6 +3374,49 @@ fn leaving_a_counted_insert_some_other_way_drops_the_count() {
     press(&mut app, KeyCode::Esc);
 
     assert_eq!(app.input.text, "xy");
+}
+
+#[test]
+fn repeating_iw_in_visual_mode_grows_the_selection() {
+    let mut app = composer_in_normal("one two three four");
+    type_keys(&mut app, "wviw");
+
+    type_keys(&mut app, "iw");
+    assert_eq!(tinted_text(&app), "two ");
+
+    type_keys(&mut app, "iw");
+    assert_eq!(tinted_text(&app), "two three");
+}
+
+#[test]
+fn repeating_an_inner_bracket_reaches_the_pair_outside() {
+    let mut app = composer_in_normal("f(a, (b, c), d)");
+    type_keys(&mut app, "fbvi(");
+    assert_eq!(tinted_text(&app), "b, c");
+
+    type_keys(&mut app, "i(");
+
+    assert_eq!(tinted_text(&app), "a, (b, c), d");
+}
+
+#[test]
+fn repeating_an_inner_quote_takes_the_quotes() {
+    let mut app = composer_in_normal(r#"say "hi there" now"#);
+    type_keys(&mut app, "fhvi\"");
+
+    type_keys(&mut app, "i\"");
+
+    assert_eq!(tinted_text(&app), r#""hi there""#);
+}
+
+#[test]
+fn repeating_ip_takes_in_the_blank_lines_after() {
+    let mut app = composer_in_normal("one\ntwo\n\n\nthree");
+    type_keys(&mut app, "vip");
+
+    type_keys(&mut app, "ipd");
+
+    assert_eq!(app.input.text, "three");
 }
 
 #[test]

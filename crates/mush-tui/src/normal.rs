@@ -125,9 +125,17 @@ pub(crate) fn select_object(
     object: motion::object::Object,
     count: Option<usize>,
 ) {
-    if let Some(selection) =
-        motion::object::selection(target.rows(), target.cursor(), object, count)
-    {
+    let grown = target
+        .selection()
+        .filter(|current| current.anchor != current.head)
+        .map(|current| {
+            motion::object::grow(target.rows(), (current.anchor, current.head), object, count)
+        });
+    let selection = match grown {
+        Some(grown) => grown,
+        None => motion::object::selection(target.rows(), target.cursor(), object, count),
+    };
+    if let Some(selection) = selection {
         target.select(Selection {
             anchor: selection.anchor,
             head: selection.head,

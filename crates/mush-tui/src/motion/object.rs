@@ -82,6 +82,55 @@ pub(crate) fn selection(
     }
 }
 
+pub(crate) fn grow(
+    rows: &[String],
+    (anchor, head): ((usize, usize), (usize, usize)),
+    object: Object,
+    count: Option<usize>,
+) -> Option<Selection> {
+    let text = Text::new(rows);
+    let (anchor_at, head_at) = (text.index_of(anchor)?, text.index_of(head)?);
+    let (low, high) = (anchor_at.min(head_at), anchor_at.max(head_at));
+    let backward = head_at < anchor_at;
+    let chars = |region: &Region| match region {
+        Region::Chars(range) => (!range.is_empty()).then(|| (range.start, range.end - 1)),
+        Region::Lines(lines) => Some((
+            text.starts[*lines.start()],
+            text.line_end(*lines.end()).max(text.starts[*lines.start()]),
+        )),
+    };
+    let (low, high) = match object.kind {
+        Kind::Block(..) | Kind::Tag | Kind::Quote(_) => {
+            let first = count.unwrap_or(1);
+            (first..first + 64)
+                .map_while(|level| span(rows, head, object, Some(level)))
+                .filter_map(|region| chars(&region))
+                .find(|(start, end)| {
+                    *start <= low && *end >= high && (*start < low || *end > high)
+                })?
+        }
+        Kind::Word(_) | Kind::Sentence | Kind::Paragraph => {
+            let edge = match (object.kind, backward) {
+                (Kind::Paragraph, true) => (text.line_of(low).checked_sub(1)?, 0),
+                (Kind::Paragraph, false) => (text.line_of(high) + 1, 0),
+                (_, true) => text.position(low.checked_sub(1)?),
+                (_, false) => text.position(high + 1),
+            };
+            if edge.0 >= rows.len() || high + 1 > text.len() {
+                return None;
+            }
+            let (start, end) = chars(&span(rows, edge, object, count)?)?;
+            (start.min(low), end.max(high))
+        }
+    };
+    let (anchor, head) = if backward { (high, low) } else { (low, high) };
+    Some(Selection {
+        anchor: text.position(anchor),
+        head: text.position(head),
+        linewise: object.kind == Kind::Paragraph,
+    })
+}
+
 fn words(text: &Text, at: usize, word: Word, around: bool, count: usize) -> Region {
     let line_start = text.starts[text.line_of(at)];
     let class = text.class(at, word);
@@ -702,6 +751,75 @@ mod tests {
     fn empty_and_missing_tags() {
         assert_eq!(take(&["<i></i>"], (0, 1), 't', false, 1), "");
         assert_eq!(take(&["a < b > c"], (0, 0), 't', false, 1), "None");
+    }
+
+    fn grown(
+        text: &[&str],
+        anchor: (usize, usize),
+        head: (usize, usize),
+        c: char,
+        around: bool,
+    ) -> String {
+        let rows = rows(text);
+        let joined = rows.join("\n");
+        let object = Object {
+            kind: Kind::for_char(c).unwrap_or(Kind::Word(Word::Small)),
+            around,
+        };
+        let Some(selection) = grow(&rows, (anchor, head), object, None) else {
+            return "None".into();
+        };
+        let text = Text::new(&rows);
+        let (a, h) = (
+            text.index_of(selection.anchor).unwrap_or(0),
+            text.index_of(selection.head).unwrap_or(0),
+        );
+        joined
+            .chars()
+            .skip(a.min(h))
+            .take(a.max(h) - a.min(h) + 1)
+            .collect()
+    }
+
+    #[test]
+    fn a_second_iw_takes_in_the_next_piece() {
+        assert_eq!(
+            grown(&["one two three"], (0, 4), (0, 6), 'w', false),
+            "two "
+        );
+        assert_eq!(
+            grown(&["one two three"], (0, 4), (0, 7), 'w', false),
+            "two three"
+        );
+        assert_eq!(
+            grown(&["one two three"], (0, 6), (0, 4), 'w', false),
+            " two"
+        );
+    }
+
+    #[test]
+    fn a_second_inner_bracket_reaches_the_next_pair_out() {
+        let text = ["f(a, (b, c), d)"];
+
+        assert_eq!(grown(&text, (0, 6), (0, 9), '(', false), "a, (b, c), d");
+        assert_eq!(grown(&text, (0, 5), (0, 10), '(', false), "a, (b, c), d");
+        assert_eq!(grown(&text, (0, 2), (0, 13), '(', false), "None");
+    }
+
+    #[test]
+    fn a_second_inner_quote_takes_the_quotes() {
+        assert_eq!(
+            grown(&[r#"say "hi" now"#], (0, 5), (0, 6), '"', false),
+            r#""hi""#
+        );
+    }
+
+    #[test]
+    fn a_second_tag_object_reaches_the_outer_element() {
+        let text = ["<a><b>x</b></a>"];
+
+        assert_eq!(grown(&text, (0, 6), (0, 6), 't', false), "<b>x</b>");
+        assert_eq!(grown(&text, (0, 3), (0, 10), 't', true), "<a><b>x</b></a>");
     }
 
     #[test]
