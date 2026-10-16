@@ -1420,6 +1420,36 @@ fn child_artifacts(saved: bool, session_id: &SessionId) -> Option<std::path::Pat
     saved.then(|| SessionStore::default_artifact_dir(session_id))
 }
 
+fn install_kernel_services(
+    worker: &mut mush_runtime::WorkerConfig,
+    ipython: &mush_tools::ipython::IpythonTool,
+    handler: mush_runtime::RlmHandler,
+    goal_file: Option<std::path::PathBuf>,
+    jobs_file: Option<std::path::PathBuf>,
+    notes_dir: Option<std::path::PathBuf>,
+) {
+    let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(goal_file));
+    let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(jobs_file));
+    let notes = mush_runtime::Notes::new(notes_dir);
+    let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
+    if let Some(host) = ipython.mush_host() {
+        host.set_extension(std::sync::Arc::new(
+            handler
+                .with_goal(goal.clone())
+                .with_scheduler(scheduler.clone())
+                .with_notes(notes.clone())
+                .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
+                    &worker.session_id,
+                )))
+                .with_host_commands(host_commands.clone()),
+        ));
+    }
+    worker.goal = Some(goal);
+    worker.scheduler = Some(scheduler);
+    worker.notes = Some(notes);
+    worker.host_commands = Some(host_commands);
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
@@ -1467,29 +1497,6 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 &project.skills,
                 sinks.into(),
             ));
-            let identity = mush_runtime::Identity {
-                id: Some(spec.id.clone()),
-                name: spec.name.clone(),
-                depth: spec.depth,
-            };
-            let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(None));
-            let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(None));
-            let notes =
-                mush_runtime::Notes::new(child_artifacts(seed.saver.is_some(), &session.meta.id));
-            let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
-            if let Some(host) = ipython.mush_host() {
-                host.set_extension(std::sync::Arc::new(
-                    mush_runtime::RlmHandler::new(family.clone(), identity)
-                        .with_goal(goal.clone())
-                        .with_scheduler(scheduler.clone())
-                        .with_notes(notes.clone())
-                        .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
-                            &session.meta.id,
-                        )))
-                        .with_host_commands(host_commands.clone())
-                        .with_compaction_callable(seed.compaction.agent_callable),
-                ));
-            }
             let max_depth = family.max_depth();
             let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth)
                 .spawned_by(parent_agent_name(&spec, &seed.session_dir));
@@ -1529,10 +1536,20 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 control_endpoint: None,
             };
             worker.kernel_signals = Some(signals);
-            worker.goal = Some(goal);
-            worker.scheduler = Some(scheduler);
-            worker.notes = Some(notes);
-            worker.host_commands = Some(host_commands);
+            let identity = mush_runtime::Identity {
+                id: Some(spec.id.clone()),
+                name: spec.name.clone(),
+                depth: spec.depth,
+            };
+            install_kernel_services(
+                &mut worker,
+                &ipython,
+                mush_runtime::RlmHandler::new(family.clone(), identity)
+                    .with_compaction_callable(seed.compaction.agent_callable),
+                None,
+                None,
+                child_artifacts(seed.saver.is_some(), &session.meta.id),
+            );
             worker.family_member = Some((family, spec.id.clone()));
             Ok(mush_runtime::ChildParts {
                 config: worker,
@@ -1668,38 +1685,24 @@ fn worker_config(
             Some(child_factory(seed)),
             artifacts.as_ref().map(|dir| dir.join("subagents.json")),
         );
-        let goal = std::sync::Arc::new(mush_runtime::GoalStore::new(
+        let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
+            .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
+        if !cli.no_session {
+            handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
+        }
+        install_kernel_services(
+            &mut worker,
+            ipython,
+            handler,
             artifacts.as_ref().map(|dir| dir.join("goal.json")),
-        ));
-        let scheduler = std::sync::Arc::new(mush_runtime::Scheduler::new(
             artifacts
                 .as_ref()
                 .map(|dir| dir.join("scheduled-jobs.json")),
-        ));
-        let notes = mush_runtime::Notes::new(artifacts.clone());
-        let host_commands = std::sync::Arc::new(mush_runtime::HostCommands::default());
-        if let Some(host) = ipython.mush_host() {
-            let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
-                .with_goal(goal.clone())
-                .with_scheduler(scheduler.clone())
-                .with_notes(notes.clone())
-                .with_harness(std::sync::Arc::new(mush_runtime::HarnessStore::new(
-                    &session.meta.id,
-                )))
-                .with_host_commands(host_commands.clone())
-                .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
-            if !cli.no_session {
-                handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
-            }
-            host.set_extension(std::sync::Arc::new(handler));
-        }
+            artifacts.clone(),
+        );
         worker.agent_inbox = Some(family.root_inbox());
         worker.observe_inbox = Some(family.root_observe_inbox());
         worker.family = Some(family);
-        worker.goal = Some(goal);
-        worker.scheduler = Some(scheduler);
-        worker.notes = Some(notes);
-        worker.host_commands = Some(host_commands);
     }
     let role = setup::RlmRole {
         depth: worker.rlm_depth,
