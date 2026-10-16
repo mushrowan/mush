@@ -63,14 +63,19 @@
       cargoExtraArgs = commonArgs.cargoExtraArgs + " --bin mush-config-schema";
       doCheck = false;
     });
-in {
-  inherit cargoArtifacts;
 
   package = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
       doCheck = false;
-      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.makeWrapper];
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.makeWrapper pkgs.installShellFiles];
+      postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+        installShellCompletion --cmd mush \
+          --bash <($out/bin/mush completions bash) \
+          --fish <($out/bin/mush completions fish) \
+          --nushell <($out/bin/mush completions nushell) \
+          --zsh <($out/bin/mush completions zsh)
+      '';
       postFixup = ''
         wrapProgram $out/bin/mush \
           ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "--prefix PATH : ${pkgs.lib.makeBinPath [pkgs.libnotify]}"} \
@@ -78,6 +83,40 @@ in {
       '';
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
     });
+in {
+  inherit cargoArtifacts package;
+
+  completionsCheck = pkgs.runCommand "mush-completions-check" {} ''
+    share=${package}/share
+    export HOME=$TMPDIR
+    mkdir bin
+    printf '#!${pkgs.runtimeShell}\n' > bin/mush
+    chmod +x bin/mush
+    export PATH=$PWD/bin:$PATH
+
+    XDG_DATA_DIRS=$share ${pkgs.lib.getExe pkgs.bashInteractive} --norc --noprofile -c '
+      source ${pkgs.bash-completion}/share/bash-completion/bash_completion
+      _comp_load mush
+      COMP_WORDS=(mush comp) COMP_CWORD=1
+      _mush mush comp mush
+      [[ "''${COMPREPLY[*]}" == completions ]]
+    '
+    ${pkgs.lib.getExe pkgs.zsh} -f -c "
+      fpath=($share/zsh/site-functions \$fpath)
+      autoload -U compinit && compinit -u -D
+      [[ \$_comps[mush] == _mush ]]
+    "
+    ${pkgs.lib.getExe pkgs.fish} --no-config -c "
+      set -g fish_complete_path $share/fish/vendor_completions.d
+      complete -C 'mush comp' | string match -q 'completions*'
+    "
+    ${pkgs.lib.getExe pkgs.nushell} --no-config-file -c "
+      source $share/nushell/vendor/autoload/mush.nu
+      mush --resume
+      mush --resume abc
+    "
+    touch $out
+  '';
 
   clippy = craneLib.cargoClippy (commonArgs
     // {
