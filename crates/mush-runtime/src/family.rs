@@ -1231,31 +1231,7 @@ impl Family {
             ClientEvent::Agent {
                 event: AgentEvent::MessageEnd { message },
                 ..
-            } => {
-                let text = message.text();
-                let usage = message.usage;
-                let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
-                let tokens = usage.total_input_tokens().get();
-                self.record_update(id, |child| {
-                    child.streaming = false;
-                    if !text.trim().is_empty() {
-                        child.answer = Some(text);
-                    }
-                    if tokens > 0 {
-                        child.record_context(tokens, model);
-                    }
-                    child.usage.input_tokens += usage.input_tokens;
-                    child.usage.output_tokens += usage.output_tokens;
-                    child.usage.cache_read_tokens += usage.cache_read_tokens;
-                    child.usage.cache_write_tokens += usage.cache_write_tokens;
-                    if let Some(cost) = cost {
-                        child.cost.input += cost.input;
-                        child.cost.output += cost.output;
-                        child.cost.cache_read += cost.cache_read;
-                        child.cost.cache_write += cost.cache_write;
-                    }
-                });
-            }
+            } => self.record_reply(id, message, model),
             ClientEvent::Agent {
                 event: AgentEvent::ContextCompacted { compaction, .. },
                 ..
@@ -1315,6 +1291,37 @@ impl Family {
             }
             _ => {}
         }
+    }
+
+    fn record_reply(
+        &self,
+        id: &str,
+        message: &mush_ai::types::AssistantMessage,
+        model: Option<&mush_ai::types::Model>,
+    ) {
+        let text = message.text();
+        let usage = message.usage;
+        let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
+        let tokens = usage.total_input_tokens().get();
+        self.record_update(id, |child| {
+            child.streaming = false;
+            if !text.trim().is_empty() {
+                child.answer = Some(text);
+            }
+            if tokens > 0 {
+                child.record_context(tokens, model);
+            }
+            child.usage.input_tokens += usage.input_tokens;
+            child.usage.output_tokens += usage.output_tokens;
+            child.usage.cache_read_tokens += usage.cache_read_tokens;
+            child.usage.cache_write_tokens += usage.cache_write_tokens;
+            if let Some(cost) = cost {
+                child.cost.input += cost.input;
+                child.cost.output += cost.output;
+                child.cost.cache_read += cost.cache_read;
+                child.cost.cache_write += cost.cache_write;
+            }
+        });
     }
 
     pub async fn collect(
