@@ -68,10 +68,8 @@ fn push_rebuilt_user_message(app: &mut App, user: &mush_ai::types::UserMessage) 
     let text = user.text();
     if let Some(body) = extract_compaction_summary(&text) {
         app.push_system_message(format_compaction_banner(&body));
-    } else if mush_session::harness::extract_digest(&text).is_some()
-        || mush_runtime::notes::extract(&text).is_some()
+    } else if mush_session::compact::is_regenerated_text(&text)
         || mush_runtime::kernel_notice::is_notice(&text)
-        || mush_session::brief::is_restated(&text)
     {
     } else if mush_session::harness::is_refinement_notice(&text) {
         app.push_system_message(text);

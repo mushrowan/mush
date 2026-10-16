@@ -1044,13 +1044,14 @@ fn summariser_input(messages: &[Message]) -> Vec<Message> {
 }
 
 fn is_regenerated(message: &Message) -> bool {
-    let Message::User(user) = message else {
-        return false;
-    };
-    let text = user.text();
-    crate::harness::extract_digest(&text).is_some()
-        || crate::notes::extract(&text).is_some()
-        || crate::brief::is_restated(&text)
+    matches!(message, Message::User(user) if is_regenerated_text(&user.text()))
+}
+
+#[must_use]
+pub fn is_regenerated_text(text: &str) -> bool {
+    crate::harness::extract_digest(text).is_some()
+        || crate::notes::extract(text).is_some()
+        || crate::brief::is_restated(text)
 }
 
 fn fallback_summary_from_reason(
