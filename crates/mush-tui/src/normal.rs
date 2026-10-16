@@ -75,6 +75,7 @@ pub(crate) trait NormalTarget {
     fn select(&mut self, selection: Selection);
     fn selection(&self) -> Option<Selection>;
     fn swap_selection_ends(&mut self);
+    fn visible_lines(&self) -> (usize, usize);
 
     fn to_top(&mut self) {
         self.place_cursor((0, 0));
@@ -135,6 +136,32 @@ pub(crate) fn select_object(
                 SelectionKind::Char
             },
         });
+    }
+}
+
+pub(crate) fn resolve_screen(
+    command: keys::Command,
+    target: &impl NormalTarget,
+    count: Option<usize>,
+) -> keys::Command {
+    let resolve = |motion| {
+        let Motion::Screen(screen) = motion else {
+            return motion;
+        };
+        let (top, bottom) = target.visible_lines();
+        let skip = count.unwrap_or(1) - 1;
+        Motion::Line(match screen {
+            motion::Screen::Top => (top + skip).min(bottom),
+            motion::Screen::Middle => top + (bottom - top) / 2,
+            motion::Screen::Bottom => bottom.saturating_sub(skip).max(top),
+        })
+    };
+    match command {
+        keys::Command::Move(motion) => keys::Command::Move(resolve(motion)),
+        keys::Command::Operate(operator, keys::Target::Motion(motion)) => {
+            keys::Command::Operate(operator, keys::Target::Motion(resolve(motion)))
+        }
+        command => command,
     }
 }
 
@@ -251,6 +278,10 @@ impl NormalTarget for LogTarget<'_> {
 
     fn swap_selection_ends(&mut self) {
         self.viewport.swap_selection_ends();
+    }
+
+    fn visible_lines(&self) -> (usize, usize) {
+        self.viewport.visible_lines()
     }
 
     fn to_top(&mut self) {
@@ -370,6 +401,26 @@ impl NormalTarget for ComposerTarget<'_> {
         if let Some(anchor) = self.input.anchor.replace(self.input.cursor) {
             self.input.cursor = anchor;
         }
+    }
+
+    fn visible_lines(&self) -> (usize, usize) {
+        let last = self.rows.len().saturating_sub(1);
+        let width = usize::from(self.input.area.get().width.saturating_sub(2));
+        let height = usize::from(self.input.visible_lines.get());
+        if width == 0 || height == 0 {
+            return (0, last);
+        }
+        let layout = self.input.layout(width);
+        let Some(final_row) = layout.wrapped_lines.len().checked_sub(1) else {
+            return (0, last);
+        };
+        let scroll = usize::from(self.input.scroll.get());
+        let line_at = |row: usize| {
+            layout.expanded.text[..layout.wrapped_lines[row.min(final_row)].start]
+                .matches('\n')
+                .count()
+        };
+        (line_at(scroll), line_at(scroll + height - 1))
     }
 }
 

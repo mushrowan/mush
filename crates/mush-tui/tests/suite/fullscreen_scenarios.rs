@@ -1496,6 +1496,26 @@ fn slash_searches_the_log() {
 }
 
 #[test]
+fn capital_h_m_and_l_move_within_the_log_window() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    let last_row = u16::try_from(app.viewport.page() - 1).unwrap_or(0);
+
+    press_with(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT);
+    assert_eq!(app.viewport.cursor_row(), 0);
+
+    press_with(&mut app, KeyCode::Char('L'), KeyModifiers::SHIFT);
+    assert_eq!(app.viewport.cursor_row(), last_row);
+
+    press_with(&mut app, KeyCode::Char('M'), KeyModifiers::SHIFT);
+    assert_eq!(app.viewport.cursor_row(), last_row / 2);
+
+    press(&mut app, KeyCode::Char('3'));
+    press_with(&mut app, KeyCode::Char('H'), KeyModifiers::SHIFT);
+    assert_eq!(app.viewport.cursor_row(), 2);
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -3228,6 +3248,48 @@ fn the_search_being_typed_shows_under_the_composer() {
 
     let shown = rows(&app, 80, SCREEN);
     assert!(shown.iter().any(|row| row.contains("/tw")), "{shown:#?}");
+}
+
+fn composer_line(app: &App) -> usize {
+    app.input.text[..app.input.cursor].matches('\n').count()
+}
+
+#[test]
+fn capital_h_m_and_l_reach_the_top_middle_and_bottom_composer_lines() {
+    let mut app = composer_in_normal("a\nb\nc\nd\ne");
+
+    type_keys(&mut app, "L");
+    assert_eq!(composer_line(&app), 4);
+
+    type_keys(&mut app, "M");
+    assert_eq!(composer_line(&app), 2);
+
+    type_keys(&mut app, "2H");
+    assert_eq!(composer_line(&app), 1);
+
+    type_keys(&mut app, "dL");
+    assert_eq!(app.input.text, "a");
+}
+
+#[test]
+fn capital_h_and_l_follow_a_scrolled_composer() {
+    let text = (0..40)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut app = composer_in_normal(&text);
+    rows(&app, 80, SCREEN);
+    type_keys(&mut app, "G");
+    rows(&app, 80, SCREEN);
+    let top = usize::from(app.input.scroll.get());
+    let shown = usize::from(app.input.visible_lines.get());
+    assert!(top > 0, "the composer scrolled");
+
+    type_keys(&mut app, "H");
+    assert_eq!(composer_line(&app), top);
+
+    type_keys(&mut app, "L");
+    assert_eq!(composer_line(&app), top + shown - 1);
 }
 
 #[test]

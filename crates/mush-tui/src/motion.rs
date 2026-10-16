@@ -29,6 +29,15 @@ pub(crate) enum Motion {
     Jump { to: (usize, usize), linewise: bool },
     Search { reverse: bool },
     SearchWord { forward: bool },
+    Screen(Screen),
+    Line(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Screen {
+    Top,
+    Middle,
+    Bottom,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -587,7 +596,11 @@ pub(crate) fn destination(
             };
             Some((line, column))
         }
-        Motion::Mark { .. } | Motion::Search { .. } | Motion::SearchWord { .. } => None,
+        Motion::Line(line) => Some((line.min(rows.len().saturating_sub(1)), column)),
+        Motion::Mark { .. }
+        | Motion::Search { .. }
+        | Motion::SearchWord { .. }
+        | Motion::Screen(_) => None,
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
 }
@@ -655,7 +668,11 @@ pub(crate) fn span(
         Motion::MatchPair => (text.matching_pair(from)?, true),
         Motion::Jump { to, linewise: true } => return lines(to.0.min(last)),
         Motion::Jump { to, .. } => (text.index_of((to.0.min(last), to.1))?, false),
-        Motion::Mark { .. } | Motion::Search { .. } | Motion::SearchWord { .. } => return None,
+        Motion::Line(target) => return lines(target.min(last)),
+        Motion::Mark { .. }
+        | Motion::Search { .. }
+        | Motion::SearchWord { .. }
+        | Motion::Screen(_) => return None,
         Motion::ParagraphForward | Motion::ParagraphBack => {
             let forward = motion == Motion::ParagraphForward;
             let edge = paragraph_edge(rows, line, forward, times)?;

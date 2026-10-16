@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keybinds::{Action, KeyMap, KeyScope};
 use crate::motion::object::{Kind, Object};
-use crate::motion::{Find, Motion, Word};
+use crate::motion::{Find, Motion, Screen, Word};
 
 const SCROLLS: &[(Action, Scroll)] = &[
     (Action::LineUp, Scroll::LineUp),
@@ -42,6 +42,9 @@ const MOTIONS: &[(Action, Motion)] = &[
         Action::SearchWordBack,
         Motion::SearchWord { forward: false },
     ),
+    (Action::ScreenTop, Motion::Screen(Screen::Top)),
+    (Action::ScreenMiddle, Motion::Screen(Screen::Middle)),
+    (Action::ScreenBottom, Motion::Screen(Screen::Bottom)),
 ];
 
 const FINDS: &[(Action, bool, bool)] = &[

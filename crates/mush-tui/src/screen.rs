@@ -333,6 +333,11 @@ impl Viewport {
             .unwrap_or(0)
     }
 
+    pub(crate) fn visible_lines(&self) -> (usize, usize) {
+        let top = self.scroll_top.get();
+        (top, self.window_end().saturating_sub(1).max(top))
+    }
+
     fn window_end(&self) -> usize {
         self.total.get().min(self.scroll_top.get() + self.page())
     }

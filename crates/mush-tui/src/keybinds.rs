@@ -206,6 +206,9 @@ pub enum Action {
     SearchBack,
     SearchWordForward,
     SearchWordBack,
+    ScreenTop,
+    ScreenMiddle,
+    ScreenBottom,
 }
 
 impl Action {
@@ -308,6 +311,9 @@ impl Action {
             Self::SearchBack => "search_back",
             Self::SearchWordForward => "search_word_forward",
             Self::SearchWordBack => "search_word_back",
+            Self::ScreenTop => "screen_top",
+            Self::ScreenMiddle => "screen_middle",
+            Self::ScreenBottom => "screen_bottom",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -414,6 +420,9 @@ impl Action {
         Self::SearchBack,
         Self::SearchWordForward,
         Self::SearchWordBack,
+        Self::ScreenTop,
+        Self::ScreenMiddle,
+        Self::ScreenBottom,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -614,7 +623,10 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::SearchForward
         | Action::SearchBack
         | Action::SearchWordForward
-        | Action::SearchWordBack => KeyScope::Normal,
+        | Action::SearchWordBack
+        | Action::ScreenTop
+        | Action::ScreenMiddle
+        | Action::ScreenBottom => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1297,6 +1309,21 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::SearchPrev,
         &[(KeyCode::Char('N'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ScreenTop,
+        &[(KeyCode::Char('H'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ScreenMiddle,
+        &[(KeyCode::Char('M'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ScreenBottom,
+        &[(KeyCode::Char('L'), KeyModifiers::SHIFT)],
     ),
 ];
 
