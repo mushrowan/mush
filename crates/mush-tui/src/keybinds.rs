@@ -202,6 +202,10 @@ pub enum Action {
     GotoMark,
     GotoMarkLine,
     SelectRegister,
+    SearchForward,
+    SearchBack,
+    SearchWordForward,
+    SearchWordBack,
 }
 
 impl Action {
@@ -300,6 +304,10 @@ impl Action {
             Self::GotoMark => "goto_mark",
             Self::GotoMarkLine => "goto_mark_line",
             Self::SelectRegister => "select_register",
+            Self::SearchForward => "search_forward",
+            Self::SearchBack => "search_back",
+            Self::SearchWordForward => "search_word_forward",
+            Self::SearchWordBack => "search_word_back",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -402,6 +410,10 @@ impl Action {
         Self::GotoMark,
         Self::GotoMarkLine,
         Self::SelectRegister,
+        Self::SearchForward,
+        Self::SearchBack,
+        Self::SearchWordForward,
+        Self::SearchWordBack,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -598,7 +610,11 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::SetMark
         | Action::GotoMark
         | Action::GotoMarkLine
-        | Action::SelectRegister => KeyScope::Normal,
+        | Action::SelectRegister
+        | Action::SearchForward
+        | Action::SearchBack
+        | Action::SearchWordForward
+        | Action::SearchWordBack => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1251,6 +1267,36 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::SelectRegister,
         &[(KeyCode::Char('"'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchForward,
+        &[(KeyCode::Char('/'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchBack,
+        &[(KeyCode::Char('?'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchWordForward,
+        &[(KeyCode::Char('*'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchWordBack,
+        &[(KeyCode::Char('#'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchNext,
+        &[(KeyCode::Char('n'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SearchPrev,
+        &[(KeyCode::Char('N'), KeyModifiers::SHIFT)],
     ),
 ];
 

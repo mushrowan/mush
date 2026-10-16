@@ -206,6 +206,19 @@ fn execute(app: &mut App, order: Order) -> Option<AppEvent> {
         return None;
     };
     let (count, register) = (order.count, order.register);
+    let command = if super::wants_search(command) {
+        let rows = rows(&app.input.text);
+        let at = composer_position(&app.input);
+        match super::resolve_search(command, &mut app.interaction.normal.keys, &rows, at, count) {
+            Ok(command) => command,
+            Err(message) => {
+                app.status = Some(message.into());
+                return None;
+            }
+        }
+    } else {
+        command
+    };
     match command {
         Command::Move(motion) => {
             let mut target = ComposerTarget::new(&mut app.input);

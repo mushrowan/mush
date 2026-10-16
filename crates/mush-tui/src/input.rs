@@ -964,6 +964,26 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         app.status = Some("mark not set".into());
         return;
     };
+    let command = if crate::normal::wants_search(command) {
+        let rows = crate::selection::transcript_rows(app);
+        let cursor = app.viewport.cursor();
+        let at = (cursor.line, cursor.column);
+        match crate::normal::resolve_search(
+            command,
+            &mut app.interaction.normal.keys,
+            &rows,
+            at,
+            count,
+        ) {
+            Ok(command) => command,
+            Err(message) => {
+                app.status = Some(message.into());
+                return;
+            }
+        }
+    } else {
+        command
+    };
     let scroll = match command {
         Command::Move(motion) => {
             let mut target = crate::normal::LogTarget::new(app);

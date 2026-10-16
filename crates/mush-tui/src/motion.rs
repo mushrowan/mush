@@ -27,6 +27,8 @@ pub(crate) enum Motion {
     ParagraphBack,
     Mark { name: char, exact: bool },
     Jump { to: (usize, usize), linewise: bool },
+    Search { reverse: bool },
+    SearchWord { forward: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +420,62 @@ impl Text {
     }
 }
 
+pub(crate) fn search(
+    rows: &[String],
+    at: (usize, usize),
+    pattern: &str,
+    forward: bool,
+    count: usize,
+) -> Option<(usize, usize)> {
+    let regex = regex::Regex::new(&pattern.replace("\\<", "\\b").replace("\\>", "\\b"))
+        .or_else(|_| regex::Regex::new(&regex::escape(pattern)))
+        .ok()?;
+    let text = rows.join("\n");
+    let starts: Vec<usize> = regex.find_iter(&text).map(|found| found.start()).collect();
+    let mut from = byte_of(rows, at);
+    for _ in 0..count {
+        from = if forward {
+            starts
+                .iter()
+                .copied()
+                .find(|start| *start > from)
+                .or_else(|| starts.first().copied())?
+        } else {
+            starts
+                .iter()
+                .copied()
+                .rev()
+                .find(|start| *start < from)
+                .or_else(|| starts.last().copied())?
+        };
+    }
+    let line = text[..from].matches('\n').count();
+    let line_start = text[..from].rfind('\n').map_or(0, |at| at + 1);
+    Some((line, text[line_start..from].chars().count()))
+}
+
+pub(crate) fn word_pattern(rows: &[String], (line, column): (usize, usize)) -> Option<String> {
+    let chars: Vec<char> = rows.get(line)?.chars().collect();
+    let keyword = |c: &char| c.is_alphanumeric() || *c == '_';
+    let start = (column..chars.len()).find(|i| keyword(&chars[*i]))?;
+    let start = (0..=start)
+        .rev()
+        .take_while(|i| keyword(&chars[*i]))
+        .last()?;
+    let word: String = chars[start..].iter().take_while(|c| keyword(c)).collect();
+    Some(format!("\\b{}\\b", regex::escape(&word)))
+}
+
+fn byte_of(rows: &[String], (line, column): (usize, usize)) -> usize {
+    let before: usize = rows.iter().take(line).map(|row| row.len() + 1).sum();
+    let row = rows.get(line).map_or("", String::as_str);
+    before
+        + row
+            .char_indices()
+            .nth(column)
+            .map_or(row.len(), |(byte, _)| byte)
+}
+
 fn blank(row: &str) -> bool {
     row.chars().all(char::is_whitespace)
 }
@@ -529,7 +587,7 @@ pub(crate) fn destination(
             };
             Some((line, column))
         }
-        Motion::Mark { .. } => None,
+        Motion::Mark { .. } | Motion::Search { .. } | Motion::SearchWord { .. } => None,
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
 }
@@ -597,7 +655,7 @@ pub(crate) fn span(
         Motion::MatchPair => (text.matching_pair(from)?, true),
         Motion::Jump { to, linewise: true } => return lines(to.0.min(last)),
         Motion::Jump { to, .. } => (text.index_of((to.0.min(last), to.1))?, false),
-        Motion::Mark { .. } => return None,
+        Motion::Mark { .. } | Motion::Search { .. } | Motion::SearchWord { .. } => return None,
         Motion::ParagraphForward | Motion::ParagraphBack => {
             let forward = motion == Motion::ParagraphForward;
             let edge = paragraph_edge(rows, line, forward, times)?;
@@ -1082,6 +1140,46 @@ mod tests {
             chars(&["one", "  two three"], (0, 1), exact, 1),
             "ne\n  two "
         );
+    }
+
+    #[test]
+    fn search_finds_the_next_match_and_wraps() {
+        let rows = rows(&["one two one", "two one"]);
+
+        assert_eq!(search(&rows, (0, 0), "one", true, 1), Some((0, 8)));
+        assert_eq!(search(&rows, (0, 8), "one", true, 1), Some((1, 4)));
+        assert_eq!(search(&rows, (1, 4), "one", true, 1), Some((0, 0)));
+        assert_eq!(search(&rows, (0, 0), "one", true, 2), Some((1, 4)));
+    }
+
+    #[test]
+    fn search_backward_wraps_to_the_end() {
+        let rows = rows(&["one two one", "two one"]);
+
+        assert_eq!(search(&rows, (0, 8), "one", false, 1), Some((0, 0)));
+        assert_eq!(search(&rows, (0, 0), "one", false, 1), Some((1, 4)));
+    }
+
+    #[test]
+    fn a_search_is_a_regex_unless_it_cannot_be_one() {
+        let rows = rows(&["a1 b22 call(x"]);
+
+        assert_eq!(search(&rows, (0, 0), "b\\d+", true, 1), Some((0, 3)));
+        assert_eq!(search(&rows, (0, 0), "call(", true, 1), Some((0, 7)));
+        assert_eq!(search(&rows, (0, 0), "\\<call\\>", true, 1), Some((0, 7)));
+        assert_eq!(search(&rows, (0, 0), "nothing", true, 1), None);
+    }
+
+    #[test]
+    fn the_word_under_the_caret_becomes_a_whole_word_pattern() {
+        let line = rows(&["foo foobar foo.x"]);
+        let dots = rows(&["  ..."]);
+
+        let pattern = word_pattern(&line, (0, 1)).unwrap_or_default();
+        assert_eq!(pattern, "\\bfoo\\b");
+        assert_eq!(search(&line, (0, 0), &pattern, true, 1), Some((0, 11)));
+        assert_eq!(word_pattern(&line, (0, 3)).as_deref(), Some("\\bfoobar\\b"));
+        assert_eq!(word_pattern(&dots, (0, 0)), None);
     }
 
     #[test]

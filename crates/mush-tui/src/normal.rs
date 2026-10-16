@@ -138,6 +138,59 @@ pub(crate) fn select_object(
     }
 }
 
+pub(crate) fn wants_search(command: keys::Command) -> bool {
+    matches!(
+        command,
+        keys::Command::Move(Motion::Search { .. } | Motion::SearchWord { .. })
+            | keys::Command::Operate(
+                _,
+                keys::Target::Motion(Motion::Search { .. } | Motion::SearchWord { .. })
+            )
+    )
+}
+
+pub(crate) fn resolve_search(
+    command: keys::Command,
+    keys: &mut keys::Keys,
+    rows: &[String],
+    at: (usize, usize),
+    count: Option<usize>,
+) -> Result<keys::Command, String> {
+    let motion = match command {
+        keys::Command::Move(motion) | keys::Command::Operate(_, keys::Target::Motion(motion)) => {
+            motion
+        }
+        command => return Ok(command),
+    };
+    let (pattern, forward) = match motion {
+        Motion::Search { reverse } => {
+            let search = keys.last_search().ok_or("no earlier search")?;
+            (search.pattern.clone(), search.forward != reverse)
+        }
+        Motion::SearchWord { forward } => {
+            let pattern = motion::word_pattern(rows, at).ok_or("no word under the cursor")?;
+            keys.remember_search(keys::Search {
+                pattern: pattern.clone(),
+                forward,
+            });
+            (pattern, forward)
+        }
+        _ => return Ok(command),
+    };
+    let to = motion::search(rows, at, &pattern, forward, count.unwrap_or(1))
+        .ok_or_else(|| format!("pattern not found: {pattern}"))?;
+    let jump = Motion::Jump {
+        to,
+        linewise: false,
+    };
+    Ok(match command {
+        keys::Command::Operate(operator, _) => {
+            keys::Command::Operate(operator, keys::Target::Motion(jump))
+        }
+        _ => keys::Command::Move(jump),
+    })
+}
+
 pub(crate) struct LogTarget<'a> {
     rows: std::cell::OnceCell<Vec<String>>,
     app: &'a crate::app::App,

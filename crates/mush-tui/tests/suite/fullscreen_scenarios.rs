@@ -1487,6 +1487,15 @@ fn marks_hold_a_place_in_the_log() {
 }
 
 #[test]
+fn slash_searches_the_log() {
+    let mut app = log_on("hello brave new world");
+
+    search_for(&mut app, '/', "new");
+
+    assert_eq!(caret(&app), Some((13, 6)));
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -3121,6 +3130,104 @@ fn a_register_works_on_a_composer_selection() {
     type_keys(&mut app, "\"bP");
 
     assert_eq!(app.input.text, "twone two");
+}
+
+fn search_for(app: &mut App, slash: char, pattern: &str) {
+    press(app, KeyCode::Char(slash));
+    for c in pattern.chars() {
+        press(app, KeyCode::Char(c));
+    }
+    press(app, KeyCode::Enter);
+}
+
+#[test]
+fn slash_finds_the_next_match_and_n_and_capital_n_move_between_them() {
+    let mut app = composer_in_normal("one two one\ntwo one");
+
+    search_for(&mut app, '/', "one");
+    assert_eq!(app.input.cursor, 8);
+
+    type_keys(&mut app, "n");
+    assert_eq!(app.input.cursor, 16);
+
+    type_keys(&mut app, "n");
+    assert_eq!(app.input.cursor, 0, "the search wraps around");
+
+    type_keys(&mut app, "N");
+    assert_eq!(app.input.cursor, 16);
+}
+
+#[test]
+fn question_mark_searches_backward() {
+    let mut app = composer_in_normal("one two one");
+    type_keys(&mut app, "$");
+
+    search_for(&mut app, '?', "one");
+    assert_eq!(app.input.cursor, 8);
+
+    type_keys(&mut app, "n");
+    assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn d_slash_deletes_up_to_the_match() {
+    let mut app = composer_in_normal("keep this but not that");
+    type_keys(&mut app, "w");
+
+    press(&mut app, KeyCode::Char('d'));
+    search_for(&mut app, '/', "not");
+
+    assert_eq!(app.input.text, "keep not that");
+}
+
+#[test]
+fn star_and_hash_search_for_the_whole_word_under_the_caret() {
+    let mut app = composer_in_normal("foo foobar foo baz foo");
+
+    type_keys(&mut app, "*");
+    assert_eq!(app.input.cursor, 11);
+
+    type_keys(&mut app, "n");
+    assert_eq!(app.input.cursor, 19);
+
+    type_keys(&mut app, "#");
+    assert_eq!(app.input.cursor, 11);
+}
+
+#[test]
+fn a_missing_pattern_leaves_the_caret_and_says_so() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "w");
+
+    search_for(&mut app, '/', "zzz");
+
+    assert_eq!(app.input.cursor, 4);
+    assert_eq!(
+        app.status.as_ref().map(|status| status.text.as_str()),
+        Some("pattern not found: zzz")
+    );
+}
+
+#[test]
+fn esc_abandons_a_half_typed_search() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "/tw");
+
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "w");
+
+    assert_eq!(app.input.cursor, 4);
+    assert!(!app.interaction.focus.is_log());
+}
+
+#[test]
+fn the_search_being_typed_shows_under_the_composer() {
+    let mut app = composer_in_normal("one two");
+
+    type_keys(&mut app, "/tw");
+
+    let shown = rows(&app, 80, SCREEN);
+    assert!(shown.iter().any(|row| row.contains("/tw")), "{shown:#?}");
 }
 
 #[test]

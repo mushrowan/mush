@@ -32,6 +32,16 @@ const MOTIONS: &[(Action, Motion)] = &[
     (Action::MatchPair, Motion::MatchPair),
     (Action::ParagraphForward, Motion::ParagraphForward),
     (Action::ParagraphBack, Motion::ParagraphBack),
+    (Action::SearchNext, Motion::Search { reverse: false }),
+    (Action::SearchPrev, Motion::Search { reverse: true }),
+    (
+        Action::SearchWordForward,
+        Motion::SearchWord { forward: true },
+    ),
+    (
+        Action::SearchWordBack,
+        Motion::SearchWord { forward: false },
+    ),
 ];
 
 const FINDS: &[(Action, bool, bool)] = &[
@@ -40,6 +50,8 @@ const FINDS: &[(Action, bool, bool)] = &[
     (Action::TillChar, true, true),
     (Action::TillCharBack, false, true),
 ];
+
+const SEARCHES: &[(Action, bool)] = &[(Action::SearchForward, true), (Action::SearchBack, false)];
 
 const MARK_JUMPS: &[(Action, bool)] = &[(Action::GotoMark, true), (Action::GotoMarkLine, false)];
 
@@ -205,6 +217,13 @@ enum Prefix {
     SetMark,
     Mark { exact: bool },
     Register,
+    Search { forward: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Search {
+    pub(crate) pattern: String,
+    pub(crate) forward: bool,
 }
 
 enum Reach {
@@ -220,7 +239,9 @@ pub(crate) struct Keys {
     operator: Option<(Operator, Option<usize>)>,
     prefix: Option<Prefix>,
     register: Option<char>,
+    prompt: String,
     last_find: Option<Find>,
+    last_search: Option<Search>,
 }
 
 impl Keys {
@@ -234,7 +255,27 @@ impl Keys {
         self.operator = None;
         self.prefix = None;
         self.register = None;
+        self.prompt.clear();
         pending
+    }
+
+    pub(crate) fn prompt(&self) -> Option<String> {
+        let Some(Prefix::Search { forward }) = self.prefix else {
+            return None;
+        };
+        Some(format!(
+            "{}{}",
+            if forward { '/' } else { '?' },
+            self.prompt
+        ))
+    }
+
+    pub(crate) fn last_search(&self) -> Option<&Search> {
+        self.last_search.as_ref()
+    }
+
+    pub(crate) fn remember_search(&mut self, search: Search) {
+        self.last_search = Some(search);
     }
 
     pub(crate) fn feed(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
@@ -247,6 +288,9 @@ impl Keys {
 
     fn step(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
         let bound = |action| keymap.matches_in(KeyScope::Normal, action, key);
+        if let Some(Prefix::Search { forward }) = self.prefix {
+            return self.type_search(key, forward);
+        }
         if let Some(prefix) = self.prefix.take() {
             return match self.complete(prefix, key, bound) {
                 Some(Reach::Register(name)) => {
@@ -276,6 +320,10 @@ impl Keys {
                 forward: *forward,
                 till: *till,
             });
+            return Step::Pending;
+        }
+        if let Some((_, forward)) = SEARCHES.iter().find(|(action, _)| bound(*action)) {
+            self.prefix = Some(Prefix::Search { forward: *forward });
             return Step::Pending;
         }
         if let Some((_, exact)) = MARK_JUMPS.iter().find(|(action, _)| bound(*action)) {
@@ -381,6 +429,30 @@ impl Keys {
         None
     }
 
+    fn type_search(&mut self, key: KeyEvent, forward: bool) -> Step {
+        if crate::keybinds::is_plain_enter(key) {
+            self.prefix = None;
+            let pattern = std::mem::take(&mut self.prompt);
+            match (pattern.is_empty(), self.last_search.as_mut()) {
+                (false, _) => self.last_search = Some(Search { pattern, forward }),
+                (true, Some(last)) => last.forward = forward,
+                (true, None) => return Step::Dropped,
+            }
+            return self.reach(Motion::Search { reverse: false });
+        }
+        if crate::keybinds::is_backspace(key) {
+            return if self.prompt.pop().is_some() {
+                Step::Pending
+            } else {
+                Step::Dropped
+            };
+        }
+        if let Some(c) = crate::keybinds::typed_char(key) {
+            self.prompt.push(c);
+        }
+        Step::Pending
+    }
+
     fn reach(&mut self, motion: Motion) -> Step {
         match self.operator {
             Some((operator, _)) => self.run(Command::Operate(operator, Target::Motion(motion))),
@@ -436,6 +508,7 @@ impl Keys {
                 name: crate::keybinds::typed_char(key)?,
                 exact,
             },
+            Prefix::Search { .. } => return None,
             Prefix::Register => {
                 return match crate::keybinds::typed_char(key)? {
                     '"' => Some(Reach::Register(None)),
@@ -1044,6 +1117,103 @@ mod tests {
                 count: None,
                 register: Some('+'),
             })
+        );
+    }
+
+    fn typed(keys: &mut Keys, text: &str) -> Step {
+        let keymap = KeyMap::default();
+        let mut step = Step::Dropped;
+        for c in text.chars() {
+            step = keys.feed(&keymap, KeyEvent::from(KeyCode::Char(c)), Context::COMPOSER);
+        }
+        step
+    }
+
+    #[test]
+    fn slash_types_a_pattern_until_enter() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+
+        assert_eq!(typed(&mut keys, "d/fo"), Step::Pending);
+        assert_eq!(keys.prompt().as_deref(), Some("/fo"));
+        let step = keys.feed(&keymap, KeyEvent::from(KeyCode::Enter), Context::COMPOSER);
+
+        assert_eq!(
+            step,
+            ran(
+                operate(
+                    Operator::Delete,
+                    Target::Motion(Motion::Search { reverse: false })
+                ),
+                None
+            )
+        );
+        assert_eq!(
+            keys.last_search(),
+            Some(&Search {
+                pattern: "fo".into(),
+                forward: true
+            })
+        );
+        assert_eq!(keys.prompt(), None);
+    }
+
+    #[test]
+    fn backspace_edits_the_pattern_and_leaves_when_it_is_empty() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        typed(&mut keys, "?ab");
+        let backspace = KeyEvent::from(KeyCode::Backspace);
+
+        assert_eq!(
+            keys.feed(&keymap, backspace, Context::COMPOSER),
+            Step::Pending
+        );
+        assert_eq!(keys.prompt().as_deref(), Some("?a"));
+        keys.feed(&keymap, backspace, Context::COMPOSER);
+        assert_eq!(
+            keys.feed(&keymap, backspace, Context::COMPOSER),
+            Step::Dropped
+        );
+        assert_eq!(keys.prompt(), None);
+    }
+
+    #[test]
+    fn an_empty_pattern_reuses_the_last_one_in_the_new_direction() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+        typed(&mut keys, "/x");
+        keys.feed(&keymap, KeyEvent::from(KeyCode::Enter), Context::COMPOSER);
+        typed(&mut keys, "?");
+
+        keys.feed(&keymap, KeyEvent::from(KeyCode::Enter), Context::COMPOSER);
+
+        assert_eq!(
+            keys.last_search(),
+            Some(&Search {
+                pattern: "x".into(),
+                forward: false
+            })
+        );
+    }
+
+    #[test]
+    fn n_star_and_hash_are_search_motions() {
+        assert_eq!(
+            last("n"),
+            ran(Command::Move(Motion::Search { reverse: false }), None)
+        );
+        assert_eq!(
+            last("3N"),
+            ran(Command::Move(Motion::Search { reverse: true }), Some(3))
+        );
+        assert_eq!(
+            last("*"),
+            ran(Command::Move(Motion::SearchWord { forward: true }), None)
+        );
+        assert_eq!(
+            last("#"),
+            ran(Command::Move(Motion::SearchWord { forward: false }), None)
         );
     }
 

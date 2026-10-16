@@ -385,10 +385,16 @@ impl Widget for InputBox<'_> {
             self.app.theme.input_border_active
         };
 
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .padding(Padding::horizontal(1))
             .border_style(border_style);
+        if let Some(prompt) = self.app.interaction.normal.keys.prompt() {
+            block = block.title_bottom(Line::from(Span::styled(
+                format!(" {prompt} "),
+                self.app.theme.input_border_active,
+            )));
+        }
 
         if content_width == 0 {
             self.app.input.visible_lines.set(0);
