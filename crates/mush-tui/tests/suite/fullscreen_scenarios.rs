@@ -2771,6 +2771,23 @@ fn a_repeated_change_undoes_in_one_step() {
 }
 
 #[test]
+fn operators_work_over_wide_and_accented_text() {
+    let mut app = composer_in_normal("naïve 日本語 café");
+    type_keys(&mut app, "wdw");
+    assert_eq!(app.input.text, "naïve café");
+
+    type_keys(&mut app, "ciwthé");
+    assert_eq!(app.input.text, "naïve thé");
+
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "0fïx");
+    assert_eq!(app.input.text, "nave thé");
+
+    type_keys(&mut app, "$p");
+    assert_eq!(app.input.text, "nave théï");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 
