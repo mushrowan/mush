@@ -1593,22 +1593,23 @@ fn worker_config(
         compaction: setup.client.cfg.compaction,
         compaction_model: setup.client.compaction_model.clone(),
     };
-    let mut turn = turn_config(
-        &seed,
-        &session.meta.id,
-        setup.client.model.clone(),
-        setup.client.options.clone(),
-    );
-    turn.branch_summary = setup.client.cfg.branch_summary.settings();
-    turn.auto_refine = setup.client.cfg.auto_refine.settings();
-    turn.auto_fork_compact = setup.client.cfg.auto_fork_compact;
-    turn.tool_allowlist = if setup.client.rlm {
-        Some(vec!["ipython".into()])
-    } else {
-        cli.tools.clone()
-    };
-    turn.generate_title = !cli.no_session;
-    let mut worker = mush_runtime::WorkerConfig::new(turn);
+    let mut worker = mush_runtime::WorkerConfig::new(mush_runtime::TurnConfig {
+        branch_summary: setup.client.cfg.branch_summary.settings(),
+        auto_refine: setup.client.cfg.auto_refine.settings(),
+        auto_fork_compact: setup.client.cfg.auto_fork_compact,
+        tool_allowlist: if setup.client.rlm {
+            Some(vec!["ipython".into()])
+        } else {
+            cli.tools.clone()
+        },
+        generate_title: !cli.no_session,
+        ..turn_config(
+            &seed,
+            &session.meta.id,
+            setup.client.model.clone(),
+            setup.client.options.clone(),
+        )
+    });
     worker.conversation = session.conversation.clone();
     worker.session_id = session.meta.id.clone();
     worker.title = session.meta.title.clone();
