@@ -2315,6 +2315,40 @@ async fn a_failing_gate_becomes_the_next_prompt_and_a_passing_one_ends_the_run()
 }
 
 #[tokio::test]
+async fn compact_status_measures_against_the_window_the_compactor_uses() {
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(crate::testing::Echo {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        reply: "hi".into(),
+    }));
+    let mut model = crate::testing::echo_model();
+    model.id = "test/effective-window".into();
+    model.effective_context_window = Some(TokenCount::new(100_000));
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        crate::testing::echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    let commands = Arc::new(HostCommands::default());
+    connection.set_host_commands(Some(Arc::clone(&commands)));
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "hello".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    drain_turn(&mut connection).await;
+
+    assert_eq!(commands.context_usage().context_window, Some(100_000));
+}
+
+#[tokio::test]
 async fn a_host_command_runs_once_the_turn_is_over() {
     let (mut connection, _requests) = connection();
     let commands = Arc::new(HostCommands::default());

@@ -195,7 +195,7 @@ impl ChildSummary {
         let context = self.context.get_or_insert_default();
         context.tokens = tokens;
         if let Some(model) = model {
-            context.window = model.context_window.get();
+            context.window = model.compaction_window().get();
         }
         context
     }
@@ -4293,7 +4293,9 @@ mod tests {
             .await
             .unwrap();
         wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
-        let model = echo_model();
+        let mut model = echo_model();
+        let compaction_window = model.context_window.get() / 2;
+        model.effective_context_window = Some(mush_ai::types::TokenCount::new(compaction_window));
 
         family.record(
             &slow.rlm_child_id,
@@ -4331,7 +4333,7 @@ mod tests {
             before,
             Some(ChildContext {
                 tokens: 912_000,
-                window: model.context_window.get(),
+                window: compaction_window,
                 compactions: 0,
             })
         );

@@ -1438,7 +1438,7 @@ impl InProcessConnection {
                         context_window: Some(
                             self.runtime
                                 .model(&self.config.default_model)
-                                .context_window
+                                .compaction_window()
                                 .get(),
                         ),
                     });
