@@ -1264,7 +1264,7 @@ mod clipboard_failure_tests {
     fn a_clipboard_command_that_fails_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let tool = dir.path().join("wl-copy");
-        std::fs::write(&tool, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::write(&tool, "#!/bin/sh\ncat >/dev/null\nexit 1\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         let env = crate::clipboard::Environment {
