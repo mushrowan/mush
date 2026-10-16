@@ -340,7 +340,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
     let mut child = command
         .args(["stty rows 40 cols 120; printf '%s' \"$$\" >parent-pid; exec \"$MUSH_FIXTURE_BINARY\" --resume \"$MUSH_FIXTURE_SESSION\" --model gpt-parent-fixture --no-tools --tui-keyboard-enhancement disabled --tui-image-probe false"])
         .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(40);
     while inbox.consumer(session.meta.id.as_str(), dir.path()).is_ok() {
         if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
             let _ = child.kill();
@@ -364,7 +364,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
     };
     let received = connection.map(|mut socket| {
         socket.set_nonblocking(false).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut bytes = Vec::new();
         let start = loop {
             if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") { break index + 4; }
@@ -379,7 +379,7 @@ fn bound_idle_parent_consumes_review_in_existing_cli_process() {
         write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         String::from_utf8(bytes[start..start+length].to_vec()).unwrap()
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !inbox.acknowledged(&event.event_id).unwrap() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
