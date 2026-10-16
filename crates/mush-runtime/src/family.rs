@@ -288,10 +288,23 @@ pub struct Broadcast {
 pub struct Delivery {
     pub event: EventMessage,
     receipt: Option<oneshot::Sender<Receipt>>,
+    rearm: Option<Rearm>,
+}
+
+struct Rearm {
+    family: std::sync::Weak<Family>,
+    child: ChildId,
 }
 
 impl Delivery {
     pub fn ack(&mut self, receipt: Receipt) {
+        if receipt != Receipt::Rejected
+            && let Some(rearm) = self.rearm.take()
+            && let Some(family) = rearm.family.upgrade()
+            && let Some(node) = family.lock().children.get_mut(&rearm.child)
+        {
+            node.rearm_exit_notice();
+        }
         if let Some(sender) = self.receipt.take() {
             let _ = sender.send(receipt);
         }
@@ -1728,14 +1741,24 @@ impl Family {
             Some(child) if self.asleep(child) => self.wake(child, this).await,
             _ => Ok(()),
         };
-        if let Some(child) = target.child.as_deref()
-            && let Some(node) = self.lock().children.get_mut(child)
-            && node.summary.parent == caller.id
-        {
-            node.rearm_exit_notice();
-        }
+        let rearm = target
+            .child
+            .as_deref()
+            .filter(|child| {
+                self.lock()
+                    .children
+                    .get(*child)
+                    .is_some_and(|node| node.summary.parent == caller.id)
+            })
+            .map(|child| Rearm {
+                family: Arc::downgrade(this),
+                child: child.to_string(),
+            });
         let delivered = match woken {
-            Ok(()) => match self.send_delivery(target.child.as_deref(), event).await {
+            Ok(()) => match self
+                .send_delivery(target.child.as_deref(), event, rearm)
+                .await
+            {
                 Ok(Receipt::Rejected) => Err(format!(
                     "{} has {MAX_PENDING_MESSAGES} messages waiting already",
                     target.endpoint.session_name
@@ -1774,11 +1797,13 @@ impl Family {
         &self,
         target: Option<&str>,
         event: EventMessage,
+        rearm: Option<Rearm>,
     ) -> Result<Receipt, String> {
         let (receipt_tx, receipt_rx) = oneshot::channel();
         let delivery = Delivery {
             event,
             receipt: Some(receipt_tx),
+            rearm,
         };
         match target {
             Some(id) => {
@@ -1947,6 +1972,7 @@ impl Family {
                 }],
             },
             receipt: None,
+            rearm: None,
         });
     }
 }
@@ -4256,6 +4282,38 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_parent_message_that_never_arrives_does_not_re_arm_the_exit_notice() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+        if let Some(node) = family.lock().children.get_mut(&slow.rlm_child_id) {
+            node.replied = true;
+            node.notified = true;
+            node.inbox = Some(mpsc::unbounded_channel().0);
+        }
+
+        let sent = family
+            .send_message(&root, "child", Some("slow"), "are you there", &family)
+            .await;
+
+        assert!(sent.is_err(), "{sent:?}");
+        let inner = family.lock();
+        let node = &inner.children[&slow.rlm_child_id];
+        assert!(node.replied && node.notified);
     }
 
     fn reply_with_usage(text: &str, input_tokens: u64) -> ClientEvent {
