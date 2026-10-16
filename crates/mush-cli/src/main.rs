@@ -1362,11 +1362,13 @@ fn turn_config(
     model: Model,
     options: StreamOptions,
 ) -> mush_runtime::TurnConfig {
-    let mut options = options;
-    options.session_id = Some(session_id.clone());
+    let for_session = |mut options: StreamOptions| {
+        options.session_id = Some(session_id.clone());
+        options
+    };
     mush_runtime::TurnConfig {
         default_model: model,
-        options,
+        options: for_session(options),
         max_turns: seed.max_turns,
         provider_api_keys: seed.provider_api_keys.clone(),
         confirm_tools: seed.confirm_tools,
@@ -1375,10 +1377,10 @@ fn turn_config(
         branch_summary: Default::default(),
         auto_refine: Default::default(),
         auto_fork_compact: false,
-        compaction_model: seed.compaction_model.clone().map(|(model, mut options)| {
-            options.session_id = Some(session_id.clone());
-            (model, options)
-        }),
+        compaction_model: seed
+            .compaction_model
+            .clone()
+            .map(|(model, options)| (model, for_session(options))),
         forbidden_chars: seed.forbidden_chars.clone(),
         tool_allowlist: Some(vec!["ipython".into()]),
         generate_title: false,
