@@ -131,6 +131,8 @@ crokey = { version = "1.5", features = ["serde"] }
 # cli
 anstream = "1.0.0"
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4.6.11"
+clap_complete_nushell = "4.6.2"
 # open URLs in the user's browser (used by /login)
 open = "5"
 

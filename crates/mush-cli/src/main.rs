@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 mod headless;
 mod json_events;
 use color_eyre::eyre::{Result, eyre};
@@ -414,6 +414,10 @@ enum Command {
         command: Option<mush_cli::sync::SyncCommand>,
     },
     Config,
+    #[command(about = "print the completion script for a shell")]
+    Completions {
+        shell: mush_cli::completions::Shell,
+    },
 }
 
 impl Cli {
@@ -461,6 +465,14 @@ async fn run() -> Result<()> {
     if let Some(Command::Control(args)) = command {
         return mush_cli::control::run(args).await;
     }
+    if let Some(Command::Completions { shell }) = command {
+        let mut out = std::io::stdout().lock();
+        return Ok(mush_cli::completions::write(
+            shell,
+            Cli::command(),
+            &mut out,
+        )?);
+    }
     if let Some(Command::Sync {
         command: Some(sync),
     }) = &command
@@ -480,7 +492,10 @@ async fn run() -> Result<()> {
         return prompt_or_tui(cli, log_buffer).await;
     };
     match command {
-        Command::Control(_) | Command::Agents | Command::Attach { .. } => unreachable!(),
+        Command::Control(_)
+        | Command::Completions { .. }
+        | Command::Agents
+        | Command::Attach { .. } => unreachable!(),
         Command::Worker {
             socket,
             descriptor,

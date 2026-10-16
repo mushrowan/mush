@@ -1,3 +1,4 @@
+mod completions;
 mod control;
 mod daemon;
 mod headless;
