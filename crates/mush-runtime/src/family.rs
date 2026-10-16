@@ -1844,6 +1844,53 @@ enum ExitNotice {
 }
 
 pub const EXIT_NOTICE_PREVIEW_CHARS: usize = 160;
+const OVERFLOW_HINT: &str = "It ran out of context window. Its transcript, notes and kernel are \
+                             kept, so a message to it can carry on from there.";
+
+impl ExitNotice {
+    fn text(self, node: &Node) -> String {
+        let child = &node.summary;
+        let name = &child.name;
+        let last_text = non_blank(child.answer.as_deref()).map(|answer| {
+            format!(
+                "Last assistant text: {}",
+                compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS)
+            )
+        });
+        let (header, details) = match self {
+            Self::NoReply => (
+                format!("[child-exited: no-reply child:{name}]"),
+                vec![last_text],
+            ),
+            Self::Cancelled => (
+                format!("[child-exited: cancelled child:{name}]"),
+                vec![node.cancel_reason.clone().or_else(|| child.error.clone())],
+            ),
+            Self::Failed => {
+                let error = child.error.as_deref().unwrap_or("unknown error");
+                let overflowed = mush_ai::registry::is_context_overflow_message(error);
+                (
+                    format!("[child-failed child:{name}]"),
+                    vec![
+                        Some(error.to_string()),
+                        overflowed.then(|| OVERFLOW_HINT.to_string()),
+                        non_blank(child.progress_note.as_deref())
+                            .map(|note| format!("Progress note: {note}")),
+                        last_text,
+                    ],
+                )
+            }
+        };
+        std::iter::once(header)
+            .chain(details.into_iter().flatten())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+fn non_blank(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
+}
 
 impl Family {
     fn post_exit_notice(&self, id: &str, notice: ExitNotice) {
@@ -1857,27 +1904,9 @@ impl Family {
                 return;
             }
             node.notified = true;
-            let name = node.summary.name.clone();
+            let content = notice.text(node);
             let parent = node.summary.parent.clone();
             let session = node.summary.session_id.clone();
-            let content = match notice {
-                ExitNotice::NoReply => match node.summary.answer.as_deref() {
-                    Some(answer) if !answer.trim().is_empty() => format!(
-                        "[child-exited: no-reply child:{name}]\n\nLast assistant text: {}",
-                        compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS)
-                    ),
-                    _ => format!("[child-exited: no-reply child:{name}]"),
-                },
-                ExitNotice::Cancelled => match node
-                    .cancel_reason
-                    .as_deref()
-                    .or(node.summary.error.as_deref())
-                {
-                    Some(reason) => format!("[child-exited: cancelled child:{name}]\n\n{reason}"),
-                    None => format!("[child-exited: cancelled child:{name}]"),
-                },
-                ExitNotice::Failed => failed_notice(&name, &node.summary),
-            };
             let inbox = match &parent {
                 Some(parent) => inner
                     .children
@@ -1909,34 +1938,6 @@ impl Family {
             receipt: None,
         });
     }
-}
-
-fn failed_notice(name: &str, child: &ChildSummary) -> String {
-    let error = child.error.as_deref().unwrap_or("unknown error");
-    let mut notice = format!("[child-failed child:{name}]\n\n{error}");
-    if mush_ai::registry::is_context_overflow_message(error) {
-        notice.push_str(
-            "\n\nIt ran out of context window. Its transcript, notes and kernel are kept, so a \
-             message to it can carry on from there.",
-        );
-    }
-    if let Some(note) = child
-        .progress_note
-        .as_deref()
-        .filter(|note| !note.trim().is_empty())
-    {
-        notice.push_str("\n\nProgress note: ");
-        notice.push_str(note);
-    }
-    if let Some(answer) = child
-        .answer
-        .as_deref()
-        .filter(|answer| !answer.trim().is_empty())
-    {
-        notice.push_str("\n\nLast assistant text: ");
-        notice.push_str(&compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS));
-    }
-    notice
 }
 
 fn compact_preview(text: &str, max: usize) -> String {
