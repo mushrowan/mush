@@ -23,6 +23,8 @@ pub(crate) enum Motion {
     WordEndBack(Word),
     Find(Find),
     MatchPair,
+    ParagraphForward,
+    ParagraphBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +416,37 @@ impl Text {
     }
 }
 
+fn blank(row: &str) -> bool {
+    row.chars().all(char::is_whitespace)
+}
+
+fn paragraph_edge(rows: &[String], line: usize, forward: bool, count: usize) -> Option<usize> {
+    let mut at = line;
+    for left in (0..count).rev() {
+        let mut seen_text = false;
+        let mut first = true;
+        loop {
+            let row = rows.get(at).map_or("", String::as_str);
+            seen_text |= !blank(row);
+            if !first && seen_text && blank(row) {
+                break;
+            }
+            first = false;
+            let next = if forward {
+                Some(at + 1).filter(|next| *next < rows.len())
+            } else {
+                at.checked_sub(1)
+            };
+            match next {
+                Some(next) => at = next,
+                None if left > 0 => return None,
+                None => break,
+            }
+        }
+    }
+    Some(at)
+}
+
 pub(crate) fn first_non_blank(row: &str) -> usize {
     row.chars().take_while(|c| c.is_whitespace()).count()
 }
@@ -478,6 +511,12 @@ pub(crate) fn destination(
             let text = Text::new(rows);
             let from = text.index_of(at)?;
             Some(text.position(text.matching_pair(from)?))
+        }
+        Motion::ParagraphForward | Motion::ParagraphBack => {
+            let forward = motion == Motion::ParagraphForward;
+            let line = paragraph_edge(rows, line, forward, count)?;
+            let at_end = forward && line + 1 == rows.len();
+            Some((line, if at_end { last_cell(row(line)) } else { 0 }))
         }
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
@@ -544,6 +583,16 @@ pub(crate) fn span(
             (text.index_of((line, column))?, find.forward)
         }
         Motion::MatchPair => (text.matching_pair(from)?, true),
+        Motion::ParagraphForward | Motion::ParagraphBack => {
+            let forward = motion == Motion::ParagraphForward;
+            let edge = paragraph_edge(rows, line, forward, times)?;
+            let width = rows[edge].chars().count();
+            if forward && edge == last && width > 0 {
+                (text.index_of((edge, width - 1))?, true)
+            } else {
+                (text.index_of((edge, 0))?, false)
+            }
+        }
     };
     Some(text.region(from, to, inclusive))
 }
@@ -933,6 +982,66 @@ mod tests {
         assert_eq!(
             span(&rows, (1, 0), Motion::WordForward(Word::Small), None, false),
             Some(Region::Lines(1..=1))
+        );
+    }
+
+    #[test]
+    fn braces_jump_to_the_blank_line_around_a_paragraph() {
+        let rows = rows(&["one", "two", "", "three", "four", "", "five"]);
+
+        assert_eq!(go(&rows, (0, 1), Motion::ParagraphForward), (2, 0));
+        assert_eq!(go(&rows, (2, 0), Motion::ParagraphForward), (5, 0));
+        assert_eq!(go(&rows, (4, 2), Motion::ParagraphBack), (2, 0));
+        assert_eq!(go(&rows, (2, 0), Motion::ParagraphBack), (0, 0));
+    }
+
+    #[test]
+    fn a_closing_brace_past_the_last_paragraph_lands_on_the_last_character() {
+        let rows = rows(&["one", "", "two words"]);
+
+        assert_eq!(go(&rows, (2, 0), Motion::ParagraphForward), (2, 8));
+        assert_eq!(
+            destination(&rows, (0, 0), Motion::ParagraphForward, 3),
+            None
+        );
+        assert_eq!(
+            destination(&rows, (0, 0), Motion::ParagraphForward, 2),
+            Some((2, 8))
+        );
+    }
+
+    #[test]
+    fn a_line_of_spaces_also_ends_a_paragraph() {
+        let rows = rows(&[" one", "   ", " two"]);
+
+        assert_eq!(go(&rows, (0, 1), Motion::ParagraphForward), (1, 0));
+    }
+
+    #[test]
+    fn d_closing_brace_from_a_line_start_takes_the_paragraph_lines() {
+        let rows = rows(&["one", "two", "", "three"]);
+
+        assert_eq!(
+            span(&rows, (0, 0), Motion::ParagraphForward, None, false),
+            Some(Region::Lines(0..=1))
+        );
+        assert_eq!(
+            chars(
+                &["one", "two", "", "three"],
+                (0, 1),
+                Motion::ParagraphForward,
+                1
+            ),
+            "ne\ntwo"
+        );
+        assert_eq!(
+            chars(
+                &["one", "", "two words"],
+                (2, 4),
+                Motion::ParagraphForward,
+                1
+            ),
+            "words"
         );
     }
 

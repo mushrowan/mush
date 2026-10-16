@@ -196,6 +196,8 @@ pub enum Action {
     ToggleCase,
     RepeatChange,
     YankToLineEnd,
+    ParagraphForward,
+    ParagraphBack,
 }
 
 impl Action {
@@ -288,6 +290,8 @@ impl Action {
             Self::ToggleCase => "toggle_case",
             Self::RepeatChange => "repeat_change",
             Self::YankToLineEnd => "yank_to_line_end",
+            Self::ParagraphForward => "paragraph_forward",
+            Self::ParagraphBack => "paragraph_back",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -384,6 +388,8 @@ impl Action {
         Self::ToggleCase,
         Self::RepeatChange,
         Self::YankToLineEnd,
+        Self::ParagraphForward,
+        Self::ParagraphBack,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -574,7 +580,9 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::JoinLines
         | Action::ToggleCase
         | Action::RepeatChange
-        | Action::YankToLineEnd => KeyScope::Normal,
+        | Action::YankToLineEnd
+        | Action::ParagraphForward
+        | Action::ParagraphBack => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1197,6 +1205,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::YankToLineEnd,
         &[(KeyCode::Char('Y'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ParagraphForward,
+        &[(KeyCode::Char('}'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::ParagraphBack,
+        &[(KeyCode::Char('{'), KeyModifiers::NONE)],
     ),
 ];
 

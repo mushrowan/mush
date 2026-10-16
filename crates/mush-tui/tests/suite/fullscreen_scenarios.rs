@@ -1438,6 +1438,20 @@ fn o_swaps_the_ends_of_a_log_selection() {
 }
 
 #[test]
+fn braces_hop_between_paragraphs_in_the_log() {
+    let mut app = log_on("first para\n\nsecond para");
+    assert_eq!(caret(&app), Some((1, 6)));
+
+    press(&mut app, KeyCode::Char('}'));
+    let between = caret(&app);
+    press(&mut app, KeyCode::Char('}'));
+    press(&mut app, KeyCode::Char('{'));
+
+    assert_eq!(between, Some((0, 7)));
+    assert_eq!(caret(&app), Some((0, 7)));
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -2830,6 +2844,32 @@ fn capital_y_still_copies_a_selection_raw() {
         matches!(&event, Some(AppEvent::Copy { text }) if text == "  one\n    two"),
         "{event:?}"
     );
+}
+
+#[test]
+fn braces_move_between_composer_paragraphs() {
+    let mut app = composer_in_normal("one\ntwo\n\nthree\n\nfour");
+
+    type_keys(&mut app, "}");
+    assert_eq!(app.input.cursor, 8);
+
+    type_keys(&mut app, "2}");
+    assert_eq!(
+        app.input.cursor, 19,
+        "past the last paragraph it rests on the end"
+    );
+
+    type_keys(&mut app, "{");
+    assert_eq!(app.input.cursor, 15);
+}
+
+#[test]
+fn d_closing_brace_deletes_the_rest_of_the_paragraph() {
+    let mut app = composer_in_normal("one\ntwo\n\nthree");
+
+    type_keys(&mut app, "d}");
+
+    assert_eq!(app.input.text, "\nthree");
 }
 
 #[test]

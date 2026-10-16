@@ -30,6 +30,8 @@ const MOTIONS: &[(Action, Motion)] = &[
     (Action::CursorWordEnd, Motion::WordEnd(Word::Small)),
     (Action::CursorChunkEnd, Motion::WordEnd(Word::Big)),
     (Action::MatchPair, Motion::MatchPair),
+    (Action::ParagraphForward, Motion::ParagraphForward),
+    (Action::ParagraphBack, Motion::ParagraphBack),
 ];
 
 const FINDS: &[(Action, bool, bool)] = &[
