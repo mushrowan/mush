@@ -4409,6 +4409,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_root_schedules_a_refinement_and_reports_it_pending() {
+        use mush_kernel::HostRequestHandler;
+
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(requests, 2, None);
+        let commands = Arc::new(crate::connection::HostCommands::default());
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root"))
+            .with_host_commands(Arc::clone(&commands));
+
+        let before = handler
+            .handle("refine.status", serde_json::json!({}))
+            .await
+            .unwrap();
+        let scheduled = handler
+            .handle(
+                "refine.run",
+                serde_json::json!({ "instructions": "keep it small" }),
+            )
+            .await
+            .unwrap();
+        let after = handler
+            .handle("refine.status", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            before,
+            serde_json::json!({ "pending": false, "in_flight": false })
+        );
+        assert_eq!(scheduled["scheduled"], true);
+        assert_eq!(
+            after,
+            serde_json::json!({ "pending": true, "in_flight": false })
+        );
+    }
+
+    #[tokio::test]
     async fn the_harness_crud_reaches_the_store_and_reports_what_it_wrote() {
         use mush_kernel::HostRequestHandler;
 

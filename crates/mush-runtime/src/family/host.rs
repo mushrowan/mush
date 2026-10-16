@@ -306,15 +306,21 @@ impl RlmHandler {
         Ok(json!({ "scheduled": true, "note": "compaction runs after this turn ends" }))
     }
 
-    fn refine(&self, payload: Payload<'_>, scheduling: bool) -> Result<Value, HostError> {
+    fn refine_commands(&self) -> Result<&Arc<HostCommands>, HostError> {
+        const UNAVAILABLE: &str = "refinement is not available here";
         if self.identity.depth > 0 {
-            return Err(HostError("refinement is not available here".into()));
+            return Err(UNAVAILABLE.into());
         }
-        let commands = self.commands("refinement is not available here")?;
-        let pending = commands.pending_refine();
-        if !scheduling {
-            return Ok(json!({ "pending": pending, "in_flight": false }));
-        }
+        self.commands(UNAVAILABLE)
+    }
+
+    fn refine_status(&self) -> Result<Value, HostError> {
+        let pending = self.refine_commands()?.pending_refine();
+        Ok(json!({ "pending": pending, "in_flight": false }))
+    }
+
+    fn schedule_refine(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let commands = self.refine_commands()?;
         commands.replace_refine(mush_session::refine::RefineRequest {
             instructions: payload.instructions(),
             rollback: None,
@@ -689,8 +695,8 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             | "harness.update"
             | "harness.delete"
             | "harness.record_refinement" => self.harness_call(kind, payload),
-            "refine.run" => self.refine(payload, true),
-            "refine.status" => self.refine(payload, false),
+            "refine.run" => self.schedule_refine(payload),
+            "refine.status" => self.refine_status(),
             "agent_observe.list_agents" => Ok(json!({
                 "agents": self.family.roster(&self.identity),
             })),
