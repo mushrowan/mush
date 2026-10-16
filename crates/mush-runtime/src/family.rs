@@ -2536,6 +2536,25 @@ mod tests {
             .collect()
     }
 
+    async fn notices_until(inbox: &mut AgentInbox, count: usize) -> Vec<String> {
+        let mut seen = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.len() < count {
+            assert!(Instant::now() < deadline, "{seen:?}");
+            seen.extend(notices(inbox));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        seen
+    }
+
+    fn agent_event(event: AgentEvent) -> ClientEvent {
+        ClientEvent::Agent {
+            generation: crate::session::StreamGeneration(0),
+            event,
+            applied: crate::Applied::Nothing,
+        }
+    }
+
     #[tokio::test]
     async fn a_child_settles_only_when_its_own_children_are_quiet() {
         let release = Arc::new(tokio::sync::Notify::new());
@@ -4113,13 +4132,7 @@ mod tests {
             .await
             .unwrap();
         let child = settle(&family, &root).await.remove(0);
-        let mut seen = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.is_empty() {
-            assert!(Instant::now() < deadline, "the parent was never told");
-            seen.extend(notices(&mut root_inbox));
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let seen = notices_until(&mut root_inbox, 1).await;
         (
             child,
             seen,
@@ -4226,16 +4239,9 @@ mod tests {
             .send_message(&root, "child", Some("flaky"), "try again", &family)
             .await
             .unwrap();
-        let mut seen = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while seen.len() < 2 {
-            assert!(Instant::now() < deadline, "{seen:?}");
-            seen.extend(notices(&mut root_inbox));
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
 
         assert_eq!(
-            seen,
+            notices_until(&mut root_inbox, 2).await,
             vec![
                 "[child-failed child:flaky]\n\nrequest failed: provider exploded".to_string(),
                 "[child-exited: no-reply child:flaky]\n\nLast assistant text: done after all"
@@ -4246,25 +4252,21 @@ mod tests {
 
     fn reply_with_usage(text: &str, input_tokens: u64) -> ClientEvent {
         let model = echo_model();
-        ClientEvent::Agent {
-            generation: crate::session::StreamGeneration(0),
-            event: AgentEvent::MessageEnd {
-                message: mush_ai::types::AssistantMessage::builder()
-                    .content(vec![mush_ai::types::AssistantContentPart::Text(
-                        mush_ai::types::TextContent { text: text.into() },
-                    )])
-                    .model(model.id.clone())
-                    .provider(model.provider.clone())
-                    .api(model.api)
-                    .usage(Usage {
-                        input_tokens: mush_ai::types::TokenCount::new(input_tokens),
-                        ..Usage::default()
-                    })
-                    .timestamp_ms(Timestamp::zero())
-                    .build(),
-            },
-            applied: crate::Applied::Nothing,
-        }
+        agent_event(AgentEvent::MessageEnd {
+            message: mush_ai::types::AssistantMessage::builder()
+                .content(vec![mush_ai::types::AssistantContentPart::Text(
+                    mush_ai::types::TextContent { text: text.into() },
+                )])
+                .model(model.id.clone())
+                .provider(model.provider.clone())
+                .api(model.api)
+                .usage(Usage {
+                    input_tokens: mush_ai::types::TokenCount::new(input_tokens),
+                    ..Usage::default()
+                })
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        })
     }
 
     #[tokio::test]
@@ -4293,19 +4295,15 @@ mod tests {
         let before = family.children_of(&root)[0].context;
         family.record(
             &slow.rlm_child_id,
-            &ClientEvent::Agent {
-                generation: crate::session::StreamGeneration(0),
-                event: AgentEvent::ContextCompacted {
-                    before_count: 40,
-                    compaction: mush_agent::ContextCompaction {
-                        messages: vec![mush_session::compact::outcome_message("x", "y")],
-                        summary: "summary".into(),
-                        summarised_count: 39,
-                        appended: 0,
-                    },
+            &agent_event(AgentEvent::ContextCompacted {
+                before_count: 40,
+                compaction: mush_agent::ContextCompaction {
+                    messages: vec![mush_session::compact::outcome_message("x", "y")],
+                    summary: "summary".into(),
+                    summarised_count: 39,
+                    appended: 0,
                 },
-                applied: crate::Applied::Nothing,
-            },
+            }),
             Some(&model),
         );
         let after = family.children_of(&root)[0].context.unwrap();
@@ -4357,13 +4355,9 @@ mod tests {
 
         family.record(
             &slow.rlm_child_id,
-            &ClientEvent::Agent {
-                generation: crate::session::StreamGeneration(0),
-                event: AgentEvent::Error {
-                    error: "prompt is too long: 1000336 tokens > 1000000 maximum".into(),
-                },
-                applied: crate::Applied::Nothing,
-            },
+            &agent_event(AgentEvent::Error {
+                error: "prompt is too long: 1000336 tokens > 1000000 maximum".into(),
+            }),
             None,
         );
 
