@@ -255,6 +255,7 @@ struct Live {
     control: mpsc::UnboundedSender<ClientCommand>,
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
+    compaction: Compaction,
 }
 
 pub const CHILD_INTERRUPTED: &str = "The parent session restarted while this agent was working. \
@@ -435,6 +436,64 @@ struct Node {
     notified: bool,
     awaiting_quiet: bool,
     cancel_reason: Option<String>,
+    compaction: Compaction,
+    overflow_report: OverflowReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compaction {
+    Off,
+    On,
+    JustRan,
+}
+
+impl Compaction {
+    fn ran(self) -> Self {
+        match self {
+            Self::Off => Self::Off,
+            Self::On | Self::JustRan => Self::JustRan,
+        }
+    }
+
+    fn settled(self) -> Self {
+        match self {
+            Self::JustRan => Self::On,
+            Self::Off | Self::On => self,
+        }
+    }
+
+    fn overflow_hint(self) -> &'static str {
+        match self {
+            Self::Off => {
+                "It ran out of context window and has compaction off, so a message to it would \
+                 overflow the same way."
+            }
+            Self::On => {
+                "It ran out of context window and compaction found nothing to shrink, so a \
+                 message to it may overflow the same way."
+            }
+            Self::JustRan => {
+                "It ran out of context window again right after compacting, so a message to it \
+                 may overflow the same way."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverflowReport {
+    Unreported,
+    Reported,
+    Repeated,
+}
+
+impl OverflowReport {
+    fn next(self) -> Self {
+        match self {
+            Self::Unreported => Self::Reported,
+            Self::Reported | Self::Repeated => Self::Repeated,
+        }
+    }
 }
 
 impl Node {
@@ -535,6 +594,8 @@ fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
                 notified: false,
                 awaiting_quiet: false,
                 cancel_reason: None,
+                compaction: Compaction::Off,
+                overflow_report: OverflowReport::Unreported,
             };
             (node.summary.id.clone(), node)
         })
@@ -1022,6 +1083,8 @@ impl Family {
                 notified: false,
                 awaiting_quiet: false,
                 cancel_reason: None,
+                compaction: live.compaction,
+                overflow_report: OverflowReport::Unreported,
             },
         );
         drop(inner);
@@ -1035,6 +1098,11 @@ impl Family {
     }
 
     fn launch(this: &Arc<Self>, id: &str, parts: ChildParts, first_prompt: Option<String>) -> Live {
+        let compaction = if parts.config.turn.auto_compact {
+            Compaction::On
+        } else {
+            Compaction::Off
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let mut connection = parts.config.connect(&parts.tools, &parts.registry);
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
@@ -1056,6 +1124,7 @@ impl Family {
             control: control_tx,
             shutdown: shutdown_tx,
             task,
+            compaction,
         }
     }
 
@@ -1137,6 +1206,7 @@ impl Family {
             node.control = Some(live.control);
             node.shutdown = Some(live.shutdown);
             node.task = Some(live.task);
+            node.compaction = live.compaction;
             node.rearm_exit_notice();
             node.awaiting_quiet = false;
             node.cancel_reason = None;
@@ -1206,6 +1276,7 @@ impl Family {
             ClientEvent::TurnStarted => {
                 if let Some(node) = self.lock().children.get_mut(id) {
                     node.awaiting_quiet = false;
+                    node.compaction = node.compaction.settled();
                 }
                 self.record_update(id, |child| {
                     child.status = ChildStatus::Running;
@@ -1250,6 +1321,9 @@ impl Family {
                 applied: crate::Applied::Compacted { .. },
                 ..
             } => {
+                if let Some(node) = self.lock().children.get_mut(id) {
+                    node.compaction = node.compaction.ran();
+                }
                 let tokens = mush_session::compact::estimate_tokens(&compaction.messages) as u64;
                 self.record_update(id, |child| {
                     child.record_context(tokens, model).compactions += 1
@@ -1269,7 +1343,12 @@ impl Family {
                     child.status = ChildStatus::Failed;
                     child.error = Some(error.clone());
                 });
-                self.post_exit_notice(id, ExitNotice::Failed);
+                let notice = if mush_ai::registry::is_context_overflow_message(error) {
+                    ExitNotice::Overflowed
+                } else {
+                    ExitNotice::Failed
+                };
+                self.post_exit_notice(id, notice);
             }
             ClientEvent::TurnEnded { cancelled } => {
                 let busy = subtree_busy(&self.lock(), id);
@@ -1313,6 +1392,12 @@ impl Family {
         message: &mush_ai::types::AssistantMessage,
         model: Option<&mush_ai::types::Model>,
     ) {
+        if message.stop_reason != mush_ai::types::StopReason::Error
+            && let Some(node) = self.lock().children.get_mut(id)
+        {
+            node.compaction = node.compaction.settled();
+            node.overflow_report = OverflowReport::Unreported;
+        }
         let text = message.text();
         let usage = message.usage;
         let cost = model.map(|model| mush_ai::models::calculate_cost(model, &usage));
@@ -1877,16 +1962,34 @@ enum ExitNotice {
     NoReply,
     Cancelled,
     Failed,
+    Overflowed,
 }
 
 pub const EXIT_NOTICE_PREVIEW_CHARS: usize = 160;
-const OVERFLOW_HINT: &str = "It ran out of context window. Its transcript, notes and kernel are \
-                             kept, so a message to it can carry on from there.";
+const OVERFLOWED_AGAIN: &str = "It ran out of context window the same way again. Later overflows \
+                                are not reported until it completes a reply.";
 
 impl ExitNotice {
+    fn silenced(self, node: &Node) -> bool {
+        node.notified
+            || match self {
+                Self::NoReply => node.replied,
+                Self::Overflowed => node.overflow_report == OverflowReport::Repeated,
+                Self::Cancelled | Self::Failed => false,
+            }
+    }
+
     fn text(self, node: &Node) -> String {
         let child = &node.summary;
         let name = &child.name;
+        let error = || {
+            child
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown error".into())
+        };
+        let progress_note =
+            non_blank(child.progress_note.as_deref()).map(|note| format!("Progress note: {note}"));
         let last_text = non_blank(child.answer.as_deref()).map(|answer| {
             format!(
                 "Last assistant text: {}",
@@ -1902,20 +2005,24 @@ impl ExitNotice {
                 format!("[child-exited: cancelled child:{name}]"),
                 vec![node.cancel_reason.clone().or_else(|| child.error.clone())],
             ),
-            Self::Failed => {
-                let error = child.error.as_deref().unwrap_or("unknown error");
-                let overflowed = mush_ai::registry::is_context_overflow_message(error);
-                (
-                    format!("[child-failed child:{name}]"),
-                    vec![
-                        Some(error.to_string()),
-                        overflowed.then(|| OVERFLOW_HINT.to_string()),
-                        non_blank(child.progress_note.as_deref())
-                            .map(|note| format!("Progress note: {note}")),
+            Self::Failed => (
+                format!("[child-failed child:{name}]"),
+                vec![Some(error()), progress_note, last_text],
+            ),
+            Self::Overflowed => (
+                format!("[child-failed child:{name}]"),
+                match node.overflow_report {
+                    OverflowReport::Unreported => vec![
+                        Some(error()),
+                        Some(node.compaction.overflow_hint().to_string()),
+                        progress_note,
                         last_text,
                     ],
-                )
-            }
+                    OverflowReport::Reported | OverflowReport::Repeated => {
+                        vec![Some(error()), Some(OVERFLOWED_AGAIN.to_string())]
+                    }
+                },
+            ),
         };
         std::iter::once(header)
             .chain(details.into_iter().flatten())
@@ -1936,11 +2043,14 @@ impl Family {
             let Some(node) = inner.children.get_mut(id) else {
                 return;
             };
-            if node.notified || (notice == ExitNotice::NoReply && node.replied) {
+            if notice.silenced(node) {
                 return;
             }
             node.notified = true;
             let content = notice.text(node);
+            if notice == ExitNotice::Overflowed {
+                node.overflow_report = node.overflow_report.next();
+            }
             let parent = node.summary.parent.clone();
             let session = node.summary.session_id.clone();
             let inbox = match &parent {
@@ -4036,7 +4146,16 @@ mod tests {
         assert!(commands.compaction_queued());
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Overflowing {
+        WithoutCompaction,
+        UntilCompacted,
+        PastCompaction,
+        Immediately,
+    }
+
     struct FillsThenOverflows {
+        scenario: Overflowing,
         overflowed: Arc<std::sync::atomic::AtomicBool>,
     }
 
@@ -4067,15 +4186,19 @@ mod tests {
             let compacted = user_texts
                 .iter()
                 .any(|text| mush_ai::types::strip_compaction_summary_prefix(text).is_some());
+            let filled = context.messages.len() >= 13;
+            let overflows = match self.scenario {
+                Overflowing::WithoutCompaction | Overflowing::UntilCompacted => {
+                    filled && !compacted
+                }
+                Overflowing::PastCompaction => filled || compacted,
+                Overflowing::Immediately => true,
+            };
             let content = if summarising {
                 vec![AssistantContentPart::Text(TextContent {
                     text: "## Goal\nwrite the report".into(),
                 })]
-            } else if compacted {
-                vec![AssistantContentPart::Text(TextContent {
-                    text: "report done".into(),
-                })]
-            } else if context.messages.len() >= 13 {
+            } else if overflows {
                 self.overflowed
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 return Err(mush_ai::registry::ProviderError::Other(
@@ -4083,6 +4206,10 @@ mod tests {
                      1000000 maximum"
                         .into(),
                 ));
+            } else if compacted {
+                vec![AssistantContentPart::Text(TextContent {
+                    text: "report done".into(),
+                })]
             } else {
                 vec![AssistantContentPart::ToolCall(ToolCall {
                     id: mush_ai::types::ToolCallId::from(format!(
@@ -4116,19 +4243,22 @@ mod tests {
     }
 
     fn overflowing_factory(
-        auto_compact: bool,
+        scenario: Overflowing,
         overflowed: Arc<std::sync::atomic::AtomicBool>,
     ) -> ChildFactory {
         Arc::new(move |_spec: ChildSpec, _family: Arc<Family>| {
             let overflowed = Arc::clone(&overflowed);
             Box::pin(async move {
                 let mut registry = ApiRegistry::new();
-                registry.register(Box::new(FillsThenOverflows { overflowed }));
+                registry.register(Box::new(FillsThenOverflows {
+                    scenario,
+                    overflowed,
+                }));
                 let mut tools = ToolRegistry::new();
                 tools.register_shared(Arc::new(crate::testing::NoteTool));
                 let mut turn = echo_config(echo_model());
                 turn.max_turns = 20;
-                turn.auto_compact = auto_compact;
+                turn.auto_compact = scenario != Overflowing::WithoutCompaction;
                 turn.compaction = mush_session::compact::CompactionSettings {
                     keep_recent_tokens: 10,
                     ..Default::default()
@@ -4142,14 +4272,14 @@ mod tests {
         })
     }
 
-    async fn run_overflowing_child(auto_compact: bool) -> (ChildSummary, Vec<String>, bool) {
+    async fn run_overflowing_child(scenario: Overflowing) -> (ChildSummary, Vec<String>, bool) {
         let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let family = Family::new(
             Identity::root("root"),
             "root".into(),
             2,
-            Some(overflowing_factory(auto_compact, Arc::clone(&overflowed))),
+            Some(overflowing_factory(scenario, Arc::clone(&overflowed))),
             None,
         );
         let mut root_inbox = family.root_inbox();
@@ -4176,7 +4306,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_child_that_overflows_its_context_compacts_retries_and_answers() {
-        let (child, seen, overflowed) = run_overflowing_child(true).await;
+        let (child, seen, overflowed) = run_overflowing_child(Overflowing::UntilCompacted).await;
 
         assert!(overflowed);
         assert_eq!(child.status, ChildStatus::Idle, "{child:?}");
@@ -4193,7 +4323,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_child_without_compaction_fails_on_a_context_overflow() {
-        let (child, seen, overflowed) = run_overflowing_child(false).await;
+        let (child, seen, overflowed) = run_overflowing_child(Overflowing::WithoutCompaction).await;
 
         assert!(overflowed);
         assert_eq!(child.status, ChildStatus::Failed, "{child:?}");
@@ -4203,10 +4333,110 @@ mod tests {
         );
         assert!(seen[0].contains("prompt is too long"), "{seen:?}");
         assert!(
-            seen[0].contains("It ran out of context window."),
+            seen[0].contains(
+                "It ran out of context window and has compaction off, so a message to it would \
+                 overflow the same way."
+            ),
             "{seen:?}"
         );
+        assert!(!seen[0].contains("carry on"), "{seen:?}");
         assert_eq!(child.context, None);
+    }
+
+    #[tokio::test]
+    async fn a_child_that_overflows_right_after_compacting_says_so() {
+        let (child, seen, overflowed) = run_overflowing_child(Overflowing::PastCompaction).await;
+
+        assert!(overflowed);
+        assert_eq!(child.status, ChildStatus::Failed, "{child:?}");
+        assert_eq!(child.context.map(|context| context.compactions), Some(1));
+        assert!(
+            seen[0].contains(
+                "It ran out of context window again right after compacting, so a message to it \
+                 may overflow the same way."
+            ),
+            "{seen:?}"
+        );
+        assert!(!seen[0].contains("carry on"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_child_too_big_to_compact_says_compaction_found_nothing_to_shrink() {
+        let (child, seen, overflowed) = run_overflowing_child(Overflowing::Immediately).await;
+
+        assert!(overflowed);
+        assert_eq!(child.status, ChildStatus::Failed, "{child:?}");
+        assert!(
+            seen[0].contains(
+                "It ran out of context window and compaction found nothing to shrink, so a \
+                 message to it may overflow the same way."
+            ),
+            "{seen:?}"
+        );
+        assert!(!seen[0].contains("carry on"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_child_that_keeps_overflowing_says_so_once_more_and_then_stays_quiet() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(overflowing_factory(
+                Overflowing::WithoutCompaction,
+                Arc::default(),
+            )),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        family
+            .spawn(
+                &root,
+                "write the report".into(),
+                "newspapers".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        let first = notices_until(&mut root_inbox, 1).await;
+        family
+            .send_message(&root, "child", Some("newspapers"), "try again", &family)
+            .await
+            .unwrap();
+        let second = notices_until(&mut root_inbox, 1).await;
+        family
+            .send_message(&root, "child", Some("newspapers"), "and again", &family)
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family
+            .children_of(&root)
+            .first()
+            .is_none_or(|child| child.turns < 3 || child.status != ChildStatus::Failed)
+        {
+            assert!(Instant::now() < deadline, "the third turn never failed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let third = notices(&mut root_inbox);
+
+        assert!(first[0].contains("has compaction off"), "{first:?}");
+        assert!(
+            second[0].starts_with("[child-failed child:newspapers]\n\nrequest failed:"),
+            "{second:?}"
+        );
+        assert!(
+            second[0].ends_with(
+                "It ran out of context window the same way again. Later overflows are not \
+                 reported until it completes a reply."
+            ),
+            "{second:?}"
+        );
+        assert!(third.is_empty(), "{third:?}");
     }
 
     struct FailsOnce {
@@ -4445,9 +4675,9 @@ mod tests {
             notices(&mut root_inbox),
             vec![
                 "[child-failed child:slow]\n\nprompt is too long: 1000336 tokens > 1000000 \
-                 maximum\n\nIt ran out of context window. Its transcript, notes and kernel are \
-                 kept, so a message to it can carry on from there.\n\nProgress note: section 4 \
-                 drafted, section 5 next\n\nLast assistant text: adding the sources to section 5"
+                 maximum\n\nIt ran out of context window and has compaction off, so a message to \
+                 it would overflow the same way.\n\nProgress note: section 4 drafted, section 5 \
+                 next\n\nLast assistant text: adding the sources to section 5"
             ]
         );
     }
