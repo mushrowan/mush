@@ -164,6 +164,12 @@ pub enum Action {
     Yank,
     YankRaw,
     GPrefix,
+    FindChar,
+    FindCharBack,
+    TillChar,
+    TillCharBack,
+    RepeatFind,
+    RepeatFindBack,
 }
 
 impl Action {
@@ -224,6 +230,12 @@ impl Action {
             Self::Yank => "yank",
             Self::YankRaw => "yank_raw",
             Self::GPrefix => "g_prefix",
+            Self::FindChar => "find_char",
+            Self::FindCharBack => "find_char_back",
+            Self::TillChar => "till_char",
+            Self::TillCharBack => "till_char_back",
+            Self::RepeatFind => "repeat_find",
+            Self::RepeatFindBack => "repeat_find_back",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -288,6 +300,12 @@ impl Action {
         Self::Yank,
         Self::YankRaw,
         Self::GPrefix,
+        Self::FindChar,
+        Self::FindCharBack,
+        Self::TillChar,
+        Self::TillCharBack,
+        Self::RepeatFind,
+        Self::RepeatFindBack,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -446,7 +464,13 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::StartBlockSelection
         | Action::Yank
         | Action::YankRaw
-        | Action::GPrefix => KeyScope::Normal,
+        | Action::GPrefix
+        | Action::FindChar
+        | Action::FindCharBack
+        | Action::TillChar
+        | Action::TillCharBack
+        | Action::RepeatFind
+        | Action::RepeatFindBack => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -909,6 +933,36 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::NavigateTop,
         &[(KeyCode::Home, KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::FindChar,
+        &[(KeyCode::Char('f'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::FindCharBack,
+        &[(KeyCode::Char('F'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::TillChar,
+        &[(KeyCode::Char('t'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::TillCharBack,
+        &[(KeyCode::Char('T'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::RepeatFind,
+        &[(KeyCode::Char(';'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::RepeatFindBack,
+        &[(KeyCode::Char(','), KeyModifiers::NONE)],
     ),
 ];
 

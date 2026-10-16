@@ -19,6 +19,31 @@ pub(crate) enum Motion {
     WordBack(Word),
     WordEnd(Word),
     WordEndBack(Word),
+    Find(Find),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Find {
+    pub(crate) target: char,
+    pub(crate) forward: bool,
+    pub(crate) till: bool,
+    pub(crate) repeat: bool,
+}
+
+impl Find {
+    pub(crate) fn again(self) -> Self {
+        Self {
+            repeat: true,
+            ..self
+        }
+    }
+
+    pub(crate) fn reversed(self) -> Self {
+        Self {
+            forward: !self.forward,
+            ..self
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,6 +301,27 @@ pub(crate) fn last_cell(row: &str) -> usize {
     row.chars().count().saturating_sub(1)
 }
 
+fn find_in_row(row: &str, column: usize, find: Find, count: usize) -> Option<usize> {
+    let chars: Vec<char> = row.chars().collect();
+    let skip_adjacent = find.till && find.repeat && count == 1;
+    let nth = count.saturating_sub(1);
+    let hit = if find.forward {
+        (column + 1..chars.len())
+            .filter(|i| chars[*i] == find.target && !(skip_adjacent && *i == column + 1))
+            .nth(nth)?
+    } else {
+        (0..column.min(chars.len()))
+            .rev()
+            .filter(|i| chars[*i] == find.target && !(skip_adjacent && *i + 1 == column))
+            .nth(nth)?
+    };
+    Some(match (find.till, find.forward) {
+        (false, _) => hit,
+        (true, true) => hit - 1,
+        (true, false) => hit + 1,
+    })
+}
+
 pub(crate) fn destination(
     rows: &[String],
     at: (usize, usize),
@@ -306,6 +352,7 @@ pub(crate) fn destination(
             text.end_word(from, word, count, false)
         }),
         Motion::WordEndBack(word) => word_motion(word, Text::back_end_word),
+        Motion::Find(find) => Some((line, find_in_row(row(line), column, find, count)?)),
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
 }
@@ -440,6 +487,54 @@ mod tests {
         assert_eq!(
             destination(&rows, (0, 14), Motion::WordEndBack(Word::Small), 2),
             Some((0, 6))
+        );
+    }
+
+    fn find(target: char, forward: bool, till: bool) -> Find {
+        Find {
+            target,
+            forward,
+            till,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn f_lands_on_the_next_match_in_the_row() {
+        assert_eq!(find_in_row("a,b,c", 0, find(',', true, false), 1), Some(1));
+        assert_eq!(find_in_row("a,b,c", 0, find(',', true, false), 2), Some(3));
+        assert_eq!(find_in_row("a,b,c", 0, find(',', true, false), 3), None);
+    }
+
+    #[test]
+    fn t_stops_one_short_of_the_match() {
+        assert_eq!(find_in_row("a,b,c", 0, find('c', true, true), 1), Some(3));
+        assert_eq!(find_in_row("a,b,c", 4, find('a', false, true), 1), Some(1));
+    }
+
+    #[test]
+    fn capital_f_searches_back() {
+        assert_eq!(find_in_row("a,b,c", 4, find(',', false, false), 1), Some(3));
+        assert_eq!(find_in_row("a,b,c", 4, find(',', false, false), 2), Some(1));
+    }
+
+    #[test]
+    fn repeating_t_skips_the_match_it_is_already_against() {
+        let till = find(',', true, true);
+
+        assert_eq!(find_in_row("a,b,c", 0, till, 1), Some(0));
+        assert_eq!(find_in_row("a,b,c", 0, till.again(), 1), Some(2));
+        assert_eq!(find_in_row("a,b,c", 4, till.reversed().again(), 1), Some(2));
+        assert_eq!(find_in_row("a,b,c", 2, till.reversed().again(), 1), None);
+    }
+
+    #[test]
+    fn a_find_never_leaves_the_row() {
+        let rows = rows(&["ab", "xa"]);
+
+        assert_eq!(
+            destination(&rows, (0, 0), Motion::Find(find('x', true, false)), 1),
+            None
         );
     }
 

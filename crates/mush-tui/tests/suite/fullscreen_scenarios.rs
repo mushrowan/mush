@@ -1395,6 +1395,16 @@ fn a_count_with_no_motion_evaporates() {
 }
 
 #[test]
+fn f_finds_a_character_in_the_log_row() {
+    let mut app = log_on("hello brave new world");
+
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('n'));
+
+    assert_eq!(caret(&app), Some((13, 6)));
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -1786,6 +1796,66 @@ fn esc_drops_a_half_typed_command_and_keeps_the_composer() {
     assert_eq!(app.interaction.mode, mush_tui::app::AppMode::Normal);
     assert!(!app.interaction.focus.is_log());
     assert_eq!(app.input.cursor, 0);
+}
+
+#[test]
+fn f_and_t_find_a_character_on_the_composer_line() {
+    let mut app = composer_in_normal("one, two, three");
+
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char(','));
+    assert_eq!(app.input.cursor, 3);
+
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char(','));
+    assert_eq!(app.input.cursor, 7);
+
+    press_with(&mut app, KeyCode::Char('F'), KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.input.cursor, 1);
+
+    press(&mut app, KeyCode::Char('$'));
+    press_with(&mut app, KeyCode::Char('T'), KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.input.cursor, 11);
+}
+
+#[test]
+fn semicolon_and_comma_repeat_the_find_both_ways() {
+    let mut app = composer_in_normal("a-b-c-d");
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('-'));
+
+    press(&mut app, KeyCode::Char(';'));
+    assert_eq!(app.input.cursor, 3);
+    press(&mut app, KeyCode::Char('2'));
+    press(&mut app, KeyCode::Char(';'));
+    assert_eq!(app.input.cursor, 3, "no third dash after this one");
+
+    press(&mut app, KeyCode::Char(','));
+    assert_eq!(app.input.cursor, 1);
+}
+
+#[test]
+fn a_counted_f_skips_matches() {
+    let mut app = composer_in_normal("a-b-c-d");
+
+    press(&mut app, KeyCode::Char('3'));
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('-'));
+
+    assert_eq!(app.input.cursor, 5);
+}
+
+#[test]
+fn a_find_that_misses_leaves_the_caret() {
+    let mut app = composer_in_normal("hello");
+
+    press(&mut app, KeyCode::Char('f'));
+    press(&mut app, KeyCode::Char('z'));
+
+    assert_eq!(app.input.cursor, 0);
+    assert_eq!(app.input.text, "hello");
 }
 
 #[test]
