@@ -29,6 +29,24 @@ pub(crate) fn run(app: &mut App, command: Command, count: Option<usize>) -> Opti
             put(app, before, count);
             None
         }
+        Command::Undo => {
+            step_history(
+                app,
+                count,
+                InputBuffer::undo,
+                "already at the oldest change",
+            );
+            None
+        }
+        Command::Redo => {
+            step_history(
+                app,
+                count,
+                InputBuffer::redo,
+                "already at the newest change",
+            );
+            None
+        }
     };
     app.input.ensure_cursor_visible();
     event
@@ -185,6 +203,27 @@ fn put(app: &mut App, before: bool, count: Option<usize>) {
         };
     }
     edited(app);
+}
+
+fn step_history(
+    app: &mut App,
+    count: Option<usize>,
+    step: fn(&mut InputBuffer) -> bool,
+    exhausted: &str,
+) {
+    let mut moved = false;
+    for _ in 0..count.unwrap_or(1) {
+        if !step(&mut app.input) {
+            break;
+        }
+        moved = true;
+    }
+    if !moved {
+        app.status = Some(exhausted.into());
+        return;
+    }
+    edited(app);
+    rest_on_a_character(&mut app.input);
 }
 
 fn yank(app: &mut App, bytes: Range<usize>, linewise: bool) -> Option<AppEvent> {

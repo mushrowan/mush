@@ -181,6 +181,8 @@ pub enum Action {
     SubstituteLine,
     PutAfter,
     PutBefore,
+    Undo,
+    Redo,
 }
 
 impl Action {
@@ -258,6 +260,8 @@ impl Action {
             Self::SubstituteLine => "substitute_line",
             Self::PutAfter => "put_after",
             Self::PutBefore => "put_before",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -339,6 +343,8 @@ impl Action {
         Self::SubstituteLine,
         Self::PutAfter,
         Self::PutBefore,
+        Self::Undo,
+        Self::Redo,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -514,7 +520,9 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::Substitute
         | Action::SubstituteLine
         | Action::PutAfter
-        | Action::PutBefore => KeyScope::Normal,
+        | Action::PutBefore
+        | Action::Undo
+        | Action::Redo => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1062,6 +1070,16 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::PutBefore,
         &[(KeyCode::Char('P'), KeyModifiers::SHIFT)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Undo,
+        &[(KeyCode::Char('u'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::Redo,
+        &[(KeyCode::Char('r'), KeyModifiers::CONTROL)],
     ),
 ];
 

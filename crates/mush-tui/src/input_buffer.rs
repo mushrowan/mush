@@ -5,6 +5,8 @@ use ratatui::layout::Rect;
 
 use crate::clipboard::ClipboardImage;
 
+mod history;
+
 pub use mush_runtime::PendingImage;
 
 #[derive(Debug)]
@@ -22,6 +24,7 @@ pub struct InputBuffer {
     #[cfg(test)]
     pub(crate) layout_builds: Cell<u32>,
     goal: Option<Goal>,
+    history: history::History,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +89,7 @@ impl InputBuffer {
             #[cfg(test)]
             layout_builds: Cell::new(0),
             goal: None,
+            history: history::History::default(),
         }
     }
 
@@ -226,6 +230,7 @@ impl InputBuffer {
     }
 
     pub fn take_text(&mut self) -> String {
+        self.forget_history();
         self.cursor = 0;
         self.scroll.set(0);
         let input = std::mem::take(&mut self.text);

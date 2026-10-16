@@ -815,6 +815,7 @@ fn focus_log(app: &mut App) -> Option<AppEvent> {
 }
 
 fn handle_composer_normal_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
+    app.input.checkpoint();
     if app.keymap.matches(Action::QuitOrAbort, key) {
         app.interaction.normal.keys.clear();
         return handle_quit_or_abort(app);
@@ -905,6 +906,7 @@ fn handle_visual_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     }
     let pending = app.interaction.normal.keys.is_pending();
     if !app.interaction.focus.is_log() {
+        app.input.checkpoint();
         if !pending {
             if crate::keybinds::is_backspace(key)
                 || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::NONE)
@@ -966,7 +968,7 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
             return;
         }
         Command::Scroll(scroll) => scroll,
-        Command::Operate(..) | Command::Put { .. } => return,
+        Command::Operate(..) | Command::Put { .. } | Command::Undo | Command::Redo => return,
     };
     for _ in 0..count.unwrap_or(1) {
         let page = app.viewport.page() as isize;

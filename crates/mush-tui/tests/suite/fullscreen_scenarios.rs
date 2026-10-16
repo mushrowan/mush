@@ -2189,6 +2189,83 @@ fn dd_on_the_only_line_empties_the_composer() {
 }
 
 #[test]
+fn u_undoes_a_change_and_ctrl_r_redoes_it() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wdw");
+    assert_eq!(app.input.text, "one three");
+
+    type_keys(&mut app, "u");
+    assert_eq!(app.input.text, "one two three");
+    assert_eq!(app.input.cursor, 4);
+
+    press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(app.input.text, "one three");
+}
+
+#[test]
+fn u_undoes_everything_typed_in_one_insert() {
+    let mut app = conversation(1);
+    type_keys(&mut app, "hello world");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "u");
+
+    assert_eq!(app.input.text, "");
+}
+
+#[test]
+fn a_change_and_what_it_typed_undo_together() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "cwfirst");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "u");
+
+    assert_eq!(app.input.text, "one two");
+}
+
+#[test]
+fn a_count_before_u_undoes_that_many_changes() {
+    let mut app = composer_in_normal("abcd");
+    type_keys(&mut app, "xxx");
+
+    type_keys(&mut app, "2u");
+    assert_eq!(app.input.text, "bcd");
+
+    press(&mut app, KeyCode::Char('2'));
+    press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(app.input.text, "d");
+}
+
+#[test]
+fn u_with_nothing_left_says_so() {
+    let mut app = conversation(1);
+    type_keys(&mut app, "hello");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "uu");
+
+    assert_eq!(app.input.text, "");
+    assert_eq!(
+        app.status.as_ref().map(|status| status.text.as_str()),
+        Some("already at the oldest change")
+    );
+}
+
+#[test]
+fn a_sent_prompt_leaves_nothing_to_undo() {
+    let mut app = conversation(1);
+    type_keys(&mut app, "first");
+    press(&mut app, KeyCode::Enter);
+    type_keys(&mut app, "second");
+    press(&mut app, KeyCode::Esc);
+
+    type_keys(&mut app, "uu");
+
+    assert_eq!(app.input.text, "");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

@@ -112,6 +112,8 @@ pub(crate) enum Command {
     Scroll(Scroll),
     Operate(Operator, Target),
     Put { before: bool },
+    Undo,
+    Redo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +236,12 @@ impl Keys {
         }
         if bound(Action::PutBefore) {
             return self.run(Command::Put { before: true });
+        }
+        if bound(Action::Undo) {
+            return self.run(Command::Undo);
+        }
+        if bound(Action::Redo) {
+            return self.run(Command::Redo);
         }
         Step::Dropped
     }
@@ -615,6 +623,20 @@ mod tests {
             Step::Run(Command::Put { before: false }, Some(3))
         );
         assert_eq!(last("P"), Step::Run(Command::Put { before: true }, None));
+    }
+
+    #[test]
+    fn u_and_ctrl_r_undo_and_redo() {
+        let mut keys = Keys::default();
+        let keymap = KeyMap::default();
+
+        assert_eq!(last("2u"), Step::Run(Command::Undo, Some(2)));
+        let step = keys.feed(
+            &keymap,
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            Context::COMPOSER,
+        );
+        assert_eq!(step, Step::Run(Command::Redo, None));
     }
 
     #[test]
