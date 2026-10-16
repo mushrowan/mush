@@ -960,6 +960,10 @@ fn handle_log_motion(app: &mut App, key: KeyEvent, context: Context) {
 }
 
 fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
+    let Some(command) = app.interaction.normal.marks.log.resolve(command) else {
+        app.status = Some("mark not set".into());
+        return;
+    };
     let scroll = match command {
         Command::Move(motion) => {
             let mut target = crate::normal::LogTarget::new(app);
@@ -974,6 +978,15 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         }
         Command::SwapEnds => {
             app.viewport.swap_selection_ends();
+            return;
+        }
+        Command::SetMark(name) => {
+            let cursor = app.viewport.cursor();
+            app.interaction
+                .normal
+                .marks
+                .log
+                .set(name, (cursor.line, cursor.column));
             return;
         }
         Command::Reselect => {

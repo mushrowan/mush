@@ -198,6 +198,9 @@ pub enum Action {
     YankToLineEnd,
     ParagraphForward,
     ParagraphBack,
+    SetMark,
+    GotoMark,
+    GotoMarkLine,
 }
 
 impl Action {
@@ -292,6 +295,9 @@ impl Action {
             Self::YankToLineEnd => "yank_to_line_end",
             Self::ParagraphForward => "paragraph_forward",
             Self::ParagraphBack => "paragraph_back",
+            Self::SetMark => "set_mark",
+            Self::GotoMark => "goto_mark",
+            Self::GotoMarkLine => "goto_mark_line",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -390,6 +396,9 @@ impl Action {
         Self::YankToLineEnd,
         Self::ParagraphForward,
         Self::ParagraphBack,
+        Self::SetMark,
+        Self::GotoMark,
+        Self::GotoMarkLine,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -582,7 +591,10 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::RepeatChange
         | Action::YankToLineEnd
         | Action::ParagraphForward
-        | Action::ParagraphBack => KeyScope::Normal,
+        | Action::ParagraphBack
+        | Action::SetMark
+        | Action::GotoMark
+        | Action::GotoMarkLine => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1215,6 +1227,21 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::ParagraphBack,
         &[(KeyCode::Char('{'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::SetMark,
+        &[(KeyCode::Char('m'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::GotoMark,
+        &[(KeyCode::Char('`'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::GotoMarkLine,
+        &[(KeyCode::Char('\''), KeyModifiers::NONE)],
     ),
 ];
 

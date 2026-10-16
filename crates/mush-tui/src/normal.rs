@@ -10,6 +10,46 @@ pub(crate) struct NormalState {
     pub(crate) register: edit::Register,
     pub(crate) last_change: Option<edit::Change>,
     pub(crate) last_selection: LastSelection,
+    pub(crate) marks: Marks,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Marks {
+    pub(crate) composer: MarkTable,
+    pub(crate) log: MarkTable,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MarkTable([Option<(usize, usize)>; 26]);
+
+impl MarkTable {
+    pub(crate) fn set(&mut self, name: char, at: (usize, usize)) {
+        if let Some(slot) = Self::slot(name).and_then(|slot| self.0.get_mut(slot)) {
+            *slot = Some(at);
+        }
+    }
+
+    pub(crate) fn resolve(&self, command: keys::Command) -> Option<keys::Command> {
+        let resolve = |motion| match motion {
+            Motion::Mark { name, exact } => Some(Motion::Jump {
+                to: (*self.0.get(Self::slot(name)?)?)?,
+                linewise: !exact,
+            }),
+            motion => Some(motion),
+        };
+        Some(match command {
+            keys::Command::Move(motion) => keys::Command::Move(resolve(motion)?),
+            keys::Command::Operate(operator, keys::Target::Motion(motion)) => {
+                keys::Command::Operate(operator, keys::Target::Motion(resolve(motion)?))
+            }
+            command => command,
+        })
+    }
+
+    fn slot(name: char) -> Option<usize> {
+        name.is_ascii_lowercase()
+            .then(|| usize::from(name as u8 - b'a'))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

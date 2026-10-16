@@ -1471,6 +1471,22 @@ fn gv_reselects_the_last_log_selection() {
 }
 
 #[test]
+fn marks_hold_a_place_in_the_log() {
+    let mut app = log_on("hello brave new world");
+    press(&mut app, KeyCode::Char('w'));
+    let marked = caret(&app);
+    press(&mut app, KeyCode::Char('m'));
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Char('g'));
+    press(&mut app, KeyCode::Char('g'));
+
+    press(&mut app, KeyCode::Char('`'));
+    press(&mut app, KeyCode::Char('x'));
+
+    assert_eq!(caret(&app), marked);
+}
+
+#[test]
 fn a_count_works_in_visual_mode() {
     let mut app = log_on("hello brave new world");
     press(&mut app, KeyCode::Char('v'));
@@ -2971,6 +2987,47 @@ fn gv_with_no_earlier_selection_does_nothing() {
 
     assert_eq!(composer_mode(&app), mush_tui::app::AppMode::Normal);
     assert_eq!(tinted_text(&app), "");
+}
+
+#[test]
+fn backtick_returns_to_a_mark_and_quote_to_its_line() {
+    let mut app = composer_in_normal("one two\n  three\nfour");
+    type_keys(&mut app, "wma");
+    type_keys(&mut app, "jllmb");
+    type_keys(&mut app, "G");
+
+    type_keys(&mut app, "`a");
+    assert_eq!(app.input.cursor, 4);
+
+    type_keys(&mut app, "'b");
+    assert_eq!(app.input.cursor, 10);
+}
+
+#[test]
+fn operators_reach_to_a_mark() {
+    let mut app = composer_in_normal("one two three");
+    type_keys(&mut app, "wma$");
+    type_keys(&mut app, "d`a");
+    assert_eq!(app.input.text, "one e");
+
+    let mut app = composer_in_normal("a\nb\nc\nd");
+    type_keys(&mut app, "jmaj");
+    type_keys(&mut app, "jd'a");
+    assert_eq!(app.input.text, "a");
+}
+
+#[test]
+fn a_mark_that_was_never_set_says_so() {
+    let mut app = composer_in_normal("one two");
+    type_keys(&mut app, "w");
+
+    type_keys(&mut app, "`q");
+
+    assert_eq!(app.input.cursor, 4);
+    assert_eq!(
+        app.status.as_ref().map(|status| status.text.as_str()),
+        Some("mark not set")
+    );
 }
 
 #[test]

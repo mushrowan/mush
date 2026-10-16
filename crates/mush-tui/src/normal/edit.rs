@@ -130,6 +130,10 @@ fn select_extent(app: &mut App, extent: Extent) {
 }
 
 fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppEvent> {
+    let Some(command) = app.interaction.normal.marks.composer.resolve(command) else {
+        app.status = Some("mark not set".into());
+        return None;
+    };
     match command {
         Command::Move(motion) => {
             let mut target = ComposerTarget::new(&mut app.input);
@@ -193,6 +197,11 @@ fn execute(app: &mut App, command: Command, count: Option<usize>) -> Option<AppE
                 ComposerTarget::new(&mut app.input).select(selection);
                 app.interaction.mode = AppMode::Visual;
             }
+            None
+        }
+        Command::SetMark(name) => {
+            let at = composer_position(&app.input);
+            app.interaction.normal.marks.composer.set(name, at);
             None
         }
         Command::Repeat => None,

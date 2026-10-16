@@ -25,6 +25,8 @@ pub(crate) enum Motion {
     MatchPair,
     ParagraphForward,
     ParagraphBack,
+    Mark { name: char, exact: bool },
+    Jump { to: (usize, usize), linewise: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -518,6 +520,16 @@ pub(crate) fn destination(
             let at_end = forward && line + 1 == rows.len();
             Some((line, if at_end { last_cell(row(line)) } else { 0 }))
         }
+        Motion::Jump { to, linewise } => {
+            let line = to.0.min(rows.len().saturating_sub(1));
+            let column = if linewise {
+                first_non_blank(row(line))
+            } else {
+                to.1
+            };
+            Some((line, column))
+        }
+        Motion::Mark { .. } => None,
         Motion::Up | Motion::Down | Motion::Top | Motion::Bottom => None,
     }
 }
@@ -583,6 +595,9 @@ pub(crate) fn span(
             (text.index_of((line, column))?, find.forward)
         }
         Motion::MatchPair => (text.matching_pair(from)?, true),
+        Motion::Jump { to, linewise: true } => return lines(to.0.min(last)),
+        Motion::Jump { to, .. } => (text.index_of((to.0.min(last), to.1))?, false),
+        Motion::Mark { .. } => return None,
         Motion::ParagraphForward | Motion::ParagraphBack => {
             let forward = motion == Motion::ParagraphForward;
             let edge = paragraph_edge(rows, line, forward, times)?;
@@ -1042,6 +1057,30 @@ mod tests {
                 1
             ),
             "words"
+        );
+    }
+
+    #[test]
+    fn a_jump_to_a_mark_lands_exactly_or_on_the_first_non_blank() {
+        let rows = rows(&["one", "  two three"]);
+        let exact = Motion::Jump {
+            to: (1, 6),
+            linewise: false,
+        };
+        let line = Motion::Jump {
+            to: (1, 6),
+            linewise: true,
+        };
+
+        assert_eq!(go(&rows, (0, 0), exact), (1, 6));
+        assert_eq!(go(&rows, (0, 0), line), (1, 2));
+        assert_eq!(
+            span(&rows, (0, 1), line, None, false),
+            Some(Region::Lines(0..=1))
+        );
+        assert_eq!(
+            chars(&["one", "  two three"], (0, 1), exact, 1),
+            "ne\n  two "
         );
     }
 

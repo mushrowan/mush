@@ -41,6 +41,8 @@ const FINDS: &[(Action, bool, bool)] = &[
     (Action::TillCharBack, false, true),
 ];
 
+const MARK_JUMPS: &[(Action, bool)] = &[(Action::GotoMark, true), (Action::GotoMarkLine, false)];
+
 const OBJECTS: &[(Action, bool)] = &[(Action::InnerObject, false), (Action::AroundObject, true)];
 
 const OPERATORS: &[(Action, Operator)] = &[
@@ -153,6 +155,7 @@ pub(crate) enum Command {
     ToggleCase,
     Repeat,
     Reselect,
+    SetMark(char),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +195,8 @@ enum Prefix {
     Find { forward: bool, till: bool },
     Object { around: bool },
     Replace,
+    SetMark,
+    Mark { exact: bool },
 }
 
 enum Reach {
@@ -256,6 +261,14 @@ impl Keys {
                 forward: *forward,
                 till: *till,
             });
+            return Step::Pending;
+        }
+        if let Some((_, exact)) = MARK_JUMPS.iter().find(|(action, _)| bound(*action)) {
+            self.prefix = Some(Prefix::Mark { exact: *exact });
+            return Step::Pending;
+        }
+        if self.operator.is_none() && bound(Action::SetMark) {
+            self.prefix = Some(Prefix::SetMark);
             return Step::Pending;
         }
         if let Some((_, scroll)) = SCROLLS.iter().find(|(action, _)| bound(*action)) {
@@ -394,6 +407,14 @@ impl Keys {
                     crate::keybinds::typed_char(key)?,
                 )));
             }
+            Prefix::SetMark => {
+                let name = crate::keybinds::typed_char(key).filter(char::is_ascii_lowercase)?;
+                return Some(Reach::Command(Command::SetMark(name)));
+            }
+            Prefix::Mark { exact } => Motion::Mark {
+                name: crate::keybinds::typed_char(key)?,
+                exact,
+            },
         };
         Some(Reach::Motion(motion))
     }
@@ -927,6 +948,35 @@ mod tests {
             Step::Run(Command::Reselect, None)
         );
         assert_eq!(last("dgv"), Step::Dropped);
+    }
+
+    #[test]
+    fn marks_are_set_and_reached_by_name() {
+        assert_eq!(last("ma"), Step::Run(Command::SetMark('a'), None));
+        assert_eq!(last("mA"), Step::Dropped);
+        assert_eq!(
+            last("`b"),
+            Step::Run(
+                Command::Move(Motion::Mark {
+                    name: 'b',
+                    exact: true
+                }),
+                None
+            )
+        );
+        assert_eq!(
+            last("d'c"),
+            Step::Run(
+                operate(
+                    Operator::Delete,
+                    Target::Motion(Motion::Mark {
+                        name: 'c',
+                        exact: false
+                    })
+                ),
+                None
+            )
+        );
     }
 
     #[test]
