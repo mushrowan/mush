@@ -81,6 +81,7 @@ normal::toggle_case = ~
 normal::undo = u
 normal::yank = y
 normal::yank_raw = Shift-y
+normal::yank_to_line_end = Shift-y
 session_picker::next_item = Down | Ctrl-j
 session_picker::previous_item = Up | Ctrl-k
 session_picker::session_picker_delete = Ctrl-d

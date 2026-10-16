@@ -74,6 +74,11 @@ const SHORTHANDS: &[(Action, Operator, Target)] = &[
         Target::Motion(Motion::Right),
     ),
     (Action::SubstituteLine, Operator::Change, Target::Lines),
+    (
+        Action::YankToLineEnd,
+        Operator::Yank,
+        Target::Motion(Motion::LineEnd),
+    ),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -712,6 +717,7 @@ mod tests {
             ("C", Operator::Change, Target::Motion(Motion::LineEnd)),
             ("s", Operator::Change, Target::Motion(Motion::Right)),
             ("S", Operator::Change, Target::Lines),
+            ("Y", Operator::Yank, Target::Motion(Motion::LineEnd)),
         ];
         for (typed, operator, target) in cases {
             assert_eq!(

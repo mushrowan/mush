@@ -195,6 +195,7 @@ pub enum Action {
     JoinLines,
     ToggleCase,
     RepeatChange,
+    YankToLineEnd,
 }
 
 impl Action {
@@ -286,6 +287,7 @@ impl Action {
             Self::JoinLines => "join_lines",
             Self::ToggleCase => "toggle_case",
             Self::RepeatChange => "repeat_change",
+            Self::YankToLineEnd => "yank_to_line_end",
             Self::PasteImage => "paste_image",
             Self::QuitOrAbort => "quit_or_abort",
             Self::SelectAll => "select_all",
@@ -381,6 +383,7 @@ impl Action {
         Self::JoinLines,
         Self::ToggleCase,
         Self::RepeatChange,
+        Self::YankToLineEnd,
         Self::PasteImage,
         Self::QuitOrAbort,
         Self::SelectAll,
@@ -570,7 +573,8 @@ const fn default_scope_for_action(action: Action) -> KeyScope {
         | Action::ReplaceChar
         | Action::JoinLines
         | Action::ToggleCase
-        | Action::RepeatChange => KeyScope::Normal,
+        | Action::RepeatChange
+        | Action::YankToLineEnd => KeyScope::Normal,
         Action::SessionPickerToggleScope | Action::SessionPickerDelete => KeyScope::SessionPicker,
         Action::ModelPickerDeleteAllStale
         | Action::ModelPickerDeleteSelectedStale
@@ -1188,6 +1192,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Normal,
         Action::RepeatChange,
         &[(KeyCode::Char('.'), KeyModifiers::NONE)],
+    ),
+    (
+        KeyScope::Normal,
+        Action::YankToLineEnd,
+        &[(KeyCode::Char('Y'), KeyModifiers::SHIFT)],
     ),
 ];
 

@@ -2788,6 +2788,51 @@ fn operators_work_over_wide_and_accented_text() {
 }
 
 #[test]
+fn capital_y_yanks_to_the_end_of_the_line_like_neovim() {
+    let mut app = composer_in_normal("one two\nthree");
+    type_keys(&mut app, "w");
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+    type_keys(&mut app, "$p");
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "two"),
+        "{event:?}"
+    );
+    assert_eq!(app.input.text, "one twotwo\nthree");
+}
+
+#[test]
+fn a_counted_capital_y_reaches_into_the_next_line() {
+    let mut app = composer_in_normal("one two\nthree\nfour");
+    type_keys(&mut app, "w2Y");
+
+    type_keys(&mut app, "GP");
+
+    assert_eq!(app.input.text, "one two\nthree\ntwo\nthreefour");
+}
+
+#[test]
+fn capital_y_still_copies_a_selection_raw() {
+    let mut app = composer_in_normal("  one\n    two");
+    press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+    press(&mut app, KeyCode::Char('j'));
+
+    let event = handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+    );
+
+    assert!(
+        matches!(&event, Some(AppEvent::Copy { text }) if text == "  one\n    two"),
+        "{event:?}"
+    );
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 
