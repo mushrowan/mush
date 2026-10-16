@@ -2893,6 +2893,17 @@ fn vip_selects_the_paragraph_lines() {
 }
 
 #[test]
+fn cis_changes_a_sentence_and_das_deletes_one() {
+    let mut app = composer_in_normal("Fix the bug. Then test it. Ship.");
+    type_keys(&mut app, "fTcisRun the tests.");
+    assert_eq!(app.input.text, "Fix the bug. Run the tests. Ship.");
+
+    press(&mut app, KeyCode::Esc);
+    type_keys(&mut app, "0das");
+    assert_eq!(app.input.text, "Run the tests. Ship.");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

@@ -6,6 +6,7 @@ pub(crate) enum Kind {
     Quote(char),
     Block(char, char),
     Paragraph,
+    Sentence,
 }
 
 impl Kind {
@@ -19,6 +20,7 @@ impl Kind {
             '{' | '}' | 'B' => Self::Block('{', '}'),
             '<' | '>' => Self::Block('<', '>'),
             'p' => Self::Paragraph,
+            's' => Self::Sentence,
             _ => return None,
         })
     }
@@ -51,6 +53,7 @@ pub(crate) fn span(
         Kind::Quote(quote) => quoted(&text, at, quote, object.around, count),
         Kind::Block(open, close) => block(&text, at, (open, close), object.around, count),
         Kind::Paragraph => paragraph(rows, text.line_of(at), object.around, count),
+        Kind::Sentence => sentence(&text, rows, at, object.around, count),
     }
 }
 
@@ -178,6 +181,71 @@ fn paragraph(rows: &[String], line: usize, around: bool, count: usize) -> Option
         }
     }
     Some(Region::Lines(start..=end))
+}
+
+fn sentence(text: &Text, rows: &[String], at: usize, around: bool, count: usize) -> Option<Region> {
+    let line = text.line_of(at);
+    if blank(&rows[line]) {
+        return paragraph(rows, line, false, 1);
+    }
+    let mut first = line;
+    while first > 0 && !blank(&rows[first - 1]) {
+        first -= 1;
+    }
+    let mut last = line;
+    while last + 1 < rows.len() && !blank(&rows[last + 1]) {
+        last += 1;
+    }
+    let pieces = sentences(&text.chars, text.starts[first]..text.line_end(last));
+    let here = pieces.iter().position(|(range, _)| range.contains(&at))?;
+    let (start, end) = if around {
+        let white_first = pieces[here].1;
+        let mut end = here + 2 * count - 1;
+        if end == pieces.len() && !white_first {
+            end -= 1;
+        }
+        if end >= pieces.len() {
+            return None;
+        }
+        let lead_in = !white_first && !pieces[end].1 && here >= 2;
+        (if lead_in { here - 1 } else { here }, end)
+    } else {
+        let end = here + count - 1;
+        if end >= pieces.len() {
+            return None;
+        }
+        (here, end)
+    };
+    Some(Region::Chars(pieces[start].0.start..pieces[end].0.end))
+}
+
+fn sentences(chars: &[char], span: std::ops::Range<usize>) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut pieces = Vec::new();
+    let mut i = span.start;
+    while i < span.end {
+        let from = i;
+        if chars[i].is_whitespace() {
+            while i < span.end && chars[i].is_whitespace() {
+                i += 1;
+            }
+            pieces.push((from..i, true));
+            continue;
+        }
+        while i < span.end {
+            let c = chars[i];
+            i += 1;
+            if matches!(c, '.' | '!' | '?') {
+                while i < span.end && matches!(chars[i], ')' | ']' | '"' | '\'') {
+                    i += 1;
+                }
+                if i == span.end || chars[i].is_whitespace() {
+                    break;
+                }
+            }
+        }
+        pieces.push((from..i, false));
+    }
+    pieces
 }
 
 fn quoted(text: &Text, at: usize, quote: char, around: bool, count: usize) -> Option<Region> {
@@ -462,6 +530,56 @@ mod tests {
         assert_eq!(lines(&text, 0, true, 2), Some(Region::Lines(0..=3)));
         assert_eq!(lines(&text, 0, true, 3), Some(Region::Lines(0..=4)));
         assert_eq!(lines(&text, 0, true, 4), None);
+    }
+
+    #[test]
+    fn is_is_the_sentence_and_as_takes_the_space_after() {
+        let text = ["Hello there. How are you? Fine!"];
+
+        assert_eq!(take(&text, (0, 14), 's', false, 1), "How are you?");
+        assert_eq!(take(&text, (0, 14), 's', true, 1), "How are you? ");
+        assert_eq!(take(&text, (0, 0), 's', false, 1), "Hello there.");
+    }
+
+    #[test]
+    fn as_on_the_last_sentence_takes_the_space_before() {
+        assert_eq!(take(&["One. Two."], (0, 6), 's', true, 1), " Two.");
+    }
+
+    #[test]
+    fn a_sentence_can_cross_lines_inside_a_paragraph() {
+        let text = ["One. Two", "three. Four."];
+
+        assert_eq!(take(&text, (1, 1), 's', false, 1), "Two\nthree.");
+    }
+
+    #[test]
+    fn closing_quotes_and_brackets_stay_with_their_sentence() {
+        let text = [r#"He said "Hi." Then (he left.) Bye"#];
+
+        assert_eq!(take(&text, (0, 0), 's', false, 1), r#"He said "Hi.""#);
+        assert_eq!(take(&text, (0, 16), 's', false, 1), "Then (he left.)");
+    }
+
+    #[test]
+    fn a_dot_inside_a_word_does_not_end_a_sentence() {
+        assert_eq!(
+            take(&["See e.g.this one. Next"], (0, 0), 's', false, 1),
+            "See e.g.this one."
+        );
+    }
+
+    #[test]
+    fn sentence_objects_on_the_gap_and_with_counts() {
+        let text = ["One.  Two. Three."];
+
+        assert_eq!(take(&text, (0, 4), 's', false, 1), "  ");
+        assert_eq!(take(&text, (0, 4), 's', true, 1), "  Two.");
+        assert_eq!(take(&text, (0, 0), 's', false, 2), "One.  ");
+        assert_eq!(take(&text, (0, 0), 's', true, 2), "One.  Two. ");
+        assert_eq!(take(&text, (0, 4), 's', true, 2), "  Two. Three.");
+        assert_eq!(take(&text, (0, 6), 's', true, 2), "  Two. Three.");
+        assert_eq!(take(&text, (0, 6), 's', true, 3), "None");
     }
 
     #[test]
