@@ -186,6 +186,19 @@ impl ChildSummary {
             | ChildStatus::Deleted => Activity::Hibernating,
         }
     }
+
+    fn record_context(
+        &mut self,
+        tokens: u64,
+        model: Option<&mush_ai::types::Model>,
+    ) -> &mut ChildContext {
+        let context = self.context.get_or_insert_default();
+        context.tokens = tokens;
+        if let Some(model) = model {
+            context.window = model.context_window.get();
+        }
+        context
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1225,7 +1238,7 @@ impl Family {
                         child.answer = Some(text);
                     }
                     if tokens > 0 {
-                        record_context(child, model, tokens, false);
+                        child.record_context(tokens, model);
                     }
                     child.usage.input_tokens += usage.input_tokens;
                     child.usage.output_tokens += usage.output_tokens;
@@ -1243,14 +1256,16 @@ impl Family {
                 event: AgentEvent::ContextCompacted { compaction, .. },
                 ..
             } => {
-                let tokens = mush_session::compact::estimate_tokens(&compaction.messages);
+                let tokens = mush_session::compact::estimate_tokens(&compaction.messages) as u64;
                 self.record_update(id, |child| {
-                    record_context(child, model, tokens as u64, true);
+                    child.record_context(tokens, model).compactions += 1
                 });
             }
             ClientEvent::Compacted(applied) => {
                 let tokens = applied.tokens_after as u64;
-                self.record_update(id, |child| record_context(child, model, tokens, true));
+                self.record_update(id, |child| {
+                    child.record_context(tokens, model).compactions += 1
+                });
             }
             ClientEvent::Agent {
                 event: AgentEvent::Error { error },
@@ -1922,22 +1937,6 @@ fn failed_notice(name: &str, child: &ChildSummary) -> String {
         notice.push_str(&compact_preview(answer, EXIT_NOTICE_PREVIEW_CHARS));
     }
     notice
-}
-
-fn record_context(
-    child: &mut ChildSummary,
-    model: Option<&mush_ai::types::Model>,
-    tokens: u64,
-    compacted: bool,
-) {
-    let context = child.context.get_or_insert_default();
-    context.tokens = tokens;
-    if let Some(model) = model {
-        context.window = model.context_window.get();
-    }
-    if compacted {
-        context.compactions += 1;
-    }
 }
 
 fn compact_preview(text: &str, max: usize) -> String {
