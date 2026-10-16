@@ -2873,6 +2873,26 @@ fn d_closing_brace_deletes_the_rest_of_the_paragraph() {
 }
 
 #[test]
+fn dip_and_dap_take_a_composer_paragraph() {
+    let mut app = composer_in_normal("one\ntwo\n\nthree");
+    type_keys(&mut app, "jdip");
+    assert_eq!(app.input.text, "\nthree");
+
+    let mut app = composer_in_normal("one\ntwo\n\nthree");
+    type_keys(&mut app, "dap");
+    assert_eq!(app.input.text, "three");
+}
+
+#[test]
+fn vip_selects_the_paragraph_lines() {
+    let mut app = composer_in_normal("one\ntwo\n\nthree");
+
+    type_keys(&mut app, "vip");
+
+    assert_eq!(tinted_text(&app), "onetwo");
+}
+
+#[test]
 fn a_motion_key_types_nothing() {
     let mut app = composer_in_normal("hello");
 

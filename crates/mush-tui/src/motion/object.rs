@@ -1,10 +1,11 @@
-use super::{Class, Ends, Region, Step, Text, Word};
+use super::{Class, Ends, Region, Step, Text, Word, blank};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Word(Word),
     Quote(char),
     Block(char, char),
+    Paragraph,
 }
 
 impl Kind {
@@ -17,6 +18,7 @@ impl Kind {
             '[' | ']' => Self::Block('[', ']'),
             '{' | '}' | 'B' => Self::Block('{', '}'),
             '<' | '>' => Self::Block('<', '>'),
+            'p' => Self::Paragraph,
             _ => return None,
         })
     }
@@ -48,6 +50,7 @@ pub(crate) fn span(
         Kind::Word(word) => Some(words(&text, at, word, object.around, count)),
         Kind::Quote(quote) => quoted(&text, at, quote, object.around, count),
         Kind::Block(open, close) => block(&text, at, (open, close), object.around, count),
+        Kind::Paragraph => paragraph(rows, text.line_of(at), object.around, count),
     }
 }
 
@@ -129,6 +132,52 @@ fn words(text: &Text, at: usize, word: Word, around: bool, count: usize) -> Regi
         }
     }
     text.region(start, end, inclusive)
+}
+
+fn paragraph(rows: &[String], line: usize, around: bool, count: usize) -> Option<Region> {
+    let white = |line: usize| blank(&rows[line]);
+    let last = rows.len() - 1;
+    let white_in_front = white(line);
+    let mut start = line;
+    while start > 0 && white(start - 1) == white_in_front {
+        start -= 1;
+    }
+    let mut next = start;
+    while next <= last && white(next) {
+        next += 1;
+    }
+    let mut left = count;
+    if !around && white_in_front {
+        left -= 1;
+    }
+    while left > 0 {
+        left -= 1;
+        if next > last {
+            return None;
+        }
+        let into_white = !around && white(next);
+        if around || !into_white {
+            next += 1;
+            while next <= last && !white(next) {
+                next += 1;
+            }
+        }
+        if left == 0 && white_in_front && around {
+            break;
+        }
+        if around || into_white {
+            while next <= last && white(next) {
+                next += 1;
+            }
+        }
+    }
+    let end = next - 1;
+    if around && !white_in_front && !white(end) {
+        while start > 0 && white(start - 1) {
+            start -= 1;
+        }
+    }
+    Some(Region::Lines(start..=end))
 }
 
 fn quoted(text: &Text, at: usize, quote: char, around: bool, count: usize) -> Option<Region> {
@@ -371,6 +420,48 @@ mod tests {
             Some(Region::Lines(1..=2))
         );
         assert_eq!(span(&rows, (0, 0), object, None), None);
+    }
+
+    fn lines(text: &[&str], line: usize, around: bool, count: usize) -> Option<Region> {
+        let object = Object {
+            kind: Kind::Paragraph,
+            around,
+        };
+        span(&rows(text), (line, 0), object, Some(count))
+    }
+
+    #[test]
+    fn ip_is_the_paragraph_and_ap_takes_the_blank_lines_after() {
+        let text = ["one", "two", "", "", "three", "", "four"];
+
+        assert_eq!(lines(&text, 1, false, 1), Some(Region::Lines(0..=1)));
+        assert_eq!(lines(&text, 1, true, 1), Some(Region::Lines(0..=3)));
+        assert_eq!(lines(&text, 4, true, 1), Some(Region::Lines(4..=5)));
+    }
+
+    #[test]
+    fn ap_on_the_last_paragraph_takes_the_blank_lines_before() {
+        let text = ["one", "", "two"];
+
+        assert_eq!(lines(&text, 2, true, 1), Some(Region::Lines(1..=2)));
+    }
+
+    #[test]
+    fn ip_on_blank_lines_is_the_blank_lines() {
+        let text = ["one", "", "  ", "two"];
+
+        assert_eq!(lines(&text, 1, false, 1), Some(Region::Lines(1..=2)));
+        assert_eq!(lines(&text, 2, true, 1), Some(Region::Lines(1..=3)));
+    }
+
+    #[test]
+    fn a_count_on_ip_counts_blank_runs_too() {
+        let text = ["one", "", "two", "", "three"];
+
+        assert_eq!(lines(&text, 0, false, 3), Some(Region::Lines(0..=2)));
+        assert_eq!(lines(&text, 0, true, 2), Some(Region::Lines(0..=3)));
+        assert_eq!(lines(&text, 0, true, 3), Some(Region::Lines(0..=4)));
+        assert_eq!(lines(&text, 0, true, 4), None);
     }
 
     #[test]
