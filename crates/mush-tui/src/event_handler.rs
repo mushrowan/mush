@@ -59,17 +59,29 @@ pub fn handle_agent_event(
             }
         }
         AgentEvent::SteeringInjected { messages } | AgentEvent::FollowUpInjected { messages } => {
-            let typed = messages
-                .iter()
-                .filter(|m| match m {
-                    Message::User(user) => {
-                        mush_tools::kernel_jobs::BashDone::parse(&user.text()).is_none()
+            let mut typed = 0;
+            let mut injected = Vec::new();
+            for message in messages {
+                let Message::User(user) = message else {
+                    typed += 1;
+                    continue;
+                };
+                let text = user.text();
+                if mush_tools::kernel_jobs::BashDone::parse(&text).is_some() {
+                    continue;
+                }
+                match crate::injected::Injected::from_text(&text) {
+                    Some(row) => {
+                        injected.push((crate::conversation_display::injected_role(&text), row));
                     }
-                    _ => true,
-                })
-                .count();
+                    None => typed += 1,
+                }
+            }
             for mut msg in app.messages.iter_mut().filter(|m| m.queued).take(typed) {
                 msg.queued = false;
+            }
+            for (role, row) in injected {
+                app.push_injected(role, row);
             }
         }
         AgentEvent::ContextCompacted {
@@ -784,5 +796,65 @@ mod tests {
         );
 
         assert!(ctx.app.messages[1].queued);
+    }
+
+    #[test]
+    fn a_steered_agent_message_shows_as_its_own_row_and_leaves_typed_steers_queued() {
+        use crate::app::App;
+        use mush_ai::types::{
+            EventKind, EventMessage, EventOrigin, EventReceipt, TokenCount, UserContent,
+            UserMessage,
+        };
+
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.push_queued_message("typed");
+        let event = EventMessage {
+            content: "[agent-message from child:auth]\n\nfound it".into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Message,
+            receipts: vec![EventReceipt {
+                id: "agentmsg_1".into(),
+                timestamp_ms: Timestamp::zero(),
+                kind: EventKind::Message,
+                origin: EventOrigin::Agent {
+                    session_id: "s".into(),
+                    name: "auth".into(),
+                    relationship: "child".into(),
+                },
+            }],
+        };
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            image_protos: &mut image_protos,
+        };
+        let injected = vec![Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(event.text()))
+                .timestamp_ms(Timestamp::zero())
+                .build(),
+        )];
+
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::SteeringInjected { messages: injected },
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
+
+        assert!(
+            ctx.app.messages[0].queued,
+            "the typed steer is still waiting"
+        );
+        let row = &ctx.app.messages[1];
+        assert_eq!(row.role, crate::app::MessageRole::Event(EventKind::Message));
+        assert_eq!(row.content, "found it");
+        assert_eq!(
+            crate::test_support::header_text(row).as_deref(),
+            Some("message from child auth")
+        );
     }
 }

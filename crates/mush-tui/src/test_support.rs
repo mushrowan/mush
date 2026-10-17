@@ -20,6 +20,22 @@ pub(crate) fn user_message(text: &str) -> mush_ai::types::Message {
     )
 }
 
+pub(crate) fn header_text(message: &crate::app::DisplayMessage) -> Option<String> {
+    use crate::injected::HeaderPart;
+    message.injected.as_ref().map(|row| {
+        row.header
+            .iter()
+            .map(|part| match part {
+                HeaderPart::Text(text) | HeaderPart::Who(text) => text.as_str(),
+            })
+            .collect()
+    })
+}
+
+pub(crate) fn is_compaction_row(message: &crate::app::DisplayMessage) -> bool {
+    header_text(message).as_deref() == Some("context compacted")
+}
+
 pub(crate) fn draw_to_buffer(
     width: u16,
     height: u16,

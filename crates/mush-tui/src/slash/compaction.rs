@@ -40,22 +40,33 @@ pub fn apply_applied_compaction(
 
 pub fn show_applied_compaction(app: &mut App, result: &AppliedCompaction, after_count: usize) {
     app.compacting = false;
-    let summary_body = extract_fresh_summary(&result.messages);
-    if let Some(Message::Event(event)) = result.messages.first()
-        && event.kind == mush_ai::types::EventKind::Summary
-    {
-        app.push_event_message(event);
-    }
+    let summary = match result.messages.first() {
+        Some(Message::Event(event)) if event.kind == mush_ai::types::EventKind::Summary => {
+            Some(event.content.clone())
+        }
+        _ => extract_fresh_summary(&result.messages),
+    };
 
     app.stats
         .reset_live_state(TokenCount::new(result.tokens_after as u64));
 
-    if let Some(body) = summary_body {
-        let banner = crate::conversation_display::format_compaction_banner(&body);
-        app.push_system_message(match result.instructions.as_deref() {
-            Some(instructions) => format!("{banner}\n\nfocus: {instructions}"),
-            None => banner,
-        });
+    if let Some(summary) = summary {
+        let mut row = crate::injected::Injected::compaction(&summary);
+        row.details.push(format!(
+            "{} → {after_count} messages, ~{} → ~{} tokens, {} summarised by {}",
+            result.before_count,
+            result.tokens_before,
+            result.tokens_after,
+            result.summarised_count,
+            result.model_id,
+        ));
+        if let Some(instructions) = result.instructions.as_deref() {
+            row.details.push(format!("focus: {instructions}"));
+        }
+        app.push_injected(
+            crate::app::MessageRole::Event(mush_ai::types::EventKind::Summary),
+            row,
+        );
     }
     if let Some(note) = result.diagnostics.status_note() {
         app.push_system_message(note);
@@ -277,11 +288,11 @@ mod tests {
         .await;
 
         let summary_idx = app.messages.iter().position(|m| {
-            m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
+            crate::test_support::is_compaction_row(m) && m.content.contains("successful summary")
         });
         assert!(
             summary_idx.is_some(),
-            "expected a system message containing 'compacted summary', got messages: {:?}",
+            "expected a compaction row with the summary, got messages: {:?}",
             app.messages
                 .iter()
                 .map(|m| (
@@ -325,9 +336,10 @@ mod tests {
         apply_compaction_result(&mut app, &mut runtime, result);
 
         assert!(app.stats.prev_usage().is_none());
-        let summary_present = app.messages.iter().any(|m| {
-            m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
-        });
+        let summary_present = app
+            .messages
+            .iter()
+            .any(crate::test_support::is_compaction_row);
         assert!(
             summary_present,
             "compaction summary missing from app.messages"
@@ -425,15 +437,12 @@ mod tests {
         );
 
         assert!(
-            app.messages.iter().skip(display_count_before).any(|m| {
-                m.role == crate::app::MessageRole::System && m.content.contains("compacted summary")
-            }),
-            "expected appended summary banner, got: {:?}",
             app.messages
                 .iter()
                 .skip(display_count_before)
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
+                .any(crate::test_support::is_compaction_row),
+            "expected an appended compaction row, got {} rows",
+            app.messages.len() - display_count_before
         );
     }
 
@@ -470,7 +479,7 @@ mod tests {
             resumed
                 .messages
                 .iter()
-                .any(|m| m.content.contains("compacted summary"))
+                .any(crate::test_support::is_compaction_row)
         };
 
         assert!(

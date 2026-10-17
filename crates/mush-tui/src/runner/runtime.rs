@@ -771,9 +771,9 @@ mod tests {
         assert!(
             app.messages
                 .iter()
-                .any(|m| m.role == crate::app::MessageRole::System
-                    && m.content.contains("compacted summary")),
-            "the compaction banner should be shown"
+                .any(|m| crate::test_support::is_compaction_row(m)
+                    && m.content.contains("EARLIER SUMMARY")),
+            "the compaction row should be shown"
         );
     }
 

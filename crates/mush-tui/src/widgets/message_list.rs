@@ -366,20 +366,12 @@ fn build_message_lines(
 
     let mut lines = Vec::new();
 
-    if let Some(from) = &msg.agent_from
-        && !style.detail.shows_full_output()
-    {
-        push_agent_message_notice(from, style.theme, width, &mut lines);
+    if let Some(injected) = &msg.injected {
+        push_injected_lines(injected, style, width, &mut lines);
         return lines;
     }
     if matches!(msg.role, MessageRole::System) {
         lines.push(system_label_line(style.theme, None));
-    }
-    if matches!(msg.role, MessageRole::Event(_)) {
-        lines.push(Line::from(Span::styled(
-            "non-human event",
-            style.theme.system_label,
-        )));
     }
     push_thinking_lines(msg, style, width, &mut lines);
 
@@ -816,17 +808,61 @@ fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (
     }
 }
 
-fn push_agent_message_notice(
-    from: &str,
-    theme: &Theme,
+const INJECTED_MARKER: &str = "\u{25c6} ";
+const PREVIEW_LINES: usize = 2;
+
+fn push_injected_lines(
+    injected: &crate::injected::Injected,
+    style: &MessageStyle<'_>,
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
-    let line = Line::from(vec![
-        Span::styled("agent message received", theme.tool_output),
-        Span::styled(format!("{HEADER_SEPARATOR}from {from}"), theme.dim),
-    ]);
-    lines.extend(indent_line(line, message_content_width(width as usize)));
+    use crate::injected::{Body, HeaderPart};
+    let theme = style.theme;
+    let cw = message_content_width(width as usize);
+    let mut header = vec![Span::styled(INJECTED_MARKER, theme.dim)];
+    header.extend(injected.header.iter().map(|part| match part {
+        HeaderPart::Text(text) => Span::styled(text.clone(), theme.dim),
+        HeaderPart::Who(who) => Span::styled(who.clone(), theme.status_model),
+    }));
+    lines.extend(indent_line(Line::from(header), cw));
+    let everything = style.detail.shows_full_output();
+    if !injected.body.is_empty() {
+        match injected.shown {
+            Body::Folded if !everything => {}
+            Body::Preview if !everything => push_preview_lines(&injected.body, theme, cw, lines),
+            Body::Shown | Body::Preview | Body::Folded => {
+                let md = crate::markdown::render_with_width(&injected.body, theme, Some(cw));
+                for line in md.lines {
+                    lines.extend(indent_line(line, cw));
+                }
+            }
+        }
+    }
+    if everything {
+        for detail in &injected.details {
+            lines.extend(indent_line(Line::styled(detail.clone(), theme.dim), cw));
+        }
+    }
+}
+
+fn push_preview_lines(body: &str, theme: &Theme, cw: usize, lines: &mut Vec<Line<'static>>) {
+    let collapsed = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut wrapped = indent_line(Line::styled(collapsed, theme.thinking), cw);
+    if wrapped.len() > PREVIEW_LINES {
+        wrapped.truncate(PREVIEW_LINES);
+        if let Some(last) = wrapped.pop() {
+            let text: String = last
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            let text = text.strip_prefix(' ').unwrap_or(&text).trim_end();
+            let shown = crate::text::truncate_with_ellipsis(&format!("{text} \u{2026}"), cw.max(1));
+            wrapped.extend(indent_line(Line::styled(shown, theme.thinking), cw));
+        }
+    }
+    lines.extend(wrapped);
 }
 
 fn push_status_lines(

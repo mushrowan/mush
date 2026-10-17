@@ -13,6 +13,7 @@ pub mod event_handler;
 pub mod feature_hints;
 pub mod filtered_list;
 pub mod fuzzy;
+pub mod injected;
 pub mod input;
 pub mod input_buffer;
 pub mod keybinds;

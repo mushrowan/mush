@@ -145,7 +145,7 @@ pub struct DisplayMessage {
     pub model_id: Option<ModelId>,
     pub queued: bool,
     pub images: Vec<Vec<u8>>,
-    pub agent_from: Option<String>,
+    pub injected: Option<crate::injected::Injected>,
     pub(crate) line_cache: RefCell<Option<LineCache>>,
 }
 
@@ -162,7 +162,7 @@ impl Clone for DisplayMessage {
             model_id: self.model_id.clone(),
             queued: self.queued,
             images: self.images.clone(),
-            agent_from: self.agent_from.clone(),
+            injected: self.injected.clone(),
             line_cache: RefCell::new(None),
         }
     }
@@ -182,7 +182,7 @@ impl DisplayMessage {
             model_id: None,
             queued: false,
             images: Vec::new(),
-            agent_from: None,
+            injected: None,
             line_cache: RefCell::new(None),
         }
     }
@@ -207,6 +207,7 @@ pub enum MessageRole {
     Assistant,
     System,
     Event(mush_ai::types::EventKind),
+    Injected,
     BashDone,
     Status { error: bool },
 }

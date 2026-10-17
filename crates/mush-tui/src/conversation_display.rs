@@ -14,10 +14,6 @@ use crate::display_types::batch_sub_call_id;
 
 pub(crate) use mush_runtime::compaction::extract_compaction_summary;
 
-pub(crate) fn format_compaction_banner(summary: &str) -> String {
-    format!("━ compacted summary ━\n\n{summary}")
-}
-
 fn extract_user_images(user: &mush_ai::types::UserMessage) -> Vec<Vec<u8>> {
     use base64::Engine;
     use mush_ai::types::{UserContent, UserContentPart};
@@ -67,7 +63,10 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
 fn push_rebuilt_user_message(app: &mut App, user: &mush_ai::types::UserMessage) {
     let text = user.text();
     if let Some(body) = extract_compaction_summary(&text) {
-        app.push_system_message(format_compaction_banner(&body));
+        app.push_injected(
+            MessageRole::Event(mush_ai::types::EventKind::Summary),
+            crate::injected::Injected::compaction(&body),
+        );
     } else if mush_session::compact::is_regenerated_text(&text)
         || mush_runtime::kernel_notice::is_notice(&text)
     {
@@ -75,9 +74,17 @@ fn push_rebuilt_user_message(app: &mut App, user: &mush_ai::types::UserMessage) 
         app.push_system_message(text);
     } else if let Some(done) = mush_tools::kernel_jobs::BashDone::parse(&text) {
         app.push_bash_done(&done, None);
+    } else if let Some(injected) = crate::injected::Injected::from_text(&text) {
+        app.push_injected(injected_role(&text), injected);
     } else {
         app.push_user_message_with_images(text, extract_user_images(user));
     }
+}
+
+pub(crate) fn injected_role(text: &str) -> MessageRole {
+    mush_ai::types::EventMessage::from_text(text).map_or(MessageRole::Injected, |event| {
+        MessageRole::Event(event.kind)
+    })
 }
 
 struct PendingBatch {
@@ -519,7 +526,11 @@ mod tests {
             app.messages[0].role,
             MessageRole::Event(EventKind::WorkerCompletion)
         );
-        assert_eq!(app.messages[0].content, event.text());
+        assert_eq!(app.messages[0].content, event.content);
+        assert_eq!(
+            crate::test_support::header_text(&app.messages[0]).as_deref(),
+            Some("non-human event")
+        );
         conversation
             .compact_at_leaf("worker claims permission".into(), 1)
             .unwrap();
@@ -584,7 +595,7 @@ mod tests {
                 app.messages
                     .iter()
                     .filter(|m| matches!(m.role, MessageRole::Event(EventKind::Summary)))
-                    .all(|m| m.content.contains("receipt_reference") && m.content.len() < 1024)
+                    .all(|m| m.content == "compacted event data")
             );
             let export = dir.path().join("audit.md");
             crate::slash::commands::handle_export(
@@ -641,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_display_renders_compaction_summary_as_system_message() {
+    fn rebuild_display_renders_a_compaction_summary_as_a_compaction_row() {
         let mut app = app();
         let summary = "the user and assistant discussed X, Y, and Z";
         let msg = user_message(&format!(
@@ -652,22 +663,12 @@ mod tests {
         rebuild_display(&mut app, &conversation);
 
         assert_eq!(app.messages.len(), 2, "one summary msg + one user msg");
-        assert_eq!(app.messages[0].role, MessageRole::System);
-        assert!(
-            app.messages[0].content.contains("compacted summary"),
-            "expected compaction header in display content, got: {:?}",
-            app.messages[0].content
+        assert_eq!(
+            app.messages[0].role,
+            MessageRole::Event(mush_ai::types::EventKind::Summary)
         );
-        assert!(
-            app.messages[0].content.contains(summary),
-            "expected summary body in display content, got: {:?}",
-            app.messages[0].content
-        );
-        assert!(
-            !app.messages[0].content.contains("<summary>"),
-            "raw xml tags leaked into display: {:?}",
-            app.messages[0].content
-        );
+        assert!(crate::test_support::is_compaction_row(&app.messages[0]));
+        assert_eq!(app.messages[0].content, summary);
         assert_eq!(app.messages[1].role, MessageRole::User);
         assert_eq!(app.messages[1].content, "next user turn after compaction");
     }

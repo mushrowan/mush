@@ -2077,25 +2077,69 @@ fn agent_message_event() -> mush_ai::types::EventMessage {
 }
 
 #[test]
-fn a_received_agent_message_is_a_notice_until_all() {
+fn a_received_agent_message_shows_its_sender_and_body_with_receipts_only_in_all() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.push_event_message(&agent_message_event());
+    let mut event = agent_message_event();
+    event.content = "[agent-message from child:auth]\n\nfound **the bug** in `login.rs`".into();
+    app.push_event_message(&event);
 
     for detail in [ChatDetail::Overview, ChatDetail::Details] {
         app.detail = detail;
         let text = buffer_to_string(&render_app(&app, 80, 10));
-        assert!(
-            text.contains("agent message received \u{b7} from child auth"),
-            "{text}"
-        );
-        assert!(!text.contains("found the"), "{text}");
-        assert!(!text.contains("non-human event"), "{text}");
+        assert!(text.contains("\u{25c6} message from child auth"), "{text}");
+        assert!(text.contains("found the bug in login.rs"), "{text}");
+        assert!(!text.contains("agent-message"), "{text}");
+        assert!(!text.contains("receipt"), "{text}");
+        assert!(!text.contains("\"receipts\""), "{text}");
     }
 
     app.detail = ChatDetail::All;
     let text = buffer_to_string(&render_app(&app, 80, 20));
-    assert!(text.contains("non-human event"), "{text}");
-    assert!(text.contains("found the"), "{text}");
+    assert!(text.contains("found the bug in login.rs"), "{text}");
+    assert!(
+        text.contains("receipt agent-message-1 · child auth"),
+        "{text}"
+    );
+    assert!(!text.contains("\"content\""), "{text}");
+}
+
+#[test]
+fn a_steered_agent_message_renders_like_a_delivered_one() {
+    let event = agent_message_event();
+    let mut steered = App::new("test".into(), TokenCount::new(200_000));
+    crate::conversation_display::rebuild_display(
+        &mut steered,
+        &[crate::test_support::user_message(&event.text())],
+    );
+    let mut delivered = App::new("test".into(), TokenCount::new(200_000));
+    delivered.push_event_message(&event);
+
+    let steered_text = buffer_to_string(&render_app(&steered, 80, 10));
+    assert_eq!(
+        steered_text,
+        buffer_to_string(&render_app(&delivered, 80, 10))
+    );
+    assert!(
+        steered_text.contains("message from child auth"),
+        "{steered_text}"
+    );
+    assert!(!steered_text.contains("non-human event"), "{steered_text}");
+    assert_eq!(
+        steered.messages[0].role,
+        MessageRole::Event(mush_ai::types::EventKind::Message)
+    );
+}
+
+#[test]
+fn a_child_exit_notice_names_the_child_and_what_happened() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut event = agent_message_event();
+    event.content = "[child-failed child:auth]\n\nprovider error".into();
+    app.push_event_message(&event);
+
+    let text = buffer_to_string(&render_app(&app, 80, 10));
+    assert!(text.contains("\u{25c6} child auth failed"), "{text}");
+    assert!(text.contains("provider error"), "{text}");
 }
 
 #[test]
@@ -2113,6 +2157,71 @@ fn a_control_message_keeps_its_full_body() {
 
     let text = buffer_to_string(&render_app(&app, 80, 20));
 
-    assert!(text.contains("non-human event"), "{text}");
+    assert!(text.contains("\u{25c6} non-human event"), "{text}");
+    assert!(text.contains("[agent-message from child:auth]"), "{text}");
     assert!(text.contains("found the"), "{text}");
+    assert!(!text.contains("message from child auth"), "{text}");
+}
+
+#[test]
+fn harness_prompts_render_as_dim_labelled_rows_not_user_boxes() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    crate::conversation_display::rebuild_display(
+        &mut app,
+        &[
+            crate::test_support::user_message("[heartbeat: every 20s run#3]\n\ncheck the tests"),
+            crate::test_support::user_message(
+                "[goal: continuation 2]\n\nContinue working toward the goal.",
+            ),
+        ],
+    );
+    assert!(app.messages.iter().all(|m| m.role == MessageRole::Injected));
+
+    let text = buffer_to_string(&render_app(&app, 60, 12));
+    assert!(
+        text.contains("\u{25c6} heartbeat · every 20s · run 3"),
+        "{text}"
+    );
+    assert!(text.contains("check the tests"), "{text}");
+    assert!(text.contains("\u{25c6} goal · continuation 2"), "{text}");
+    assert!(!text.contains("Continue working"), "{text}");
+    assert!(!text.contains("you"), "{text}");
+
+    app.detail = ChatDetail::All;
+    let text = buffer_to_string(&render_app(&app, 60, 12));
+    assert!(text.contains("Continue working toward the goal."), "{text}");
+}
+
+#[test]
+fn a_compaction_shows_a_two_line_preview_until_all_output() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let summary = format!(
+        "## Goal\n\n{}",
+        "the parser rewrite keeps going ".repeat(12)
+    );
+    let mut row = crate::injected::Injected::compaction(&summary);
+    row.details.push("24 → 6 messages".into());
+    app.push_injected(MessageRole::Event(mush_ai::types::EventKind::Summary), row);
+
+    let text = buffer_to_string(&render_app(&app, 50, 12));
+    let rows: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let header = rows
+        .iter()
+        .position(|line| line.contains("\u{25c6} context compacted"))
+        .unwrap();
+    assert!(
+        rows[header + 1].contains("## Goal the parser rewrite"),
+        "{text}"
+    );
+    assert!(rows[header + 2].trim_end().ends_with('\u{2026}'), "{text}");
+    assert!(!text.contains("24 → 6 messages"), "{text}");
+
+    app.detail = ChatDetail::All;
+    let text = buffer_to_string(&render_app(&app, 50, 20));
+    assert!(text.contains("Goal"), "{text}");
+    assert!(!text.contains("## Goal"), "{text}");
+    assert!(text.contains("24 → 6 messages"), "{text}");
 }

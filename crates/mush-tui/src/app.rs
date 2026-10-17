@@ -162,29 +162,6 @@ pub struct PendingOAuth {
 
 pub const QUIT_HINT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn agent_sender(event: &mush_ai::types::EventMessage) -> Option<String> {
-    use mush_ai::types::EventOrigin;
-    let mut senders: Vec<String> = Vec::new();
-    for receipt in &event.receipts {
-        let sender = match &receipt.origin {
-            EventOrigin::Agent {
-                name, relationship, ..
-            } if relationship.is_empty() => name.clone(),
-            EventOrigin::Agent {
-                name, relationship, ..
-            } => format!("{relationship} {name}"),
-            EventOrigin::Control { .. } | EventOrigin::Inbox { .. } | EventOrigin::Legacy => {
-                return None;
-            }
-        };
-        if !senders.contains(&sender) {
-            senders.push(sender);
-        }
-    }
-    (event.kind == mush_ai::types::EventKind::Message && !senders.is_empty())
-        .then(|| senders.join(", "))
-}
-
 impl App {
     pub fn new(model_id: ModelId, context_window: TokenCount) -> Self {
         Self {
@@ -573,9 +550,16 @@ impl App {
     }
 
     pub fn push_event_message(&mut self, event: &mush_ai::types::EventMessage) {
+        self.push_injected(
+            MessageRole::Event(event.kind),
+            crate::injected::Injected::from_event(event),
+        );
+    }
+
+    pub fn push_injected(&mut self, role: MessageRole, injected: crate::injected::Injected) {
         self.messages.push(DisplayMessage {
-            agent_from: agent_sender(event),
-            ..DisplayMessage::new(MessageRole::Event(event.kind), event.text())
+            injected: Some(injected.clone()),
+            ..DisplayMessage::new(role, injected.body)
         });
     }
 
@@ -848,7 +832,12 @@ impl App {
         let live_turn = self
             .messages
             .iter()
-            .rposition(|m| matches!(m.role, MessageRole::User | MessageRole::Event(_)) && !m.queued)
+            .rposition(|m| {
+                matches!(
+                    m.role,
+                    MessageRole::User | MessageRole::Event(_) | MessageRole::Injected
+                ) && !m.queued
+            })
             .unwrap_or(self.messages.len());
         let unsettled = self
             .messages
