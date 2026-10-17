@@ -1,4 +1,3 @@
-use ratatui::buffer::CellWidth;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
@@ -45,32 +44,14 @@ fn is_truncation_footer(line: &str) -> bool {
 }
 
 fn display_width(text: &str) -> usize {
-    usize::from(text.cell_width())
-}
-
-fn char_display_width(ch: char) -> usize {
-    if ch.is_control() {
-        return 0;
-    }
-    let mut buf = [0; 4];
-    usize::from(ch.encode_utf8(&mut buf).cell_width())
+    crate::text::width(text)
 }
 
 fn truncate_display(text: &str, max: usize) -> String {
     if display_width(text) <= max {
         return text.to_string();
     }
-    let budget = max.saturating_sub(1);
-    let mut width = 0usize;
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        let cw = char_display_width(ch);
-        if width + cw > budget {
-            break;
-        }
-        width += cw;
-        out.push(ch);
-    }
+    let mut out = crate::text::prefix_within(text, max.saturating_sub(1)).to_string();
     out.push(ELLIPSIS);
     out
 }
@@ -114,18 +95,9 @@ pub(crate) fn fit_spans(
         }
         let remaining = budget.saturating_sub(used);
         let style = span.style;
-        let mut taken = String::new();
-        let mut taken_width = 0usize;
-        for ch in span.content.chars() {
-            let cw = char_display_width(ch);
-            if taken_width + cw > remaining {
-                break;
-            }
-            taken_width += cw;
-            taken.push(ch);
-        }
+        let taken = crate::text::prefix_within(&span.content, remaining);
         if !taken.is_empty() {
-            out.push(Span::styled(taken, style));
+            out.push(Span::styled(taken.to_string(), style));
         }
         break;
     }
@@ -548,6 +520,18 @@ mod tests {
         let text = "bare line\n";
         let events = parse_diff_lines(text);
         assert_eq!(events, vec![DiffEvent::Context("bare line".into())]);
+    }
+
+    #[test]
+    fn fitting_a_row_never_splits_a_joined_emoji() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let spans = vec![Span::raw(format!("ab{family}{family}cd"))];
+
+        let fitted = fit_spans(spans, 6, Style::default());
+
+        let text: String = fitted.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, format!("ab{family}…"));
+        assert_eq!(truncate_display(&format!("中文{family}"), 5), "中文…");
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use ratatui::buffer::CellWidth;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -108,12 +107,12 @@ pub(super) struct Segments {
 pub(super) fn spans_width(spans: &[Span<'_>]) -> usize {
     spans
         .iter()
-        .map(|span| usize::from(span.content.as_ref().cell_width()))
+        .map(|span| crate::text::width(span.content.as_ref()))
         .sum()
 }
 
 fn text_width(text: &str) -> usize {
-    usize::from(text.cell_width())
+    crate::text::width(text)
 }
 
 pub(super) fn build(app: &App) -> Segments {
@@ -960,16 +959,9 @@ pub(super) fn truncate_spans(spans: &[Span<'static>], width: usize) -> Vec<Span<
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
     for span in spans {
-        let mut kept = String::new();
-        for ch in span.content.chars() {
-            let mut buf = [0; 4];
-            let w = text_width(ch.encode_utf8(&mut buf));
-            if used + w > budget {
-                break;
-            }
-            kept.push(ch);
-            used += w;
-        }
+        let kept = crate::text::prefix_within(&span.content, budget.saturating_sub(used));
+        used += text_width(kept);
+        let kept = kept.to_string();
         let whole = kept.len() == span.content.len();
         if !kept.is_empty() {
             out.push(Span::styled(kept, span.style));

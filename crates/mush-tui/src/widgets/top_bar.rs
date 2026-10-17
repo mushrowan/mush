@@ -2,7 +2,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use mush_ai::types::{Dollars, TokenCount};
 
@@ -45,23 +44,15 @@ fn cwd_name(cwd: &str) -> &str {
 }
 
 fn fit_title(title: &str, room: usize) -> String {
-    if title.width() <= room {
+    if crate::text::width(title) <= room {
         return title.to_string();
     }
     if room < 2 {
         return String::new();
     }
-    let mut fitted = String::new();
-    let mut used = 0;
-    for ch in title.chars() {
-        let cells = ch.width().unwrap_or(0);
-        if used + cells + 1 > room {
-            break;
-        }
-        fitted.push(ch);
-        used += cells;
-    }
-    let mut fitted = fitted.trim_end().to_string();
+    let mut fitted = crate::text::prefix_within(title, room - 1)
+        .trim_end()
+        .to_string();
     fitted.push('\u{2026}');
     fitted
 }
@@ -74,12 +65,12 @@ pub fn top_bar_line(app: &App, width: u16) -> Line<'static> {
     let width = usize::from(width);
     let (tokens, cost) = app.session_spend();
     let spend = format!("  {}", spend_label(tokens, cost));
-    let room = width.saturating_sub(spend.width());
+    let room = width.saturating_sub(crate::text::width(&spend));
     let title = fit_title(&title, room);
     if title.is_empty() {
         return Line::from(Span::styled(spend.trim_start().to_string(), app.theme.dim));
     }
-    let title_width = title.width();
+    let title_width = crate::text::width(&title);
     let start = (width.saturating_sub(title_width) / 2).min(room.saturating_sub(title_width));
     Line::from(vec![
         Span::raw(" ".repeat(start)),
@@ -145,6 +136,27 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
         TopBar::new(app).render(Rect::new(0, 0, width, 1), &mut buf);
         buffer_to_string(&buf).trim_end_matches('\n').to_string()
+    }
+
+    #[test]
+    fn a_wide_title_is_cut_on_a_grapheme_and_keeps_the_spend_in_view() {
+        assert_eq!(fit_title("中文标题测试", 9), "中文标题…");
+        assert_eq!(
+            fit_title("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} family", 5),
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} f…"
+        );
+
+        let mut app = app();
+        app.session_title = Some("日本語のタイトルがとても長い".into());
+        let line = top_bar_line(&app, 30);
+        let row: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(row.ends_with("0 tok \u{b7} $0.00"), "{row:?}");
+        assert!(row.contains('\u{2026}'), "{row:?}");
+        assert!(crate::text::width(&row) <= 30, "{row:?}");
     }
 
     #[test]

@@ -79,11 +79,11 @@ fn render_list(frame: &mut Frame, picker: &LoginPickerState, list_area: Rect, th
             .map(|acc| format!("  · {acc}"))
             .unwrap_or_default();
         let right = format!("{id_suffix}{account_suffix}");
-        let right_width = right.chars().count();
-
-        let name_len = entry.name.chars().count();
-        let badge_len = badge_text.chars().count();
-        let left_width = prefix.len() + badge_len + name_len;
+        let right_width = crate::text::width(&right);
+        let left_width = [prefix, badge_text.as_str(), entry.name.as_str()]
+            .into_iter()
+            .map(crate::text::width)
+            .sum::<usize>();
         let pad = (list_area.width as usize)
             .saturating_sub(left_width + right_width)
             .max(1);

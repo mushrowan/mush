@@ -91,11 +91,11 @@ pub(crate) fn key_hints<'a>(hints: &[(&'a str, &'a str)], theme: &Theme) -> Line
     )
 }
 
-pub(crate) fn truncate_chars(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+pub(crate) fn truncate_to_width(text: &str, max: usize) -> String {
+    if crate::text::width(text) <= max {
         return text.to_string();
     }
-    let kept: String = text.chars().take(max.saturating_sub(1).max(1)).collect();
+    let kept = crate::text::prefix_within(text, max.saturating_sub(1).max(1));
     format!("{kept}…")
 }
 

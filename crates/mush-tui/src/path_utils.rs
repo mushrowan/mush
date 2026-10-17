@@ -11,19 +11,33 @@ pub fn shorten_path(path: &str) -> String {
 
 #[must_use]
 pub fn truncate_path(path: &str, max_len: usize) -> String {
-    if path.chars().count() <= max_len {
+    if crate::text::width(path) <= max_len {
         return path.to_string();
     }
-    let target = path.len().saturating_sub(max_len) + 1;
-    let target = path.floor_char_boundary(target);
-    match path[target..].find('/') {
-        Some(pos) => format!("…{}", &path[target + pos..]),
-        None => {
-            let tail_start = path.len().saturating_sub(max_len.saturating_sub(1));
-            let tail_start = path.ceil_char_boundary(tail_start);
-            format!("…{}", &path[tail_start..])
-        }
+    let room = max_len.saturating_sub(1);
+    let tail = tail_within(path, room);
+    let start = path.len() - tail.len();
+    match path[start..].find('/') {
+        Some(pos) if pos > 0 => format!("…{}", &path[start + pos..]),
+        _ => format!("…{tail}"),
     }
+}
+
+fn tail_within(text: &str, max_width: usize) -> &str {
+    let mut used = 0;
+    let mut start = text.len();
+    for (at, grapheme) in crate::text::graphemes(text)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        used += crate::text::grapheme_width(grapheme);
+        if used > max_width {
+            break;
+        }
+        start = at;
+    }
+    &text[start..]
 }
 
 #[cfg(test)]
@@ -38,6 +52,14 @@ mod tests {
     #[test]
     fn truncate_short_unchanged() {
         assert_eq!(truncate_path("~/dev/mush", 30), "~/dev/mush");
+    }
+
+    #[test]
+    fn a_wide_path_is_cut_by_cells() {
+        let path = "~/作業/とても長いディレクトリ/プロジェクト";
+        let result = truncate_path(path, 16);
+        assert_eq!(result, "…/プロジェクト");
+        assert!(crate::text::width(&result) <= 16);
     }
 
     #[test]

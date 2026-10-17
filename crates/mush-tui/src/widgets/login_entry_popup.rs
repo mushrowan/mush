@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame, picker: &LoginPickerState, theme: &Theme) {
         return;
     }
 
-    let mask: String = "•".repeat(prompt.buffer.chars().count());
+    let mask: String = "•".repeat(crate::text::grapheme_count(&prompt.buffer));
     let input = Line::from(vec![
         Span::styled("» ", theme.dim),
         Span::styled(mask, Style::default()),

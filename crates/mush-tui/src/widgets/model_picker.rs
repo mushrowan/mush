@@ -107,9 +107,12 @@ fn render_model_list(frame: &mut Frame, picker: &ModelPickerState, list_area: Re
         };
 
         let id_text = model.id.as_str();
-        let left_width = prefix.len() + star.len() + id_text.len() + speed.len() + stale.len();
+        let left_width = [prefix, star, id_text, speed.as_str(), stale]
+            .into_iter()
+            .map(crate::text::width)
+            .sum::<usize>();
         let right = format!("{provider_badge}{display_suffix}");
-        let right_width = right.chars().count();
+        let right_width = crate::text::width(&right);
         let pad = (list_area.width as usize)
             .saturating_sub(left_width + right_width)
             .max(1);

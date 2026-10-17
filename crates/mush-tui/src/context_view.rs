@@ -137,7 +137,7 @@ pub fn format_context(root: &AgentNode, stats: &crate::prompt_cache::TokenStats)
         .collect();
     let label_width = label_cells
         .iter()
-        .map(|cell| cell.chars().count())
+        .map(|cell| crate::text::width(cell))
         .max()
         .unwrap_or(0);
     let token_width = column_width("tokens", &token_cells);
@@ -159,7 +159,7 @@ pub fn format_context(root: &AgentNode, stats: &crate::prompt_cache::TokenStats)
         if shows_activity { "activity" } else { "" }
     ));
     for (index, (_, node)) in rows.iter().enumerate() {
-        let padding = label_width.saturating_sub(label_cells[index].chars().count());
+        let padding = label_width.saturating_sub(crate::text::width(&label_cells[index]));
         let line = format!(
             "{}{}  {:>token_width$}  {:>cost_width$}  {:<context_width$}{}",
             label_cells[index],

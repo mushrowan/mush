@@ -2,7 +2,7 @@ use crate::path_utils::shorten_path;
 use crate::session_picker::{Liveness, SessionPickerState, SessionScope, filtered_sessions};
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{
-    PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row, truncate_chars,
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, selection_row, truncate_to_width,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -116,13 +116,16 @@ fn session_row(
         .map(|live| format!("{}  ", live.label()))
         .unwrap_or_default();
     let meta_right = format!("{cwd_display}{msgs}  {age}");
-    let meta_width = live_label.len() + meta_right.len() + 1;
+    let cells = crate::text::width;
+    let meta_width = cells(&live_label) + cells(&meta_right) + 1;
 
-    let max_title = width.saturating_sub(prefix.len() + meta_width);
-    let title_display = truncate_chars(title, max_title);
+    let max_title = width.saturating_sub(cells(prefix) + meta_width);
+    let title_display = truncate_to_width(title, max_title);
 
     let padding = width
-        .saturating_sub(prefix.len() + title_display.len() + live_label.len() + meta_right.len())
+        .saturating_sub(
+            cells(prefix) + cells(&title_display) + cells(&live_label) + cells(&meta_right),
+        )
         .max(1);
     let live_style = match live {
         Some(Liveness::Stale | Liveness::Failed) => theme.tool_error,
@@ -159,6 +162,31 @@ mod tests {
             rlm_max_depth: None,
             spawn_view: None,
             lifecycle: mush_session::Lifecycle::Live,
+        }
+    }
+
+    #[test]
+    fn rows_with_wide_titles_and_the_selection_marker_line_up() {
+        let theme = Theme::default();
+        let width = 60;
+        let row_width = |line: &Line<'_>| -> usize {
+            line.spans
+                .iter()
+                .map(|span| crate::text::width(&span.content))
+                .sum()
+        };
+        for (title, selected) in [
+            ("plain title", false),
+            ("plain title", true),
+            ("中文的会话标题", false),
+            (
+                "日本語のセッション名がとても長いのでここで切れる筈です",
+                true,
+            ),
+            ("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467} family", true),
+        ] {
+            let line = session_row(&meta("s", title), selected, None, false, width, &theme);
+            assert_eq!(row_width(&line), width, "{title}");
         }
     }
 

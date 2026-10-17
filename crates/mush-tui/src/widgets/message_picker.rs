@@ -3,7 +3,7 @@ use crate::message_picker::{
 };
 use crate::theme::Theme;
 use crate::widgets::popup_layout::{
-    PICKER_SIZE, filter_line, key_hints, render_popup_frame, truncate_chars,
+    PICKER_SIZE, filter_line, key_hints, render_popup_frame, truncate_to_width,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -61,9 +61,12 @@ pub fn render(frame: &mut Frame, picker: &MessagePickerState, theme: &Theme) {
             Style::default()
         };
         let max_text = (list_area.width as usize).saturating_sub(
-            prefix.len() + number.len() + indent.len() + tag.len() + fork.chars().count(),
+            [prefix, number.as_str(), indent.as_str(), tag, fork]
+                .into_iter()
+                .map(crate::text::width)
+                .sum(),
         );
-        let text = truncate_chars(&item.text, max_text);
+        let text = truncate_to_width(&item.text, max_text);
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
             Span::styled(number, theme.dim),
