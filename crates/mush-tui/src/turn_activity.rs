@@ -9,11 +9,20 @@ pub enum StreamPart {
     ToolArgs,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnReadout {
+    pub verb: String,
+    pub elapsed: Option<Duration>,
+    pub tokens: u64,
+    pub arrow: &'static str,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TurnActivity {
     started_at: Option<Instant>,
     completed_output_tokens: u64,
     reported_tokens: u64,
+    last_duration: Option<Duration>,
 }
 
 impl TurnActivity {
@@ -25,7 +34,14 @@ impl TurnActivity {
     }
 
     pub fn end(&mut self) {
-        self.started_at = None;
+        if let Some(started) = self.started_at.take() {
+            self.last_duration = Some(started.elapsed());
+        }
+    }
+
+    #[must_use]
+    pub fn last_duration(&self) -> Option<Duration> {
+        self.last_duration
     }
 
     #[must_use]
@@ -132,5 +148,20 @@ mod tests {
         turn.end();
         assert!(!turn.running());
         assert!(turn.elapsed().is_none());
+    }
+
+    #[test]
+    fn a_finished_turn_keeps_its_duration_until_the_next_one_starts() {
+        let mut turn = TurnActivity::default();
+        assert_eq!(turn.last_duration(), None);
+        turn.begin();
+        turn.backdate(Duration::from_secs(125));
+        turn.end();
+        let last = turn.last_duration().expect("a duration");
+        assert!(last >= Duration::from_secs(125), "{last:?}");
+        turn.end();
+        assert_eq!(turn.last_duration(), Some(last));
+        turn.begin();
+        assert_eq!(turn.last_duration(), None);
     }
 }

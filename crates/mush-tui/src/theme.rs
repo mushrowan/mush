@@ -36,6 +36,7 @@ pub struct Theme {
     pub usage: Style,
     pub status_model: Style,
     pub status_dim: Style,
+    pub status_muted: Style,
 
     pub input_border: Style,
     pub input_border_active: Style,
@@ -159,6 +160,7 @@ impl Theme {
             usage: dim,
             status_model: Style::default().fg(Color::Cyan),
             status_dim: dim,
+            status_muted: Style::default().fg(Color::Gray),
 
             input_border: Style::default().fg(Color::DarkGray),
             input_border_active: Style::default().fg(Color::Blue),
@@ -274,6 +276,7 @@ impl Theme {
             usage: dim,
             status_model: Style::default().fg(Color::Blue),
             status_dim: dim,
+            status_muted: Style::default().fg(Color::DarkGray),
 
             input_border: Style::default().fg(Color::Gray),
             input_border_active: Style::default().fg(Color::Blue),
@@ -500,6 +503,9 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
         theme.input_border = fg(col);
         theme.pane_separator = fg(col);
         theme.context_cold = fg(col);
+    }
+    if let Some(col) = c(&p.base04) {
+        theme.status_muted = fg(col);
     }
     if let Some(col) = c(&p.base05) {
         theme.tool_output = fg(col);

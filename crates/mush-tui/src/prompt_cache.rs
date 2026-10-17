@@ -138,6 +138,11 @@ impl CacheTimer {
         self.last_active.map(|t| t.elapsed().as_secs())
     }
 
+    #[cfg(test)]
+    pub(crate) fn backdate(&mut self, by: std::time::Duration) {
+        self.last_active = self.last_active.map(|at| at - by);
+    }
+
     pub fn seed_for_model(
         &mut self,
         model: &Model,

@@ -133,6 +133,17 @@ pub struct SlotEditState {
     pub current: usize,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusBarLayout {
+    #[default]
+    Auto,
+    Stacked,
+    Single,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct StatusBarConfig {
@@ -140,9 +151,26 @@ pub struct StatusBarConfig {
     pub show_context: bool,
     pub show_oauth_usage: bool,
     pub show_status_messages: bool,
-    pub show_background_alerts: bool,
-    pub show_pane_indicator: bool,
     pub show_cwd: bool,
+    pub layout: StatusBarLayout,
+    pub stack_below: u16,
+}
+
+impl StatusBarConfig {
+    #[must_use]
+    pub fn rows(&self, width: u16) -> u16 {
+        match self.layout {
+            StatusBarLayout::Single => 1,
+            StatusBarLayout::Stacked => 2,
+            StatusBarLayout::Auto => {
+                if width < self.stack_below {
+                    2
+                } else {
+                    1
+                }
+            }
+        }
+    }
 }
 
 impl Default for StatusBarConfig {
@@ -152,10 +180,27 @@ impl Default for StatusBarConfig {
             show_context: true,
             show_oauth_usage: true,
             show_status_messages: true,
-            show_background_alerts: true,
-            show_pane_indicator: true,
             show_cwd: true,
+            layout: StatusBarLayout::Auto,
+            stack_below: 140,
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ChildNotes {
+    clock: u64,
+    stamps: HashMap<mush_runtime::ChildId, u64>,
+}
+
+impl ChildNotes {
+    pub(crate) fn stamp(&mut self, child: &str) {
+        self.clock += 1;
+        self.stamps.insert(child.to_owned(), self.clock);
+    }
+
+    pub(crate) fn stamp_of(&self, child: &str) -> Option<u64> {
+        self.stamps.get(child).copied()
     }
 }
 
@@ -235,10 +280,8 @@ pub type CachedToolBoxLines = (u64, u16, Vec<Line<'static>>);
 #[derive(Debug, Clone)]
 pub struct CachedStatusBar {
     pub width: u16,
-    pub spans: Vec<ratatui::text::Span<'static>>,
-    pub right_text: String,
+    pub rows: Vec<Line<'static>>,
     pub cache_timer_text: Option<String>,
-    pub height: u16,
 }
 
 #[derive(Debug)]

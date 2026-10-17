@@ -1,136 +1,114 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Span;
 
-pub const DEFAULT_BAR_WIDTH: usize = 20;
+use crate::theme::Theme;
 
-const PACE_COLOUR: Color = Color::DarkGray;
-
-const EMPTY_COLOUR: Color = Color::DarkGray;
+pub const METER_WIDTH: usize = 8;
 
 #[must_use]
-pub fn render_usage_bar(usage_pct: f32, pace_pct: f32) -> Vec<Span<'static>> {
-    render_usage_bar_width(usage_pct, pace_pct, DEFAULT_BAR_WIDTH)
-}
-
-#[must_use]
-pub fn render_usage_bar_width(usage_pct: f32, pace_pct: f32, width: usize) -> Vec<Span<'static>> {
+pub fn render_usage_meter(
+    usage_pct: f32,
+    pace_pct: f32,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
     let width = width.max(4);
-    let usage_filled = pct_to_cells(usage_pct, width);
-    let pace_filled = pct_to_cells(pace_pct, width);
-    let usage_colour = colour_for_pct(usage_pct);
-
-    let mut spans = Vec::with_capacity(width);
-
-    for i in 0..width {
-        let has_usage = i < usage_filled;
-        let has_pace = i < pace_filled;
-
-        let (ch, style) = match (has_usage, has_pace) {
-            (true, true) => ("▀", Style::default().fg(usage_colour).bg(PACE_COLOUR)),
-            (true, false) => ("▀", Style::default().fg(usage_colour)),
-            (false, true) => ("▄", Style::default().fg(PACE_COLOUR)),
-            (false, false) => ("░", Style::default().fg(EMPTY_COLOUR)),
-        };
-
-        spans.push(Span::styled(ch, style));
-    }
-
+    let used = pct_to_cells(usage_pct, width);
+    let pace = pct_to_cells(pace_pct, width);
+    let mut spans = Vec::with_capacity(3);
+    push_run(&mut spans, "━", used, level_style(usage_pct, theme));
+    push_run(
+        &mut spans,
+        "━",
+        pace.saturating_sub(used),
+        theme.input_border,
+    );
+    push_run(&mut spans, "─", width - used.max(pace), theme.dim);
     spans
 }
 
-fn pct_to_cells(pct: f32, bar_width: usize) -> usize {
-    ((pct / 100.0 * bar_width as f32).round() as usize).min(bar_width)
+#[must_use]
+pub fn level_style(pct: f32, theme: &Theme) -> Style {
+    if pct >= 80.0 {
+        theme.context_danger
+    } else if pct >= 50.0 {
+        theme.context_warn
+    } else {
+        theme.status_model
+    }
 }
 
-fn colour_for_pct(pct: f32) -> Color {
-    if pct >= 80.0 {
-        Color::Red
-    } else if pct >= 50.0 {
-        Color::Yellow
-    } else {
-        Color::Cyan
+fn push_run(spans: &mut Vec<Span<'static>>, glyph: &str, cells: usize, style: Style) {
+    if cells > 0 {
+        spans.push(Span::styled(glyph.repeat(cells), style));
     }
+}
+
+fn pct_to_cells(pct: f32, width: usize) -> usize {
+    ((pct / 100.0 * width as f32).round().max(0.0) as usize).min(width)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn bar_length_is_constant() {
-        let spans = render_usage_bar(0.0, 0.0);
-        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
-        let spans = render_usage_bar(100.0, 100.0);
-        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
-        let spans = render_usage_bar(37.0, 50.0);
-        assert_eq!(spans.len(), DEFAULT_BAR_WIDTH);
+    fn text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
     }
 
     #[test]
-    fn empty_bar_all_dim() {
-        let spans = render_usage_bar(0.0, 0.0);
-        for span in &spans {
-            assert_eq!(span.content.as_ref(), "░");
+    fn the_meter_keeps_its_width() {
+        let theme = Theme::dark();
+        for (usage, pace) in [(0.0, 0.0), (100.0, 100.0), (37.0, 50.0), (80.0, 30.0)] {
+            let spans = render_usage_meter(usage, pace, METER_WIDTH, &theme);
+            assert_eq!(text(&spans).chars().count(), METER_WIDTH, "{usage} {pace}");
         }
     }
 
     #[test]
-    fn full_bar_all_overlap() {
-        let spans = render_usage_bar(100.0, 100.0);
-        for span in &spans {
-            assert_eq!(span.content.as_ref(), "▀");
-            assert_eq!(span.style.bg, Some(PACE_COLOUR));
-        }
+    fn an_empty_meter_is_a_faint_line() {
+        let theme = Theme::dark();
+        let spans = render_usage_meter(0.0, 0.0, METER_WIDTH, &theme);
+        assert_eq!(text(&spans), "─".repeat(METER_WIDTH));
+        assert_eq!(spans[0].style, theme.dim);
     }
 
     #[test]
-    fn usage_ahead_of_pace() {
-        let spans = render_usage_bar(80.0, 30.0);
-        for span in &spans[..6] {
-            assert_eq!(span.content.as_ref(), "▀");
-            assert_eq!(span.style.bg, Some(PACE_COLOUR));
-        }
-        for span in &spans[6..16] {
-            assert_eq!(span.content.as_ref(), "▀");
-            assert_eq!(span.style.bg, None);
-        }
-        for span in &spans[16..] {
-            assert_eq!(span.content.as_ref(), "░");
-        }
+    fn usage_under_pace_shows_the_headroom() {
+        let theme = Theme::dark();
+        let spans = render_usage_meter(25.0, 50.0, METER_WIDTH, &theme);
+        assert_eq!(text(&spans), "━━━━────");
+        assert_eq!(spans[0].content.as_ref(), "━━");
+        assert_eq!(spans[0].style, theme.status_model);
+        assert_eq!(spans[1].content.as_ref(), "━━");
+        assert_eq!(spans[1].style, theme.input_border);
+        assert_eq!(spans[2].style, theme.dim);
     }
 
     #[test]
-    fn pace_ahead_of_usage() {
-        let spans = render_usage_bar(26.0, 43.0);
-        for span in &spans[..5] {
-            assert_eq!(span.content.as_ref(), "▀");
-            assert_eq!(span.style.bg, Some(PACE_COLOUR));
-        }
-        for span in &spans[5..9] {
-            assert_eq!(span.content.as_ref(), "▄");
-        }
-        for span in &spans[9..] {
-            assert_eq!(span.content.as_ref(), "░");
-        }
+    fn usage_over_pace_fills_in_its_level_colour() {
+        let theme = Theme::dark();
+        let spans = render_usage_meter(88.0, 30.0, METER_WIDTH, &theme);
+        assert_eq!(text(&spans), "━━━━━━━─");
+        assert_eq!(spans[0].style, theme.context_danger);
     }
 
     #[test]
-    fn colour_thresholds() {
-        assert_eq!(colour_for_pct(0.0), Color::Cyan);
-        assert_eq!(colour_for_pct(49.9), Color::Cyan);
-        assert_eq!(colour_for_pct(50.0), Color::Yellow);
-        assert_eq!(colour_for_pct(79.9), Color::Yellow);
-        assert_eq!(colour_for_pct(80.0), Color::Red);
-        assert_eq!(colour_for_pct(100.0), Color::Red);
+    fn the_level_colour_follows_the_thresholds() {
+        let theme = Theme::dark();
+        assert_eq!(level_style(49.9, &theme), theme.status_model);
+        assert_eq!(level_style(50.0, &theme), theme.context_warn);
+        assert_eq!(level_style(79.9, &theme), theme.context_warn);
+        assert_eq!(level_style(80.0, &theme), theme.context_danger);
     }
 
     #[test]
-    fn pct_to_cells_rounds() {
-        assert_eq!(pct_to_cells(0.0, DEFAULT_BAR_WIDTH), 0);
-        assert_eq!(pct_to_cells(5.0, DEFAULT_BAR_WIDTH), 1);
-        assert_eq!(pct_to_cells(50.0, DEFAULT_BAR_WIDTH), 10);
-        assert_eq!(pct_to_cells(100.0, DEFAULT_BAR_WIDTH), 20);
-        assert_eq!(pct_to_cells(2.4, DEFAULT_BAR_WIDTH), 0);
-        assert_eq!(pct_to_cells(2.5, DEFAULT_BAR_WIDTH), 1);
+    fn cells_round_to_the_nearest() {
+        assert_eq!(pct_to_cells(0.0, 20), 0);
+        assert_eq!(pct_to_cells(2.4, 20), 0);
+        assert_eq!(pct_to_cells(2.5, 20), 1);
+        assert_eq!(pct_to_cells(50.0, 20), 10);
+        assert_eq!(pct_to_cells(120.0, 20), 20);
+        assert_eq!(pct_to_cells(-5.0, 20), 0);
     }
 }

@@ -821,9 +821,9 @@
     },
     "StatusBarConfig": {
       "properties": {
-        "show_background_alerts": {
-          "default": true,
-          "type": "boolean"
+        "layout": {
+          "$ref": "#/$defs/StatusBarLayout",
+          "default": "auto"
         },
         "show_context": {
           "default": true,
@@ -837,10 +837,6 @@
           "default": true,
           "type": "boolean"
         },
-        "show_pane_indicator": {
-          "default": true,
-          "type": "boolean"
-        },
         "show_status_messages": {
           "default": true,
           "type": "boolean"
@@ -848,9 +844,24 @@
         "show_thinking": {
           "default": true,
           "type": "boolean"
+        },
+        "stack_below": {
+          "default": 140,
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
+    },
+    "StatusBarLayout": {
+      "enum": [
+        "auto",
+        "stacked",
+        "single"
+      ],
+      "type": "string"
     },
     "SyncConfig": {
       "properties": {
@@ -1371,13 +1382,13 @@
     "status_bar": {
       "$ref": "#/$defs/StatusBarConfig",
       "default": {
-        "show_background_alerts": true,
+        "layout": "auto",
         "show_context": true,
         "show_cwd": true,
         "show_oauth_usage": true,
-        "show_pane_indicator": true,
         "show_status_messages": true,
-        "show_thinking": true
+        "show_thinking": true,
+        "stack_below": 140
       }
     },
     "subagent_model": {

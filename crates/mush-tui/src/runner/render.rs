@@ -81,8 +81,6 @@ fn draw_frame(
 ) {
     app.flush_status();
     app.render_state.status_bar_cache.borrow_mut().take();
-    app.pane_info = None;
-    app.background_alert = None;
 
     let area = frame.area();
     let input_cursor = Ui::new(app).cursor_position(area);

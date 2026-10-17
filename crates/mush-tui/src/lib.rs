@@ -50,7 +50,7 @@ pub mod ui;
 pub mod widgets;
 
 pub use app::{App, AppEvent, ThinkingDisplay};
-pub use app_state::StatusBarConfig;
+pub use app_state::{StatusBarConfig, StatusBarLayout};
 pub use keybinds::{Action as KeybindAction, KeyMap, KeysConfig};
 pub use mush_runtime::AgentConnection;
 pub use mush_runtime::session::DEFAULT_RLM_MAX_DEPTH;

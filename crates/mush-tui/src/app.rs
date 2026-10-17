@@ -114,8 +114,6 @@ pub struct App {
     pub completion: CompletionState,
     pub render_state: RenderState,
     pub cwd: String,
-    pub pane_info: Option<(u16, u16)>,
-    pub background_alert: Option<String>,
     pub cache: CacheTimer,
     current_tool_batch: u32,
     announced_tool_calls: Vec<mush_ai::types::ToolCall>,
@@ -142,6 +140,7 @@ pub struct App {
     pub detail: ChatDetail,
     pub children: Vec<mush_runtime::ChildSummary>,
     children_spend: (TokenCount, Dollars),
+    child_notes: crate::app_state::ChildNotes,
     pub goal: Option<mush_runtime::Goal>,
     pub jobs: Vec<mush_runtime::Job>,
     pub autonomous: Option<mush_runtime::AutonomousStatus>,
@@ -194,8 +193,6 @@ impl App {
                     Err(_) => path.display().to_string(),
                 }
             },
-            pane_info: None,
-            background_alert: None,
             cache: CacheTimer::new(300),
             current_tool_batch: 0,
             announced_tool_calls: Vec::new(),
@@ -218,6 +215,7 @@ impl App {
             detail: ChatDetail::default(),
             children: Vec::new(),
             children_spend: (TokenCount::ZERO, Dollars::ZERO),
+            child_notes: crate::app_state::ChildNotes::default(),
             goal: None,
             jobs: Vec::new(),
             autonomous: None,
@@ -299,6 +297,18 @@ impl App {
     }
 
     pub fn note_child(&mut self, child: mush_runtime::ChildSummary) {
+        let previous_note = self
+            .children
+            .iter()
+            .find(|known| known.id == child.id)
+            .and_then(|known| known.progress_note.as_deref());
+        if child
+            .progress_note
+            .as_deref()
+            .is_some_and(|note| !note.trim().is_empty() && Some(note) != previous_note)
+        {
+            self.child_notes.stamp(&child.id);
+        }
         match self.children.iter_mut().find(|known| known.id == child.id) {
             Some(known) => *known = child,
             None => self.children.push(child),
@@ -336,6 +346,21 @@ impl App {
     pub fn clear_children(&mut self) {
         self.children.clear();
         self.children_spend = (TokenCount::ZERO, Dollars::ZERO);
+        self.child_notes = crate::app_state::ChildNotes::default();
+    }
+
+    #[must_use]
+    pub fn newest_child_note(&self) -> Option<(&str, &str)> {
+        self.children
+            .iter()
+            .filter(|child| !child.status.settled())
+            .filter_map(|child| {
+                let note = child.progress_note.as_deref()?;
+                let stamp = self.child_notes.stamp_of(&child.id)?;
+                (!note.trim().is_empty()).then_some((stamp, child.name.as_str(), note))
+            })
+            .max_by_key(|(stamp, _, _)| *stamp)
+            .map(|(_, name, note)| (name, note))
     }
 
     #[must_use]
@@ -417,28 +442,40 @@ impl App {
     }
 
     pub fn activity_label(&self) -> Option<String> {
-        let mut label = self.activity_kind()?;
-        if let Some(elapsed) = self.turn.elapsed() {
+        let readout = self.turn_readout()?;
+        let mut label = readout.verb;
+        if let Some(elapsed) = readout.elapsed {
             label.push_str(" · ");
             label.push_str(&crate::turn_activity::format_elapsed(elapsed));
         }
+        if readout.tokens > 0 {
+            label.push_str(&format!(
+                " · {} {} tokens",
+                readout.arrow,
+                crate::turn_activity::format_tokens(readout.tokens)
+            ));
+        }
+        Some(label)
+    }
+
+    pub(crate) fn turn_readout(&self) -> Option<crate::turn_activity::TurnReadout> {
+        let verb = self.activity_kind()?;
         let tokens = self.turn.tokens(if self.stream.active {
             self.stream.streamed_chars
         } else {
             0
         });
-        if tokens > 0 {
-            let arrow = if self.stream.active && self.stream.last_part.is_some() {
-                "↓"
-            } else {
-                "↑"
-            };
-            label.push_str(&format!(
-                " · {arrow} {} tokens",
-                crate::turn_activity::format_tokens(tokens)
-            ));
-        }
-        Some(label)
+        let arrow = if self.stream.active && self.stream.last_part.is_some() {
+            "↓"
+        } else {
+            "↑"
+        };
+        Some(crate::turn_activity::TurnReadout {
+            verb,
+            elapsed: self.turn.elapsed(),
+            tokens,
+            arrow,
+        })
     }
 
     fn activity_kind(&self) -> Option<String> {

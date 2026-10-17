@@ -422,14 +422,6 @@ fn handle_compaction_model(app: &mut App, tui_config: &mut TuiConfig, model_id: 
 fn build_debug_dump(app: &App, session_id: &str) -> String {
     let mut out = String::from("```\nmush debug state\n");
     let _ = writeln!(out, "cwd: {}", app.cwd);
-    let _ = writeln!(
-        out,
-        "pane: {}",
-        match app.pane_info {
-            Some((idx, total)) => format!("{idx}/{total}"),
-            None => "single".into(),
-        }
-    );
     let _ = writeln!(out, "pid: {} session: {}", std::process::id(), session_id);
 
     let _ = writeln!(out, "\n[model]");
@@ -1391,7 +1383,6 @@ mod tests {
         app.stats.input_tokens = TokenCount::new(12_345);
         app.stats.output_tokens = TokenCount::new(678);
         app.cwd = "/home/user/project".into();
-        app.pane_info = Some((1, 3));
 
         let dump = build_debug_dump(&app, "test-session-id");
 
@@ -1412,7 +1403,6 @@ mod tests {
         }
 
         assert!(dump.contains("/home/user/project"));
-        assert!(dump.contains("pane: 1/3"));
         assert!(dump.contains("claude-opus-4-7"));
         assert!(dump.contains("12345"));
     }

@@ -113,13 +113,13 @@ pub fn open_config() -> Result<()> {
              # enter_search = \"ctrl+f\"            # enter fullscreen search\n\
              \n\
              # [status_bar]\n\
-             # show_thinking = true          # `thinking: <level>` segment\n\
-             # show_context = true           # `used/window` + cache warmth\n\
-             # show_oauth_usage = true       # 5h / 7d usage bars (claude code plan)\n\
-             # show_status_messages = true   # ephemeral slash / tool messages\n\
-             # show_background_alerts = true # background pane notifications\n\
-             # show_pane_indicator = true    # [i/n] when multi-pane\n\
-             # show_cwd = true               # cwd in the right column\n\
+             # show_thinking = true          # thinking effort after the model\n\
+             # show_context = true           # context use + cache countdown\n\
+             # show_oauth_usage = true       # 5h / 7d usage meters (claude code plan)\n\
+             # show_status_messages = true   # what the agent is doing right now\n\
+             # show_cwd = true               # cwd on the right\n\
+             # layout = \"auto\"              # auto | stacked | single\n\
+             # stack_below = 140             # auto uses two rows below this width\n\
              \n\
              # [terminal]\n\
              # keyboard_enhancement = \"auto\"  # auto | enabled | disabled\n\

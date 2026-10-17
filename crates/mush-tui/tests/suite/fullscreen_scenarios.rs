@@ -14,7 +14,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 
-const SCREEN: u16 = 24 + TOP;
+const SCREEN: u16 = 25 + TOP;
 
 fn conversation(exchanges: usize) -> App {
     let mut app = App::new("claude-opus-4-5".into(), TokenCount::new(200_000));
@@ -138,7 +138,8 @@ fn the_dock_sits_on_the_bottom_rows() {
         "input box bottom: {:?}",
         rows[22]
     );
-    assert!(rows[23].contains("c-o-4-5"), "status bar: {:?}", rows[23]);
+    assert!(rows[23].contains("ready"), "activity row: {:?}", rows[23]);
+    assert!(rows[24].contains("c-o-4-5"), "identity row: {:?}", rows[24]);
     assert!(
         rows[..20].iter().any(|row| row.contains("answer 19")),
         "transcript above the dock: {rows:?}"
@@ -146,7 +147,16 @@ fn the_dock_sits_on_the_bottom_rows() {
 }
 
 #[test]
-fn the_status_bar_keeps_its_usage_bars() {
+fn a_wide_terminal_keeps_the_status_bar_on_one_row() {
+    let rows = rows(&conversation(20), 160, SCREEN);
+
+    assert!(rows[21].starts_with('─'), "input box top: {:?}", rows[21]);
+    assert!(rows[24].contains("ready"), "status bar: {:?}", rows[24]);
+    assert!(rows[24].contains("c-o-4-5"), "status bar: {:?}", rows[24]);
+}
+
+#[test]
+fn the_status_bar_keeps_its_usage_meters() {
     let mut app = conversation(2);
     app.oauth_usage_provider = Some("anthropic".into());
     app.oauth_usage = Some(OAuthUsage {
@@ -163,10 +173,9 @@ fn the_status_bar_keeps_its_usage_bars() {
     let status = rows(&app, 120, 24).pop().unwrap();
 
     assert!(status.contains("c-o-4-5"), "{status:?}");
-    assert!(status.contains("thinking:"), "{status:?}");
     assert!(status.contains("5h"), "{status:?}");
     assert!(status.contains("7d"), "{status:?}");
-    assert!(status.contains('░'), "usage bar: {status:?}");
+    assert!(status.contains('━'), "usage meter: {status:?}");
 }
 
 #[test]
