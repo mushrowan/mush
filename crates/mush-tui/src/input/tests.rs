@@ -46,6 +46,7 @@ fn apply_model_completions_populates_completion_state_from_merged_rows() {
                 output: 0.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(400_000),
             effective_context_window: None,

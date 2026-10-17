@@ -36,6 +36,63 @@ pub struct ModelCost {
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<PriceTier>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PriceTier {
+    pub over_prompt_tokens: u64,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Prices {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+impl ModelCost {
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.input == 0.0 && self.output == 0.0 && self.cache_read == 0.0 && self.cache_write == 0.0
+    }
+
+    #[must_use]
+    pub fn tier_for(&self, prompt_tokens: TokenCount) -> Option<&PriceTier> {
+        self.tiers
+            .iter()
+            .filter(|tier| prompt_tokens.get() > tier.over_prompt_tokens)
+            .max_by_key(|tier| tier.over_prompt_tokens)
+    }
+
+    #[must_use]
+    pub fn first_cliff(&self) -> Option<&PriceTier> {
+        self.tiers.iter().min_by_key(|tier| tier.over_prompt_tokens)
+    }
+
+    #[must_use]
+    pub fn prices_for(&self, prompt_tokens: TokenCount) -> Prices {
+        match self.tier_for(prompt_tokens) {
+            Some(tier) => Prices {
+                input: tier.input,
+                output: tier.output,
+                cache_read: tier.cache_read,
+                cache_write: tier.cache_write,
+            },
+            None => Prices {
+                input: self.input,
+                output: self.output,
+                cache_read: self.cache_read,
+                cache_write: self.cache_write,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -446,6 +503,7 @@ mod tests {
                 output: 2.0,
                 cache_read,
                 cache_write,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,

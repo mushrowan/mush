@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use super::{DiscoveredModel, DiscoveryError, DiscoveryReport};
-use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, Provider, TokenCount};
+use crate::types::{Api, ApiKey, InputModality, Model, ModelCost, PriceTier, Provider, TokenCount};
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -115,11 +115,25 @@ fn pricing_to_cost(pricing: OpenRouterPricing) -> ModelCost {
     let parse = |s: Option<String>| -> f64 {
         s.and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) * 1_000_000.0
     };
+    let tiers = pricing
+        .overrides
+        .into_iter()
+        .filter_map(|tier| {
+            Some(PriceTier {
+                over_prompt_tokens: tier.min_prompt_tokens?,
+                input: parse(tier.prompt),
+                output: parse(tier.completion),
+                cache_read: parse(tier.input_cache_read),
+                cache_write: parse(tier.input_cache_write),
+            })
+        })
+        .collect();
     ModelCost {
         input: parse(pricing.prompt),
         output: parse(pricing.completion),
         cache_read: parse(pricing.input_cache_read),
         cache_write: parse(pricing.input_cache_write),
+        tiers,
     }
 }
 
@@ -153,6 +167,22 @@ struct OpenRouterArchitecture {
 
 #[derive(Deserialize, Debug, Default)]
 struct OpenRouterPricing {
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    completion: Option<String>,
+    #[serde(default)]
+    input_cache_read: Option<String>,
+    #[serde(default)]
+    input_cache_write: Option<String>,
+    #[serde(default)]
+    overrides: Vec<OpenRouterPriceOverride>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct OpenRouterPriceOverride {
+    #[serde(default)]
+    min_prompt_tokens: Option<u64>,
     #[serde(default)]
     prompt: Option<String>,
     #[serde(default)]
@@ -209,6 +239,37 @@ mod tests {
         }
       ]
     }"#;
+
+    #[test]
+    fn price_overrides_become_prompt_size_tiers() {
+        let body = r#"{
+          "data": [{
+            "id": "anthropic/claude-haiku-5.5",
+            "pricing": {
+              "prompt": "0.0000001",
+              "completion": "0.0000005",
+              "input_cache_read": "0.00000001",
+              "input_cache_write": "0.000000125",
+              "overrides": [{
+                "min_prompt_tokens": 100000,
+                "prompt": "0.0000005",
+                "completion": "0.0000025",
+                "input_cache_read": "0.00000005",
+                "input_cache_write": "0.000000625",
+                "input_cache_write_1h": "0.000001"
+              }]
+            }
+          }]
+        }"#;
+        let models = parse_openrouter_models(body).unwrap();
+        let cost = &models[0].model.cost;
+        assert!((cost.output - 0.5).abs() < 1e-9, "{cost:?}");
+        let tier = cost.first_cliff().unwrap();
+        assert_eq!(tier.over_prompt_tokens, 100_000);
+        assert!((tier.input - 0.5).abs() < 1e-9, "{tier:?}");
+        assert!((tier.output - 2.5).abs() < 1e-9, "{tier:?}");
+        assert!((tier.cache_write - 0.625).abs() < 1e-9, "{tier:?}");
+    }
 
     #[test]
     fn parses_full_fixture() {

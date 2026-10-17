@@ -4905,6 +4905,7 @@ mod tests {
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
+                tiers: Vec::new(),
             })
             .build()
     }

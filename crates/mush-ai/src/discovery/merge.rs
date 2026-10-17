@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use super::cache::DiscoveryCache;
 use crate::models::FileStamp;
-use crate::types::{Model, ModelCost};
+use crate::types::{Model, ModelCost, Provider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelSource {
@@ -67,6 +67,8 @@ pub fn merge(
         );
     }
 
+    price_from_openrouter_twins(&mut merged);
+
     for model in overrides {
         let key = (model.provider.to_string(), model.id.as_str().to_string());
         let raw = merged.get(&key).and_then(|existing| existing.raw.clone());
@@ -83,6 +85,37 @@ pub fn merge(
     merged.into_values().collect()
 }
 
+fn price_from_openrouter_twins(merged: &mut BTreeMap<(String, String), MergedModel>) {
+    let twins: std::collections::HashMap<String, ModelCost> = merged
+        .values()
+        .filter(|entry| {
+            entry.model.provider == Provider::OpenRouter
+                && entry.model.id.as_str().starts_with("anthropic/")
+        })
+        .map(|entry| {
+            (
+                crate::models::canonical_model_key(entry.model.id.as_str()),
+                entry.model.cost.clone(),
+            )
+        })
+        .collect();
+    for entry in merged.values_mut() {
+        if entry.model.provider != Provider::Anthropic {
+            continue;
+        }
+        let Some(twin) = twins.get(&crate::models::canonical_model_key(entry.model.id.as_str()))
+        else {
+            continue;
+        };
+        let cost = &mut entry.model.cost;
+        if cost.is_unknown() {
+            *cost = twin.clone();
+        } else if cost.tiers.is_empty() && cost.input == twin.input && cost.output == twin.output {
+            cost.tiers.clone_from(&twin.tiers);
+        }
+    }
+}
+
 fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost {
     let pick = |static_v: f64, discovered_v: f64| {
         if discovered_v == 0.0 && static_v != 0.0 {
@@ -96,6 +129,11 @@ fn pick_cost(static_cost: &ModelCost, discovered_cost: &ModelCost) -> ModelCost 
         output: pick(static_cost.output, discovered_cost.output),
         cache_read: pick(static_cost.cache_read, discovered_cost.cache_read),
         cache_write: pick(static_cost.cache_write, discovered_cost.cache_write),
+        tiers: if discovered_cost.tiers.is_empty() {
+            static_cost.tiers.clone()
+        } else {
+            discovered_cost.tiers.clone()
+        },
     }
 }
 
@@ -183,8 +221,78 @@ mod tests {
                 output: cost_input * 5.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             })
             .build()
+    }
+
+    #[test]
+    fn an_anthropic_model_only_discovery_knows_takes_its_openrouter_price() {
+        let tier = crate::types::PriceTier {
+            over_prompt_tokens: 200_000,
+            input: 6.0,
+            output: 22.5,
+            cache_read: 0.6,
+            cache_write: 7.5,
+        };
+        let openrouter = |id: &str, input: f64, tiers: Vec<crate::types::PriceTier>| Model {
+            provider: Provider::OpenRouter,
+            cost: ModelCost {
+                input,
+                output: input * 5.0,
+                cache_read: input / 10.0,
+                cache_write: input * 1.25,
+                tiers,
+            },
+            ..anthropic_model(id, id, input)
+        };
+        let codex = Model {
+            provider: Provider::Custom("openai-codex".into()),
+            ..anthropic_model("gpt-5.5", "GPT-5.5", 0.0)
+        };
+        let mut cache = DiscoveryCache::default();
+        for (provider, models) in [
+            (
+                Provider::Anthropic,
+                vec![
+                    anthropic_model("claude-sonnet-5-5", "Claude Sonnet 5.5", 0.0),
+                    anthropic_model("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5", 3.0),
+                ],
+            ),
+            (
+                Provider::OpenRouter,
+                vec![
+                    openrouter("anthropic/claude-sonnet-5.5", 2.0, Vec::new()),
+                    openrouter("anthropic/claude-sonnet-4.5", 3.0, vec![tier.clone()]),
+                    openrouter("openai/gpt-5.5", 5.0, Vec::new()),
+                ],
+            ),
+            (Provider::Custom("openai-codex".into()), vec![codex]),
+        ] {
+            cache.apply_report(DiscoveryReport {
+                provider,
+                fetched_at: SystemTime::UNIX_EPOCH,
+                models: models.into_iter().map(Into::into).collect(),
+            });
+        }
+
+        let merged = merge(vec![], &cache, vec![]);
+        let cost = |id: &str| {
+            merged
+                .iter()
+                .find(|m| m.model.id.as_str() == id)
+                .map(|m| m.model.cost.clone())
+                .unwrap()
+        };
+
+        assert_eq!(cost("claude-sonnet-5-5").input, 2.0);
+        assert_eq!(cost("claude-sonnet-5-5").output, 10.0);
+        assert_eq!(cost("claude-sonnet-4-5-20250929").input, 3.0);
+        assert_eq!(cost("claude-sonnet-4-5-20250929").tiers, vec![tier]);
+        assert!(
+            cost("gpt-5.5").is_unknown(),
+            "a subscription model stays unpriced"
+        );
     }
 
     #[test]
@@ -243,6 +351,7 @@ mod tests {
                 output: 99.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             ..anthropic_model("a", "A", 99.0)
         };
@@ -252,6 +361,7 @@ mod tests {
                 output: 5.0,
                 cache_read: 0.1,
                 cache_write: 1.25,
+                tiers: Vec::new(),
             },
             ..anthropic_model("a", "A", 0.0)
         };

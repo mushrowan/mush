@@ -98,6 +98,7 @@ fn entry_to_model(id: &str, entry: Entry) -> Model {
             output: entry.cost.output,
             cache_read: entry.cost.cache_read,
             cache_write: entry.cost.cache_write,
+            tiers: Vec::new(),
         },
         context_window: TokenCount::new(entry.limit.context),
         effective_context_window: None,

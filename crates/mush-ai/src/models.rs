@@ -3,7 +3,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
 use crate::types::{
-    Api, Cost, Dollars, InputModality, Model, ModelCost, Provider, TokenCount, Usage,
+    Api, Cost, Dollars, InputModality, Model, ModelCost, PriceTier, Provider, TokenCount, Usage,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +68,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 20.0,
                 cache_read: 0.2,
                 cache_write: 5.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -89,6 +90,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 10.0,
                 cache_read: 0.2,
                 cache_write: 2.5,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -112,6 +114,13 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 0.5,
                 cache_read: 0.01,
                 cache_write: 0.125,
+                tiers: vec![PriceTier {
+                    over_prompt_tokens: 100_000,
+                    input: 0.5,
+                    output: 2.5,
+                    cache_read: 0.05,
+                    cache_write: 0.625,
+                }],
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -135,6 +144,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 25.0,
                 cache_read: 0.5,
                 cache_write: 6.25,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -158,6 +168,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 25.0,
                 cache_read: 0.5,
                 cache_write: 6.25,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -179,6 +190,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 25.0,
                 cache_read: 0.5,
                 cache_write: 6.25,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -200,6 +212,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_000_000),
             effective_context_window: None,
@@ -221,6 +234,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 5.0,
                 cache_read: 0.1,
                 cache_write: 1.25,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -242,6 +256,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -263,6 +278,7 @@ pub fn anthropic_models() -> Vec<Model> {
                 output: 75.0,
                 cache_read: 1.5,
                 cache_write: 18.75,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -290,6 +306,7 @@ pub fn openrouter_models() -> Vec<Model> {
                 output: 15.0,
                 cache_read: 0.3,
                 cache_write: 3.75,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -311,6 +328,7 @@ pub fn openrouter_models() -> Vec<Model> {
                 output: 75.0,
                 cache_read: 1.5,
                 cache_write: 18.75,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
@@ -332,6 +350,7 @@ pub fn openrouter_models() -> Vec<Model> {
                 output: 10.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_048_576),
             effective_context_window: None,
@@ -353,6 +372,7 @@ pub fn openrouter_models() -> Vec<Model> {
                 output: 0.6,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(1_048_576),
             effective_context_window: None,
@@ -379,6 +399,7 @@ pub fn openai_models() -> Vec<Model> {
             output: 10.0,
             cache_read: 0.125,
             cache_write: 1.5625,
+            tiers: Vec::new(),
         },
         context_window: TokenCount::new(400_000),
         effective_context_window: None,
@@ -605,11 +626,30 @@ pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
     let per_token = |rate: f64, tokens: TokenCount| -> Dollars {
         Dollars::new((rate / 1_000_000.0) * tokens.get() as f64)
     };
+    let prices = model.cost.prices_for(prompt_tokens(usage));
     Cost {
-        input: per_token(model.cost.input, usage.input_tokens),
-        output: per_token(model.cost.output, usage.output_tokens),
-        cache_read: per_token(model.cost.cache_read, usage.cache_read_tokens),
-        cache_write: per_token(model.cost.cache_write, usage.cache_write_tokens),
+        input: per_token(prices.input, usage.input_tokens),
+        output: per_token(prices.output, usage.output_tokens),
+        cache_read: per_token(prices.cache_read, usage.cache_read_tokens),
+        cache_write: per_token(prices.cache_write, usage.cache_write_tokens),
+    }
+}
+
+#[must_use]
+pub fn prompt_tokens(usage: &Usage) -> TokenCount {
+    usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens
+}
+
+#[must_use]
+pub fn canonical_model_key(id: &str) -> String {
+    let id = id.to_ascii_lowercase();
+    let bare = id.rsplit_once('/').map_or(id.as_str(), |(_, bare)| bare);
+    let bare = bare.replace('.', "-");
+    match bare.rsplit_once('-') {
+        Some((stem, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => {
+            stem.to_string()
+        }
+        _ => bare,
     }
 }
 
@@ -849,6 +889,7 @@ mod tests {
                 output: 1.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(128_000),
             effective_context_window: None,
@@ -900,6 +941,7 @@ mod tests {
                 output: 2.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(128_000),
             effective_context_window: None,
@@ -930,6 +972,55 @@ mod tests {
                 .name,
             "Second"
         );
+    }
+
+    #[test]
+    fn a_request_over_the_price_cliff_pays_the_higher_tier_on_every_token() {
+        let haiku = anthropic_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == "claude-haiku-5-5")
+            .unwrap();
+        let usage = |input: u64, cache_read: u64| Usage {
+            input_tokens: TokenCount::new(input),
+            output_tokens: TokenCount::new(1_000_000),
+            cache_read_tokens: TokenCount::new(cache_read),
+            cache_write_tokens: TokenCount::ZERO,
+        };
+
+        let under = calculate_cost(&haiku, &usage(50_000, 50_000));
+        assert!((under.output.get() - 0.5).abs() < 1e-9, "{under:?}");
+        assert!((under.input.get() - 0.005).abs() < 1e-9, "{under:?}");
+
+        let over = calculate_cost(&haiku, &usage(50_000, 50_001));
+        assert!((over.output.get() - 2.5).abs() < 1e-9, "{over:?}");
+        assert!((over.input.get() - 0.025).abs() < 1e-9, "{over:?}");
+        assert!(
+            (over.cache_read.get() - 50_001.0 * 0.05 / 1_000_000.0).abs() < 1e-12,
+            "cache reads count toward the prompt and pay the tier: {over:?}"
+        );
+        assert_eq!(
+            haiku.cost.first_cliff().unwrap().over_prompt_tokens,
+            100_000
+        );
+    }
+
+    #[test]
+    fn the_same_model_from_two_providers_shares_a_canonical_key() {
+        for (a, b) in [
+            ("claude-haiku-4-5", "anthropic/claude-haiku-4.5"),
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+            ("claude-sonnet-5-5", "anthropic/claude-sonnet-5.5"),
+            ("gpt-5.4", "openai/gpt-5.4"),
+        ] {
+            assert_eq!(canonical_model_key(a), canonical_model_key(b), "{a} vs {b}");
+        }
+        for (a, b) in [
+            ("claude-opus-4-8", "anthropic/claude-opus-4.8-fast"),
+            ("claude-opus-5", "anthropic/claude-opus-5:batch"),
+            ("claude-opus-5", "claude-opus-5-5"),
+        ] {
+            assert_ne!(canonical_model_key(a), canonical_model_key(b), "{a} vs {b}");
+        }
     }
 
     #[test]

@@ -1527,6 +1527,7 @@ mod tests {
                 output: 0.0,
                 cache_read: 0.0,
                 cache_write: 0.0,
+                tiers: Vec::new(),
             },
             context_window: TokenCount::new(200_000),
             effective_context_window: None,
