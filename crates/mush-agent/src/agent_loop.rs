@@ -357,8 +357,7 @@ pub fn agent_loop(
                             }
                             StreamEvent::Error { message, .. } => {
                                 let error_msg = message.error_message.clone().unwrap_or_else(|| "unknown error".into());
-                                if message.content.is_empty()
-                                    && !overflow_retried
+                                if !overflow_retried
                                     && mush_ai::registry::is_context_overflow_message(&error_msg)
                                 {
                                     if streamed {
@@ -411,8 +410,12 @@ pub fn agent_loop(
                         Some(_) => None,
                     };
                     if let Some(error_msg) = failure {
-                        let retrying = attempt < MAX_RETRIES && retry_stream_error(&error_msg, attempt);
-                        if retrying && streamed {
+                        let overflowed = !overflow_retried
+                            && mush_ai::registry::is_context_overflow_message(&error_msg);
+                        let retrying = !overflowed
+                            && attempt < MAX_RETRIES
+                            && retry_stream_error(&error_msg, attempt);
+                        if (retrying || overflowed) && streamed {
                             yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
                         }
                         last_error = Some(match local_final {
@@ -421,6 +424,9 @@ pub fn agent_loop(
                         });
                         if retrying {
                             continue 'attempt;
+                        }
+                        if overflowed {
+                            break 'attempt;
                         }
                         final_message = match local_final {
                             Some(message) => Some(failed_message(message, &error_msg)),
@@ -1872,8 +1878,16 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum Overflow {
+        Refused,
+        MidReply,
+        ErrorMidReply,
+    }
+
     struct OverflowingProvider {
         max_messages: usize,
+        overflow: Overflow,
         seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     }
 
@@ -1899,9 +1913,38 @@ mod tests {
                     .collect(),
             );
             if context.messages.len() > self.max_messages {
-                return Err(mush_ai::registry::ProviderError::Other(
-                    "anthropic returned 400 Bad Request: prompt is too long: 1011825 tokens > 1000000 maximum".into(),
-                ));
+                let partial = AssistantMessage::builder()
+                    .content(vec![AssistantContentPart::Text(TextContent {
+                        text: "half a re".into(),
+                    })])
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                let filled = "the response filled the model's context window. compact and retry";
+                let overflow = self.overflow;
+                let s = async_stream::stream! {
+                    yield StreamEvent::Start { partial: AssistantMessage { content: Vec::new(), ..partial.clone() } };
+                    yield StreamEvent::TextDelta { content_index: 0, delta: "half a re".into() };
+                    let failed = AssistantMessage {
+                        stop_reason: StopReason::Error,
+                        error_message: Some(filled.into()),
+                        ..partial
+                    };
+                    match overflow {
+                        Overflow::MidReply => yield StreamEvent::Done { message: failed, reason: StopReason::Error },
+                        Overflow::ErrorMidReply | Overflow::Refused => yield StreamEvent::Error { message: failed, reason: StopReason::Error },
+                    }
+                };
+                return match self.overflow {
+                    Overflow::Refused => Err(mush_ai::registry::ProviderError::Other(
+                        "anthropic returned 400 Bad Request: prompt is too long: 1011825 tokens > 1000000 maximum".into(),
+                    )),
+                    Overflow::MidReply | Overflow::ErrorMidReply => {
+                        Ok(Box::pin(s) as mush_ai::registry::EventStream)
+                    }
+                };
             }
             RecordingProvider {
                 seen: std::sync::Arc::default(),
@@ -1913,6 +1956,13 @@ mod tests {
 
     async fn overflow_run(
         compacts: bool,
+    ) -> (Vec<AgentEvent>, Vec<ContextPressure>, Vec<Vec<String>>) {
+        overflow_run_with(compacts, Overflow::Refused).await
+    }
+
+    async fn overflow_run_with(
+        compacts: bool,
+        overflow: Overflow,
     ) -> (Vec<AgentEvent>, Vec<ContextPressure>, Vec<Vec<String>>) {
         let user = |text: &str| {
             Message::User(
@@ -1927,6 +1977,7 @@ mod tests {
         let mut registry = ApiRegistry::new();
         registry.register(Box::new(OverflowingProvider {
             max_messages: 2,
+            overflow,
             seen: seen.clone(),
         }));
         let recorded = pressures.clone();
@@ -1991,6 +2042,42 @@ mod tests {
             1
         );
         assert!(matches!(events.last(), Some(AgentEvent::AgentEnd)));
+    }
+
+    #[tokio::test]
+    async fn an_overflow_after_a_partial_reply_discards_it_compacts_and_retries() {
+        for overflow in [Overflow::MidReply, Overflow::ErrorMidReply] {
+            let (events, pressures, seen) = overflow_run_with(true, overflow).await;
+
+            assert_eq!(
+                pressures,
+                [ContextPressure::Normal, ContextPressure::Overflowed]
+            );
+            assert_eq!(
+                seen,
+                [vec!["old 1", "old 2", "kept"], vec!["summary", "kept"]]
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::PartialDiscarded { .. })),
+                "{events:?}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Error { .. })),
+                "{events:?}"
+            );
+            let ended: Vec<String> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::MessageEnd { message } => Some(message.text()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ended, ["done"]);
+        }
     }
 
     #[tokio::test]
