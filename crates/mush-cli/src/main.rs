@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser};
+use clap_complete::engine::ArgValueCompleter;
 mod headless;
 mod json_events;
 use color_eyre::eyre::{Result, eyre};
@@ -10,7 +11,9 @@ use mush_ai::types::*;
 use mush_session::{PaneSession, Session, SessionStore};
 
 use mush_cli::output::Style;
-use mush_cli::{agents, commands, config, daemon, doctor, logging, schedule, setup, timing};
+use mush_cli::{
+    agents, commands, completions, config, daemon, doctor, logging, schedule, setup, timing,
+};
 use mush_tui::TuiConfig;
 
 use setup::{
@@ -44,10 +47,10 @@ struct Cli {
     #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "fork"])]
     continue_recent: bool,
 
-    #[arg(long, value_name = "ID", conflicts_with = "fork")]
+    #[arg(long, value_name = "ID", conflicts_with = "fork", add = ArgValueCompleter::new(completions::saved_sessions))]
     resume: Option<Option<String>>,
 
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", add = ArgValueCompleter::new(completions::saved_sessions))]
     fork: Option<String>,
 
     #[arg(short, long)]
@@ -294,6 +297,7 @@ impl Cli {
 #[derive(clap::Subcommand)]
 enum ScheduleCommand {
     List {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents))]
         agent: Option<String>,
         #[arg(short, long)]
         all: bool,
@@ -301,6 +305,7 @@ enum ScheduleCommand {
         json: bool,
     },
     Add {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents))]
         agent: String,
         expression: String,
         #[arg(num_args = 1.., trailing_var_arg = true)]
@@ -334,9 +339,11 @@ enum Command {
     },
     Agents,
     Attach {
+        #[arg(add = ArgValueCompleter::new(completions::saved_sessions))]
         agent: String,
     },
     Rename {
+        #[arg(add = ArgValueCompleter::new(completions::saved_sessions))]
         agent: String,
         #[arg(num_args = 1..)]
         name: Vec<String>,
@@ -348,6 +355,7 @@ enum Command {
         command: ScheduleCommand,
     },
     Pause {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents))]
         agent: Option<String>,
         #[arg(short, long)]
         all: bool,
@@ -355,16 +363,19 @@ enum Command {
         reason: Option<String>,
     },
     Unpause {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents))]
         agent: Option<String>,
         #[arg(short, long)]
         all: bool,
     },
     Stop {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents_and_children))]
         id: String,
         #[arg(long)]
         json: bool,
     },
     Send {
+        #[arg(add = ArgValueCompleter::new(completions::live_agents))]
         session: String,
         #[arg(num_args = 1.., trailing_var_arg = true)]
         text: Vec<String>,
@@ -399,9 +410,11 @@ enum Command {
     Models,
     Status,
     Delete {
+        #[arg(add = ArgValueCompleter::new(completions::saved_sessions))]
         id: String,
     },
     Slim {
+        #[arg(add = ArgValueCompleter::new(completions::saved_sessions))]
         session: Option<String>,
         #[arg(short, long)]
         all: bool,
@@ -416,7 +429,7 @@ enum Command {
     Config,
     #[command(about = "print the completion script for a shell")]
     Completions {
-        shell: mush_cli::completions::Shell,
+        shell: completions::Shell,
     },
 }
 
@@ -437,8 +450,15 @@ impl Cli {
     }
 }
 
+fn main() -> std::process::ExitCode {
+    clap_complete::CompleteEnv::with_factory(Cli::command)
+        .shells(completions::SHELLS)
+        .complete();
+    start()
+}
+
 #[tokio::main]
-async fn main() -> std::process::ExitCode {
+async fn start() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(report) => match report.downcast_ref::<headless::PrintExit>() {
@@ -467,11 +487,7 @@ async fn run() -> Result<()> {
     }
     if let Some(Command::Completions { shell }) = command {
         let mut out = std::io::stdout().lock();
-        return Ok(mush_cli::completions::write(
-            shell,
-            Cli::command(),
-            &mut out,
-        )?);
+        return Ok(completions::write(shell, Cli::command(), &mut out)?);
     }
     if let Some(Command::Sync {
         command: Some(sync),
