@@ -5,12 +5,6 @@ target/
 result
 result-*
 
-# reference repos
-pi-mono/
-opencode/
-codex/
-prime-agent/
-
 # direnv
 .direnv/
 .fastembed_cache/
