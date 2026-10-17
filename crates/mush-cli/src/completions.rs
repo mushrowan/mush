@@ -29,6 +29,7 @@ pub fn write(shell: Shell, command: clap::Command, out: &mut dyn Write) -> std::
     generator.try_generate(&command, out)
 }
 
+// nushell externs can't express an optional flag value, and a typed flag rejects a bare --resume
 fn optional_values_as_switches(command: clap::Command) -> clap::Command {
     command
         .mut_args(|arg| match arg.get_num_args() {
