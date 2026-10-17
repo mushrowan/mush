@@ -1433,6 +1433,35 @@ fn install_kernel_services(
     worker.host_commands = Some(host_commands);
 }
 
+fn open_child_session(
+    seed: &ChildSeed,
+    spec: &mush_runtime::ChildSpec,
+    model: &Model,
+) -> Result<(Session, Option<mush_session::SessionLease>), String> {
+    let store = SessionStore::new(seed.session_dir.clone());
+    let persisted = seed.saver.is_some();
+    match &spec.resume_session {
+        Some(id) => {
+            let reopen =
+                |error: mush_session::StoreError| format!("cannot reopen {}: {error}", spec.name);
+            let id = SessionId::from(id.as_str());
+            let lease = persisted
+                .then(|| store.acquire_child(&id))
+                .transpose()
+                .map_err(reopen)?;
+            Ok((store.load(&id).map_err(reopen)?, lease))
+        }
+        None => {
+            let session = Session::new(model.id.as_str(), &seed.cwd.display().to_string());
+            let lease = persisted
+                .then(|| store.acquire_child(&session.meta.id))
+                .transpose()
+                .map_err(|error| format!("cannot open a session for {}: {error}", spec.name))?;
+            Ok((session, lease))
+        }
+    }
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
@@ -1471,12 +1500,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 spec.thinking.as_ref(),
                 &parent_thinking,
             )?);
-            let session = match &spec.resume_session {
-                Some(id) => SessionStore::new(seed.session_dir.clone())
-                    .load(&SessionId::from(id.as_str()))
-                    .map_err(|error| format!("cannot reopen {}: {error}", spec.name))?,
-                None => Session::new(model.id.as_str(), &seed.cwd.display().to_string()),
-            };
+            let (session, lease) = open_child_session(&seed, &spec, &model)?;
             let (sinks, signals) = mush_runtime::kernel_channels();
             let cfg = config::Config {
                 kernel: seed.kernel.clone(),
@@ -1523,6 +1547,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             };
             worker.kernel_state = Some(ipython.clone());
             worker.saver = seed.saver.clone();
+            worker.lease = lease;
             worker.injections = mush_agent::AgentInjections {
                 lifecycle_hooks: seed.lifecycle_hooks.clone(),
                 cwd: Some(seed.cwd.clone()),
@@ -2131,6 +2156,61 @@ mod tests {
             compaction,
             compaction_model,
         }
+    }
+
+    fn child_spec(name: &str, resume_session: Option<String>) -> mush_runtime::ChildSpec {
+        mush_runtime::ChildSpec {
+            id: format!("{name}-1"),
+            name: name.into(),
+            prompt: String::new(),
+            model: None,
+            thinking: None,
+            depth: 1,
+            parent: mush_runtime::Identity::root("root"),
+            parent_session_id: "parent".into(),
+            parent_thinking: None,
+            resume_session,
+        }
+    }
+
+    #[test]
+    fn a_persisted_child_session_holds_its_lease_while_it_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = child_seed(config::CompactionConfig::default(), None);
+        seed.session_dir = dir.path().to_path_buf();
+        seed.saver = Some(std::sync::Arc::new(|_| {}));
+        let store = SessionStore::new(dir.path().to_path_buf());
+
+        let (session, lease) =
+            open_child_session(&seed, &child_spec("scout", None), &seed.model).unwrap();
+        let id = session.meta.id.clone();
+        assert!(lease.is_some());
+        assert!(store.is_leased(&id));
+        store.save(&session).unwrap();
+
+        let resume = child_spec("scout", Some(id.to_string()));
+        let busy = open_child_session(&seed, &resume, &seed.model).unwrap_err();
+        assert!(busy.contains("is open in another mush"), "{busy}");
+        assert!(store.acquire(&id).is_err());
+
+        drop(lease);
+        assert!(!store.is_leased(&id));
+        let (reopened, lease) = open_child_session(&seed, &resume, &seed.model).unwrap();
+        assert_eq!(reopened.meta.id, id);
+        assert!(lease.is_some() && store.is_leased(&id));
+    }
+
+    #[test]
+    fn an_unsaved_child_session_takes_no_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = child_seed(config::CompactionConfig::default(), None);
+        seed.session_dir = dir.path().to_path_buf();
+
+        let (session, lease) =
+            open_child_session(&seed, &child_spec("scout", None), &seed.model).unwrap();
+
+        assert!(lease.is_none());
+        assert!(!SessionStore::new(dir.path().to_path_buf()).is_leased(&session.meta.id));
     }
 
     #[test]

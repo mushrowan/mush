@@ -100,17 +100,22 @@ impl SessionStore {
         }
     }
 
-    pub fn acquire(&self, id: &SessionId) -> Result<SessionLease, StoreError> {
+    pub fn acquire_child(&self, id: &SessionId) -> Result<SessionLease, StoreError> {
         let file = self.open_lease_file(id)?;
         match file.try_lock() {
-            Ok(()) => {
-                return Ok(SessionLease {
-                    _file: file,
-                    id: id.clone(),
-                });
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-            Err(std::fs::TryLockError::WouldBlock) => {}
+            Ok(()) => Ok(SessionLease {
+                _file: file,
+                id: id.clone(),
+            }),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+            Err(std::fs::TryLockError::WouldBlock) => Err(StoreError::Busy(id.clone())),
+        }
+    }
+
+    pub fn acquire(&self, id: &SessionId) -> Result<SessionLease, StoreError> {
+        match self.acquire_child(id) {
+            Err(StoreError::Busy(_)) => {}
+            acquired => return acquired,
         }
         let inherited = std::env::var("MUSH_SESSION_LEASE_FD")
             .ok()
