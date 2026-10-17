@@ -144,7 +144,7 @@ impl MenuItemKind {
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
             Self::ThinkingTokenCount => "thinking-token-count-2026-05-13",
             Self::ThinkingUpdates => {
-                "thinking-display-updates-2026-08-18: show progress updates between tool calls"
+                "thinking-display-updates-2026-08-18: stream thinking summaries, off sends the claude code shape"
             }
             Self::Advisor => "advisor-tool-2026-03-01: advisor tool (not yet supported)",
             Self::AdvancedToolUse => {

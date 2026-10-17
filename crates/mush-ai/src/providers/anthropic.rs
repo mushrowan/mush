@@ -767,14 +767,12 @@ fn build_request_headers(
 }
 
 fn thinking_display(options: &StreamOptions, is_oauth: bool) -> &'static str {
-    if !is_oauth {
-        return "summarized";
-    }
-    let updates = options
-        .anthropic_betas
-        .as_ref()
-        .is_none_or(|betas| betas.thinking_updates);
-    if updates { "updates" } else { "" }
+    let claude_code_shape = is_oauth
+        && options
+            .anthropic_betas
+            .as_ref()
+            .is_some_and(|betas| !betas.thinking_updates);
+    if claude_code_shape { "" } else { "summarized" }
 }
 
 fn oauth_context_management(
@@ -2646,6 +2644,78 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn streamed_summarised_thinking_and_redacted_blocks_replay_unchanged() {
+        let stream = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Weighing the two \"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"options.\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_summary_1\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"opaque_blob\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"the answer\"}}\n\n",
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let model = test_model();
+        let mut output = AssistantMessage::builder()
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let mut processor = AnthropicProcessor {
+            blocks: Vec::new(),
+            is_oauth: false,
+            tools: Vec::new(),
+            ended: false,
+        };
+        let mut events = Vec::new();
+        for raw in super::super::sse::SseParser::new().push(stream.as_bytes()) {
+            use super::super::sse::SseProcessor;
+            if let super::super::sse::ProcessResult::Events(batch) =
+                processor.process(&raw, &mut output)
+            {
+                events.extend(batch);
+            }
+        }
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ThinkingDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, "Weighing the two options.");
+
+        let messages = vec![
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text("which one".into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            ),
+            Message::Assistant(output),
+        ];
+        let options = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &None, &messages, &[], &options, false);
+        assert_eq!(
+            body.messages[1].content,
+            serde_json::json!([
+                {"type": "thinking", "thinking": "Weighing the two options.", "signature": "sig_summary_1"},
+                {"type": "redacted_thinking", "data": "opaque_blob"},
+                {"type": "text", "text": "the answer"},
+            ])
+        );
     }
 
     #[test]
@@ -4633,7 +4703,7 @@ mod tests {
         );
         assert_eq!(
             json["thinking"],
-            serde_json::json!({"type": "adaptive", "display": "updates"})
+            serde_json::json!({"type": "adaptive", "display": "summarized"})
         );
         assert_eq!(
             json["context_management"],
