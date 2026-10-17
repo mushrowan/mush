@@ -312,7 +312,10 @@ enum ScheduleCommand {
         message: Vec<String>,
     },
     #[command(alias = "remove", alias = "delete")]
-    Cancel { job: String },
+    Cancel {
+        #[arg(add = ArgValueCompleter::new(completions::scheduled_jobs))]
+        job: String,
+    },
 }
 
 #[derive(clap::Subcommand)]

@@ -8,6 +8,7 @@ use clap_complete::engine::CompletionCandidate;
 use clap_complete::env::{self, EnvCompleter, Shells};
 use clap_complete_nushell::Nushell;
 use mush_daemon::WorkerDescriptor;
+use mush_runtime::{Job, JobStatus};
 use mush_session::SessionStore;
 
 const NEWEST_SESSIONS: usize = 200;
@@ -111,6 +112,18 @@ pub fn live_agents_and_children(current: &OsStr) -> Vec<CompletionCandidate> {
     agent_candidates(&live(), &current.to_string_lossy(), true)
 }
 
+pub fn scheduled_jobs(current: &OsStr) -> Vec<CompletionCandidate> {
+    let prefix = current.to_string_lossy();
+    live()
+        .iter()
+        .flat_map(|worker| {
+            let jobs = SessionStore::default_artifact_dir(&worker.session_id.as_str().into())
+                .join("scheduled-jobs.json");
+            job_candidates(worker, &jobs_at(&jobs), &prefix)
+        })
+        .collect()
+}
+
 fn live() -> Vec<WorkerDescriptor> {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -160,10 +173,7 @@ fn agent_candidates(
 ) -> Vec<CompletionCandidate> {
     let mut candidates = Vec::new();
     for worker in workers {
-        let title = worker
-            .title
-            .clone()
-            .unwrap_or_else(|| worker.cwd.display().to_string());
+        let title = worker_title(worker);
         if worker.session_id.starts_with(prefix) {
             candidates
                 .push(CompletionCandidate::new(&worker.session_id).help(Some((&title).into())));
@@ -184,10 +194,46 @@ fn agent_candidates(
     candidates
 }
 
+fn worker_title(worker: &WorkerDescriptor) -> String {
+    worker
+        .title
+        .clone()
+        .unwrap_or_else(|| worker.cwd.display().to_string())
+}
+
+fn jobs_at(path: &Path) -> Vec<Job> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn job_candidates(
+    worker: &WorkerDescriptor,
+    jobs: &[Job],
+    prefix: &str,
+) -> Vec<CompletionCandidate> {
+    let title = worker_title(worker);
+    jobs.iter()
+        .filter(|job| matches!(job.status, JobStatus::Active | JobStatus::Paused))
+        .filter(|job| job.id.starts_with(prefix))
+        .map(|job| {
+            let what = job
+                .label
+                .clone()
+                .unwrap_or_else(|| job.prompt.lines().next().unwrap_or_default().to_owned());
+            CompletionCandidate::new(&job.id).help(Some(
+                format!("{what} ({}) on {title}", job.expression).into(),
+            ))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mush_daemon::ChildDescriptor;
+    use mush_runtime::{JobSource, ScheduleCommand, Scheduler};
     use mush_session::{Lifecycle, Session};
 
     fn saved(store: &SessionStore, id: &str, title: Option<&str>, age_secs: u64) -> Session {
@@ -305,5 +351,52 @@ mod tests {
             ]
         );
         assert!(agent_candidates(&workers, "cc", true).is_empty());
+    }
+
+    #[test]
+    fn active_and_paused_jobs_complete_with_what_they_run_and_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduled-jobs.json");
+        let scheduler = Scheduler::new(Some(path.clone()));
+        let add = |expression: &str, prompt: &str, label: Option<&str>| {
+            scheduler
+                .apply(ScheduleCommand::Add {
+                    expression: expression.into(),
+                    prompt: prompt.into(),
+                    label: label.map(str::to_owned),
+                    source: JobSource::Schedule,
+                })
+                .unwrap()
+                .last()
+                .unwrap()
+                .id
+                .clone()
+        };
+        let build = add("every 10m", "check the build\nthen report", None);
+        let nightly = add("every 1d", "tidy up", Some("nightly"));
+        let gone = add("in 5m", "never mind", None);
+        scheduler
+            .apply(ScheduleCommand::Pause(nightly.clone()))
+            .unwrap();
+        scheduler.apply(ScheduleCommand::Cancel(gone)).unwrap();
+        let worker = WorkerDescriptor {
+            session_id: "aa11".into(),
+            title: Some("planner".into()),
+            ..WorkerDescriptor::default()
+        };
+
+        let jobs = jobs_at(&path);
+        assert_eq!(
+            shown(&job_candidates(&worker, &jobs, "")),
+            [
+                (
+                    build.clone(),
+                    "check the build (every 10m) on planner".to_owned()
+                ),
+                (nightly, "nightly (every 1d) on planner".to_owned()),
+            ]
+        );
+        assert_eq!(shown(&job_candidates(&worker, &jobs, &build)).len(), 1);
+        assert!(jobs_at(&dir.path().join("absent.json")).is_empty());
     }
 }
