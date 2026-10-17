@@ -77,7 +77,8 @@ impl HarnessStore {
 
     #[must_use]
     pub fn overview(&self, global: bool) -> String {
-        self.read(global).digest()
+        self.read(global)
+            .digest(&mush_session::harness::Focus::default())
     }
 
     pub fn record_refinement(

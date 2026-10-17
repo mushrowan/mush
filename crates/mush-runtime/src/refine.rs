@@ -11,14 +11,22 @@ impl SessionRuntime {
         self.saver.is_some()
     }
 
-    pub fn deliver_pending_harness_digest(&mut self) -> Option<String> {
+    pub fn deliver_pending_harness_digest(
+        &mut self,
+        goal: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Option<String> {
         if !std::mem::take(&mut self.harness_digest_pending) {
             return None;
         }
-        self.refresh_harness_digest()
+        self.refresh_harness_digest(goal, prompt)
     }
 
-    fn refresh_harness_digest(&mut self) -> Option<String> {
+    fn refresh_harness_digest(
+        &mut self,
+        goal: Option<&str>,
+        prompt: Option<&str>,
+    ) -> Option<String> {
         if !self.harness_enabled() {
             return None;
         }
@@ -27,14 +35,18 @@ impl SessionRuntime {
             return None;
         }
         let current = merged.fingerprint();
-        if harness::latest_digest_fingerprint(&self.conversation.context()).as_deref()
-            == Some(&current)
-        {
+        let context = self.conversation.context();
+        if harness::latest_digest_fingerprint(&context).as_deref() == Some(&current) {
             return None;
         }
-        let digest = merged.digest();
+        let recent = harness::Focus::recent_texts(&context);
+        let focus = harness::Focus::new(
+            goal,
+            prompt.into_iter().chain(recent.iter().map(String::as_str)),
+        );
+        let digest = merged.digest(&focus);
         self.conversation
-            .append_message(harness::digest_message(&merged));
+            .append_message(harness::digest_message(&merged, &focus));
         Some(digest)
     }
 

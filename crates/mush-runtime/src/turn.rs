@@ -43,6 +43,7 @@ pub struct TurnDeps<'a> {
 pub struct TurnRequest {
     pub pane_id: PaneId,
     pub prompt: PendingPrompt,
+    pub goal: Option<String>,
 }
 
 pub struct TurnPrep {
@@ -259,7 +260,11 @@ impl SessionRuntime {
         prep: TurnPrep,
         deps: &TurnDeps<'_>,
     ) {
-        let TurnRequest { pane_id, prompt } = request;
+        let TurnRequest {
+            pane_id,
+            prompt,
+            goal,
+        } = request;
         let TurnPrep {
             model,
             target,
@@ -281,7 +286,8 @@ impl SessionRuntime {
             registry,
         } = *deps;
         let steering_queue = self.steering_queue.clone();
-        self.deliver_pending_harness_digest();
+        let unsent_prompt = (!prompt.is_persisted()).then_some(prompt.text.as_str());
+        self.deliver_pending_harness_digest(goal.as_deref(), unsent_prompt);
         self.refresh_notes();
         self.restate_task_brief();
         self.record_thinking_level();

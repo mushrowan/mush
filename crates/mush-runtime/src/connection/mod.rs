@@ -1371,6 +1371,11 @@ impl InProcessConnection {
         let request = TurnRequest {
             pane_id: PRIMARY_PANE,
             prompt,
+            goal: self
+                .goal
+                .as_ref()
+                .and_then(|goal| goal.get())
+                .map(|goal| goal.objective),
         };
         self.runtime.start_prepared_turn(request, prep, &deps);
         self.runtime.save_now_and_settle();

@@ -330,6 +330,81 @@ async fn the_turn_after_a_compaction_carries_the_digest_again() {
 }
 
 #[tokio::test]
+async fn the_digest_ranks_entries_by_the_goal_and_the_prompt() {
+    let _dirs = crate::testing::IsolatedDirs::acquire().await;
+    let (mut connection, requests) = connection();
+    connection.runtime.saver = Some(Arc::new(|_| {}));
+    let memory = |title: &str, content: &str| mush_session::harness::Edit {
+        action: mush_session::harness::Action::Create,
+        kind: mush_session::harness::Kind::Memory,
+        id: None,
+        title: Some(title.into()),
+        content: Some(content.into()),
+        path: None,
+        reference: None,
+        arguments: None,
+        metadata: None,
+        reason: None,
+    };
+    let mut state = mush_session::harness::State::default();
+    for name in [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+    ] {
+        state
+            .upsert(
+                &memory(&format!("{name} note"), "nothing in particular"),
+                mush_session::harness::Scope::Local,
+                "test",
+            )
+            .unwrap();
+    }
+    for (title, content) in [
+        ("xray kernel", "the xray kernel restarts on every deploy"),
+        (
+            "yankee parser",
+            "the yankee parser keeps its grammar in crates/grammar",
+        ),
+    ] {
+        state
+            .upsert(
+                &memory(title, content),
+                mush_session::harness::Scope::Local,
+                "test",
+            )
+            .unwrap();
+    }
+    state
+        .save(&mush_session::harness::local_dir(
+            &connection.runtime.session_id,
+        ))
+        .unwrap();
+    let goal = Arc::new(crate::goal::GoalStore::new(None));
+    goal.apply(crate::goal::GoalCommand::Create {
+        objective: "rewrite the yankee parser".into(),
+        token_budget: None,
+    })
+    .unwrap();
+    connection.set_goal_store(Some(goal));
+
+    prompt(&mut connection, "why does the xray kernel keep restarting").await;
+
+    let asked = requests.lock().unwrap();
+    let Message::User(digest) = &asked[0].messages[0] else {
+        panic!("{:?}", asked[0].messages)
+    };
+    let text = digest.text();
+    let memories: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("memory: "))
+        .skip(2)
+        .take(3)
+        .collect();
+    assert!(memories[0].contains("yankee parser"), "{text}");
+    assert!(memories[1].contains("xray kernel"), "{text}");
+    assert!(memories[2].contains("alpha note"), "{text}");
+}
+
+#[tokio::test]
 async fn a_refine_that_returns_no_json_fails_without_touching_the_harness() {
     let _dirs = crate::testing::IsolatedDirs::acquire().await;
     let (mut connection, _) = connection_replying("i have nothing to add");

@@ -1373,7 +1373,10 @@ mod tests {
 
     #[test]
     fn the_summariser_does_not_read_harness_digests_or_notes() {
-        let digest = crate::harness::digest_message(&crate::harness::State::default());
+        let digest = crate::harness::digest_message(
+            &crate::harness::State::default(),
+            &crate::harness::Focus::default(),
+        );
         let notes = crate::notes::message("- the daemon lives in mush-daemon");
         let context = compaction_context(
             &[
@@ -2397,7 +2400,10 @@ mod tests {
                 serde_json::json!({"path": "a.rs"}),
             )]),
             tool_result("tc", "read", "file body", ToolOutcome::Success),
-            crate::harness::digest_message(&crate::harness::State::default()),
+            crate::harness::digest_message(
+                &crate::harness::State::default(),
+                &crate::harness::Focus::default(),
+            ),
         ];
         msgs.push(assistant_msg("it did not work"));
 

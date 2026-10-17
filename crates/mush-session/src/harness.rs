@@ -497,45 +497,14 @@ impl State {
         if terms.is_empty() || entries.is_empty() {
             return Vec::new();
         }
-        let haystacks: Vec<(String, String, String)> = entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry.title.to_lowercase(),
-                    entry.content.to_lowercase(),
-                    format!("{} {}", entry.path, entry.id).to_lowercase(),
-                )
-            })
-            .collect();
-        let hits = |term: &str, fields: &(String, String, String)| {
-            u32::from(fields.0.contains(term))
-                + u32::from(fields.1.contains(term))
-                + u32::from(fields.2.contains(term))
-        };
-        let idf: Vec<(String, f64)> = terms
-            .into_iter()
-            .filter_map(|term| {
-                let documents = haystacks
-                    .iter()
-                    .filter(|fields| hits(&term, fields) > 0)
-                    .count();
-                (documents > 0).then(|| {
-                    let idf = (1.0 + entries.len() as f64 / documents as f64).ln();
-                    (term, idf)
-                })
-            })
-            .collect();
+        let haystacks: Vec<Haystack> = entries.iter().map(|entry| Haystack::of(entry)).collect();
+        let weighted: Vec<(String, f64)> = terms.into_iter().map(|term| (term, 1.0)).collect();
+        let idf = term_idf(&haystacks, &weighted);
         let mut ranked: Vec<(f64, &Entry)> = entries
             .iter()
             .zip(&haystacks)
-            .filter_map(|(entry, fields)| {
-                let score: f64 = idf
-                    .iter()
-                    .map(|(term, idf)| match hits(term, fields) {
-                        0 => 0.0,
-                        found => idf * (1.0 + f64::from(found - 1) * 0.5),
-                    })
-                    .sum();
+            .filter_map(|(entry, haystack)| {
+                let score = haystack.score(&idf);
                 (score > 0.0).then_some((score, *entry))
             })
             .collect();
@@ -551,7 +520,7 @@ impl State {
     }
 
     #[must_use]
-    pub fn digest(&self) -> String {
+    pub fn digest(&self, focus: &Focus) -> String {
         let mut lines = vec![
             "# continual harness state".to_string(),
             String::new(),
@@ -585,9 +554,15 @@ impl State {
             let entries = self.entries.get(&kind).map(BTreeMap::len).unwrap_or(0);
             total += entries;
             lines.push(format!("{}: {entries}", kind.as_str()));
-            let mut sorted: Vec<&Entry> = self.entries[&kind].values().collect();
-            sorted.sort_by(|a, b| (&a.path, &a.title, &a.id).cmp(&(&b.path, &b.title, &b.id)));
-            for entry in sorted.iter().take(OVERVIEW_ENTRIES_PER_KIND) {
+            if !focus.is_empty() && entries > OVERVIEW_ENTRIES_PER_KIND {
+                lines.push(
+                    "(ranked by relevance to the current task, `await harness.search(query)` \
+                     finds the rest)"
+                        .to_string(),
+                );
+            }
+            let ranked = focus.rank(self.entries[&kind].values().collect());
+            for entry in ranked.iter().take(OVERVIEW_ENTRIES_PER_KIND) {
                 lines.push(entry_line(entry, OVERVIEW_CONTENT_CHARS));
             }
             lines.extend(self.skipped_lines(Some(kind)));
@@ -843,6 +818,140 @@ fn query_runs(text: &str) -> Vec<(bool, String)> {
         runs.push((run_is_cjk, run));
     }
     runs
+}
+
+const FOCUS_TEXTS: usize = 4;
+const FOCUS_TERMS: usize = 48;
+const FOCUS_TERM_CHARS: usize = 4;
+const FOCUS_TEXT_CHARS: usize = 4_000;
+const GOAL_WEIGHT: f64 = 3.0;
+const NEWEST_TEXT_WEIGHT: f64 = 2.0;
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Focus {
+    terms: Vec<(String, f64)>,
+}
+
+impl Focus {
+    #[must_use]
+    pub fn new<'a>(goal: Option<&str>, newest_first: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut focus = Self::default();
+        focus.add(goal.unwrap_or_default(), GOAL_WEIGHT);
+        let mut weight = NEWEST_TEXT_WEIGHT;
+        for text in newest_first.into_iter().take(FOCUS_TEXTS) {
+            focus.add(text, weight);
+            weight = (weight - 0.5).max(1.0);
+        }
+        focus
+    }
+
+    #[must_use]
+    pub fn recent_texts(messages: &[mush_ai::types::Message]) -> Vec<String> {
+        use mush_ai::types::Message;
+        messages
+            .iter()
+            .rev()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                Message::Assistant(assistant) => Some(assistant.text()),
+                Message::Event(event) => Some(event.content.clone()),
+                Message::ToolResult(_) => None,
+            })
+            .filter(|text| {
+                !text.trim().is_empty()
+                    && !crate::compact::is_regenerated_text(text)
+                    && !is_refinement_notice(text)
+            })
+            .take(FOCUS_TEXTS)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    fn add(&mut self, text: &str, weight: f64) {
+        let text: String = text.chars().take(FOCUS_TEXT_CHARS).collect();
+        for term in query_terms(&text) {
+            if term.chars().count() < FOCUS_TERM_CHARS && !term.chars().any(is_cjk) {
+                continue;
+            }
+            if self.terms.iter().any(|(known, _)| *known == term) {
+                continue;
+            }
+            if self.terms.len() >= FOCUS_TERMS {
+                return;
+            }
+            self.terms.push((term, weight));
+        }
+    }
+
+    fn rank<'a>(&self, mut entries: Vec<&'a Entry>) -> Vec<&'a Entry> {
+        let by_path =
+            |a: &&Entry, b: &&Entry| (&a.path, &a.title, &a.id).cmp(&(&b.path, &b.title, &b.id));
+        if self.is_empty() {
+            entries.sort_by(by_path);
+            return entries;
+        }
+        let haystacks: Vec<Haystack> = entries.iter().map(|entry| Haystack::of(entry)).collect();
+        let idf = term_idf(&haystacks, &self.terms);
+        let mut scored: Vec<(f64, &Entry)> = haystacks
+            .iter()
+            .map(|haystack| haystack.score(&idf))
+            .zip(entries)
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| by_path(&a.1, &b.1)));
+        scored.into_iter().map(|(_, entry)| entry).collect()
+    }
+}
+
+struct Haystack {
+    title: String,
+    content: String,
+    identifier: String,
+}
+
+impl Haystack {
+    fn of(entry: &Entry) -> Self {
+        Self {
+            title: entry.title.to_lowercase(),
+            content: entry.content.to_lowercase(),
+            identifier: format!("{} {}", entry.path, entry.id).to_lowercase(),
+        }
+    }
+
+    fn fields(&self, term: &str) -> u32 {
+        u32::from(self.title.contains(term))
+            + u32::from(self.content.contains(term))
+            + u32::from(self.identifier.contains(term))
+    }
+
+    fn score(&self, weighted_idf: &[(&str, f64)]) -> f64 {
+        weighted_idf
+            .iter()
+            .map(|(term, weight)| match self.fields(term) {
+                0 => 0.0,
+                found => weight * (1.0 + f64::from(found - 1) * 0.5),
+            })
+            .sum()
+    }
+}
+
+fn term_idf<'a>(haystacks: &[Haystack], terms: &'a [(String, f64)]) -> Vec<(&'a str, f64)> {
+    terms
+        .iter()
+        .filter_map(|(term, weight)| {
+            let documents = haystacks
+                .iter()
+                .filter(|haystack| haystack.fields(term) > 0)
+                .count();
+            (documents > 0).then(|| {
+                let idf = (1.0 + haystacks.len() as f64 / documents as f64).ln();
+                (term.as_str(), weight * idf)
+            })
+        })
+        .collect()
 }
 
 fn query_terms(query: &str) -> Vec<String> {
@@ -1442,8 +1551,8 @@ const DIGEST: crate::user_text::TaggedBlock = crate::user_text::TaggedBlock {
 };
 
 #[must_use]
-pub fn digest_message(state: &State) -> mush_ai::types::Message {
-    DIGEST.message(&state.fingerprint(), &state.digest())
+pub fn digest_message(state: &State, focus: &Focus) -> mush_ai::types::Message {
+    DIGEST.message(&state.fingerprint(), &state.digest(focus))
 }
 
 #[must_use]
@@ -1746,15 +1855,23 @@ mod tests {
     fn the_digest_and_fingerprint_follow_the_entries() {
         let mut state = State::default();
         let empty = state.fingerprint();
-        assert!(state.digest().contains("no saved harness entries yet."));
-        assert!(state.digest().contains("default to local refinement"));
+        assert!(
+            state
+                .digest(&Focus::default())
+                .contains("no saved harness entries yet.")
+        );
+        assert!(
+            state
+                .digest(&Focus::default())
+                .contains("default to local refinement")
+        );
         state.apply(
             &proposal(vec![create(Kind::Memory, "tests", "cargo nextest run")]),
             "ref_1",
             Scope::Local,
             None,
         );
-        let digest = state.digest();
+        let digest = state.digest(&Focus::default());
         assert!(digest.contains("memory: 1"), "{digest}");
         assert!(
             digest.contains("- [local:tests] tests (general, v1): cargo nextest run"),
@@ -1763,6 +1880,131 @@ mod tests {
         assert!(digest.contains("recent refinements: 1"), "{digest}");
         assert_ne!(state.fingerprint(), empty);
         assert_eq!(state.fingerprint(), state.clone().fingerprint());
+    }
+
+    fn crowded_memories() -> State {
+        let mut state = State::default();
+        let mut edits: Vec<Edit> = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+        ]
+        .into_iter()
+        .map(|name| {
+            create(
+                Kind::Memory,
+                &format!("{name} note"),
+                "nothing in particular",
+            )
+        })
+        .collect();
+        edits.push(create(
+            Kind::Memory,
+            "yankee parser",
+            "the yankee parser keeps its grammar in crates/grammar",
+        ));
+        edits.push(create(
+            Kind::Memory,
+            "zulu deploys",
+            "zulu ships through the staging cluster first",
+        ));
+        state.apply(&proposal(edits), "ref_1", Scope::Global, None);
+        state
+    }
+
+    fn memory_lines(digest: &str) -> Vec<&str> {
+        digest
+            .lines()
+            .skip_while(|line| !line.starts_with("memory: "))
+            .skip(1)
+            .take_while(|line| line.starts_with('-') || line.starts_with('('))
+            .collect()
+    }
+
+    #[test]
+    fn without_a_focus_the_digest_lists_entries_by_path_and_title() {
+        let digest = crowded_memories().digest(&Focus::default());
+        let lines = memory_lines(&digest);
+        assert!(lines[0].contains("alpha note"), "{digest}");
+        assert!(!digest.contains("ranked by relevance"), "{digest}");
+        assert!(!digest.contains("yankee parser"), "{digest}");
+        assert!(
+            lines.last().unwrap().contains("+3 more memory entries"),
+            "{digest}"
+        );
+    }
+
+    #[test]
+    fn the_goal_and_the_newest_texts_pull_their_entries_into_the_digest() {
+        let state = crowded_memories();
+        let focus = Focus::new(
+            Some("fix the yankee parser"),
+            [
+                "the zulu staging cluster is down",
+                "older chat",
+                "more chat",
+                "chat",
+            ],
+        );
+        let digest = state.digest(&focus);
+        let lines = memory_lines(&digest);
+        assert!(lines[0].starts_with("(ranked by relevance"), "{digest}");
+        assert!(lines[1].contains("yankee parser"), "{digest}");
+        assert!(lines[2].contains("zulu deploys"), "{digest}");
+        assert!(lines[3].contains("alpha note"), "{digest}");
+        assert_eq!(digest, state.digest(&focus), "ranking is deterministic");
+        let mush_ai::types::Message::User(ranked) = digest_message(&state, &focus) else {
+            unreachable!()
+        };
+        let (fingerprint, _) = extract_digest(&ranked.text()).unwrap();
+        assert_eq!(fingerprint, state.fingerprint());
+    }
+
+    #[test]
+    fn the_goal_outweighs_the_texts_and_only_the_newest_four_count() {
+        let state = crowded_memories();
+        let focus = Focus::new(
+            Some("the zulu cluster"),
+            [
+                "yankee",
+                "one more",
+                "two more",
+                "three more",
+                "yankee parser grammar",
+            ],
+        );
+        let lines = memory_lines(&state.digest(&focus)).join("\n");
+        let zulu = lines.find("zulu deploys").unwrap();
+        let yankee = lines.find("yankee parser").unwrap();
+        assert!(zulu < yankee, "{lines}");
+
+        let stale = Focus::new(None, ["a", "b", "c", "d", "yankee parser"]);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn recent_texts_skip_harness_deliveries_and_keep_the_newest_four() {
+        use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
+        let user = |text: &str| {
+            Message::User(
+                UserMessage::builder()
+                    .content(UserContent::Text(text.into()))
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            )
+        };
+        let digest = digest_message(&crowded_memories(), &Focus::default());
+        let messages = vec![
+            user("first"),
+            user("second"),
+            user("third"),
+            user("fourth"),
+            digest,
+            user("[self-refinement]\n\nthese harness edits are already applied"),
+            user("fifth"),
+        ];
+        assert_eq!(
+            Focus::recent_texts(&messages),
+            ["fifth", "fourth", "third", "second"]
+        );
     }
 
     #[test]
@@ -1813,13 +2055,13 @@ mod tests {
             Scope::Local,
             None,
         );
-        let message = digest_message(&state);
+        let message = digest_message(&state, &Focus::default());
         let mush_ai::types::Message::User(user) = &message else {
             unreachable!()
         };
         let (fingerprint, body) = extract_digest(&user.text()).unwrap();
         assert_eq!(fingerprint, state.fingerprint());
-        assert_eq!(body, state.digest());
+        assert_eq!(body, state.digest(&Focus::default()));
         assert_eq!(
             latest_digest_fingerprint(&[message]),
             Some(state.fingerprint())
@@ -1992,7 +2234,7 @@ mod tests {
 
         let mut state = State::load(dir.path(), Scope::Local);
         assert!(state.entry(Kind::Memory, "tests").is_some());
-        let digest = state.digest();
+        let digest = state.digest(&Focus::default());
         assert!(
             digest.contains("harness: skipped malformed entry broken (invalid type: integer `3`"),
             "{digest}"
@@ -2027,7 +2269,7 @@ mod tests {
         assert!(!state.is_empty());
         assert!(
             state
-                .digest()
+                .digest(&Focus::default())
                 .contains("harness: could not read harness_state.json")
         );
         state
