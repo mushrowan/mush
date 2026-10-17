@@ -83,7 +83,10 @@ pub fn child_thinking(
             } else {
                 supported.contains(level)
             };
-            if *level == ThinkingLevel::Off || listed {
+            if *level == ThinkingLevel::Off {
+                return Ok(model.clamp_thinking(level));
+            }
+            if listed {
                 return Ok(level.clone());
             }
             let names: Vec<&str> = std::iter::once("off")
@@ -97,7 +100,6 @@ pub fn child_thinking(
             ))
         }
         None if !same_model => Ok(middle_thinking(model)),
-        None if *parent == ThinkingLevel::Off => Ok(ThinkingLevel::Off),
         None => Ok(model.clamp_thinking(parent)),
     }
 }
@@ -172,7 +174,10 @@ fn spawnable_thinking(model: &mush_ai::types::Model) -> Vec<String> {
     if !model.reasoning {
         return vec!["off".into()];
     }
-    std::iter::once("off")
+    let off = (model.clamp_thinking(&mush_ai::types::ThinkingLevel::Off)
+        == mush_ai::types::ThinkingLevel::Off)
+        .then_some("off");
+    off.into_iter()
         .chain(
             thinking_ladder(model)
                 .filter_map(mush_ai::types::ThinkingLevel::effort_name)
@@ -282,6 +287,7 @@ mod tests {
         model.id = id.into();
         model.name = id.replace('-', " ");
         model.provider = provider;
+        model.supported_thinking_levels = Vec::new();
         mush_ai::discovery::MergedModel {
             model,
             source,
@@ -296,6 +302,7 @@ mod tests {
         haiku_4_5.model.max_output_tokens = mush_ai::types::TokenCount::new(64_000);
         let mut haiku_5_5 = listed("claude-haiku-5-5", Provider::Anthropic, ModelSource::Static);
         haiku_5_5.model.supported_thinking_levels = vec![
+            mush_ai::types::ThinkingLevel::Off,
             mush_ai::types::ThinkingLevel::Low,
             mush_ai::types::ThinkingLevel::Medium,
             mush_ai::types::ThinkingLevel::High,
@@ -376,6 +383,14 @@ mod tests {
             ["off", "minimal", "low", "medium", "high", "xhigh"]
         );
 
+        let mut always_on = catalogue[0].model.clone();
+        always_on.supported_thinking_levels.remove(0);
+        assert_eq!(
+            ModelChoice::of(&always_on).thinking,
+            ["low", "medium", "high", "xhigh", "max"],
+            "a model that cannot switch thinking off does not offer off"
+        );
+
         let mut plain = catalogue[1].model.clone();
         plain.reasoning = false;
         plain.cost = mush_ai::types::ModelCost::default();
@@ -432,7 +447,17 @@ mod tests {
         );
         assert_eq!(
             child_thinking(&model, None, &ThinkingLevel::Off, true),
-            Ok(ThinkingLevel::Off)
+            Ok(ThinkingLevel::Low),
+            "a model that cannot think less runs at its lowest level"
+        );
+        assert_eq!(
+            child_thinking(
+                &model,
+                Some(&ThinkingLevel::Off),
+                &ThinkingLevel::High,
+                true
+            ),
+            Ok(ThinkingLevel::Low)
         );
         assert_eq!(
             child_thinking(
@@ -451,6 +476,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(refused.contains("off, low, medium"), "{refused}");
+
+        model
+            .supported_thinking_levels
+            .insert(0, ThinkingLevel::Off);
+        assert_eq!(
+            child_thinking(&model, None, &ThinkingLevel::Off, true),
+            Ok(ThinkingLevel::Off)
+        );
+        assert_eq!(
+            child_thinking(
+                &model,
+                Some(&ThinkingLevel::Off),
+                &ThinkingLevel::High,
+                false
+            ),
+            Ok(ThinkingLevel::Off)
+        );
     }
 
     #[test]

@@ -89,15 +89,23 @@ fn entry_to_model(entry: AnthropicModelEntry) -> Model {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| entry.id.clone());
 
-    let supported_thinking_levels = caps
+    let effort_levels = caps
         .effort
         .as_ref()
         .map(AnthropicEffortCaps::supported_levels)
         .unwrap_or_default();
-    let default_thinking_level = if supported_thinking_levels.contains(&ThinkingLevel::High) {
+    let default_thinking_level = if effort_levels.contains(&ThinkingLevel::High) {
         Some(ThinkingLevel::High)
     } else {
-        supported_thinking_levels.first().cloned()
+        effort_levels.first().cloned()
+    };
+    let can_turn_off = thinking.types.disabled.unwrap_or_default().supported;
+    let supported_thinking_levels = if can_turn_off && !effort_levels.is_empty() {
+        std::iter::once(ThinkingLevel::Off)
+            .chain(effort_levels)
+            .collect()
+    } else {
+        effort_levels
     };
 
     Model {
@@ -197,6 +205,8 @@ struct AnthropicThinkingTypes {
     enabled: Option<SupportedFlag>,
     #[serde(default)]
     budget: Option<SupportedFlag>,
+    #[serde(default)]
+    disabled: Option<SupportedFlag>,
 }
 
 #[derive(Deserialize, Debug, Default, Clone, Copy)]
@@ -318,6 +328,58 @@ mod tests {
             .unwrap();
         assert!(haiku.model.supported_thinking_levels.is_empty());
         assert!(haiku.model.default_thinking_level.is_none());
+    }
+
+    #[test]
+    fn a_model_that_can_turn_thinking_off_lists_off_before_its_effort_levels() {
+        let body = r#"{
+          "data": [
+            {
+              "id": "claude-haiku-5-5",
+              "capabilities": {
+                "thinking": {"types": {"adaptive": {"supported": true}, "disabled": {"supported": true}}},
+                "effort": {"supported": true, "low": {"supported": true}, "high": {"supported": true}}
+              }
+            },
+            {
+              "id": "claude-opus-5-5",
+              "capabilities": {
+                "thinking": {"types": {"adaptive": {"supported": true}, "disabled": {"supported": false}}},
+                "effort": {"supported": true, "low": {"supported": true}, "high": {"supported": true}}
+              }
+            },
+            {
+              "id": "claude-haiku-4-5",
+              "capabilities": {
+                "thinking": {"types": {"enabled": {"supported": true}, "disabled": {"supported": true}}},
+                "effort": {"supported": false}
+              }
+            }
+          ],
+          "has_more": false
+        }"#;
+        let models = parse_anthropic_models(body).unwrap();
+        let levels = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.model.id.as_str() == id)
+                .map(|m| m.model.supported_thinking_levels.clone())
+                .unwrap()
+        };
+
+        assert_eq!(
+            levels("claude-haiku-5-5"),
+            vec![ThinkingLevel::Off, ThinkingLevel::Low, ThinkingLevel::High]
+        );
+        assert_eq!(
+            levels("claude-opus-5-5"),
+            vec![ThinkingLevel::Low, ThinkingLevel::High]
+        );
+        assert!(levels("claude-haiku-4-5").is_empty());
+        assert_eq!(
+            models[0].model.default_thinking_level,
+            Some(ThinkingLevel::High)
+        );
     }
 
     #[test]

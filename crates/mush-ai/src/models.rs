@@ -45,6 +45,13 @@ static BUILTIN_MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
 static USER_MODELS_CACHE: LazyLock<Mutex<Option<UserModelsCache>>> =
     LazyLock::new(|| Mutex::new(None));
 
+fn thinking_levels(names: &[&str]) -> Vec<crate::types::ThinkingLevel> {
+    names
+        .iter()
+        .map(|name| crate::types::ThinkingLevel::from_effort_str(name))
+        .collect()
+}
+
 #[must_use]
 pub fn anthropic_models() -> Vec<Model> {
     vec![
@@ -66,7 +73,7 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&["low", "medium", "high", "xhigh", "max"]),
             default_thinking_level: Some(crate::types::ThinkingLevel::Medium),
         },
         Model {
@@ -87,7 +94,9 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&[
+                "off", "low", "medium", "high", "xhigh", "max",
+            ]),
             default_thinking_level: Some(crate::types::ThinkingLevel::High),
         },
         Model {
@@ -108,7 +117,9 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&[
+                "off", "low", "medium", "high", "xhigh", "max",
+            ]),
             default_thinking_level: Some(crate::types::ThinkingLevel::Medium),
         },
         Model {
@@ -129,7 +140,9 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&[
+                "off", "low", "medium", "high", "xhigh", "max",
+            ]),
             default_thinking_level: None,
         },
         Model {
@@ -150,7 +163,7 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(128_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&["off", "low", "medium", "high", "max"]),
             default_thinking_level: None,
         },
         Model {
@@ -171,12 +184,7 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
-            supported_thinking_levels: vec![
-                crate::types::ThinkingLevel::Off,
-                crate::types::ThinkingLevel::Low,
-                crate::types::ThinkingLevel::Medium,
-                crate::types::ThinkingLevel::High,
-            ],
+            supported_thinking_levels: thinking_levels(&["off", "low", "medium", "high"]),
             default_thinking_level: None,
         },
         Model {
@@ -197,7 +205,7 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: true,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: thinking_levels(&["off", "low", "medium", "high", "max"]),
             default_thinking_level: None,
         },
         Model {

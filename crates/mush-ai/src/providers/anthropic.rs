@@ -439,6 +439,10 @@ enum ThinkingConfig {
         #[serde(skip_serializing_if = "String::is_empty")]
         display: String,
     },
+    Disabled {
+        #[serde(rename = "type")]
+        config_type: String,
+    },
 }
 
 fn messages_fingerprint(
@@ -624,25 +628,40 @@ fn build_request_body(
                 (Some(enabled), max_tokens)
             }
         }
+        Some(ThinkingLevel::Off) if turns_thinking_off(model) => (
+            Some(ThinkingConfig::Disabled {
+                config_type: "disabled".into(),
+            }),
+            max_tokens.get(),
+        ),
         _ => (None, max_tokens.get()),
     };
+    let thinking_on = matches!(
+        thinking,
+        Some(ThinkingConfig::Enabled { .. } | ThinkingConfig::Adaptive { .. })
+    );
+    let thinking_disabled = matches!(thinking, Some(ThinkingConfig::Disabled { .. }));
     let output_config = if accepts_effort(model) {
         super::requested_effort(options)
             .as_ref()
             .and_then(|effort| anthropic_effort(effort, model))
+            .map(|effort| match effort.as_str() {
+                "xhigh" | "max" if thinking_disabled => "high".to_string(),
+                _ => effort,
+            })
             .map(|effort| OutputConfig { effort })
     } else {
         None
     };
 
-    let temperature = if thinking.is_none() {
-        options.temperature.map(|t| t.value())
-    } else {
+    let temperature = if thinking_on {
         None
+    } else {
+        options.temperature.map(|t| t.value())
     };
 
     let metadata = is_oauth.then(|| claude_code_metadata(options));
-    let context_management = oauth_context_management(options, is_oauth, thinking.is_some());
+    let context_management = oauth_context_management(options, is_oauth, thinking_on);
     let diagnostics = is_oauth.then(|| Diagnostics {
         previous_message_id: messages.iter().rev().find_map(|message| match message {
             Message::Assistant(assistant) => assistant.generation_id.clone(),
@@ -1001,6 +1020,13 @@ fn effort_ladder(model: &Model) -> impl Iterator<Item = &ThinkingLevel> {
         .supported_thinking_levels
         .iter()
         .filter(|level| level.effort_name().is_some())
+}
+
+fn turns_thinking_off(model: &Model) -> bool {
+    model.reasoning
+        && model
+            .supported_thinking_levels
+            .contains(&ThinkingLevel::Off)
 }
 
 fn accepts_effort(model: &Model) -> bool {
@@ -3129,6 +3155,46 @@ mod tests {
             Some("medium")
         );
         assert_eq!(body.max_tokens, 128_000);
+    }
+
+    #[test]
+    fn thinking_off_sends_a_disabled_block_where_the_model_can_switch_thinking_off() {
+        let off = StreamOptions {
+            thinking: Some(ThinkingLevel::Off),
+            temperature: Some(crate::types::Temperature::new(0.5)),
+            ..Default::default()
+        };
+        let body = |id: &str, options: &StreamOptions| {
+            serde_json::to_value(build_request_body(
+                &catalogue_model(id),
+                &None,
+                &[],
+                &[],
+                options,
+                true,
+            ))
+            .unwrap()
+        };
+
+        let haiku = body("claude-haiku-5-5", &off);
+        assert_eq!(haiku["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(haiku.get("output_config").is_none(), "{haiku}");
+        assert!(haiku.get("context_management").is_none(), "{haiku}");
+        assert_eq!(haiku["temperature"], 0.5);
+
+        let capped = body(
+            "claude-haiku-5-5",
+            &StreamOptions {
+                effort: Some(EffortLevel::Xhigh),
+                ..off.clone()
+            },
+        );
+        assert_eq!(capped["output_config"]["effort"], "high");
+
+        for id in ["claude-opus-5-5", "claude-haiku-4-5"] {
+            let body = body(id, &off);
+            assert!(body.get("thinking").is_none(), "{id}: {body}");
+        }
     }
 
     #[test]
