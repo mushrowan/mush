@@ -10,6 +10,7 @@ pub const FEATURE_HINTS: &[&str] = &[
     "/schedule add \"in 30m\" <prompt> runs a prompt later, once or on a cron",
     "the agent can hand tasks to child agents with rlm.spawn and run them in parallel",
     "/agents lists the child agents of this session and what they're doing",
+    "a long message from a child agent is folded: ctrl+o, move onto it and press enter to open it",
     "/tree shows the conversation tree, /branch returns to an earlier message",
     "/fork starts a new session from an earlier prompt",
     "/goal <objective> keeps the agent working until it calls goal.complete()",

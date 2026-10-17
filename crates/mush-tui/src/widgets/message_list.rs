@@ -367,7 +367,7 @@ fn build_message_lines(
     let mut lines = Vec::new();
 
     if let Some(injected) = &msg.injected {
-        push_injected_lines(injected, style, width, &mut lines);
+        push_injected_lines(injected, style, width, msg.expanded, &mut lines);
         return lines;
     }
     if matches!(msg.role, MessageRole::System) {
@@ -810,20 +810,30 @@ fn bash_done_label(done: &mush_tools::kernel_jobs::BashDone, theme: &Theme) -> (
 
 const INJECTED_MARKER: &str = "\u{25c6} ";
 const PREVIEW_LINES: usize = 2;
+const SENDER_GUTTER: &str = "\u{258e} ";
+const CLIPPED_ROWS: usize = 5;
 
 fn push_injected_lines(
     injected: &crate::injected::Injected,
     style: &MessageStyle<'_>,
     width: u16,
+    expanded: bool,
     lines: &mut Vec<Line<'static>>,
 ) {
     use crate::injected::{Body, HeaderPart};
     let theme = style.theme;
     let cw = message_content_width(width as usize);
+    let sender = injected.header.iter().find_map(|part| match part {
+        HeaderPart::Who(who) => Some(sender_style(theme, who)),
+        HeaderPart::Text(_) | HeaderPart::Alert(_) => None,
+    });
     let mut header = vec![Span::styled(INJECTED_MARKER, theme.dim)];
     header.extend(injected.header.iter().map(|part| match part {
         HeaderPart::Text(text) => Span::styled(text.clone(), theme.dim),
-        HeaderPart::Who(who) => Span::styled(who.clone(), theme.status_model),
+        HeaderPart::Who(who) => Span::styled(
+            who.clone(),
+            sender_style(theme, who).add_modifier(Modifier::BOLD),
+        ),
         HeaderPart::Alert(text) => Span::styled(text.clone(), theme.alert),
     }));
     lines.extend(indent_line(Line::from(header), cw));
@@ -832,8 +842,16 @@ fn push_injected_lines(
         match injected.shown {
             Body::Folded if !everything => {}
             Body::Preview if !everything => push_preview_lines(&injected.body, theme, cw, lines),
+            Body::Clipped => push_sender_body(
+                &injected.body,
+                sender.unwrap_or(theme.dim),
+                theme,
+                cw,
+                !(everything || expanded),
+                lines,
+            ),
             Body::Shown | Body::Preview | Body::Folded => {
-                let md = crate::markdown::render_with_width(&injected.body, theme, Some(cw));
+                let md = crate::markdown::render_lines_with_width(&injected.body, theme, Some(cw));
                 for line in md.lines {
                     lines.extend(indent_line(line, cw));
                 }
@@ -844,6 +862,79 @@ fn push_injected_lines(
         for detail in &injected.details {
             lines.extend(indent_line(Line::styled(detail.clone(), theme.dim), cw));
         }
+    }
+}
+
+fn sender_style(theme: &Theme, who: &str) -> Style {
+    let mut colours: Vec<Color> = Vec::new();
+    for style in [
+        theme.heading,
+        theme.status_model,
+        theme.inline_code,
+        theme.tool_running,
+        theme.link,
+        theme.image_label,
+    ] {
+        if let Some(colour) = style.fg
+            && !colours.contains(&colour)
+        {
+            colours.push(colour);
+        }
+    }
+    let hash = who.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    match colours.get(hash as usize % colours.len().max(1)) {
+        Some(colour) => Style::default().fg(*colour),
+        None => theme.status_model,
+    }
+}
+
+fn push_sender_body(
+    body: &str,
+    gutter: Style,
+    theme: &Theme,
+    cw: usize,
+    clipped: bool,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let inner = cw.saturating_sub(SENDER_GUTTER.cell_width().into()).max(1);
+    let md = crate::markdown::render_lines_with_width(body, theme, Some(inner));
+    let rows: Vec<Line<'static>> = md
+        .lines
+        .into_iter()
+        .flat_map(|line| indent_line(line, inner))
+        .collect();
+    let written = |row: &Line<'_>| row.spans.iter().any(|span| !span.content.trim().is_empty());
+    let content = rows.iter().filter(|row| written(row)).count();
+    let cut = (clipped && content > CLIPPED_ROWS + 1)
+        .then(|| {
+            rows.iter()
+                .enumerate()
+                .filter(|(_, row)| written(row))
+                .nth(CLIPPED_ROWS - 1)
+                .map(|(index, _)| index + 1)
+        })
+        .flatten();
+    let behind_gutter = |row: Line<'static>| {
+        let line_style = row.style;
+        let mut spans = vec![Span::raw(" "), Span::styled(SENDER_GUTTER, gutter)];
+        spans.extend(row.spans.into_iter().skip(1));
+        Line::from(spans).style(line_style)
+    };
+    let shown = cut.unwrap_or(rows.len());
+    lines.extend(rows.into_iter().take(shown).map(behind_gutter));
+    if cut.is_some() {
+        lines.push(behind_gutter(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(
+                    "\u{2026} {} more lines, ctrl+o then enter to open",
+                    content - CLIPPED_ROWS
+                ),
+                theme.dim,
+            ),
+        ])));
     }
 }
 

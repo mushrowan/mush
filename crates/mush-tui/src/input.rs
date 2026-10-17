@@ -885,6 +885,9 @@ fn handle_navigate_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             app.cycle_detail();
             return None;
         }
+        if app.keymap.matches(Action::Confirm, key) && app.toggle_row_at_cursor() {
+            return None;
+        }
         if app
             .keymap
             .matches_in(KeyScope::Normal, Action::EnterInsert, key)

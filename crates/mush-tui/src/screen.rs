@@ -107,6 +107,14 @@ impl Viewport {
         }
     }
 
+    #[must_use]
+    pub(crate) fn message_at_cursor(&self) -> Option<usize> {
+        match chunk_at(&self.chunks.borrow(), self.cursor.get().line)?.id {
+            crate::widgets::message_list::TranscriptChunkId::Message(index) => Some(index),
+            crate::widgets::message_list::TranscriptChunkId::Streaming => None,
+        }
+    }
+
     pub fn window(&self, total: usize, height: usize) -> Range<usize> {
         self.total.set(total);
         self.height.set(height);

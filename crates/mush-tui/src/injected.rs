@@ -12,6 +12,7 @@ pub enum Body {
     Shown,
     Preview,
     Folded,
+    Clipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +115,7 @@ impl Injected {
             return Some(Self::labelled(label, body, shown));
         }
         (tag == mush_session::brief::TASK_LABEL.trim_matches(['[', ']']))
-            .then(|| Self::labelled("task from parent", body, Body::Shown))
+            .then(|| Self::labelled("task from parent", body, Body::Clipped))
     }
 }
 
@@ -149,7 +150,7 @@ fn message(event: &EventMessage) -> Injected {
                     HeaderPart::Who(who),
                 ],
                 body,
-                Body::Shown,
+                Body::Clipped,
             );
         }
         let exits = [
@@ -162,7 +163,7 @@ fn message(event: &EventMessage) -> Injected {
                 return Injected::new(
                     vec![HeaderPart::Who(who), HeaderPart::Text(outcome.into())],
                     body,
-                    Body::Shown,
+                    Body::Clipped,
                 );
             }
         }
@@ -173,7 +174,7 @@ fn message(event: &EventMessage) -> Injected {
             HeaderPart::Who(who),
         ],
         content,
-        Body::Shown,
+        Body::Clipped,
     )
 }
 
@@ -229,7 +230,7 @@ fn worker(event: &EventMessage) -> Injected {
         HeaderPart::Text(outcome),
     ];
     header.extend(claim(&event.receipts));
-    Injected::new(header, body, Body::Shown)
+    Injected::new(header, body, Body::Clipped)
 }
 
 fn control_text(content: &str) -> String {
@@ -251,7 +252,7 @@ fn agent_sender(receipts: &[EventReceipt]) -> Option<String> {
         let sender = if relationship.is_empty() {
             name.clone()
         } else {
-            format!("{relationship} {name}")
+            format!("{relationship}:{name}")
         };
         if !senders.contains(&sender) {
             senders.push(sender);
@@ -373,7 +374,7 @@ mod tests {
                 "[task from parent]\n\nwrite the report",
                 "task from parent",
                 "write the report",
-                Body::Shown,
+                Body::Clipped,
             ),
         ];
         for (text, label, body, shown) in cases {

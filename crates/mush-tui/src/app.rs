@@ -887,6 +887,34 @@ impl App {
         self.status = Some(format!("detail: {}", self.detail.label()).into());
     }
 
+    pub fn toggle_row_at_cursor(&mut self) -> bool {
+        let Some(index) = self.viewport.message_at_cursor() else {
+            return false;
+        };
+        let foldable = self.messages.get(index).is_some_and(|message| {
+            message
+                .injected
+                .as_ref()
+                .is_some_and(|row| row.shown == crate::injected::Body::Clipped)
+        });
+        if !foldable {
+            return false;
+        }
+        let Some(mut message) = self.messages.get_mut(index) else {
+            return false;
+        };
+        message.expanded = !message.expanded;
+        self.status = Some(
+            if message.expanded {
+                "opened, enter folds it again"
+            } else {
+                "folded"
+            }
+            .into(),
+        );
+        true
+    }
+
     pub fn toggle_thinking_expanded(&mut self) {
         if let Some(mut msg) = self
             .messages

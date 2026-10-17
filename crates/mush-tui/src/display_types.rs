@@ -146,6 +146,7 @@ pub struct DisplayMessage {
     pub queued: bool,
     pub images: Vec<Vec<u8>>,
     pub injected: Option<crate::injected::Injected>,
+    pub expanded: bool,
     pub(crate) line_cache: RefCell<Option<LineCache>>,
 }
 
@@ -163,6 +164,7 @@ impl Clone for DisplayMessage {
             queued: self.queued,
             images: self.images.clone(),
             injected: self.injected.clone(),
+            expanded: self.expanded,
             line_cache: RefCell::new(None),
         }
     }
@@ -183,6 +185,7 @@ impl DisplayMessage {
             queued: false,
             images: Vec::new(),
             injected: None,
+            expanded: false,
             line_cache: RefCell::new(None),
         }
     }

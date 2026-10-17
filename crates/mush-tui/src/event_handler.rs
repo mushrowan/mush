@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(row.content, "found it");
         assert_eq!(
             crate::test_support::header_text(row).as_deref(),
-            Some("message from child auth")
+            Some("message from child:auth")
         );
     }
 }

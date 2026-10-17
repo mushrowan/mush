@@ -737,6 +737,59 @@ fn an_image_attached_before_another_takes_the_earlier_slot() {
 }
 
 #[test]
+fn enter_in_the_log_opens_and_closes_the_agent_message_under_the_cursor() {
+    use mush_ai::types::{EventKind, EventMessage, EventOrigin, EventReceipt, Timestamp};
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages.push(crate::app::DisplayMessage::new(
+        crate::app::MessageRole::Assistant,
+        "my own words",
+    ));
+    let body: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+    app.push_event_message(&EventMessage {
+        content: format!("[agent-message from child:auth]\n\n{}", body.join("\n")),
+        timestamp_ms: Timestamp::zero(),
+        kind: EventKind::Message,
+        receipts: vec![EventReceipt {
+            id: String::from("r1").into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Message,
+            origin: EventOrigin::Agent {
+                session_id: "s".into(),
+                name: "auth".into(),
+                relationship: "child".into(),
+            },
+        }],
+    });
+    let place = |app: &App| {
+        let guards = crate::widgets::message_list::transcript_guards(app, 60);
+        let transcript = guards.flatten();
+        app.viewport.place(&transcript, Rect::new(0, 0, 60, 40));
+    };
+    place(&app);
+    app.interaction.focus = crate::app_event::Focus::Log;
+    app.interaction.mode = AppMode::Normal;
+
+    app.viewport.cursor_to(0);
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(
+        !app.messages[1].expanded,
+        "the assistant row has nothing to open"
+    );
+
+    app.viewport.cursor_to(4);
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(app.messages[1].expanded);
+    assert_eq!(
+        app.status.as_ref().map(|s| s.text.as_str()),
+        Some("opened, enter folds it again")
+    );
+    place(&app);
+    handle_key(&mut app, key(KeyCode::Enter));
+    assert!(!app.messages[1].expanded);
+    assert_eq!(app.status.as_ref().map(|s| s.text.as_str()), Some("folded"));
+}
+
+#[test]
 fn submit_allowed_while_streaming() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;

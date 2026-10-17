@@ -2086,7 +2086,7 @@ fn a_received_agent_message_shows_its_sender_and_body_with_receipts_only_in_all(
     for detail in [ChatDetail::Overview, ChatDetail::Details] {
         app.detail = detail;
         let text = buffer_to_string(&render_app(&app, 80, 10));
-        assert!(text.contains("\u{25c6} message from child auth"), "{text}");
+        assert!(text.contains("\u{25c6} message from child:auth"), "{text}");
         assert!(text.contains("found the bug in login.rs"), "{text}");
         assert!(!text.contains("agent-message"), "{text}");
         assert!(!text.contains("receipt"), "{text}");
@@ -2120,7 +2120,7 @@ fn a_steered_agent_message_renders_like_a_delivered_one() {
         buffer_to_string(&render_app(&delivered, 80, 10))
     );
     assert!(
-        steered_text.contains("message from child auth"),
+        steered_text.contains("message from child:auth"),
         "{steered_text}"
     );
     assert!(!steered_text.contains("non-human event"), "{steered_text}");
@@ -2128,6 +2128,163 @@ fn a_steered_agent_message_renders_like_a_delivered_one() {
         steered.messages[0].role,
         MessageRole::Event(mush_ai::types::EventKind::Message)
     );
+}
+
+fn agent_message_with(body: &str) -> mush_ai::types::EventMessage {
+    let mut event = agent_message_event();
+    event.content = format!("[agent-message from child:tidy-repos]\n\n{body}");
+    event.receipts[0].origin = mush_ai::types::EventOrigin::Agent {
+        session_id: "s".into(),
+        name: "tidy-repos".into(),
+        relationship: "child".into(),
+    };
+    event
+}
+
+fn row_texts(buf: &Buffer) -> Vec<String> {
+    buffer_to_string(buf)
+        .lines()
+        .map(|row| row.trim_end().to_string())
+        .collect()
+}
+
+#[test]
+fn an_agent_message_keeps_every_line_its_sender_wrote() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.detail = ChatDetail::All;
+    app.push_event_message(&agent_message_with(
+        "UNMERGED WORK, needs merge or drop\n| # | repo | workspace / change |\n| 1 | ai-safety | dangling urvxxukstpys |\nchecks for each one:\n    the owner was not working\n\n- mush: mush-models 23.4 GB\n- ai-safety: map-gleam 3.7",
+    ));
+
+    let rows = row_texts(&render_app(&app, 80, 14));
+
+    for expected in [
+        " \u{258e} UNMERGED WORK, needs merge or drop",
+        " \u{258e} | # | repo | workspace / change |",
+        " \u{258e} | 1 | ai-safety | dangling urvxxukstpys |",
+        " \u{258e} checks for each one:",
+        " \u{258e}     the owner was not working",
+    ] {
+        assert!(
+            rows.iter().any(|row| row == expected),
+            "{expected:?} in {rows:#?}"
+        );
+    }
+    for item in ["mush: mush-models 23.4 GB", "ai-safety: map-gleam 3.7"] {
+        assert!(
+            rows.iter()
+                .any(|row| row.ends_with(item) && row.starts_with(" \u{258e} ")),
+            "{item:?} in {rows:#?}"
+        );
+    }
+}
+
+#[test]
+fn an_agent_message_carries_a_gutter_in_its_senders_colour_and_the_assistant_none() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "my own words"));
+    app.push_event_message(&agent_message_with("a child's words\nand a second line"));
+
+    let buf = render_app(&app, 60, 8);
+    let rows = row_texts(&buf);
+
+    let own = rows
+        .iter()
+        .position(|row| row.contains("my own words"))
+        .unwrap();
+    assert!(!rows[own].contains('\u{258e}'), "{rows:#?}");
+    let header = rows
+        .iter()
+        .position(|row| row.contains("message from child:tidy-repos"))
+        .unwrap();
+    let sender = sender_style(&app.theme, "child:tidy-repos").fg;
+    assert!(sender.is_some());
+    for row in header + 1..header + 3 {
+        assert_eq!(buf[(1, row as u16)].symbol(), "\u{258e}", "{rows:#?}");
+        assert_eq!(buf[(1, row as u16)].fg, sender.unwrap());
+    }
+    let name_at = rows[header].find("child:tidy-repos").unwrap();
+    let column = rows[header][..name_at].chars().count() as u16;
+    assert_eq!(buf[(column, header as u16)].fg, sender.unwrap());
+}
+
+#[test]
+fn senders_keep_their_colour_and_different_senders_can_differ() {
+    let theme = Theme::default();
+    assert_eq!(
+        sender_style(&theme, "child:auth"),
+        sender_style(&theme, "child:auth")
+    );
+    let colours: std::collections::HashSet<_> =
+        ["child:a", "child:b", "child:c", "child:d", "parent:root"]
+            .iter()
+            .map(|who| sender_style(&theme, who).fg)
+            .collect();
+    assert!(colours.len() > 1, "{colours:?}");
+}
+
+#[test]
+fn a_long_agent_message_shows_its_first_rows_until_it_is_opened_or_all_output_is_on() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let body: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+    app.push_event_message(&agent_message_with(&body.join("\n")));
+
+    for detail in [ChatDetail::Overview, ChatDetail::Details] {
+        app.detail = detail;
+        let rows = row_texts(&render_app(&app, 60, 40));
+        let shown: Vec<&String> = rows.iter().filter(|row| row.contains("line ")).collect();
+        assert_eq!(shown.len(), 5, "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|row| row == " \u{258e} \u{2026} 25 more lines, ctrl+o then enter to open"),
+            "{rows:#?}"
+        );
+    }
+
+    app.detail = ChatDetail::All;
+    let rows = row_texts(&render_app(&app, 60, 40));
+    assert_eq!(rows.iter().filter(|row| row.contains("line ")).count(), 30);
+    assert!(!rows.iter().any(|row| row.contains("more lines")));
+
+    app.detail = ChatDetail::Details;
+    if let Some(mut message) = app.messages.last_mut() {
+        message.expanded = true;
+    }
+    let rows = row_texts(&render_app(&app, 60, 40));
+    assert_eq!(rows.iter().filter(|row| row.contains("line ")).count(), 30);
+}
+
+#[test]
+fn blank_rows_inside_a_folded_message_do_not_use_up_its_preview() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let body: Vec<String> = (1..=12).map(|n| format!("paragraph {n}")).collect();
+    app.push_event_message(&agent_message_with(&body.join("\n\n")));
+
+    let rows = row_texts(&render_app(&app, 60, 40));
+
+    let shown: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.contains("paragraph "))
+        .collect();
+    assert_eq!(shown.len(), 5, "{rows:#?}");
+    let marker = rows
+        .iter()
+        .position(|row| row.contains("7 more lines"))
+        .unwrap();
+    assert!(rows[marker - 1].contains("paragraph 5"), "{rows:#?}");
+}
+
+#[test]
+fn a_message_one_row_over_the_clip_is_shown_whole() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let body: Vec<String> = (1..=6).map(|n| format!("line {n}")).collect();
+    app.push_event_message(&agent_message_with(&body.join("\n")));
+
+    let rows = row_texts(&render_app(&app, 60, 12));
+
+    assert_eq!(rows.iter().filter(|row| row.contains("line ")).count(), 6);
+    assert!(!rows.iter().any(|row| row.contains("more lines")));
 }
 
 #[test]
@@ -2138,7 +2295,7 @@ fn a_child_exit_notice_names_the_child_and_what_happened() {
     app.push_event_message(&event);
 
     let text = buffer_to_string(&render_app(&app, 80, 10));
-    assert!(text.contains("\u{25c6} child auth failed"), "{text}");
+    assert!(text.contains("\u{25c6} child:auth failed"), "{text}");
     assert!(text.contains("provider error"), "{text}");
 }
 
@@ -2160,7 +2317,7 @@ fn a_control_message_keeps_its_full_body() {
     assert!(text.contains("\u{25c6} non-human event"), "{text}");
     assert!(text.contains("[agent-message from child:auth]"), "{text}");
     assert!(text.contains("found the"), "{text}");
-    assert!(!text.contains("message from child auth"), "{text}");
+    assert!(!text.contains("\u{25c6} message from child:auth"), "{text}");
 }
 
 #[test]
