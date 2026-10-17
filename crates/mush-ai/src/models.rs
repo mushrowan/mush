@@ -91,6 +91,27 @@ pub fn anthropic_models() -> Vec<Model> {
             default_thinking_level: Some(crate::types::ThinkingLevel::High),
         },
         Model {
+            id: "claude-haiku-5-5".into(),
+            name: "Claude Haiku 5.5".into(),
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            reasoning: true,
+            input: vec![InputModality::Text, InputModality::Image],
+            cost: ModelCost {
+                input: 0.1,
+                output: 0.5,
+                cache_read: 0.01,
+                cache_write: 0.125,
+            },
+            context_window: TokenCount::new(1_000_000),
+            effective_context_window: None,
+            max_output_tokens: TokenCount::new(128_000),
+            supports_adaptive_thinking: true,
+            supported_thinking_levels: Vec::new(),
+            default_thinking_level: Some(crate::types::ThinkingLevel::Medium),
+        },
+        Model {
             id: "claude-opus-4-7".into(),
             name: "Claude Opus 4.7".into(),
             api: Api::AnthropicMessages,
@@ -658,6 +679,22 @@ mod tests {
         assert_eq!(sonnet.cost.input, 2.0);
         assert_eq!(sonnet.cost.output, 10.0);
         assert!(sonnet.supports_adaptive_thinking);
+        let haiku = by_id["claude-haiku-5-5"];
+        assert_eq!(haiku.name, "Claude Haiku 5.5");
+        assert_eq!(haiku.context_window, TokenCount::new(1_000_000));
+        assert_eq!(haiku.max_output_tokens, TokenCount::new(128_000));
+        assert_eq!(haiku.cost.input, 0.1);
+        assert_eq!(haiku.cost.output, 0.5);
+        assert_eq!(haiku.cost.cache_read, 0.01);
+        assert_eq!(haiku.cost.cache_write, 0.125);
+        assert!(haiku.supports_adaptive_thinking);
+        assert_eq!(
+            haiku.default_thinking_level,
+            Some(crate::types::ThinkingLevel::Medium)
+        );
+        let old_haiku = by_id["claude-haiku-4-5"];
+        assert_eq!(old_haiku.max_output_tokens, TokenCount::new(64_000));
+        assert!(!old_haiku.supports_adaptive_thinking);
     }
 
     #[test]
@@ -665,7 +702,12 @@ mod tests {
         let models = anthropic_models();
         let by_id: std::collections::HashMap<_, _> =
             models.iter().map(|m| (m.id.as_str(), m)).collect();
-        for id in ["claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-6"] {
+        for id in [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-5-5",
+        ] {
             let model = by_id
                 .get(id)
                 .unwrap_or_else(|| panic!("missing model: {id}"));
