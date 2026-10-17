@@ -742,13 +742,17 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             None
         }
+        _ if let Some((_, edit)) = EDIT_COMMANDS
+            .iter()
+            .find(|(action, _)| app.keymap.matches(*action, key)) =>
+        {
+            edit(&mut app.input);
+            refresh_slash_menu(app);
+            None
+        }
         _ if crate::keybinds::is_backspace(key) => {
             app.input.backspace();
-            if app.input.text.is_empty() || !app.input.text.starts_with('/') {
-                app.close_slash_menu();
-            } else {
-                app.update_slash_menu();
-            }
+            refresh_slash_menu(app);
             None
         }
         _ if let Some(c) = crate::keybinds::typed_char(key) => {
@@ -757,6 +761,14 @@ fn handle_slash_menu_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             None
         }
         _ => None,
+    }
+}
+
+fn refresh_slash_menu(app: &mut App) {
+    if app.input.text.is_empty() || !app.input.text.starts_with('/') {
+        app.close_slash_menu();
+    } else {
+        app.update_slash_menu();
     }
 }
 

@@ -1538,6 +1538,65 @@ fn alt(code: KeyCode) -> KeyEvent {
     }
 }
 
+fn slash_menu_with(text: &str) -> App {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.completion.slash_commands = ["model", "thinking", "help"]
+        .into_iter()
+        .map(|name| crate::app::SlashCommand {
+            name: name.into(),
+            description: String::new(),
+        })
+        .collect();
+    app.input.text = text.into();
+    app.input.cursor = app.input.text.len();
+    handle_key(&mut app, key(KeyCode::Tab));
+    assert_eq!(app.interaction.mode, AppMode::SlashComplete);
+    app
+}
+
+#[test]
+fn deleting_a_word_edits_a_half_typed_slash_command() {
+    for word_back in [
+        ctrl(KeyCode::Backspace),
+        alt(KeyCode::Backspace),
+        ctrl(KeyCode::Char('w')),
+    ] {
+        let mut app = slash_menu_with("/thinking hi");
+
+        handle_key(&mut app, word_back);
+        assert_eq!(app.input.text, "/thinking ", "{word_back:?}");
+        assert_eq!(app.input.cursor, app.input.text.len());
+        assert_eq!(
+            app.interaction.mode,
+            AppMode::SlashComplete,
+            "{word_back:?}"
+        );
+
+        handle_key(&mut app, word_back);
+        assert_eq!(app.input.text, "/", "{word_back:?}");
+        assert_eq!(
+            app.interaction.mode,
+            AppMode::SlashComplete,
+            "{word_back:?}"
+        );
+
+        handle_key(&mut app, word_back);
+        assert_eq!(app.input.text, "", "{word_back:?}");
+        assert!(app.completion.slash_menu.is_none());
+        assert_eq!(app.interaction.mode, AppMode::Insert);
+    }
+}
+
+#[test]
+fn deleting_to_the_start_closes_the_slash_menu() {
+    let mut app = slash_menu_with("/mod");
+
+    handle_key(&mut app, ctrl(KeyCode::Char('u')));
+
+    assert_eq!(app.input.text, "");
+    assert!(app.completion.slash_menu.is_none());
+}
+
 #[test]
 fn ctrl_bracket_closes_slash_menu() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
