@@ -304,6 +304,76 @@ pub fn stalled_connection() -> (InProcessConnection, Arc<tokio::sync::Notify>) {
     (connection, release)
 }
 
+pub type Stamps = Arc<Mutex<Vec<std::time::Instant>>>;
+
+pub struct Paced {
+    pub deltas: usize,
+    pub gap: std::time::Duration,
+    pub sent: Stamps,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for Paced {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &Model,
+        _context: &mush_ai::registry::LlmContext,
+        _options: &StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        let text: String = (0..self.deltas).map(|index| format!("d{index} ")).collect();
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent { text })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Stop)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        let (deltas, gap, sent) = (self.deltas, self.gap, Arc::clone(&self.sent));
+        Ok(Box::pin(futures::stream::unfold(0, move |index| {
+            let (message, sent) = (message.clone(), Arc::clone(&sent));
+            async move {
+                if index > deltas {
+                    return None;
+                }
+                if index == deltas {
+                    let done = mush_ai::stream::StreamEvent::Done {
+                        reason: StopReason::Stop,
+                        message,
+                    };
+                    return Some((done, index + 1));
+                }
+                tokio::time::sleep(gap).await;
+                if let Ok(mut sent) = sent.lock() {
+                    sent.push(std::time::Instant::now());
+                }
+                let delta = mush_ai::stream::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: format!("d{index} "),
+                };
+                Some((delta, index + 1))
+            }
+        })))
+    }
+}
+
+#[must_use]
+pub fn paced_connection(deltas: usize, gap: std::time::Duration) -> (InProcessConnection, Stamps) {
+    let sent: Stamps = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(Paced {
+        deltas,
+        gap,
+        sent: Arc::clone(&sent),
+    }));
+    let connection = echo_model_connection(registry, ToolRegistry::new());
+    (connection, sent)
+}
+
 #[cfg(test)]
 static DIRS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

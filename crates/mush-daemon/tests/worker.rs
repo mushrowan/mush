@@ -901,3 +901,48 @@ async fn wait_for_response(raw: &mut RawClient) {
         }
     }
 }
+
+#[tokio::test]
+async fn a_streamed_delta_crosses_the_socket_well_inside_the_gap_to_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("worker.sock");
+    let listener = bind(&socket).unwrap();
+    let gap = Duration::from_millis(50);
+    let (connection, sent) = mush_runtime::testing::paced_connection(20, gap);
+    let _task = tokio::spawn(serve(connection, listener, None, Default::default()));
+    let mut client = DaemonConnection::connect(&socket).await.unwrap();
+
+    client.send(prompt("go")).await.unwrap();
+    let mut received = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())
+            .await
+            .expect("an event before the timeout")
+            .expect("the connection stays open");
+        if matches!(
+            &event,
+            ClientEvent::Agent {
+                event: mush_agent::AgentEvent::StreamEvent {
+                    event: mush_ai::stream::StreamEvent::TextDelta { .. }
+                },
+                ..
+            }
+        ) {
+            received.push(std::time::Instant::now());
+        }
+        if matches!(event, ClientEvent::TurnEnded { .. }) {
+            break;
+        }
+    }
+
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(received.len(), sent.len());
+    let lags: Vec<Duration> = sent
+        .iter()
+        .zip(&received)
+        .map(|(sent, received)| received.duration_since(*sent))
+        .collect();
+    let worst = lags.iter().max().copied().unwrap_or_default();
+    eprintln!("socket hop lags: {lags:?}");
+    assert!(worst < gap, "worst {worst:?}, lags {lags:?}");
+}
