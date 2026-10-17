@@ -175,7 +175,8 @@ impl HostRequestHandler for Echo {
                 "context_window": 1_000_000,
                 "max_output_tokens": 128_000,
                 "thinking": ["off", "low"],
-                "cost": {"input": 0.1, "output": 0.5}
+                "cost": {"input": 0.1, "output": 0.5},
+                "also_on": [payload["all_providers"].to_string()]
             }])),
             other => Err(HostError(format!("unknown request {other}"))),
         }
@@ -200,13 +201,13 @@ async fn find_models_turns_host_rows_into_model_infos() {
     let kernel = kernel_with(Arc::new(Echo)).await;
 
     let output = kernel
-        .execute("[m] = await rlm.find_models('haiku', limit=2)\n(m.id, m.provider, m.context_window, m.max_output_tokens, m.thinking, m.cost['output'], repr(m).startswith('ModelInfo('))")
+        .execute("[m] = await rlm.find_models('haiku', limit=2, all_providers=True)\n(m.id, m.provider, m.context_window, m.max_output_tokens, m.thinking, m.cost['output'], m.also_on, repr(m).startswith('ModelInfo('))")
         .await
         .unwrap();
 
     assert_eq!(
         output.result.as_deref(),
-        Some("('haiku-2', 'anthropic', 1000000, 128000, ['off', 'low'], 0.5, True)")
+        Some("('haiku-2', 'anthropic', 1000000, 128000, ['off', 'low'], 0.5, ['true'], True)")
     );
     kernel.shutdown().await.unwrap();
 }

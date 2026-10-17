@@ -97,6 +97,9 @@ pub enum SlashAction {
         model_id: Option<String>,
         unset: bool,
     },
+    Providers {
+        names: Vec<String>,
+    },
     Pause {
         reason: Option<String>,
     },
@@ -638,6 +641,13 @@ pub fn parse(input: &str) -> Result<SlashAction, SlashParseError> {
         "tree" => Ok(SlashAction::Tree),
         "compact" => parse_compact_focus(args).map(|focus| SlashAction::Compact { focus }),
         "refine" => parse_refine(args).map(SlashAction::Refine),
+        "providers" => Ok(SlashAction::Providers {
+            names: args
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect(),
+        }),
         "subagent-model" | "sub-model" => {
             let unset = matches!(args, "unset" | "none" | "default" | "inherit");
             Ok(SlashAction::SubagentModel {
@@ -1192,6 +1202,20 @@ mod tests {
             }
         );
         assert!(parse("/account two words").is_err());
+    }
+
+    #[test]
+    fn parse_providers() {
+        assert_eq!(
+            parse("/providers anthropic, openrouter").unwrap(),
+            SlashAction::Providers {
+                names: vec!["anthropic".into(), "openrouter".into()]
+            }
+        );
+        assert_eq!(
+            parse("/providers").unwrap(),
+            SlashAction::Providers { names: Vec::new() }
+        );
     }
 
     #[test]

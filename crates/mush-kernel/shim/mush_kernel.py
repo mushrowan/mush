@@ -573,12 +573,14 @@ class ModelInfo:
         self.max_output_tokens = int(reply.get("max_output_tokens", 0))
         self.thinking = [str(level) for level in reply.get("thinking") or []]
         self.cost = reply.get("cost")
+        self.also_on = [str(provider) for provider in reply.get("also_on") or []]
 
     def __repr__(self) -> str:
         cost = f", cost={self.cost!r}" if self.cost else ""
+        also_on = f", also_on={self.also_on!r}" if self.also_on else ""
         return (
             f"ModelInfo(id={self.id!r}, provider={self.provider!r}, context_window={self.context_window}, "
-            f"max_output_tokens={self.max_output_tokens}, thinking={self.thinking!r}{cost})"
+            f"max_output_tokens={self.max_output_tokens}, thinking={self.thinking!r}{cost}{also_on})"
         )
 
 
@@ -604,9 +606,9 @@ class _Rlm:
     async def list_subagents(self) -> list:
         return [ChildSummary(entry) for entry in await host_request("rlm.list_subagents", {})]
 
-    async def find_models(self, query: str = "", limit: int = 10) -> list:
-        reply = await host_request("rlm.find_models", {"query": str(query), "limit": int(limit)})
-        return [ModelInfo(entry) for entry in reply]
+    async def find_models(self, query: str = "", limit: int = 10, all_providers: bool = False) -> list:
+        payload = {"query": str(query), "limit": int(limit), "all_providers": bool(all_providers)}
+        return [ModelInfo(entry) for entry in await host_request("rlm.find_models", payload)]
 
     async def collect(self, targets=None, *, timeout_ms: int = 0) -> list:
         payload = {"targets": _child_targets(targets), "timeout_ms": int(timeout_ms)}

@@ -329,6 +329,8 @@ pub struct Config {
     pub compaction_model: Option<String>,
     pub subagent_model: Option<String>,
     #[serde(default)]
+    pub preferred_providers: Vec<String>,
+    #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
     pub keys: mush_tui::KeysConfig,
@@ -402,6 +404,7 @@ impl Default for Config {
             favourite_models: Vec::new(),
             compaction_model: None,
             subagent_model: None,
+            preferred_providers: Vec::new(),
             settings: Settings::default(),
             keys: mush_tui::KeysConfig::default(),
             forbidden_chars: Vec::new(),
@@ -634,6 +637,9 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
         if let Some(pin) = persisted.compact_below_price_cliff {
             config.compaction.below_price_cliff = pin;
         }
+        if let Some(providers) = persisted.preferred_providers {
+            config.preferred_providers = providers;
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
         let repo = cwd.join(".mush").join("settings.toml");
@@ -641,6 +647,9 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
             config.settings.anthropic_betas = persisted.anthropic_betas;
             if let Some(pin) = persisted.compact_below_price_cliff {
                 config.compaction.below_price_cliff = pin;
+            }
+            if let Some(providers) = persisted.preferred_providers {
+                config.preferred_providers = providers;
             }
         }
     }

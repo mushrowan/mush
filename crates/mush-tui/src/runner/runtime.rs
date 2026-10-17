@@ -49,6 +49,10 @@ pub(super) const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "pick the model new subagents use ([<model-id>|unset])",
     ),
     (
+        "providers",
+        "show or set which provider serves a model several offer ([<provider> ...])",
+    ),
+    (
         "pause",
         "stop this agent taking new turns ([<reason>] | off)",
     ),

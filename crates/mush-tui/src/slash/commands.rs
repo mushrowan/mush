@@ -178,6 +178,9 @@ pub async fn handle(
             let chosen = if *unset { None } else { model_id.clone() };
             set_subagent_model(app, connection, chosen).await;
         }
+        SlashAction::Providers { names } => {
+            set_providers(app, tui_config, connection, names).await;
+        }
         SlashAction::Effort { level } => {
             handle_effort(app, tui_config.model.reasoning, level.as_deref());
         }
@@ -291,6 +294,36 @@ async fn set_rlm_max_depth(
         }
         None => app.status = Some(format!("rlm max depth set: {max_depth}").into()),
     }
+}
+
+async fn set_providers(
+    app: &mut App,
+    tui_config: &mut TuiConfig,
+    connection: &mut dyn mush_runtime::AgentConnection,
+    names: &[String],
+) {
+    if names.is_empty() {
+        let order = &tui_config.settings.preferred_providers;
+        app.push_system_message(if order.is_empty() {
+            "no preferred providers: a model several providers offer runs where its parent runs"
+                .to_string()
+        } else {
+            format!("preferred providers: {}", order.join(", "))
+        });
+        return;
+    }
+    tui_config.settings.preferred_providers = names.to_vec();
+    let _ = connection
+        .send(mush_runtime::ClientCommand::SetPreferredProviders(
+            names.to_vec(),
+        ))
+        .await;
+    let note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
+        Ok(Some(path)) => format!(" (saved to {})", path.display()),
+        Ok(None) => " (this session)".to_string(),
+        Err(error) => format!(" (persist failed: {error})"),
+    };
+    app.push_system_message(format!("preferred providers: {}{note}", names.join(", ")));
 }
 
 async fn set_subagent_model(
@@ -564,6 +597,7 @@ const HELP_TEXT: &str = concat!(
     "  /skill:<name> [args] - send a skill's instructions as your prompt\n",
     "  /new           - save session, start fresh\n",
     "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",
+    "  /providers [names] - show or set which provider serves a model several offer\n",
     "  /sessions      - browse and resume sessions\n",
     "  /resume [id]   - resume session (most recent in cwd if no id)\n",
     "  /reload        - rebuild AGENTS.md and templates without restart\n",
@@ -807,6 +841,20 @@ fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
         out,
         "auto_compact: {} (this session)",
         if settings.auto_compact { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        out,
+        "compact_below_price_cliff: {}",
+        settings.price_cliff_pin.as_str()
+    );
+    let _ = writeln!(
+        out,
+        "preferred_providers: {}",
+        if settings.preferred_providers.is_empty() {
+            "none".to_string()
+        } else {
+            settings.preferred_providers.join(", ")
+        }
     );
     let _ = writeln!(out, "anthropic betas:");
     let _ = writeln!(out, "  context_1m         = {}", b.context_1m);

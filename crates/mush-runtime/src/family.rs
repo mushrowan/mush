@@ -605,6 +605,7 @@ pub struct Family {
     revision: std::sync::atomic::AtomicU64,
     max_depth: std::sync::atomic::AtomicU32,
     price_cliff_pin: std::sync::atomic::AtomicU8,
+    preferred_providers: Mutex<Vec<String>>,
     idle_release_ms: std::sync::atomic::AtomicU64,
     waking: tokio::sync::Mutex<()>,
 }
@@ -691,6 +692,7 @@ impl Family {
             price_cliff_pin: std::sync::atomic::AtomicU8::new(pin_code(
                 mush_session::compact::PriceCliffPin::default(),
             )),
+            preferred_providers: Mutex::new(Vec::new()),
             idle_release_ms: std::sync::atomic::AtomicU64::new(0),
             waking: tokio::sync::Mutex::new(()),
         })
@@ -722,6 +724,28 @@ impl Family {
             2 => PriceCliffPin::All,
             _ => PriceCliffPin::Children,
         }
+    }
+
+    pub fn set_preferred_providers(&self, providers: Vec<String>) {
+        if let Ok(mut preferred) = self.preferred_providers.lock() {
+            *preferred = providers;
+        }
+    }
+
+    #[must_use]
+    pub fn preferred_providers(&self) -> Vec<String> {
+        self.preferred_providers
+            .lock()
+            .map(|preferred| preferred.clone())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn model_of(&self, child: &str) -> Option<String> {
+        self.lock()
+            .children
+            .get(child)
+            .map(|node| node.summary.model_id.clone())
     }
 
     pub fn set_idle_release(&self, after: Option<Duration>) {
@@ -3547,7 +3571,8 @@ mod tests {
     async fn find_models_returns_rows_and_refuses_a_limit_out_of_range() {
         use mush_kernel::HostRequestHandler;
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
-        let handler = RlmHandler::new(family(requests, 2, None), Identity::root("root"));
+        let family = family(requests, 2, None);
+        let handler = RlmHandler::new(Arc::clone(&family), Identity::root("root"));
         for limit in [
             serde_json::json!(0),
             serde_json::json!(51),
@@ -3562,10 +3587,11 @@ mod tests {
                 .unwrap_err();
             assert!(refused.0.contains("from 1 to 50"), "{}", refused.0);
         }
+        family.set_preferred_providers(vec!["anthropic".into()]);
         let rows = handler
             .handle(
                 "rlm.find_models",
-                serde_json::json!({ "query": "claude", "limit": 2 }),
+                serde_json::json!({ "query": "claude", "limit": 2, "all_providers": true }),
             )
             .await
             .unwrap();

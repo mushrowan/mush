@@ -25,6 +25,7 @@ pub struct RlmHandler {
     harness: Option<Arc<HarnessStore>>,
     sessions: Option<SessionSpawner>,
     host_commands: Option<Arc<HostCommands>>,
+    models: Option<crate::models::ModelSelection>,
     compaction_callable: bool,
 }
 
@@ -98,8 +99,15 @@ impl RlmHandler {
             harness: None,
             sessions: None,
             host_commands: None,
+            models: None,
             compaction_callable: true,
         }
+    }
+
+    #[must_use]
+    pub fn with_models(mut self, models: crate::models::ModelSelection) -> Self {
+        self.models = Some(models);
+        self
     }
 
     #[must_use]
@@ -195,7 +203,17 @@ impl RlmHandler {
         Ok(to_json(handle))
     }
 
-    fn find_models(payload: Payload<'_>) -> Result<Value, HostError> {
+    fn caller_model(&self) -> Option<String> {
+        match self.identity.id.as_deref() {
+            Some(child) => self.family.model_of(child),
+            None => self
+                .models
+                .as_ref()
+                .map(crate::models::ModelSelection::current),
+        }
+    }
+
+    fn find_models(&self, payload: Payload<'_>) -> Result<Value, HostError> {
         use crate::models::{MAX_MODEL_SEARCH_LIMIT, MODEL_SEARCH_LIMIT};
         let limit = match payload.0.get("limit") {
             None | Some(Value::Null) => MODEL_SEARCH_LIMIT,
@@ -211,10 +229,18 @@ impl RlmHandler {
         };
         let config_api_keys = mush_ai::auth::load_config_api_keys();
         let store = mush_ai::credentials::default_store();
+        let catalogue = mush_ai::discovery::shared_catalogue();
+        let order = crate::models::provider_order(
+            self.family.preferred_providers(),
+            self.caller_model().as_deref(),
+            &catalogue,
+        );
         Ok(to_json(crate::models::find_models(
-            &mush_ai::discovery::shared_catalogue(),
+            &catalogue,
             &payload.text("query").unwrap_or_default(),
             limit,
+            &order,
+            payload.flag("all_providers"),
             |provider| mush_ai::auth::has_credentials(provider, &config_api_keys, store.as_ref()),
         )))
     }
@@ -709,7 +735,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
         let payload = Payload(&payload);
         match kind {
             "rlm.spawn" => self.spawn(payload).await,
-            "rlm.find_models" => Self::find_models(payload),
+            "rlm.find_models" => self.find_models(payload),
             "rlm.list_subagents" => Ok(summaries(
                 &self.family,
                 &self.family.children_of(&self.identity),

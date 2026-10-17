@@ -1352,6 +1352,13 @@
       "default": {},
       "type": "object"
     },
+    "preferred_providers": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "repo_map": {
       "$ref": "#/$defs/RepoMapConfig",
       "default": {

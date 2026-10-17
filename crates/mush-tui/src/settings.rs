@@ -58,6 +58,7 @@ pub struct ScopedSettings {
     pub anthropic_betas: AnthropicBetas,
     pub auto_compact: bool,
     pub price_cliff_pin: mush_session::compact::PriceCliffPin,
+    pub preferred_providers: Vec<String>,
 }
 
 impl Default for ScopedSettings {
@@ -67,6 +68,7 @@ impl Default for ScopedSettings {
             anthropic_betas: AnthropicBetas::default(),
             auto_compact: true,
             price_cliff_pin: mush_session::compact::PriceCliffPin::default(),
+            preferred_providers: Vec::new(),
         }
     }
 }
@@ -236,6 +238,8 @@ pub struct PersistedSettings {
     pub rlm_max_depth: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_below_price_cliff: Option<mush_session::compact::PriceCliffPin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_providers: Option<Vec<String>>,
 }
 
 impl From<&ScopedSettings> for PersistedSettings {
@@ -244,6 +248,7 @@ impl From<&ScopedSettings> for PersistedSettings {
             anthropic_betas: s.anthropic_betas.clone(),
             rlm_max_depth: None,
             compact_below_price_cliff: Some(s.price_cliff_pin),
+            preferred_providers: Some(s.preferred_providers.clone()),
         }
     }
 }
@@ -359,6 +364,15 @@ mod tests {
         assert_eq!(
             loaded.compact_below_price_cliff,
             Some(mush_session::compact::PriceCliffPin::Off)
+        );
+
+        settings.preferred_providers = vec!["anthropic".into(), "openrouter".into()];
+        let path = persist(&settings, tmp.path()).unwrap().unwrap();
+        let loaded: PersistedSettings =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.preferred_providers,
+            Some(vec!["anthropic".to_string(), "openrouter".to_string()])
         );
     }
 

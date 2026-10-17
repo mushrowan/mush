@@ -109,6 +109,12 @@ impl CompactionTarget {
 
 #[must_use]
 pub fn resolve_runtime_model(id: &str, default: &Model) -> Model {
+    if default.id.as_str() == id {
+        return mush_ai::discovery::shared_catalogue()
+            .iter()
+            .find(|entry| entry.model.id == default.id && entry.model.provider == default.provider)
+            .map_or_else(|| default.clone(), |entry| entry.model.clone());
+    }
     mush_ai::discovery::resolve_model_by_id(id).unwrap_or_else(|| default.clone())
 }
 
@@ -650,6 +656,18 @@ pub async fn auto_compact(
 mod tests {
     use super::*;
     use mush_ai::types::{Api, InputModality, ModelCost, Provider};
+
+    #[test]
+    fn a_session_keeps_the_provider_it_was_started_on_when_two_offer_the_id() {
+        let mut elsewhere = crate::testing::echo_model();
+        elsewhere.provider = Provider::Custom("a-provider-nobody-lists".into());
+        let resolved = resolve_runtime_model(elsewhere.id.as_str(), &elsewhere);
+        assert_eq!(resolved.provider, elsewhere.provider);
+
+        let listed = crate::testing::echo_model();
+        let resolved = resolve_runtime_model(listed.id.as_str(), &listed);
+        assert_eq!(resolved.provider, listed.provider);
+    }
 
     #[tokio::test]
     async fn compaction_target_follows_the_pane_model_not_the_startup_one() {

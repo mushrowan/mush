@@ -1483,32 +1483,34 @@ fn parent_model_id(seed: &ChildSeed, spec: &mush_runtime::ChildSpec) -> String {
         .unwrap_or_else(|| seed.models.current())
 }
 
-fn child_model(seed: &ChildSeed, spec: &mush_runtime::ChildSpec) -> Result<Model, String> {
+fn child_model(
+    seed: &ChildSeed,
+    spec: &mush_runtime::ChildSpec,
+    preferred: Vec<String>,
+) -> Result<Model, String> {
     let chosen = seed
         .models
         .for_child(spec.model.as_deref())
         .or_else(|| seed.subagent_model.clone());
+    let parent = parent_model_id(seed, spec);
     let Some(id) = chosen else {
         return Ok(
-            mush_ai::discovery::resolve_model_by_id(&parent_model_id(seed, spec))
-                .unwrap_or_else(|| seed.model.clone()),
+            mush_ai::discovery::resolve_model_by_id(&parent).unwrap_or_else(|| seed.model.clone())
         );
     };
     let store = mush_ai::credentials::default_store();
-    mush_runtime::models::resolve_child_model(
-        &mush_ai::discovery::shared_catalogue(),
-        &id,
-        |provider| {
-            mush_ai::auth::has_credentials(provider, &seed.provider_api_keys, store.as_ref())
-        },
-    )
+    let catalogue = mush_ai::discovery::shared_catalogue();
+    let order = mush_runtime::models::provider_order(preferred, Some(&parent), &catalogue);
+    mush_runtime::models::resolve_child_model(&catalogue, &id, &order, |provider| {
+        mush_ai::auth::has_credentials(provider, &seed.provider_api_keys, store.as_ref())
+    })
 }
 
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
         Box::pin(async move {
-            let model = child_model(&seed, &spec)?;
+            let model = child_model(&seed, &spec, family.preferred_providers())?;
             let mut options = seed.options.clone();
             let parent_thinking = spec
                 .parent_thinking
@@ -1709,7 +1711,7 @@ fn worker_config(
     };
     worker.agent_card = Some(agent_card(setup));
     worker.kernel_signals = Some(kernel_signals);
-    worker.models = models;
+    worker.models = models.clone();
     worker.subagent_model = session.meta.subagent_model.clone();
     worker.accounts = session.meta.accounts.clone();
     worker.paused = session.meta.paused.clone();
@@ -1732,8 +1734,10 @@ fn worker_config(
         );
         family.set_idle_release(Some(setup.client.cfg.kernel.idle_release()));
         family.set_price_cliff_pin(setup.client.cfg.compaction.below_price_cliff);
+        family.set_preferred_providers(setup.client.cfg.preferred_providers.clone());
         let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
-            .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
+            .with_compaction_callable(setup.client.cfg.compaction.agent_callable)
+            .with_models(models);
         if !cli.no_session {
             handler = handler.with_session_spawner(daemon::session_spawner(cli.worker_args()));
         }
@@ -1855,6 +1859,7 @@ fn client_config(
             anthropic_betas: client.cfg.settings.anthropic_betas.clone(),
             auto_compact: client.cfg.compaction.enabled,
             price_cliff_pin: client.cfg.compaction.below_price_cliff,
+            preferred_providers: client.cfg.preferred_providers.clone(),
         },
         favourite_models,
         favourites_locked,
@@ -2302,16 +2307,19 @@ mod tests {
         let seed = child_seed(config::CompactionConfig::default(), None);
         let mut spec = child_spec("scout", None);
 
-        assert_eq!(child_model(&seed, &spec).unwrap().id, seed.model.id);
+        assert_eq!(
+            child_model(&seed, &spec, Vec::new()).unwrap().id,
+            seed.model.id
+        );
 
         spec.parent_model = Some("claude-haiku-5-5".into());
         assert_eq!(
-            child_model(&seed, &spec).unwrap().id.as_str(),
+            child_model(&seed, &spec, Vec::new()).unwrap().id.as_str(),
             "claude-haiku-5-5"
         );
 
         spec.model = Some("claude-haiku-4-5".into());
-        let asked = child_model(&seed, &spec);
+        let asked = child_model(&seed, &spec, Vec::new());
         assert!(
             asked
                 .as_ref()
@@ -2332,7 +2340,7 @@ mod tests {
             id: "sub-1".into(),
             name: "worker".into(),
             prompt: "count the tests".into(),
-            model: Some("claude-haiku-4.5".into()),
+            model: Some("claude-haiku-9-9".into()),
             thinking: None,
             depth: 1,
             parent: root,
@@ -2347,7 +2355,7 @@ mod tests {
         };
 
         assert!(
-            refused.starts_with("unknown model claude-haiku-4.5."),
+            refused.starts_with("unknown model claude-haiku-9-9."),
             "{refused}"
         );
         assert!(

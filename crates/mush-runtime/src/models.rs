@@ -144,6 +144,8 @@ pub struct ModelChoice {
     pub thinking: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<ModelChoiceCost>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_on: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -166,6 +168,7 @@ impl ModelChoice {
             max_output_tokens: model.max_output_tokens.get(),
             thinking: spawnable_thinking(model),
             cost,
+            also_on: Vec::new(),
         }
     }
 }
@@ -205,52 +208,157 @@ fn match_rank(query: &str, model: &mush_ai::types::Model) -> Option<usize> {
         .or_else(|| found(|field, wanted| field.contains(wanted)).map(|at| at + 4))
 }
 
+fn provider_rank(provider: &mush_ai::types::Provider, order: &[String]) -> usize {
+    let name = provider.to_string();
+    order
+        .iter()
+        .position(|preferred| *preferred == name)
+        .unwrap_or(order.len())
+}
+
+fn dated(id: &str) -> bool {
+    id.rsplit_once('-')
+        .is_some_and(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn preference(model: &mush_ai::types::Model, order: &[String]) -> (usize, bool, usize, String) {
+    (
+        provider_rank(&model.provider, order),
+        dated(model.id.as_str()),
+        model.id.as_str().len(),
+        model.id.to_string(),
+    )
+}
+
 #[must_use]
 pub fn find_models(
     catalogue: &[mush_ai::discovery::MergedModel],
     query: &str,
     limit: usize,
+    order: &[String],
+    all_providers: bool,
     signed_in: impl Fn(&mush_ai::types::Provider) -> bool,
 ) -> Vec<ModelChoice> {
     let query = search_text(query);
     let mut providers = std::collections::HashMap::new();
-    let mut ranked: Vec<(usize, &mush_ai::types::Model)> = catalogue
-        .iter()
-        .filter(|entry| entry.source != mush_ai::discovery::ModelSource::DiscoveredStale)
-        .filter_map(|entry| match_rank(&query, &entry.model).map(|rank| (rank, &entry.model)))
-        .filter(|(_, model)| {
-            *providers
-                .entry(model.provider.to_string())
-                .or_insert_with(|| signed_in(&model.provider))
+    let mut groups: Vec<(usize, Vec<&mush_ai::types::Model>)> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for entry in catalogue {
+        if entry.source == mush_ai::discovery::ModelSource::DiscoveredStale {
+            continue;
+        }
+        let Some(rank) = match_rank(&query, &entry.model) else {
+            continue;
+        };
+        let usable = *providers
+            .entry(entry.model.provider.to_string())
+            .or_insert_with(|| signed_in(&entry.model.provider));
+        if !usable {
+            continue;
+        }
+        let key = if all_providers {
+            format!("{}/{}", entry.model.provider, entry.model.id)
+        } else {
+            mush_ai::models::canonical_model_key(entry.model.id.as_str())
+        };
+        match index.get(&key) {
+            Some(&at) => {
+                groups[at].0 = groups[at].0.min(rank);
+                groups[at].1.push(&entry.model);
+            }
+            None => {
+                index.insert(key, groups.len());
+                groups.push((rank, vec![&entry.model]));
+            }
+        }
+    }
+    let mut choices: Vec<(usize, &mush_ai::types::Model, Vec<String>)> = groups
+        .into_iter()
+        .filter_map(|(rank, members)| {
+            let best = *members
+                .iter()
+                .min_by_key(|model| preference(model, order))?;
+            let mut also_on: Vec<String> = members
+                .iter()
+                .map(|model| model.provider.to_string())
+                .filter(|provider| *provider != best.provider.to_string())
+                .collect();
+            also_on.sort();
+            also_on.dedup();
+            Some((rank, best, also_on))
         })
         .collect();
-    ranked.sort_by(|(a_rank, a), (b_rank, b)| {
+    choices.sort_by(|(a_rank, a, _), (b_rank, b, _)| {
         a_rank
             .cmp(b_rank)
+            .then_with(|| preference(a, order).cmp(&preference(b, order)))
             .then_with(|| a.provider.to_string().cmp(&b.provider.to_string()))
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
-    ranked
+    choices
         .into_iter()
         .take(limit)
-        .map(|(_, model)| ModelChoice::of(model))
+        .map(|(_, model, also_on)| ModelChoice {
+            also_on,
+            ..ModelChoice::of(model)
+        })
         .collect()
+}
+
+#[must_use]
+pub fn provider_order(
+    preferred: Vec<String>,
+    caller_model: Option<&str>,
+    catalogue: &[mush_ai::discovery::MergedModel],
+) -> Vec<String> {
+    if !preferred.is_empty() {
+        return preferred;
+    }
+    caller_model
+        .and_then(|id| catalogue.iter().find(|entry| entry.model.id.as_str() == id))
+        .map(|entry| vec![entry.model.provider.to_string()])
+        .unwrap_or_default()
 }
 
 pub fn resolve_child_model(
     catalogue: &[mush_ai::discovery::MergedModel],
-    id: &str,
+    requested: &str,
+    order: &[String],
     signed_in: impl Fn(&mush_ai::types::Provider) -> bool,
 ) -> Result<mush_ai::types::Model, String> {
-    let found = catalogue.iter().find(|entry| entry.model.id.as_str() == id);
-    if let Some(entry) = found
-        && signed_in(&entry.model.provider)
+    let pinned = requested.split_once('/').and_then(|(provider, id)| {
+        catalogue.iter().find(|entry| {
+            entry.model.provider.to_string() == provider && entry.model.id.as_str() == id
+        })
+    });
+    let candidates: Vec<&mush_ai::discovery::MergedModel> = match pinned {
+        Some(entry) => vec![entry],
+        None => {
+            let key = mush_ai::models::canonical_model_key(requested);
+            catalogue
+                .iter()
+                .filter(|entry| {
+                    mush_ai::models::canonical_model_key(entry.model.id.as_str()) == key
+                })
+                .collect()
+        }
+    };
+    if let Some(best) = candidates
+        .iter()
+        .filter(|entry| signed_in(&entry.model.provider))
+        .min_by_key(|entry| {
+            (
+                provider_rank(&entry.model.provider, order),
+                entry.model.id.as_str() != requested,
+                entry.source == mush_ai::discovery::ModelSource::DiscoveredStale,
+                dated(entry.model.id.as_str()),
+            )
+        })
     {
-        return Ok(entry.model.clone());
+        return Ok(best.model.clone());
     }
-    let close: Vec<String> = std::iter::once(id)
-        .chain(id.rsplit_once('/').map(|(_, bare)| bare))
-        .map(|query| find_models(catalogue, query, CLOSE_MATCHES, &signed_in))
+    let close: Vec<String> = std::iter::once(requested)
+        .chain(requested.rsplit_once('/').map(|(_, bare)| bare))
+        .map(|query| find_models(catalogue, query, CLOSE_MATCHES, order, false, &signed_in))
         .find(|found| !found.is_empty())
         .unwrap_or_default()
         .into_iter()
@@ -261,13 +369,19 @@ pub fn resolve_child_model(
     } else {
         format!(" Close matches: {}.", close.join(", "))
     };
-    let problem = match found {
-        Some(entry) => format!(
-            "{id} runs on {provider}, which has no credentials here, so a child cannot \
+    let mut providers: Vec<String> = candidates
+        .iter()
+        .map(|entry| entry.model.provider.to_string())
+        .collect();
+    providers.dedup();
+    let problem = if providers.is_empty() {
+        format!("unknown model {requested}.")
+    } else {
+        format!(
+            "{requested} runs on {}, which has no credentials here, so a child cannot \
              use it. Sign in with /login or pick another model.",
-            provider = entry.model.provider
-        ),
-        None => format!("unknown model {id}."),
+            providers.join(" or ")
+        )
     };
     Err(format!(
         "{problem}{close} `await rlm.find_models(query)` lists the models a child can run."
@@ -327,6 +441,11 @@ mod tests {
                 Provider::OpenRouter,
                 ModelSource::Discovered,
             ),
+            listed(
+                "claude-haiku-4-5-20251001",
+                Provider::Anthropic,
+                ModelSource::Discovered,
+            ),
         ]
     }
 
@@ -342,28 +461,122 @@ mod tests {
     fn model_search_ranks_exact_then_prefix_then_substring_and_skips_what_cannot_run() {
         let catalogue = catalogue();
         let everyone = |_: &mush_ai::types::Provider| true;
+        let none: &[String] = &[];
 
-        let haiku = find_models(&catalogue, "haiku", 10, anthropic_only);
+        let haiku = find_models(&catalogue, "haiku", 10, none, false, anthropic_only);
         assert_eq!(ids(&haiku), ["claude-haiku-4-5", "claude-haiku-5-5"]);
 
-        let exact = find_models(&catalogue, "Claude Haiku 5.5", 10, everyone);
+        let exact = find_models(&catalogue, "Claude Haiku 5.5", 10, none, false, everyone);
         assert_eq!(exact[0].id, "claude-haiku-5-5");
-        let prefix = find_models(&catalogue, "claude-haiku-4", 10, everyone);
-        assert_eq!(
-            ids(&prefix),
-            ["claude-haiku-4-5", "anthropic/claude-haiku-4.5"]
-        );
 
-        let all = find_models(&catalogue, "", 10, everyone);
-        assert_eq!(all.len(), 4, "the stale model is left out");
-        assert_eq!(find_models(&catalogue, "", 2, everyone).len(), 2);
-        assert!(find_models(&catalogue, "gemini", 10, everyone).is_empty());
+        let all = find_models(&catalogue, "", 10, none, false, everyone);
+        assert_eq!(
+            all.len(),
+            3,
+            "one row per model, and the stale one is left out"
+        );
+        let every_row = find_models(&catalogue, "", 10, none, true, everyone);
+        assert_eq!(every_row.len(), 5);
+        assert_eq!(
+            find_models(&catalogue, "", 2, none, false, everyone).len(),
+            2
+        );
+        assert!(find_models(&catalogue, "gemini", 10, none, false, everyone).is_empty());
+    }
+
+    #[test]
+    fn one_row_per_model_comes_from_the_preferred_provider_and_names_the_others() {
+        let catalogue = catalogue();
+        let everyone = |_: &mush_ai::types::Provider| true;
+        let row = |order: &[String]| {
+            find_models(&catalogue, "claude-haiku-4", 10, order, false, everyone)
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+
+        let direct = row(&["anthropic".to_string()]);
+        assert_eq!(direct.id, "claude-haiku-4-5");
+        assert_eq!(direct.also_on, ["openrouter"]);
+
+        let routed = row(&["openrouter".to_string(), "anthropic".to_string()]);
+        assert_eq!(routed.id, "anthropic/claude-haiku-4.5");
+        assert_eq!(routed.also_on, ["anthropic"]);
+
+        let only_direct = find_models(&catalogue, "claude-haiku-4", 10, &[], false, anthropic_only);
+        assert!(
+            only_direct[0].also_on.is_empty(),
+            "a provider without credentials is not offered"
+        );
+    }
+
+    #[test]
+    fn a_bare_id_goes_to_the_preferred_provider_and_a_provider_prefix_pins_it() {
+        let catalogue = catalogue();
+        let everyone = |_: &mush_ai::types::Provider| true;
+        let resolve = |requested: &str, order: &[&str]| {
+            let order: Vec<String> = order.iter().map(ToString::to_string).collect();
+            resolve_child_model(&catalogue, requested, &order, everyone)
+                .map(|model| format!("{}/{}", model.provider, model.id))
+        };
+
+        assert_eq!(
+            resolve("claude-haiku-4-5", &["openrouter", "anthropic"]).unwrap(),
+            "openrouter/anthropic/claude-haiku-4.5"
+        );
+        assert_eq!(
+            resolve("claude-haiku-4-5", &["anthropic"]).unwrap(),
+            "anthropic/claude-haiku-4-5"
+        );
+        assert_eq!(
+            resolve("claude-haiku-4-5", &[]).unwrap(),
+            "anthropic/claude-haiku-4-5",
+            "with no order an exact id wins"
+        );
+        assert_eq!(
+            resolve("anthropic/claude-haiku-4.5", &["anthropic"]).unwrap(),
+            "anthropic/claude-haiku-4-5"
+        );
+        assert_eq!(
+            resolve("openrouter/anthropic/claude-haiku-4.5", &["anthropic"]).unwrap(),
+            "openrouter/anthropic/claude-haiku-4.5"
+        );
+        assert_eq!(
+            resolve("claude-haiku-4-5-20251001", &["anthropic"]).unwrap(),
+            "anthropic/claude-haiku-4-5-20251001",
+            "a dated snapshot asked for by name is kept"
+        );
+    }
+
+    #[test]
+    fn the_order_falls_back_to_the_provider_the_caller_runs_on() {
+        let catalogue = catalogue();
+        assert_eq!(
+            provider_order(
+                vec!["openrouter".into()],
+                Some("claude-haiku-5-5"),
+                &catalogue
+            ),
+            ["openrouter"]
+        );
+        assert_eq!(
+            provider_order(Vec::new(), Some("anthropic/claude-haiku-4.5"), &catalogue),
+            ["openrouter"]
+        );
+        assert!(provider_order(Vec::new(), None, &catalogue).is_empty());
     }
 
     #[test]
     fn a_model_choice_shows_limits_thinking_levels_and_cost() {
         let catalogue = catalogue();
-        let found = find_models(&catalogue, "claude-haiku-5-5", 1, anthropic_only);
+        let found = find_models(
+            &catalogue,
+            "claude-haiku-5-5",
+            1,
+            &[],
+            false,
+            anthropic_only,
+        );
         let haiku = &found[0];
         assert_eq!(haiku.provider, "anthropic");
         assert_eq!(
@@ -376,7 +589,14 @@ mod tests {
         );
         assert!(haiku.cost.is_some());
 
-        let old = &find_models(&catalogue, "claude-haiku-4-5", 1, anthropic_only)[0];
+        let old = &find_models(
+            &catalogue,
+            "claude-haiku-4-5",
+            1,
+            &[],
+            false,
+            anthropic_only,
+        )[0];
         assert_eq!(old.max_output_tokens, 64_000);
         assert_eq!(
             old.thinking,
@@ -404,11 +624,13 @@ mod tests {
     #[test]
     fn a_child_model_must_be_known_and_have_credentials() {
         let catalogue = catalogue();
+        let none: &[String] = &[];
 
-        let haiku = resolve_child_model(&catalogue, "claude-haiku-5-5", anthropic_only).unwrap();
+        let haiku =
+            resolve_child_model(&catalogue, "claude-haiku-5-5", none, anthropic_only).unwrap();
         assert_eq!(haiku.id.as_str(), "claude-haiku-5-5");
 
-        let unknown = resolve_child_model(&catalogue, "haiku", anthropic_only).unwrap_err();
+        let unknown = resolve_child_model(&catalogue, "haiku", none, anthropic_only).unwrap_err();
         assert!(unknown.starts_with("unknown model haiku."), "{unknown}");
         assert!(
             unknown.contains("Close matches: claude-haiku-4-5, claude-haiku-5-5."),
@@ -419,9 +641,26 @@ mod tests {
             "{unknown}"
         );
 
-        let signed_out =
-            resolve_child_model(&catalogue, "anthropic/claude-haiku-4.5", anthropic_only)
-                .unwrap_err();
+        let twin = resolve_child_model(
+            &catalogue,
+            "anthropic/claude-haiku-4.5",
+            none,
+            anthropic_only,
+        )
+        .unwrap();
+        assert_eq!(
+            twin.id.as_str(),
+            "claude-haiku-4-5",
+            "the openrouter id lands on the twin that has credentials"
+        );
+
+        let signed_out = resolve_child_model(
+            &catalogue,
+            "openrouter/anthropic/claude-haiku-4.5",
+            none,
+            anthropic_only,
+        )
+        .unwrap_err();
         assert!(
             signed_out.contains("runs on openrouter, which has no credentials here"),
             "{signed_out}"
@@ -432,7 +671,7 @@ mod tests {
         );
 
         let nothing_close =
-            resolve_child_model(&catalogue, "gemini-9", anthropic_only).unwrap_err();
+            resolve_child_model(&catalogue, "gemini-9", none, anthropic_only).unwrap_err();
         assert!(!nothing_close.contains("Close matches"), "{nothing_close}");
     }
 
