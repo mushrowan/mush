@@ -62,6 +62,7 @@ struct StoredSession<'a> {
 #[derive(serde::Serialize)]
 struct StoredTree<'a> {
     leaf_id: Option<&'a crate::tree::EntryId>,
+    history_entries: usize,
 }
 
 impl<'a> From<&'a Session> for StoredSession<'a> {
@@ -70,10 +71,105 @@ impl<'a> From<&'a Session> for StoredSession<'a> {
             meta: &session.meta,
             tree: StoredTree {
                 leaf_id: session.conversation.leaf_id(),
+                history_entries: session.conversation.entries().len(),
             },
             panes: &session.panes,
             system_prompt: &session.system_prompt,
         }
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SavedPosition {
+    #[serde(default)]
+    tree: SavedTree,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct SavedTree {
+    #[serde(default)]
+    history_entries: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Reopened {
+    Missing {
+        saved: crate::tree::EntryId,
+        newest: Option<(crate::tree::EntryId, mush_ai::types::Timestamp)>,
+    },
+    Behind {
+        newer: usize,
+        newest: (crate::tree::EntryId, mush_ai::types::Timestamp),
+    },
+}
+
+impl Reopened {
+    fn notice(&self) -> String {
+        let written = |at: &mush_ai::types::Timestamp| {
+            i64::try_from(at.as_ms())
+                .ok()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map_or_else(
+                    || "at an unknown time".to_string(),
+                    |at| format!("at {} UTC", at.format("%Y-%m-%d %H:%M:%S")),
+                )
+        };
+        match self {
+            Self::Missing {
+                saved,
+                newest: Some((newest, at)),
+            } => format!(
+                "mush repaired this session when it reopened it. Its saved position, entry {saved}, was missing from the history on disk, most likely because the newest writes were lost in a crash or power cut. The session now continues from entry {newest}, the newest one that reached the disk, written {}. Anything after that point is gone, so recent messages, tool results or replies from child agents may be missing. Check files and other state before relying on what you remember of them.",
+                written(at)
+            ),
+            Self::Missing {
+                saved,
+                newest: None,
+            } => format!(
+                "mush repaired this session when it reopened it. Its saved position, entry {saved}, was missing because none of its history reached the disk, most likely after a crash or power cut. The session starts again from nothing, so check files and other state before relying on what you remember."
+            ),
+            Self::Behind {
+                newer,
+                newest: (newest, at),
+            } => format!(
+                "mush repaired this session when it reopened it. Its history held {} than its saved position, most likely because a crash cut the last save short. The session now continues from entry {newest}, the newest one, written {}. Nothing was lost.",
+                match newer {
+                    1 => "an entry newer".to_string(),
+                    newer => format!("{newer} entries newer"),
+                },
+                written(at)
+            ),
+        }
+    }
+}
+
+fn reopen_at(
+    entries: &[crate::tree::SessionEntry],
+    saved: Option<crate::tree::EntryId>,
+    recorded: Option<usize>,
+) -> (Option<crate::tree::EntryId>, Option<Reopened>) {
+    let newest = entries
+        .last()
+        .map(|entry| (entry.id.clone(), entry.timestamp));
+    if let Some(recorded) = recorded
+        && entries.len() > recorded
+        && let Some(newest) = newest.clone()
+        && saved.as_ref() != Some(&newest.0)
+    {
+        return (
+            Some(newest.0.clone()),
+            Some(Reopened::Behind {
+                newer: entries.len() - recorded,
+                newest,
+            }),
+        );
+    }
+    match saved {
+        Some(saved) if !entries.iter().any(|entry| entry.id == saved) => (
+            newest.as_ref().map(|(id, _)| id.clone()),
+            Some(Reopened::Missing { saved, newest }),
+        ),
+        saved => (saved, None),
     }
 }
 
@@ -218,6 +314,7 @@ impl SessionStore {
                     use std::io::Write;
                     let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
                     file.write_all(&appended)?;
+                    file.sync_data()?;
                 }
                 logged.bytes + appended.len() as u64
             }
@@ -269,10 +366,27 @@ impl SessionStore {
             bytes: bytes.len() as u64,
             damaged,
         };
-        let tree =
-            crate::tree::SessionTree::rebuild(entries, session.conversation.leaf_id().cloned())
-                .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+        let recorded = serde_json::from_str::<SavedPosition>(&json)
+            .unwrap_or_default()
+            .tree
+            .history_entries;
+        let (leaf, reopened) =
+            reopen_at(&entries, session.conversation.leaf_id().cloned(), recorded);
+        let tree = crate::tree::SessionTree::rebuild(entries, leaf)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
         session.conversation = crate::ConversationState::from_tree(tree);
+        if let Some(reopened) = reopened {
+            let notice = reopened.notice();
+            tracing::warn!(session = %id, %notice, "reopened a session away from its saved position");
+            session.push_message(mush_ai::types::Message::Event(
+                mush_ai::types::EventMessage {
+                    content: notice,
+                    timestamp_ms: mush_ai::types::Timestamp::now(),
+                    kind: mush_ai::types::EventKind::Recovery,
+                    receipts: Vec::new(),
+                },
+            ));
+        }
         self.remember(id, logged);
         Ok(session)
     }
@@ -681,6 +795,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(value.get("messages").is_none());
         assert!(value["tree"].get("entries").is_none());
+        assert_eq!(value["tree"]["history_entries"], 1);
     }
 
     #[test]
@@ -775,6 +890,131 @@ mod tests {
         zeroed.save(&loaded).unwrap();
         assert_eq!(every_line_parses(&zeroed, &session.meta.id), 4);
         assert_eq!(zeroed.load(&session.meta.id).unwrap().context().len(), 4);
+    }
+
+    fn recovery(session: &Session) -> Option<String> {
+        session
+            .context()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::Event(event) if event.kind == EventKind::Recovery => {
+                    Some(event.content.clone())
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn a_saved_position_lost_with_the_history_tail_reopens_at_the_newest_entry_that_survived() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        let survived = session.conversation.leaf_id().unwrap().clone();
+        let path = store.history_path(&session.meta.id);
+        let on_disk = std::fs::read(&path).unwrap();
+        session.push_message(user("three"));
+        store.save(&session).unwrap();
+        let lost = session.conversation.leaf_id().unwrap().clone();
+        std::fs::write(&path, &on_disk).unwrap();
+
+        let reopened = SessionStore::new(store.base_dir.clone());
+        let loaded = reopened.load(&session.meta.id).unwrap();
+
+        let context = loaded.context();
+        assert_eq!(context.len(), 3);
+        assert!(matches!(&context[1], Message::User(user) if user.text() == "two"));
+        let notice = recovery(&loaded).unwrap();
+        assert!(
+            notice.contains(&format!("entry {lost}, was missing")),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&format!("from entry {survived}")),
+            "{notice}"
+        );
+        reopened.save(&loaded).unwrap();
+        let again = SessionStore::new(store.base_dir.clone())
+            .load(&session.meta.id)
+            .unwrap();
+        assert_eq!(again.context().len(), 3, "the repair is saved once");
+        assert_eq!(again.conversation.leaf_id(), loaded.conversation.leaf_id());
+    }
+
+    #[test]
+    fn history_the_saved_position_never_saw_moves_the_session_forward() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        store.save(&session).unwrap();
+        let meta_path = store.session_path(&session.meta.id);
+        let older_meta = std::fs::read(&meta_path).unwrap();
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        let newest = session.conversation.leaf_id().unwrap().clone();
+        std::fs::write(&meta_path, &older_meta).unwrap();
+
+        let loaded = SessionStore::new(store.base_dir.clone())
+            .load(&session.meta.id)
+            .unwrap();
+
+        let texts: Vec<String> = loaded
+            .context()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["one", "two"]);
+        let notice = recovery(&loaded).unwrap();
+        assert!(
+            notice.contains("an entry newer than its saved position"),
+            "{notice}"
+        );
+        assert!(notice.contains(&format!("from entry {newest}")), "{notice}");
+    }
+
+    #[test]
+    fn a_session_moved_back_up_its_branch_reopens_where_it_was_moved() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        let first = session.conversation.leaf_id().unwrap().clone();
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        session.conversation.branch(&first);
+        store.save(&session).unwrap();
+
+        let loaded = SessionStore::new(store.base_dir.clone())
+            .load(&session.meta.id)
+            .unwrap();
+
+        assert_eq!(loaded.conversation.leaf_id(), Some(&first));
+        assert_eq!(loaded.context().len(), 1);
+        assert_eq!(recovery(&loaded), None);
+    }
+
+    #[test]
+    fn a_saved_position_with_no_history_left_reopens_empty_and_says_so() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        store.save(&session).unwrap();
+        std::fs::write(store.history_path(&session.meta.id), b"").unwrap();
+
+        let loaded = SessionStore::new(store.base_dir.clone())
+            .load(&session.meta.id)
+            .unwrap();
+
+        assert_eq!(loaded.context().len(), 1);
+        let notice = recovery(&loaded).unwrap();
+        assert!(
+            notice.contains("none of its history reached the disk"),
+            "{notice}"
+        );
     }
 
     #[test]
