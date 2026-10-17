@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::content::{AssistantContentPart, ToolResultContentPart, UserContent};
+use super::content::{AssistantContentPart, ThinkingContent, ToolResultContentPart, UserContent};
 use super::model::{Api, Model, Provider};
 use super::newtypes::{Dollars, ModelId, PromptId, Timestamp, TokenCount, ToolCallId, ToolName};
 
@@ -109,10 +109,18 @@ impl AssistantMessage {
 
     #[must_use]
     pub fn thinking(&self) -> Option<String> {
-        self.content.iter().find_map(|p| match p {
-            AssistantContentPart::Thinking(t) => Some(t.text().to_string()),
-            _ => None,
-        })
+        let blocks: Vec<&str> = self
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                AssistantContentPart::Thinking(ThinkingContent::Thinking { thinking, .. }) => {
+                    Some(thinking.trim_end())
+                }
+                _ => None,
+            })
+            .filter(|thinking| !thinking.trim().is_empty())
+            .collect();
+        (!blocks.is_empty()).then(|| blocks.join("\n\n"))
     }
 }
 
@@ -284,6 +292,45 @@ mod tests {
             !cap_detail_text(&mut details, 1024),
             "capping twice changes nothing"
         );
+    }
+
+    #[test]
+    fn thinking_joins_every_block_with_text_and_leaves_signatures_and_redacted_out() {
+        let block = |thinking: &str| {
+            AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: thinking.into(),
+                signature: Some("sig".into()),
+            })
+        };
+        let message = AssistantMessage::builder()
+            .content(vec![
+                block(""),
+                AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                    data: "opaque".into(),
+                }),
+                block("Weighing the two options.\n"),
+                block("  "),
+                block("Checked the cache, editing it next."),
+            ])
+            .model("m".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+
+        assert_eq!(
+            message.thinking().as_deref(),
+            Some("Weighing the two options.\n\nChecked the cache, editing it next.")
+        );
+
+        let hidden = AssistantMessage::builder()
+            .content(vec![block("")])
+            .model("m".into())
+            .provider(Provider::Anthropic)
+            .api(Api::AnthropicMessages)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        assert_eq!(hidden.thinking(), None);
     }
 
     #[test]
