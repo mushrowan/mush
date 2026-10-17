@@ -73,6 +73,7 @@ impl CompactionConfig {
         mush_session::compact::CompactionSettings {
             reserve_tokens: self.reserve_tokens,
             keep_recent_tokens: self.keep_recent_tokens,
+            ..Default::default()
         }
     }
 }

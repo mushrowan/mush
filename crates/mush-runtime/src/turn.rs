@@ -302,10 +302,11 @@ impl SessionRuntime {
         let cwd = injections.cwd.clone().unwrap_or_default();
         let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
         let live = Some(self.live_context(&tool_registry, &model));
+        let reply = mush_ai::providers::effective_max_output_tokens(&model, &config.options);
         let transform = build_context_transform(
             target,
             config.auto_compact,
-            config.compaction,
+            config.compaction.leaving_room_for(reply),
             model.compaction_window(),
             registry.clone(),
             context_tokens_shared.clone(),
@@ -458,7 +459,6 @@ pub fn build_context_transform(
             if !mush_session::compact::needs_compaction_at(
                 effective_compaction_tokens,
                 compaction_window,
-                owned_messages.len(),
                 &settings,
             ) {
                 measured_len.store(owned_messages.len(), std::sync::atomic::Ordering::Relaxed);

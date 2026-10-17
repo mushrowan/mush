@@ -29,15 +29,13 @@ impl InProcessConnection {
         if !self.config.auto_fork_compact {
             return false;
         }
-        let window = self
-            .runtime
-            .model(&self.config.default_model)
-            .compaction_window();
+        let model = self.runtime.model(&self.config.default_model);
+        let reply = mush_ai::providers::effective_max_output_tokens(&model, &self.config.options);
         mush_session::compact::needs_compaction_for_messages(
             self.runtime.context_tokens,
-            window,
+            model.compaction_window(),
             &self.runtime.conversation.context(),
-            &self.config.compaction,
+            &self.config.compaction.leaving_room_for(reply),
         )
     }
 

@@ -19,7 +19,8 @@ const RECENT_TURNS_TO_KEEP: usize = 3;
 
 pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
 
-pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
+#[must_use]
+pub fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
     if let Some(explicit) = options.max_tokens {
         return explicit.get();
     }

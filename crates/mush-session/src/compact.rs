@@ -544,6 +544,8 @@ const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
 pub struct CompactionSettings {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
+    #[serde(skip)]
+    pub reply_tokens: u64,
 }
 
 impl Default for CompactionSettings {
@@ -551,19 +553,33 @@ impl Default for CompactionSettings {
         Self {
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
+            reply_tokens: 0,
         }
     }
 }
 
 impl CompactionSettings {
     #[must_use]
+    pub fn leaving_room_for(self, reply_tokens: u64) -> Self {
+        Self {
+            reply_tokens,
+            ..self
+        }
+    }
+
+    #[must_use]
     pub fn threshold(&self, context_window: TokenCount) -> TokenCount {
         let window = context_window.get();
-        if window >= 2 * self.reserve_tokens {
-            TokenCount::new(window - self.reserve_tokens)
+        let threshold = if window >= 2 * self.reserve_tokens {
+            window - self.reserve_tokens
         } else {
-            TokenCount::new(window * 95 / 100)
+            window * 95 / 100
+        };
+        if self.reply_tokens == 0 {
+            return TokenCount::new(threshold);
         }
+        let room = window.saturating_sub(self.reply_tokens + self.reserve_tokens);
+        TokenCount::new(threshold.min(room.max(window / 2)))
     }
 
     #[must_use]
@@ -598,10 +614,9 @@ pub fn keep_recent_for_budget(messages: &[Message], budget_tokens: usize) -> usi
 pub fn needs_compaction_at(
     context_tokens: TokenCount,
     context_window: TokenCount,
-    message_count: usize,
     settings: &CompactionSettings,
 ) -> bool {
-    message_count > DEFAULT_KEEP_RECENT && context_tokens > settings.threshold(context_window)
+    context_tokens > settings.threshold(context_window)
 }
 
 pub fn needs_compaction_for_messages(
@@ -611,12 +626,7 @@ pub fn needs_compaction_for_messages(
     settings: &CompactionSettings,
 ) -> bool {
     let estimated = TokenCount::new(estimate_tokens(messages) as u64);
-    needs_compaction_at(
-        context_tokens.max(estimated),
-        context_window,
-        messages.len(),
-        settings,
-    )
+    needs_compaction_at(context_tokens.max(estimated), context_window, settings)
 }
 
 pub fn compaction_tokens(
@@ -1769,7 +1779,6 @@ mod tests {
         assert!(!needs_compaction_at(
             TokenCount::new(100),
             TokenCount::new(200_000),
-            20,
             &CompactionSettings::default(),
         ));
     }
@@ -1779,7 +1788,6 @@ mod tests {
         assert!(needs_compaction_at(
             TokenCount::new(9600),
             TokenCount::new(10_000),
-            20,
             &CompactionSettings::default(),
         ));
     }
@@ -1806,13 +1814,11 @@ mod tests {
         assert!(needs_compaction_at(
             TokenCount::new(184_000),
             TokenCount::new(200_000),
-            20,
             &CompactionSettings::default(),
         ));
         assert!(!needs_compaction_at(
             TokenCount::new(183_000),
             TokenCount::new(200_000),
-            20,
             &CompactionSettings::default(),
         ));
     }
@@ -1851,11 +1857,38 @@ mod tests {
     }
 
     #[test]
-    fn needs_compaction_too_few_messages() {
-        assert!(!needs_compaction_at(
+    fn a_short_conversation_over_the_threshold_still_compacts() {
+        assert!(needs_compaction_at(
             TokenCount::new(9600),
             TokenCount::new(10_000),
-            8,
+            &CompactionSettings::default(),
+        ));
+    }
+
+    #[test]
+    fn the_threshold_leaves_room_for_the_next_reply() {
+        let settings = CompactionSettings::default().leaving_room_for(32_000);
+        assert_eq!(
+            settings.threshold(TokenCount::new(200_000)),
+            TokenCount::new(200_000 - 32_000 - 16_384)
+        );
+        assert_eq!(
+            settings.threshold(TokenCount::new(1_000_000)),
+            TokenCount::new(1_000_000 - 32_000 - 16_384)
+        );
+        assert_eq!(
+            settings.threshold(TokenCount::new(40_000)),
+            TokenCount::new(20_000),
+            "a reply budget near the window still leaves half of it for the context"
+        );
+        assert!(needs_compaction_at(
+            TokenCount::new(160_000),
+            TokenCount::new(200_000),
+            &settings,
+        ));
+        assert!(!needs_compaction_at(
+            TokenCount::new(160_000),
+            TokenCount::new(200_000),
             &CompactionSettings::default(),
         ));
     }
@@ -1874,14 +1907,12 @@ mod tests {
         assert!(needs_compaction_at(
             compaction_tokens(previous_api_tokens, &messages, 20),
             context_window,
-            messages.len(),
             &CompactionSettings::default(),
         ));
         assert!(
             !needs_compaction_at(
                 previous_api_tokens,
                 context_window,
-                messages.len(),
                 &CompactionSettings::default()
             ),
             "old api-token-only trigger misses the newly appended payload"
@@ -1905,14 +1936,12 @@ mod tests {
         assert!(needs_compaction_at(
             compaction_tokens(reported, &messages, measured_len(&messages)),
             window,
-            messages.len(),
             &settings,
         ));
         assert!(
             !needs_compaction_at(
                 compaction_tokens(reported, &messages, messages.len()),
                 window,
-                messages.len(),
                 &settings,
             ),
             "counting the whole snapshot as already reported misses the new turn"
@@ -1930,18 +1959,12 @@ mod tests {
             needs_compaction_at(
                 tokens,
                 model.compaction_window(),
-                20,
                 &CompactionSettings::default()
             ),
             "must compact against the effective input budget"
         );
         assert!(
-            !needs_compaction_at(
-                tokens,
-                model.context_window,
-                20,
-                &CompactionSettings::default()
-            ),
+            !needs_compaction_at(tokens, model.context_window, &CompactionSettings::default()),
             "keying off the displayed window would compact too late"
         );
     }
@@ -2496,7 +2519,6 @@ mod tests {
             needs_compaction_at(
                 TokenCount::new(estimated as u64),
                 context_window,
-                msgs.len(),
                 &CompactionSettings::default()
             ),
             "should need compaction: {estimated} tokens",
@@ -2510,7 +2532,6 @@ mod tests {
             !needs_compaction_at(
                 TokenCount::new(post_estimated as u64),
                 context_window,
-                msgs.len(),
                 &CompactionSettings::default()
             ),
             "shouldn't need compaction right after: {post_estimated} tokens in {} msgs",
@@ -2531,7 +2552,6 @@ mod tests {
             needs_compaction_at(
                 TokenCount::new(regrown as u64),
                 context_window,
-                msgs.len(),
                 &CompactionSettings::default()
             ),
             "should need re-compaction: {regrown} tokens in {} msgs",
