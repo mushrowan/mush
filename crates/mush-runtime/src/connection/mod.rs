@@ -290,7 +290,7 @@ pub struct InProcessConnection {
     known_goal: Option<Goal>,
     scheduler: Option<Arc<Scheduler>>,
     known_jobs: Vec<Job>,
-    deferred_jobs: VecDeque<String>,
+    deferred_events: VecDeque<mush_ai::types::EventMessage>,
     notes: Option<Arc<Notes>>,
     autonomous: Option<Arc<Autonomous>>,
     gate_task: Option<tokio::task::JoinHandle<Vec<crate::autonomous::GateRun>>>,
@@ -377,7 +377,7 @@ impl InProcessConnection {
             known_goal: None,
             scheduler: None,
             known_jobs: Vec::new(),
-            deferred_jobs: VecDeque::new(),
+            deferred_events: VecDeque::new(),
             notes: None,
             autonomous: None,
             gate_task: None,
@@ -576,21 +576,28 @@ impl InProcessConnection {
         };
         let now = mush_ai::types::Timestamp::now().as_ms();
         for job in scheduler.take_due(now) {
-            let text = job.prompt_text();
-            if self.turn_active() {
-                match job.delivery {
-                    crate::schedule::Delivery::Steer => self.steer(text, Vec::new()).await,
-                    crate::schedule::Delivery::FollowUp => self.deferred_jobs.push_back(text),
+            let event = job.event();
+            match job.delivery {
+                crate::schedule::Delivery::Steer if self.turn_active() => {
+                    self.steer_event(event).await;
                 }
-            } else {
-                self.deferred_jobs.push_back(text);
+                crate::schedule::Delivery::Steer | crate::schedule::Delivery::FollowUp => {
+                    self.deferred_events.push_back(event);
+                }
             }
         }
+        self.deliver_deferred_events();
+    }
+
+    fn deliver_deferred_events(&mut self) {
         if self.turn_active() || self.compaction.is_some() {
             return;
         }
-        while let Some(text) = self.deferred_jobs.pop_front() {
-            self.queue_prompt(&text, Vec::new());
+        while let Some(event) = self.deferred_events.pop_front() {
+            self.runtime.queue_event(event.clone());
+            if event.kind != mush_ai::types::EventKind::BashDone {
+                self.queued.push_back(ClientEvent::MessageInjected(event));
+            }
         }
     }
 
@@ -651,7 +658,7 @@ impl InProcessConnection {
         !self.closed
             && self.idle().await
             && self.deferred_deliveries.is_empty()
-            && self.deferred_jobs.is_empty()
+            && self.deferred_events.is_empty()
             && !self.runtime.kernel_restore_pending()
             && self.runtime.kernel_release.is_none()
             && self.side_questions.is_empty()
@@ -900,7 +907,7 @@ impl InProcessConnection {
                 continue;
             }
             if busy {
-                self.steer(delivery.event.text(), Vec::new()).await;
+                self.steer_event(delivery.event.clone()).await;
                 self.wake_kernel_waits();
                 delivery.ack(Receipt::Queued);
             } else if self.runtime.pending_prompt.is_some() {
@@ -1281,14 +1288,15 @@ impl InProcessConnection {
             }
         }
         for notice in notices {
-            let text = notice.done.text();
+            let event = bash_done_event(&notice.done);
             self.queued.push_back(ClientEvent::BashDone(notice));
             if self.turn_active() {
-                self.steer(text, Vec::new()).await;
+                self.steer_event(event).await;
             } else {
-                self.queue_prompt(&text, Vec::new());
+                self.deferred_events.push_back(event);
             }
         }
+        self.deliver_deferred_events();
     }
 
     fn try_poll_title(&mut self) -> Option<ClientEvent> {
@@ -1571,6 +1579,14 @@ impl InProcessConnection {
         ));
     }
 
+    async fn steer_event(&mut self, event: mush_ai::types::EventMessage) {
+        let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) else {
+            self.deferred_events.push_back(event);
+            return;
+        };
+        meta.steering_queue.lock().await.push(Message::Event(event));
+    }
+
     async fn retract_steer(&mut self, text: &str) -> bool {
         let Some(meta) = self.runtime.turns.meta(PRIMARY_PANE) else {
             return false;
@@ -1778,6 +1794,28 @@ impl InProcessConnection {
             }
             _ => {}
         }
+    }
+}
+
+fn bash_done_event(done: &mush_tools::kernel_jobs::BashDone) -> mush_ai::types::EventMessage {
+    use mush_ai::types::{EventKind, EventMessage, EventOrigin, EventReceipt};
+    let at = Timestamp::now();
+    EventMessage {
+        content: done.text(),
+        timestamp_ms: at,
+        kind: EventKind::BashDone,
+        receipts: vec![EventReceipt {
+            id: format!(
+                "bash-done-{}-{}",
+                done.pid
+                    .map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+                at.as_ms()
+            )
+            .into(),
+            timestamp_ms: at,
+            kind: EventKind::BashDone,
+            origin: EventOrigin::Kernel { pid: done.pid },
+        }],
     }
 }
 

@@ -986,6 +986,75 @@ async fn a_steer_sent_during_a_tool_call_reaches_the_next_request() {
 }
 
 #[tokio::test]
+async fn an_agent_message_steered_during_a_tool_call_enters_the_session_as_an_event() {
+    let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(crate::testing::ToolThenText {
+        requests: requests.clone(),
+        gate: gate.clone(),
+    }));
+    let model = crate::testing::echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut tools = ToolRegistry::new();
+    tools.register_shared(Arc::new(crate::testing::NoteTool));
+    let mut connection = InProcessConnection::new(
+        runtime,
+        tools,
+        registry,
+        crate::testing::echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    let event = mush_ai::types::EventMessage {
+        content: "[agent-message from child:auth]\n\nfound it".into(),
+        timestamp_ms: Timestamp::zero(),
+        kind: mush_ai::types::EventKind::Message,
+        receipts: vec![mush_ai::types::EventReceipt {
+            id: "agentmsg_1".into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Message,
+            origin: mush_ai::types::EventOrigin::Agent {
+                session_id: "child".into(),
+                name: "auth".into(),
+                relationship: "child".into(),
+            },
+        }],
+    };
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "start".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(connection.state().turn_active);
+    connection.steer_event(event.clone()).await;
+    gate.notify_one();
+    drain_turn(&mut connection).await;
+
+    let asked = requests.lock().unwrap().clone();
+    assert!(
+        matches!(asked[1].messages.last(), Some(Message::Event(sent)) if *sent == event),
+        "{:?}",
+        asked[1].messages
+    );
+    let transcript = connection.transcript().await;
+    assert!(
+        transcript
+            .iter()
+            .any(|message| matches!(message, Message::Event(kept) if *kept == event))
+    );
+    assert!(
+        !transcript.iter().any(
+            |message| matches!(message, Message::User(user) if user.text().contains("found it"))
+        )
+    );
+}
+
+#[tokio::test]
 async fn abort_cancels_a_running_compaction_and_the_queued_prompt_goes_out() {
     let (mut connection, release) = crate::testing::stalled_connection();
     connection.runtime.conversation = ConversationState::from_messages(
@@ -1387,7 +1456,9 @@ async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
     let transcript = connection.transcript().await;
     assert!(matches!(
         &transcript[0],
-        Message::User(user) if user.text().starts_with("[bash-done pid:77 exit:5]")
+        Message::Event(event) if event.kind == mush_ai::types::EventKind::BashDone
+            && event.text().starts_with("[bash-done pid:77 exit:5]")
+            && event.receipts.len() == 1
     ));
 
     (sinks.notices)(bash_done("second", 0));
@@ -1406,8 +1477,45 @@ async fn a_kernel_notice_becomes_a_prompt_when_idle_and_steering_when_busy() {
         .steering_queue
         .lock()
         .await
-        .len();
-    assert_eq!(queued, 1);
+        .clone();
+    assert!(
+        matches!(&queued[..], [Message::Event(event)] if event.kind == mush_ai::types::EventKind::BashDone),
+        "{queued:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_kernel_notice_during_a_compaction_waits_for_it_and_keeps_the_typed_prompt() {
+    let (mut connection, release) = crate::testing::stalled_connection();
+    let (sinks, signals) = crate::kernel_channels::kernel_channels();
+    connection.attach_kernel(Some(signals));
+    connection.runtime.conversation = ConversationState::from_messages(
+        (0..30)
+            .map(|i| user(&format!("turn {i}: {}", "x".repeat(400))))
+            .collect(),
+    );
+    connection
+        .send(ClientCommand::Compact {
+            focus: CompactionFocus::default(),
+            auto: false,
+        })
+        .await
+        .unwrap();
+    connection
+        .send(ClientCommand::QueuePrompt {
+            text: "after the compaction".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    (sinks.notices)(bash_done("make", 0));
+    connection.tick().await;
+
+    assert_eq!(connection.deferred_events.len(), 1);
+    let pending = connection.runtime.pending_prompt.as_ref().unwrap();
+    assert_eq!(pending.text, "after the compaction");
+    drop(release);
 }
 
 #[tokio::test]
@@ -2071,13 +2179,18 @@ async fn a_due_heartbeat_becomes_a_prompt_when_idle_and_a_steer_when_busy() {
     let far = mush_ai::types::Timestamp::now().as_ms() + 11_000;
     let due = scheduler.take_due(far);
     assert_eq!(due.len(), 1);
-    connection.queue_prompt(&due[0].prompt_text(), Vec::new());
+    connection.deferred_events.push_back(due[0].event());
     connection.start_pending().await;
     assert!(connection.state().turn_active);
+    let injected = std::iter::from_fn(|| connection.try_next_event()).find(|event| {
+        matches!(event, ClientEvent::MessageInjected(event) if event.kind == mush_ai::types::EventKind::Schedule)
+    });
+    assert!(injected.is_some());
     drain_turn(&mut connection).await;
     assert!(matches!(
         &requests.lock().unwrap()[0].messages[0],
-        Message::User(user) if user.text() == "[heartbeat: every 10s run#1]\n\ncheck the build"
+        Message::Event(event) if event.kind == mush_ai::types::EventKind::Schedule
+            && event.text() == "[heartbeat: every 10s run#1]\n\ncheck the build"
     ));
 
     connection

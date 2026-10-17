@@ -389,6 +389,13 @@ impl SessionRuntime {
         Ok(message)
     }
 
+    pub fn queue_event(&mut self, event: mush_ai::types::EventMessage) {
+        if self.pending_prompt.is_none() {
+            self.pending_prompt = Some(PendingPrompt::persisted(event.text()));
+        }
+        self.conversation.append_message(Message::Event(event));
+    }
+
     pub fn accept_event(&mut self, event: mush_ai::types::EventMessage) {
         self.pending_prompt = Some(PendingPrompt::persisted(event.text()));
         self.conversation.append_message(Message::Event(event));
@@ -518,6 +525,30 @@ impl Default for SessionRuntime {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_queued_event_starts_a_turn_but_keeps_a_prompt_that_is_already_waiting() {
+        let event = || mush_ai::types::EventMessage {
+            content: "[heartbeat: every 10m run#1]\n\ncheck".into(),
+            timestamp_ms: mush_ai::types::Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Schedule,
+            receipts: Vec::new(),
+        };
+        let mut idle = SessionRuntime::new(ConversationState::new());
+        idle.queue_event(event());
+        assert!(idle.pending_prompt.as_ref().unwrap().is_persisted());
+
+        let mut waiting = SessionRuntime::new(ConversationState::new());
+        waiting.pending_prompt = Some(PendingPrompt::text("typed first"));
+        waiting.queue_event(event());
+        let pending = waiting.pending_prompt.as_ref().unwrap();
+        assert!(!pending.is_persisted());
+        assert_eq!(pending.text, "typed first");
+        assert!(matches!(
+            waiting.conversation.context().last(),
+            Some(Message::Event(kept)) if kept.kind == mush_ai::types::EventKind::Schedule
+        ));
+    }
 
     #[test]
     fn accept_event_persists_the_event_and_queues_a_persisted_prompt() {

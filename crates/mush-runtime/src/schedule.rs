@@ -97,6 +97,26 @@ impl Job {
             ),
         }
     }
+
+    #[must_use]
+    pub fn event(&self) -> mush_ai::types::EventMessage {
+        use mush_ai::types::{EventKind, EventMessage, EventOrigin, EventReceipt};
+        let at = self.last_run_at.unwrap_or_else(Timestamp::now);
+        EventMessage {
+            content: self.prompt_text(),
+            timestamp_ms: at,
+            kind: EventKind::Schedule,
+            receipts: vec![EventReceipt {
+                id: format!("schedule-{}-run-{}", self.id, self.runs).into(),
+                timestamp_ms: at,
+                kind: EventKind::Schedule,
+                origin: EventOrigin::Scheduler {
+                    job_id: self.id.clone(),
+                    run: self.runs,
+                },
+            }],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

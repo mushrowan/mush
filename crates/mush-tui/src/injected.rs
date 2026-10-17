@@ -57,6 +57,13 @@ impl Injected {
             ),
             EventKind::WorkerCompletion => worker(event),
             EventKind::Message | EventKind::Legacy => message(event),
+            EventKind::Schedule => Self::from_text(&event.content)
+                .unwrap_or_else(|| Self::labelled("scheduled", &event.content, Body::Shown)),
+            EventKind::BashDone => Self::labelled(
+                "background shell command finished",
+                &event.content,
+                Body::Folded,
+            ),
         };
         if !event.kind.is_summary() {
             injected.details = event.receipts.iter().map(receipt_line).collect();
@@ -270,6 +277,11 @@ fn receipt_line(receipt: &EventReceipt) -> String {
         EventOrigin::Inbox {
             run_id, worker_id, ..
         } => format!("inbox run {run_id} worker {worker_id}"),
+        EventOrigin::Scheduler { job_id, run } => format!("job {job_id} run {run}"),
+        EventOrigin::Kernel { pid } => match pid {
+            Some(pid) => format!("kernel job pid {pid}"),
+            None => "kernel job".to_string(),
+        },
         EventOrigin::Legacy => "legacy".to_string(),
     };
     format!("receipt {} · {origin}", receipt.id)

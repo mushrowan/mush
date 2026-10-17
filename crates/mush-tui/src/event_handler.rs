@@ -66,9 +66,20 @@ pub fn handle_agent_event(
             let mut typed = 0;
             let mut injected = Vec::new();
             for message in messages {
-                let Message::User(user) = message else {
-                    typed += 1;
-                    continue;
+                let user = match message {
+                    Message::User(user) => user,
+                    Message::Event(event) if event.kind == EventKind::BashDone => continue,
+                    Message::Event(event) => {
+                        injected.push((
+                            crate::app::MessageRole::Event(event.kind),
+                            crate::injected::Injected::from_event(event),
+                        ));
+                        continue;
+                    }
+                    Message::Assistant(_) | Message::ToolResult(_) => {
+                        typed += 1;
+                        continue;
+                    }
                 };
                 let text = user.text();
                 if mush_tools::kernel_jobs::BashDone::parse(&text).is_some() {
@@ -858,6 +869,40 @@ mod tests {
         assert_eq!(row.content, "found it");
         assert_eq!(
             crate::test_support::header_text(row).as_deref(),
+            Some("message from child:auth")
+        );
+
+        let typed_events = vec![
+            Message::Event(event.clone()),
+            Message::Event(EventMessage {
+                content: "[bash-done pid:7 exit:0]\n\nCommand: \"make\"".into(),
+                timestamp_ms: Timestamp::zero(),
+                kind: EventKind::BashDone,
+                receipts: Vec::new(),
+            }),
+        ];
+        handle_agent_event(
+            &mut ctx,
+            &AgentEvent::SteeringInjected {
+                messages: typed_events,
+            },
+            mush_runtime::Applied::Nothing,
+            &model,
+            false,
+            &None,
+        );
+
+        assert!(
+            ctx.app.messages[0].queued,
+            "events never dequeue a typed steer"
+        );
+        assert_eq!(
+            ctx.app.messages.len(),
+            3,
+            "the bash-done notice is shown by its own event"
+        );
+        assert_eq!(
+            crate::test_support::header_text(&ctx.app.messages[2]).as_deref(),
             Some("message from child:auth")
         );
     }

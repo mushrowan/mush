@@ -13,6 +13,8 @@ pub enum EventKind {
     Summary,
     BranchSummary,
     Recovery,
+    Schedule,
+    BashDone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +38,13 @@ pub enum EventOrigin {
         session_id: String,
         name: String,
         relationship: String,
+    },
+    Scheduler {
+        job_id: String,
+        run: u32,
+    },
+    Kernel {
+        pid: Option<u32>,
     },
     Legacy,
 }
@@ -93,6 +102,11 @@ impl EventKind {
     pub fn is_summary(self) -> bool {
         matches!(self, Self::Summary | Self::BranchSummary)
     }
+
+    #[must_use]
+    pub fn is_own_delivery(self) -> bool {
+        matches!(self, Self::Schedule | Self::BashDone)
+    }
 }
 
 impl EventMessage {
@@ -115,6 +129,9 @@ impl EventMessage {
     pub fn text(&self) -> String {
         if self.kind.is_summary() {
             return self.summary_text();
+        }
+        if self.kind.is_own_delivery() {
+            return self.content.clone();
         }
         let value = match self.receipt_reference() {
             Some(reference) => {
@@ -233,5 +250,27 @@ mod tests {
         assert_eq!(read.content, event.content);
         assert_eq!(read.kind, EventKind::Message);
         assert!(read.receipts.is_empty());
+    }
+
+    #[test]
+    fn the_sessions_own_deliveries_reach_the_model_as_they_were_written() {
+        for (kind, content) in [
+            (
+                EventKind::Schedule,
+                "[heartbeat: every 10m run#3]\n\ncheck the tests",
+            ),
+            (
+                EventKind::BashDone,
+                "[bash-done pid:42 exit:0]\n\nCommand: \"make\"",
+            ),
+        ] {
+            let event = EventMessage {
+                content: content.into(),
+                timestamp_ms: Timestamp::from_ms(5),
+                kind,
+                receipts: Vec::new(),
+            };
+            assert_eq!(event.text(), content);
+        }
     }
 }

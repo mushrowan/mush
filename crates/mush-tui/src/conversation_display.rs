@@ -52,11 +52,21 @@ pub fn rebuild_display(app: &mut App, conversation: &[Message]) {
     let mut rebuild = Rebuild::default();
     for message in conversation {
         match message {
-            Message::Event(event) => app.push_event_message(event),
+            Message::Event(event) => push_rebuilt_event(app, event),
             Message::User(user) => push_rebuilt_user_message(app, user),
             Message::Assistant(assistant) => rebuild.push_assistant(app, assistant),
             Message::ToolResult(result) => rebuild.apply_result(app, result),
         }
+    }
+}
+
+fn push_rebuilt_event(app: &mut App, event: &mush_ai::types::EventMessage) {
+    let done = (event.kind == mush_ai::types::EventKind::BashDone)
+        .then(|| mush_tools::kernel_jobs::BashDone::parse(&event.content))
+        .flatten();
+    match done {
+        Some(done) => app.push_bash_done(&done, None),
+        None => app.push_event_message(event),
     }
 }
 
@@ -442,6 +452,39 @@ mod tests {
             timestamp_ms: Timestamp::zero(),
             details: None,
         })
+    }
+
+    #[test]
+    fn typed_deliveries_rebuild_as_the_rows_their_text_used_to_make() {
+        let mut app = app();
+        let event = |kind, content: &str| {
+            Message::Event(mush_ai::types::EventMessage {
+                content: content.into(),
+                timestamp_ms: mush_ai::types::Timestamp::zero(),
+                kind,
+                receipts: Vec::new(),
+            })
+        };
+
+        rebuild_display(
+            &mut app,
+            &[
+                event(
+                    mush_ai::types::EventKind::Schedule,
+                    "[heartbeat: every 20s run#3]\n\ncheck the tests",
+                ),
+                event(
+                    mush_ai::types::EventKind::BashDone,
+                    "[bash-done pid:7 exit:2]\n\nCommand: \"make\"",
+                ),
+            ],
+        );
+
+        assert_eq!(
+            crate::test_support::header_text(&app.messages[0]).as_deref(),
+            Some("heartbeat · every 20s · run 3")
+        );
+        assert_eq!(app.messages[1].role, MessageRole::BashDone);
     }
 
     #[test]
