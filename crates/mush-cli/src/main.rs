@@ -733,7 +733,8 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
     });
 
     let context_tokens = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let transform = compaction_transform(&setup, context_tokens.clone());
+    let next_prompt = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let transform = compaction_transform(&setup, context_tokens.clone(), next_prompt.clone());
 
     let config = AgentConfig {
         model: setup.client.model.clone(),
@@ -745,6 +746,7 @@ async fn print_mode_inner(cli: Cli, prompt: String, status: &mut headless::Statu
         hooks: Box::new(mush_agent::ClosureHooks {
             transform,
             follow_up: Some(mush_cli::control::follow_up(control.clone())),
+            prompt_tokens: Some(mush_runtime::turn::prompt_tokens_from(next_prompt)),
             ..mush_agent::ClosureHooks::default()
         }),
         injections: mush_agent::AgentInjections {
@@ -962,6 +964,7 @@ fn print_progress(event: &AgentEvent, model: &Model, debug_cache: bool) {
 fn compaction_transform(
     setup: &AppSetup,
     context_tokens: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next_prompt: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Option<mush_agent::TransformFn> {
     if !setup.client.cfg.compaction.enabled {
         return None;
@@ -989,16 +992,7 @@ fn compaction_transform(
         system_prompt: Some(setup.system_prompt.clone()),
         tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
     });
-    let compaction_settings =
-        setup
-            .client
-            .cfg
-            .compaction
-            .settings()
-            .leaving_room_for(mush_ai::providers::reply_budget(
-                &setup.client.model,
-                &setup.client.options,
-            ));
+    let compaction_settings = setup.client.cfg.compaction.settings();
     let after = mush_runtime::AfterCompaction {
         kernel: setup.kernel_state.clone(),
         ..Default::default()
@@ -1012,8 +1006,16 @@ fn compaction_transform(
         let reg = reg_ref.clone();
         let live = live.clone();
         let after = after.clone();
+        let next_prompt = next_prompt.clone();
         Box::pin(async move {
             let tokens = TokenCount::new(ctx.load(std::sync::atomic::Ordering::Relaxed));
+            let overhead = mush_session::compact::overhead_tokens(&live) as u64;
+            next_prompt.store(
+                tokens
+                    .get()
+                    .max(mush_session::compact::estimate_tokens(&owned) as u64 + overhead),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             let tokens = match pressure {
                 mush_agent::ContextPressure::Normal => tokens,
                 mush_agent::ContextPressure::Overflowed => tokens.max(context_window),
@@ -1043,10 +1045,9 @@ fn compaction_transform(
                 return mush_agent::ContextTransformResult::Unchanged;
             }
             let compaction = after.restore(result).await;
-            ctx.store(
-                mush_session::compact::estimate_tokens(&compaction.messages) as u64,
-                std::sync::atomic::Ordering::Relaxed,
-            );
+            let compacted = mush_session::compact::estimate_tokens(&compaction.messages) as u64;
+            ctx.store(compacted, std::sync::atomic::Ordering::Relaxed);
+            next_prompt.store(compacted + overhead, std::sync::atomic::Ordering::Relaxed);
             mush_agent::ContextTransformResult::Compacted(compaction)
         })
     }))
@@ -2239,6 +2240,7 @@ mod tests {
                 enabled: true,
                 reserve_tokens: 8_000,
                 keep_recent_tokens: 12_000,
+                threshold_percent: 90,
                 agent_callable: true,
             },
             Some((summariser.clone(), StreamOptions::default())),
@@ -2253,6 +2255,7 @@ mod tests {
             mush_session::compact::CompactionSettings {
                 reserve_tokens: 8_000,
                 keep_recent_tokens: 12_000,
+                threshold_percent: 90,
                 ..Default::default()
             }
         );

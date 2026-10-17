@@ -514,6 +514,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp"),
                 None,
                 mush_runtime::AfterCompaction::default(),
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             );
             let config = AgentConfig {
                 model: model.clone(),

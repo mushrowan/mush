@@ -10,7 +10,7 @@ use crate::registry::ApiRegistry;
 use crate::types::{
     AccountLabel, ApiKey, AssistantContentPart, AssistantMessage, CacheRetention, EffortLevel,
     ImageContent, Message, Model, StreamOptions, TextContent, ThinkingContent, ThinkingLevel,
-    ToolResultContentPart, ToolResultMessage, ToolResultTrimming, UserMessage,
+    TokenCount, ToolResultContentPart, ToolResultMessage, ToolResultTrimming, UserMessage,
     find_recent_boundary,
 };
 
@@ -30,11 +30,38 @@ pub fn reply_budget(model: &Model, options: &StreamOptions) -> u64 {
     }
 }
 
-pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
-    if let Some(explicit) = options.max_tokens {
-        return explicit.get();
+pub const MIN_REPLY_TOKENS: u64 = 4_096;
+
+#[must_use]
+pub fn fit_reply(
+    model: &Model,
+    options: &StreamOptions,
+    prompt_tokens: TokenCount,
+) -> StreamOptions {
+    let mut fitted = options.clone();
+    let window = model.context_window.get();
+    if window == 0 {
+        return fitted;
     }
-    model.max_output_tokens.get().min(MAX_OUTPUT_TOKENS_CAP)
+    let room = window.saturating_sub(prompt_tokens.get());
+    if reply_budget(model, options) > room {
+        fitted.reply_cap = Some(TokenCount::new(room.max(MIN_REPLY_TOKENS)));
+    }
+    fitted
+}
+
+pub(crate) fn capped(tokens: u64, options: &StreamOptions) -> u64 {
+    options
+        .reply_cap
+        .map_or(tokens, |cap| tokens.min(cap.get()))
+}
+
+pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
+    let requested = match options.max_tokens {
+        Some(explicit) => explicit.get(),
+        None => model.max_output_tokens.get().min(MAX_OUTPUT_TOKENS_CAP),
+    };
+    capped(requested, options)
 }
 
 pub(crate) fn format_error_chain(err: &dyn std::error::Error) -> String {
@@ -927,5 +954,61 @@ mod tests {
             128_000
         );
         assert_eq!(reply_budget(&model("claude-haiku-4-5"), &oauth), 64_000);
+    }
+
+    #[test]
+    fn the_reply_shrinks_to_the_room_the_prompt_leaves_but_never_under_the_minimum() {
+        let model = Model {
+            context_window: TokenCount::new(200_000),
+            max_output_tokens: TokenCount::new(128_000),
+            ..crate::models::anthropic_models()
+                .into_iter()
+                .find(|model| model.id.as_str() == "claude-opus-5-5")
+                .unwrap()
+        };
+        let options = StreamOptions::default();
+        let cap = |prompt: u64| {
+            fit_reply(&model, &options, TokenCount::new(prompt))
+                .reply_cap
+                .map(TokenCount::get)
+        };
+
+        assert_eq!(cap(50_000), None, "a reply that fits is left alone");
+        assert_eq!(cap(100_000), Some(100_000));
+        assert_eq!(cap(198_000), Some(MIN_REPLY_TOKENS));
+        assert_eq!(
+            reply_budget(
+                &model,
+                &fit_reply(&model, &options, TokenCount::new(150_000))
+            ),
+            50_000,
+            "the request sends what the cap allows"
+        );
+
+        let small = Model {
+            context_window: TokenCount::ZERO,
+            ..model
+        };
+        assert_eq!(
+            fit_reply(&small, &options, TokenCount::new(500_000)).reply_cap,
+            None,
+            "an unknown window is left alone"
+        );
+    }
+
+    #[test]
+    fn a_capped_reply_caps_every_provider_budget() {
+        let capped = StreamOptions {
+            reply_cap: Some(TokenCount::new(10_000)),
+            ..StreamOptions::default()
+        };
+        assert_eq!(
+            effective_max_output_tokens(&model_with_output(64_000), &capped),
+            10_000
+        );
+        assert_eq!(
+            effective_max_output_tokens(&model_with_output(8_192), &capped),
+            8_192
+        );
     }
 }

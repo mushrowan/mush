@@ -295,6 +295,7 @@ impl ThinkingLevel {
 pub struct StreamOptions {
     pub temperature: Option<Temperature>,
     pub max_tokens: Option<TokenCount>,
+    pub reply_cap: Option<TokenCount>,
     pub api_key: Option<ApiKey>,
     pub thinking: Option<ThinkingLevel>,
     pub effort: Option<EffortLevel>,

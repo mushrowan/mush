@@ -127,6 +127,10 @@ pub trait AgentHooks: Send + Sync {
     ) -> BoxFuture<'static, ConfirmAction> {
         Box::pin(async { ConfirmAction::Allow })
     }
+
+    fn prompt_tokens(&self) -> Option<mush_ai::types::TokenCount> {
+        None
+    }
 }
 
 pub struct NoopHooks;
@@ -140,6 +144,7 @@ pub type ConfirmFn = Box<
         + Send
         + Sync,
 >;
+pub type PromptTokensFn = Box<dyn Fn() -> Option<mush_ai::types::TokenCount> + Send + Sync>;
 
 #[derive(Default)]
 pub struct ClosureHooks {
@@ -147,6 +152,7 @@ pub struct ClosureHooks {
     pub follow_up: Option<SteeringFn>,
     pub transform: Option<TransformFn>,
     pub confirm: Option<ConfirmFn>,
+    pub prompt_tokens: Option<PromptTokensFn>,
 }
 
 impl AgentHooks for ClosureHooks {
@@ -185,6 +191,10 @@ impl AgentHooks for ClosureHooks {
             Some(f) => f(id, name, args),
             None => Box::pin(async { ConfirmAction::Allow }),
         }
+    }
+
+    fn prompt_tokens(&self) -> Option<mush_ai::types::TokenCount> {
+        self.prompt_tokens.as_ref().and_then(|f| f())
     }
 }
 
@@ -287,6 +297,10 @@ pub fn agent_loop(
                     messages: llm_messages,
                     tools: crate::tool::tool_definitions(&config.tools, config.model.api),
                 };
+                let options = match config.hooks.prompt_tokens() {
+                    Some(prompt) => mush_ai::providers::fit_reply(&config.model, &config.options, prompt),
+                    None => config.options.clone(),
+                };
 
                 tracing::debug!(turn = turn_index, model = %config.model.id, "streaming LLM response");
 
@@ -314,7 +328,7 @@ pub fn agent_loop(
                     }
 
                     let response = tokio::select! {
-                        response = config.registry.stream(&config.model, &context, &config.options) => response,
+                        response = config.registry.stream(&config.model, &context, &options) => response,
                         _ = cancel.cancelled() => {
                             aborted = true;
                             break 'attempt;

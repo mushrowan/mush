@@ -619,7 +619,7 @@ fn build_request_body(
                 (Some(adaptive), max_tokens.get())
             } else {
                 let (max_tokens, budget) =
-                    budget_thinking_tokens(level, max_tokens.get(), model.max_output_tokens.get());
+                    budget_thinking_tokens(level, max_tokens.get(), output_limit(model, options));
                 let enabled = ThinkingConfig::Enabled {
                     config_type: "enabled".into(),
                     budget_tokens: budget,
@@ -995,9 +995,17 @@ pub(crate) fn sent_max_tokens(model: &Model, options: &StreamOptions, is_oauth: 
                 && model.reasoning
                 && !(model.supports_adaptive_thinking && !options.force_budget_thinking) =>
         {
-            budget_thinking_tokens(level, max_tokens, model.max_output_tokens.get()).0
+            budget_thinking_tokens(level, max_tokens, output_limit(model, options)).0
         }
         _ => max_tokens,
+    }
+}
+
+fn output_limit(model: &Model, options: &StreamOptions) -> u64 {
+    match (model.max_output_tokens.get(), options.reply_cap) {
+        (limit, None) => limit,
+        (0, Some(cap)) => cap.get(),
+        (limit, Some(cap)) => limit.min(cap.get()),
     }
 }
 
@@ -1009,7 +1017,7 @@ fn request_max_tokens(model: &Model, options: &StreamOptions, is_oauth: bool) ->
     } else {
         super::effective_max_output_tokens(model, options)
     };
-    match model.max_output_tokens.get() {
+    match output_limit(model, options) {
         0 => requested,
         limit => requested.min(limit),
     }
@@ -3195,6 +3203,35 @@ mod tests {
             let body = body(id, &off);
             assert!(body.get("thinking").is_none(), "{id}: {body}");
         }
+    }
+
+    #[test]
+    fn a_reply_cap_bounds_the_whole_request_and_keeps_the_thinking_budget_under_it() {
+        let cap = StreamOptions {
+            reply_cap: Some(TokenCount::new(12_000)),
+            thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+        let haiku = catalogue_model("claude-haiku-4-5");
+        for is_oauth in [true, false] {
+            let body = build_request_body(&haiku, &None, &[], &[], &cap, is_oauth);
+            assert_eq!(body.max_tokens, 12_000, "oauth={is_oauth}");
+            let Some(ThinkingConfig::Enabled { budget_tokens, .. }) = body.thinking else {
+                panic!("haiku 4.5 keeps budget thinking");
+            };
+            assert!(budget_tokens < body.max_tokens, "{budget_tokens}");
+            assert_eq!(sent_max_tokens(&haiku, &cap, is_oauth), body.max_tokens);
+        }
+
+        let adaptive = build_request_body(
+            &catalogue_model("claude-haiku-5-5"),
+            &None,
+            &[],
+            &[],
+            &cap,
+            true,
+        );
+        assert_eq!(adaptive.max_tokens, 12_000);
     }
 
     #[test]

@@ -312,11 +312,11 @@ impl SessionRuntime {
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.oauth_account = oauth_account;
-        let reply = mush_ai::providers::reply_budget(&model, &call_options);
+        let next_prompt = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let transform = build_context_transform(
             target,
             self.auto_compact.clone(),
-            config.compaction.leaving_room_for(reply),
+            config.compaction,
             model.compaction_window(),
             registry.clone(),
             context_tokens_shared.clone(),
@@ -329,6 +329,7 @@ impl SessionRuntime {
                 notes: self.notes.clone(),
                 task: self.conversation.task_brief(),
             },
+            next_prompt.clone(),
         );
 
         let steering = build_steering_callback(steering_queue.clone());
@@ -364,6 +365,7 @@ impl SessionRuntime {
                     follow_up,
                     transform: Some(transform),
                     confirm,
+                    prompt_tokens: Some(prompt_tokens_from(next_prompt)),
                 }),
                 injections,
                 cancel: Some(cancel),
@@ -429,6 +431,7 @@ pub fn build_context_transform(
     cwd: std::path::PathBuf,
     live: Option<mush_session::compact::LiveContext>,
     after: AfterCompaction,
+    next_prompt: Arc<std::sync::atomic::AtomicU64>,
 ) -> mush_agent::TransformFn {
     let measured_len = Arc::new(std::sync::atomic::AtomicUsize::new(measured_len));
     let overhead = live
@@ -450,10 +453,8 @@ pub fn build_context_transform(
         let registry = registry.clone();
         let live = live.clone();
         let after = after.clone();
+        let next_prompt = next_prompt.clone();
         Box::pin(async move {
-            if !enabled {
-                return mush_agent::ContextTransformResult::Unchanged;
-            }
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
             let measured_tokens = mush_session::compact::compaction_tokens(
@@ -462,6 +463,11 @@ pub fn build_context_transform(
                 measured_len.load(std::sync::atomic::Ordering::Relaxed),
                 overhead,
             );
+            next_prompt.store(measured_tokens.get(), std::sync::atomic::Ordering::Relaxed);
+            if !enabled {
+                measured_len.store(owned_messages.len(), std::sync::atomic::Ordering::Relaxed);
+                return mush_agent::ContextTransformResult::Unchanged;
+            }
             let effective_compaction_tokens = match pressure {
                 mush_agent::ContextPressure::Normal => measured_tokens,
                 mush_agent::ContextPressure::Overflowed => measured_tokens.max(compaction_window),
@@ -506,12 +512,23 @@ pub fn build_context_transform(
                 compaction.messages.len(),
                 std::sync::atomic::Ordering::Relaxed,
             );
-            ctx_tokens.store(
-                estimated_tokens_u64(&compaction.messages),
+            let compacted = estimated_tokens_u64(&compaction.messages);
+            ctx_tokens.store(compacted, std::sync::atomic::Ordering::Relaxed);
+            next_prompt.store(
+                compacted.saturating_add(overhead as u64),
                 std::sync::atomic::Ordering::Relaxed,
             );
             mush_agent::ContextTransformResult::Compacted(compaction)
         })
+    })
+}
+
+pub fn prompt_tokens_from(
+    next_prompt: Arc<std::sync::atomic::AtomicU64>,
+) -> mush_agent::PromptTokensFn {
+    Box::new(move || {
+        let tokens = next_prompt.load(std::sync::atomic::Ordering::Relaxed);
+        (tokens > 0).then(|| TokenCount::new(tokens))
     })
 }
 
@@ -796,6 +813,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             AfterCompaction::default(),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
 
         let baseline: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
@@ -840,6 +858,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             AfterCompaction::default(),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
         let mut messages: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         messages.push(user_msg("x".repeat(16_000)));
@@ -894,6 +913,7 @@ mod tests {
                 kernel: Some(Arc::new(NamedKernel)),
                 ..AfterCompaction::default()
             },
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
         let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         grown.push(user_msg("x".repeat(16_000)));
@@ -955,6 +975,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             after,
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         )
     }
 
@@ -1077,6 +1098,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             AfterCompaction::default(),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
 
         match transform(&messages, mush_agent::ContextPressure::Normal).await {

@@ -539,13 +539,17 @@ mod focus_tests {
 }
 
 const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
+pub const MIN_HEADROOM_TOKENS: u64 = 5_000;
+pub const DEFAULT_THRESHOLD_PERCENT: u8 = 95;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CompactionSettings {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
+    pub threshold_percent: u8,
     #[serde(skip)]
-    pub reply_tokens: u64,
+    pub price_cliff: Option<u64>,
 }
 
 impl Default for CompactionSettings {
@@ -553,16 +557,22 @@ impl Default for CompactionSettings {
         Self {
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
-            reply_tokens: 0,
+            threshold_percent: DEFAULT_THRESHOLD_PERCENT,
+            price_cliff: None,
         }
     }
 }
 
+#[must_use]
+pub fn below_price_cliff(cliff_tokens: u64) -> u64 {
+    cliff_tokens.saturating_sub(MIN_HEADROOM_TOKENS.max(cliff_tokens / 10))
+}
+
 impl CompactionSettings {
     #[must_use]
-    pub fn leaving_room_for(self, reply_tokens: u64) -> Self {
+    pub fn under_price_cliff(self, cliff_tokens: Option<u64>) -> Self {
         Self {
-            reply_tokens,
+            price_cliff: cliff_tokens,
             ..self
         }
     }
@@ -570,16 +580,14 @@ impl CompactionSettings {
     #[must_use]
     pub fn threshold(&self, context_window: TokenCount) -> TokenCount {
         let window = context_window.get();
-        let threshold = if window >= 2 * self.reserve_tokens {
-            window - self.reserve_tokens
-        } else {
-            window * 95 / 100
-        };
-        if self.reply_tokens == 0 {
-            return TokenCount::new(threshold);
-        }
-        let room = window.saturating_sub(self.reply_tokens + self.reserve_tokens);
-        TokenCount::new(threshold.min(room.max(window / 2)))
+        let share = window * u64::from(self.threshold_percent.clamp(1, 100)) / 100;
+        let retained = self.keep_recent_tokens + self.reserve_tokens + 1;
+        let headroom = MIN_HEADROOM_TOKENS.min(window / 4);
+        let threshold = share.max(retained).min(window - headroom);
+        TokenCount::new(match self.price_cliff {
+            Some(cliff) => threshold.min(below_price_cliff(cliff)),
+            None => threshold,
+        })
     }
 
     #[must_use]
@@ -1829,33 +1837,52 @@ mod tests {
     }
 
     #[test]
-    fn the_threshold_leaves_the_reserve_free_above_small_windows() {
+    fn the_threshold_is_a_share_of_the_window_with_headroom_above_what_compaction_keeps() {
         let settings = CompactionSettings::default();
         assert_eq!(
             settings.threshold(TokenCount::new(200_000)),
-            TokenCount::new(200_000 - 16_384)
+            TokenCount::new(190_000)
         );
         assert_eq!(
-            settings.threshold(TokenCount::new(10_000)),
-            TokenCount::new(9_500)
+            settings.threshold(TokenCount::new(1_000_000)),
+            TokenCount::new(950_000)
         );
         assert_eq!(
             CompactionSettings {
-                reserve_tokens: 8_192,
+                threshold_percent: 90,
                 ..settings
             }
             .threshold(TokenCount::new(200_000)),
-            TokenCount::new(200_000 - 8_192)
+            TokenCount::new(180_000)
         );
-        assert!(needs_compaction_at(
-            TokenCount::new(184_000),
-            TokenCount::new(200_000),
-            &CompactionSettings::default(),
-        ));
+        assert_eq!(
+            settings.threshold(TokenCount::new(40_000)),
+            TokenCount::new(35_000),
+            "at least five thousand tokens stay free"
+        );
+        assert_eq!(
+            settings.threshold(TokenCount::new(10_000)),
+            TokenCount::new(7_500),
+            "a tiny window keeps a quarter free rather than five thousand"
+        );
+        assert_eq!(
+            CompactionSettings {
+                threshold_percent: 10,
+                ..settings
+            }
+            .threshold(TokenCount::new(200_000)),
+            TokenCount::new(20_000 + 16_384 + 1),
+            "a low share never sits under what one compaction keeps"
+        );
         assert!(!needs_compaction_at(
-            TokenCount::new(183_000),
+            TokenCount::new(100_000),
             TokenCount::new(200_000),
-            &CompactionSettings::default(),
+            &settings,
+        ));
+        assert!(needs_compaction_at(
+            TokenCount::new(190_001),
+            TokenCount::new(200_000),
+            &settings,
         ));
     }
 
@@ -1944,31 +1971,38 @@ mod tests {
     }
 
     #[test]
-    fn the_threshold_leaves_room_for_the_next_reply() {
-        let settings = CompactionSettings::default().leaving_room_for(32_000);
+    fn a_price_cliff_pins_the_threshold_under_it() {
+        let settings = CompactionSettings::default();
         assert_eq!(
-            settings.threshold(TokenCount::new(200_000)),
-            TokenCount::new(200_000 - 32_000 - 16_384)
+            settings
+                .under_price_cliff(Some(100_000))
+                .threshold(TokenCount::new(1_000_000)),
+            TokenCount::new(90_000)
         );
         assert_eq!(
-            settings.threshold(TokenCount::new(1_000_000)),
-            TokenCount::new(1_000_000 - 32_000 - 16_384)
+            settings
+                .under_price_cliff(Some(40_000))
+                .threshold(TokenCount::new(1_000_000)),
+            TokenCount::new(35_000),
+            "a small cliff keeps the five thousand token floor"
         );
         assert_eq!(
-            settings.threshold(TokenCount::new(40_000)),
-            TokenCount::new(20_000),
-            "a reply budget near the window still leaves half of it for the context"
+            settings
+                .under_price_cliff(Some(500_000))
+                .threshold(TokenCount::new(200_000)),
+            TokenCount::new(190_000),
+            "a cliff beyond the window changes nothing"
         );
-        assert!(needs_compaction_at(
-            TokenCount::new(160_000),
-            TokenCount::new(200_000),
-            &settings,
-        ));
-        assert!(!needs_compaction_at(
-            TokenCount::new(160_000),
-            TokenCount::new(200_000),
-            &CompactionSettings::default(),
-        ));
+        assert_eq!(
+            CompactionSettings {
+                threshold_percent: 5,
+                ..settings
+            }
+            .under_price_cliff(Some(100_000))
+            .threshold(TokenCount::new(1_000_000)),
+            TokenCount::new(50_000),
+            "the cliff only ever lowers the threshold"
+        );
     }
 
     #[test]
@@ -2007,7 +2041,7 @@ mod tests {
         messages.push(Message::Assistant(reply));
         messages.push(user_msg(&"x".repeat(1_000)));
         let window = TokenCount::new(10_000);
-        let reported = TokenCount::new(9_000);
+        let reported = TokenCount::new(7_000);
         let settings = CompactionSettings::default();
 
         assert_eq!(measured_len(&messages), 20);

@@ -3213,3 +3213,85 @@ async fn crossing_a_price_cliff_warns_once_in_the_transcript_and_in_the_state() 
     );
     assert_eq!(notices(&connection), 2);
 }
+
+type Sent = Arc<Mutex<Vec<(mush_ai::registry::LlmContext, mush_ai::types::StreamOptions)>>>;
+
+struct Recorder(Sent);
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for Recorder {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &mush_ai::types::Model,
+        context: &mush_ai::registry::LlmContext,
+        options: &mush_ai::types::StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((context.clone(), options.clone()));
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: "ok".into(),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Stop)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        Ok(Box::pin(futures::stream::iter([
+            mush_ai::stream::StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            },
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn a_200k_window_with_a_128k_reply_limit_does_not_compact_at_100k_and_the_reply_fits_the_room()
+ {
+    let sent: Sent = Arc::default();
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(Recorder(sent.clone())));
+    let mut model = crate::testing::echo_model();
+    model.id = "a-200k-model".into();
+    model.context_window = TokenCount::new(200_000);
+    model.effective_context_window = None;
+    model.max_output_tokens = TokenCount::new(128_000);
+    let mut config = crate::testing::echo_config(model.clone());
+    config.auto_compact = true;
+    let mut runtime =
+        SessionRuntime::new(ConversationState::from_messages(long_history(22, 20_000)));
+    runtime.model_id = model.id.to_string();
+    let mut connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        config,
+        mush_agent::AgentInjections::default(),
+    );
+
+    prompt(&mut connection, "carry on").await;
+
+    let sent = sent.lock().unwrap();
+    let prompt_tokens = mush_session::compact::estimate_tokens(&sent[0].0.messages) as u64;
+    assert!(
+        (100_000..190_000).contains(&prompt_tokens),
+        "the history should sit past the old 100k trigger: {prompt_tokens}"
+    );
+    assert!(
+        !sent.iter().any(|(context, _)| is_summary_request(context)),
+        "nothing compacts below 95% of the window"
+    );
+    let cap = sent[0].1.reply_cap.expect("the reply was fitted").get();
+    assert!(
+        cap < 128_000 && cap + prompt_tokens <= 200_000 + 1_000,
+        "cap {cap} for a {prompt_tokens} token prompt"
+    );
+}

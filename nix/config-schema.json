@@ -414,6 +414,13 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "threshold_percent": {
+          "default": 95,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -1180,7 +1187,8 @@
         "agent_callable": true,
         "enabled": true,
         "keep_recent_tokens": 20000,
-        "reserve_tokens": 16384
+        "reserve_tokens": 16384,
+        "threshold_percent": 95
       }
     },
     "compaction_model": {

@@ -52,6 +52,7 @@ pub struct CompactionConfig {
     pub enabled: bool,
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
+    pub threshold_percent: u8,
     pub agent_callable: bool,
 }
 
@@ -62,6 +63,7 @@ impl Default for CompactionConfig {
             enabled: true,
             reserve_tokens: defaults.reserve_tokens,
             keep_recent_tokens: defaults.keep_recent_tokens,
+            threshold_percent: defaults.threshold_percent,
             agent_callable: true,
         }
     }
@@ -73,6 +75,7 @@ impl CompactionConfig {
         mush_session::compact::CompactionSettings {
             reserve_tokens: self.reserve_tokens,
             keep_recent_tokens: self.keep_recent_tokens,
+            threshold_percent: self.threshold_percent,
             ..Default::default()
         }
     }
