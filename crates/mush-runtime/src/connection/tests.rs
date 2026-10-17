@@ -1643,10 +1643,13 @@ async fn a_resumed_kernel_names_what_came_back_once_before_the_first_request() {
     assert_eq!(
         first,
         [
-            "[python-state-restored]\n\nYour Python kernel state was revived from your \
-             previous session. These names are available again: df, helper.\nThese could \
-             not be restored and must be recreated if needed: sock.",
-            "carry on"
+            format!(
+                "[python-state-restored]\n\nYour Python kernel state was revived from your \
+                 previous session. These names are available again: df, helper.\nThese could \
+                 not be restored and must be recreated if needed: sock.\n{}",
+                mush_kernel::RESTART_RESETS
+            ),
+            "carry on".to_string()
         ]
     );
     let notices = |texts: &[String]| {
@@ -1672,10 +1675,13 @@ async fn a_failed_resume_restore_tells_the_model_the_kernel_starts_fresh() {
     assert_eq!(
         first,
         [
-            "[python-state-restored]\n\nYour previous Python kernel state could not be \
-             revived; the kernel is starting fresh, so re-create any variables, imports, or \
-             loaded data you need.",
-            "carry on"
+            format!(
+                "[python-state-restored]\n\nYour previous Python kernel state could not be \
+                 revived; the kernel is starting fresh, so re-create any variables, imports, or \
+                 loaded data you need.\n{}",
+                mush_kernel::RESTART_RESETS
+            ),
+            "carry on".to_string()
         ]
     );
     assert_eq!(status, "python state could not be restored");

@@ -1670,6 +1670,7 @@ fn worker_config(
             Some(child_factory(seed)),
             artifacts.as_ref().map(|dir| dir.join("subagents.json")),
         );
+        family.set_idle_release(Some(setup.client.cfg.kernel.idle_release()));
         let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
             .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
         if !cli.no_session {

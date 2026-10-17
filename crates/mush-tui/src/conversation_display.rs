@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_kernel_restore_notice_stays_out_of_the_transcript() {
-        let notice = mush_runtime::kernel_notice::restored(&Err("kernel exited".into())).unwrap();
+        let notice = mush_runtime::kernel_notice::restored(&Err("kernel exited".into()));
         let mut app = app();
 
         rebuild_display(&mut app, &[notice, user_message("hello")]);

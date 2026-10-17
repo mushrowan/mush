@@ -33,6 +33,7 @@ const STOPPED_REASON: &str = "Stopped by the user";
 const TICK: Duration = Duration::from_millis(50);
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const HIBERNATE_AFTER: Duration = Duration::from_secs(30 * 60);
+const RELEASE_POLL: Duration = Duration::from_secs(1);
 
 pub type ChildId = String;
 
@@ -256,7 +257,10 @@ struct Live {
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
     compaction: Compaction,
+    kernel: Option<KernelHandle>,
 }
+
+type KernelHandle = std::sync::Weak<dyn mush_kernel::KernelState>;
 
 pub const CHILD_INTERRUPTED: &str = "The parent session restarted while this agent was working. \
 The saved transcript was recovered, but unfinished model, tool, bash or child-agent work was not \
@@ -422,6 +426,35 @@ pub struct AgentView {
     pub awaiting_confirmation: Option<String>,
     #[serde(default)]
     pub children_running: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<ChildKernel>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildKernel {
+    pub live: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_bytes: Option<u64>,
+}
+
+fn kernel_view(kernel: Option<&KernelHandle>) -> ChildKernel {
+    let Some(pid) = kernel
+        .and_then(std::sync::Weak::upgrade)
+        .and_then(|kernel| kernel.pid())
+    else {
+        return ChildKernel::default();
+    };
+    let memory = mush_kernel::process::memory(pid);
+    ChildKernel {
+        live: true,
+        pid: Some(pid),
+        rss_bytes: memory.map(|memory| memory.rss_bytes),
+        swap_bytes: memory.and_then(|memory| memory.swap_bytes),
+    }
 }
 
 struct Node {
@@ -438,6 +471,8 @@ struct Node {
     cancel_reason: Option<String>,
     compaction: Compaction,
     overflow_report: OverflowReport,
+    kernel: Option<KernelHandle>,
+    quiet_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,6 +595,7 @@ pub struct Family {
     persist_scheduled: std::sync::atomic::AtomicBool,
     revision: std::sync::atomic::AtomicU64,
     max_depth: std::sync::atomic::AtomicU32,
+    idle_release_ms: std::sync::atomic::AtomicU64,
     waking: tokio::sync::Mutex<()>,
 }
 
@@ -596,6 +632,8 @@ fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
                 cancel_reason: None,
                 compaction: Compaction::Off,
                 overflow_report: OverflowReport::Unreported,
+                kernel: None,
+                quiet_since: None,
             };
             (node.summary.id.clone(), node)
         })
@@ -632,6 +670,7 @@ impl Family {
             persist_scheduled: std::sync::atomic::AtomicBool::new(false),
             revision: std::sync::atomic::AtomicU64::new(0),
             max_depth: std::sync::atomic::AtomicU32::new(max_depth),
+            idle_release_ms: std::sync::atomic::AtomicU64::new(0),
             waking: tokio::sync::Mutex::new(()),
         })
     }
@@ -644,6 +683,25 @@ impl Family {
     pub fn set_max_depth(&self, max_depth: u32) {
         self.max_depth
             .store(max_depth, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_idle_release(&self, after: Option<Duration>) {
+        let millis = after.map_or(0, |after| {
+            u64::try_from(after.as_millis()).unwrap_or(u64::MAX).max(1)
+        });
+        self.idle_release_ms
+            .store(millis, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn idle_release(&self) -> Option<Duration> {
+        match self
+            .idle_release_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            millis => Some(Duration::from_millis(millis)),
+        }
     }
 
     pub fn root_inbox(&self) -> AgentInbox {
@@ -793,6 +851,26 @@ impl Family {
 
     #[must_use]
     pub fn roster(&self, caller: &Identity) -> Vec<AgentView> {
+        let mut views = self.roster_views(caller);
+        let kernels: Vec<Option<Option<KernelHandle>>> = {
+            let inner = self.lock();
+            views
+                .iter()
+                .map(|view| {
+                    view.rlm_child_id
+                        .as_ref()
+                        .and_then(|id| inner.children.get(id))
+                        .map(|node| node.kernel.clone())
+                })
+                .collect()
+        };
+        for (view, kernel) in views.iter_mut().zip(kernels) {
+            view.kernel = kernel.map(|kernel| kernel_view(kernel.as_ref()));
+        }
+        views
+    }
+
+    fn roster_views(&self, caller: &Identity) -> Vec<AgentView> {
         let inner = self.lock();
         let mut views = Vec::new();
         match &caller.id {
@@ -1085,6 +1163,8 @@ impl Family {
                 cancel_reason: None,
                 compaction: live.compaction,
                 overflow_report: OverflowReport::Unreported,
+                kernel: live.kernel,
+                quiet_since: None,
             },
         );
         drop(inner);
@@ -1104,6 +1184,7 @@ impl Family {
             Compaction::Off
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let kernel = parts.config.kernel_state.as_ref().map(Arc::downgrade);
         let mut connection = parts.config.connect(&parts.tools, &parts.registry);
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
         connection.attach_agent_inbox(inbox_rx);
@@ -1125,6 +1206,7 @@ impl Family {
             shutdown: shutdown_tx,
             task,
             compaction,
+            kernel,
         }
     }
 
@@ -1207,6 +1289,8 @@ impl Family {
             node.shutdown = Some(live.shutdown);
             node.task = Some(live.task);
             node.compaction = live.compaction;
+            node.kernel = live.kernel;
+            node.quiet_since = Some(Instant::now());
             node.rearm_exit_notice();
             node.awaiting_quiet = false;
             node.cancel_reason = None;
@@ -1216,6 +1300,30 @@ impl Family {
         }
         self.persist();
         Ok(())
+    }
+
+    fn kernel_release_due(&self, id: &str) -> bool {
+        let Some(after) = self.idle_release() else {
+            return false;
+        };
+        let inner = self.lock();
+        inner.children.get(id).is_some_and(|node| {
+            node.inbox.is_some()
+                && matches!(
+                    node.summary.status,
+                    ChildStatus::Idle | ChildStatus::Failed | ChildStatus::Cancelled
+                )
+                && node
+                    .quiet_since
+                    .is_some_and(|since| since.elapsed() >= after)
+                && !subtree_busy(&inner, id)
+        })
+    }
+
+    #[must_use]
+    pub fn kernel_status(&self, id: &str) -> Option<ChildKernel> {
+        let kernel = self.lock().children.get(id)?.kernel.clone();
+        Some(kernel_view(kernel.as_ref()))
     }
 
     fn update(&self, id: &str, apply: impl FnOnce(&mut ChildSummary)) {
@@ -1240,6 +1348,11 @@ impl Family {
                 node.summary.idle_since = now;
             }
             let was_settled = was.settled();
+            match (was_settled, node.summary.status.settled()) {
+                (false, true) => node.quiet_since = Some(Instant::now()),
+                (_, false) => node.quiet_since = None,
+                (true, true) => {}
+            }
             (!was_settled && node.summary.status.settled())
                 .then(|| node.summary.parent.clone())
                 .flatten()
@@ -2111,6 +2224,7 @@ fn root_view(inner: &Inner, relationship: &str, observable: bool) -> AgentView {
         tool_running: None,
         awaiting_confirmation: None,
         children_running: running_children(inner, &None),
+        kernel: None,
     }
 }
 
@@ -2131,6 +2245,7 @@ fn view_of(inner: &Inner, node: &Node, relationship: &str, observable: bool) -> 
         tool_running: summary.tool_running.clone(),
         awaiting_confirmation: summary.awaiting_confirmation.clone(),
         children_running,
+        kernel: None,
     }
 }
 
@@ -2232,8 +2347,13 @@ async fn drive_child(
     }
     let mut shutdown = shutdown;
     let mut closing = false;
+    let mut release_retry = Instant::now();
     loop {
         connection.start_pending().await;
+        if !closing && Instant::now() >= release_retry && family.kernel_release_due(&id) {
+            connection.release_idle_kernel().await;
+            release_retry = Instant::now() + RELEASE_POLL;
+        }
         tokio::select! {
             _ = &mut shutdown, if !closing => {
                 closing = true;
@@ -4957,5 +5077,437 @@ mod tests {
         assert!(settled.tool_running.is_none());
         assert!(settled.awaiting_confirmation.is_none());
         assert!(!settled.streaming);
+    }
+
+    #[derive(Default)]
+    struct FakeKernel {
+        pid: StdMutex<Option<u32>>,
+        live_pid: StdMutex<Option<u32>>,
+        background: std::sync::atomic::AtomicBool,
+        releases: std::sync::atomic::AtomicUsize,
+        restores: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeKernel {
+        fn live(pid: u32) -> Arc<Self> {
+            let kernel = Self::default();
+            *kernel.pid.lock().unwrap() = Some(pid);
+            *kernel.live_pid.lock().unwrap() = Some(pid);
+            Arc::new(kernel)
+        }
+
+        fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn set_background(&self, running: bool) {
+            self.background
+                .store(running, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl mush_kernel::KernelState for FakeKernel {
+        async fn restore_from(
+            &self,
+            path: &std::path::Path,
+        ) -> Option<Result<mush_kernel::RestoreReport, String>> {
+            if !path.is_file() {
+                return None;
+            }
+            self.restores
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.live_pid.lock().unwrap() = *self.pid.lock().unwrap();
+            Some(Ok(mush_kernel::RestoreReport {
+                restored: vec!["df".into()],
+                failed: vec!["sock".into()],
+            }))
+        }
+
+        fn background_work(&self) -> bool {
+            self.background.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn pid(&self) -> Option<u32> {
+            *self.live_pid.lock().unwrap()
+        }
+
+        async fn release(&self) -> mush_kernel::Release {
+            if self.background_work() {
+                return mush_kernel::Release::Busy;
+            }
+            let Some(pid) = *self.live_pid.lock().unwrap() else {
+                return mush_kernel::Release::NotRunning;
+            };
+            if mush_kernel::process::has_children(pid) != Some(false) {
+                return mush_kernel::Release::Busy;
+            }
+            self.releases
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.live_pid.lock().unwrap() = None;
+            mush_kernel::Release::Released(mush_kernel::SnapshotReport::default())
+        }
+    }
+
+    fn kernel_factory(
+        requests: Requests,
+        kernels: Arc<StdMutex<Vec<Arc<FakeKernel>>>>,
+        scheduler: Option<Arc<crate::schedule::Scheduler>>,
+    ) -> ChildFactory {
+        let inner = echo_factory(requests, "on it");
+        Arc::new(move |spec: ChildSpec, family: Arc<Family>| {
+            let inner = Arc::clone(&inner);
+            let kernels = Arc::clone(&kernels);
+            let scheduler = scheduler.clone();
+            Box::pin(async move {
+                let mut parts = inner(spec, family).await?;
+                let kernel = {
+                    let mut kernels = kernels.lock().unwrap();
+                    if kernels.len() > 1 {
+                        kernels.remove(0)
+                    } else {
+                        Arc::clone(&kernels[0])
+                    }
+                };
+                parts.config.kernel_state = Some(kernel);
+                parts.config.scheduler = scheduler;
+                Ok(parts)
+            })
+        })
+    }
+
+    fn releasing_family(
+        requests: Requests,
+        kernels: Vec<Arc<FakeKernel>>,
+        scheduler: Option<Arc<crate::schedule::Scheduler>>,
+    ) -> Arc<Family> {
+        let family = Family::new(
+            Identity::root("root"),
+            "root-session".into(),
+            3,
+            Some(kernel_factory(
+                requests,
+                Arc::new(StdMutex::new(kernels)),
+                scheduler,
+            )),
+            None,
+        );
+        family.set_idle_release(Some(Duration::from_millis(100)));
+        family
+    }
+
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap()
+    }
+
+    async fn kernel_live_after(family: &Family, id: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if !family.kernel_status(id).unwrap().live {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        family.kernel_status(id).unwrap().live
+    }
+
+    fn request_texts(requests: &Requests) -> Vec<Vec<String>> {
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                request
+                    .messages
+                    .iter()
+                    .map(|message| match message {
+                        Message::User(user) => user.text(),
+                        Message::Event(event) => event.content.clone(),
+                        _ => String::new(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_idle_childs_kernel_is_released_after_the_ttl_and_a_message_revives_it_first() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut process = sleeper();
+        let kernel = FakeKernel::live(process.id());
+        let family = releasing_family(Arc::clone(&requests), vec![Arc::clone(&kernel)], None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "scout".into(), None, None, &family)
+            .await
+            .unwrap();
+        let child = settle(&family, &root).await.remove(0);
+        let state = mush_session::SessionStore::kernel_state_path(
+            &mush_ai::types::SessionId::from(child.session_id.as_str()),
+        );
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, b"state").unwrap();
+
+        assert!(!kernel_live_after(&family, &child.id, Duration::from_secs(5)).await);
+        assert_eq!(FakeKernel::count(&kernel.releases), 1);
+        assert_eq!(FakeKernel::count(&kernel.restores), 0);
+        assert_eq!(family.children_of(&root)[0].status, ChildStatus::Idle);
+
+        let receipt = family
+            .send_message(&root, "child", Some("scout"), "one more thing", &family)
+            .await
+            .unwrap();
+        assert_eq!(receipt.delivery_status, Receipt::Delivered);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while requests.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        settle(&family, &root).await;
+        assert_eq!(FakeKernel::count(&kernel.restores), 1);
+        let texts = request_texts(&requests);
+        let woken = &texts[1];
+        let notice = woken
+            .iter()
+            .position(|text| text.starts_with("[python-state-restored]"))
+            .unwrap_or_else(|| panic!("{woken:?}"));
+        let message = woken
+            .iter()
+            .position(|text| text.ends_with("one more thing"))
+            .unwrap_or_else(|| panic!("{woken:?}"));
+        assert!(notice > message, "{woken:?}");
+        assert!(woken[notice].contains("df") && woken[notice].contains("sock"));
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_child_with_a_running_background_job_keeps_its_kernel_until_the_job_ends() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut process = sleeper();
+        let kernel = FakeKernel::live(process.id());
+        kernel.set_background(true);
+        let family = releasing_family(requests, vec![Arc::clone(&kernel)], None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "builder".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+
+        assert!(kernel_live_after(&family, &id, Duration::from_millis(800)).await);
+        assert_eq!(FakeKernel::count(&kernel.releases), 0);
+
+        kernel.set_background(false);
+        assert!(!kernel_live_after(&family, &id, Duration::from_secs(5)).await);
+        assert_eq!(FakeKernel::count(&kernel.releases), 1);
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_child_whose_kernel_has_child_processes_keeps_it() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut parent = std::process::Command::new("bash")
+            .args(["-c", "sleep 60 & wait"])
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while mush_kernel::process::has_children(parent.id()) != Some(true) {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let kernel = FakeKernel::live(parent.id());
+        let family = releasing_family(requests, vec![Arc::clone(&kernel)], None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "spawner".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+
+        assert!(kernel_live_after(&family, &id, Duration::from_millis(800)).await);
+        assert_eq!(FakeKernel::count(&kernel.releases), 0);
+        let _ = std::process::Command::new("pkill")
+            .args(["-P", &parent.id().to_string()])
+            .status();
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_child_with_a_live_heartbeat_keeps_its_kernel() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut process = sleeper();
+        let kernel = FakeKernel::live(process.id());
+        let scheduler = Arc::new(crate::schedule::Scheduler::new(None));
+        scheduler
+            .apply(crate::schedule::ScheduleCommand::Add {
+                expression: "every 1h".into(),
+                prompt: "check in".into(),
+                label: None,
+                source: crate::schedule::JobSource::RlmHeartbeat,
+            })
+            .unwrap();
+        let family = releasing_family(
+            requests,
+            vec![Arc::clone(&kernel)],
+            Some(Arc::clone(&scheduler)),
+        );
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "watcher".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+        assert!(kernel_live_after(&family, &id, Duration::from_millis(800)).await);
+
+        let job = scheduler.jobs()[0].id.clone();
+        scheduler
+            .apply(crate::schedule::ScheduleCommand::Cancel(job))
+            .unwrap();
+        assert!(!kernel_live_after(&family, &id, Duration::from_secs(5)).await);
+        assert_eq!(FakeKernel::count(&kernel.releases), 1);
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    fn stalling_factory(
+        release: Arc<tokio::sync::Notify>,
+        stalled_depth: u32,
+        kernels: Arc<StdMutex<Vec<Arc<FakeKernel>>>>,
+        pid: u32,
+    ) -> ChildFactory {
+        let echo = echo_factory(Arc::new(StdMutex::new(Vec::new())), "done");
+        Arc::new(move |spec: ChildSpec, family: Arc<Family>| {
+            let release = Arc::clone(&release);
+            let kernels = Arc::clone(&kernels);
+            let echo = Arc::clone(&echo);
+            Box::pin(async move {
+                let depth = spec.depth;
+                let mut parts = echo(spec, family).await?;
+                if depth == stalled_depth {
+                    let mut registry = ApiRegistry::new();
+                    registry.register(Box::new(crate::testing::Stall { release }));
+                    parts.registry = registry;
+                }
+                let kernel = FakeKernel::live(pid);
+                kernels.lock().unwrap().push(Arc::clone(&kernel));
+                parts.config.kernel_state = Some(kernel);
+                Ok(parts)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_child_in_a_turn_or_with_a_running_child_keeps_its_kernel() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut process = sleeper();
+        let kernels = Arc::new(StdMutex::new(Vec::new()));
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            3,
+            Some(stalling_factory(
+                Arc::clone(&release),
+                2,
+                Arc::clone(&kernels),
+                process.id(),
+            )),
+            None,
+        );
+        family.set_idle_release(Some(Duration::from_millis(50)));
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "lead".into(), "lead".into(), None, None, &family)
+            .await
+            .unwrap();
+        let lead = Identity {
+            id: Some(family.children_of(&root)[0].id.clone()),
+            name: "lead".into(),
+            depth: 1,
+        };
+        let lead_id = lead.id.clone().unwrap();
+        family
+            .spawn(&lead, "dig".into(), "digger".into(), None, None, &family)
+            .await
+            .unwrap();
+        let digger_id = family.children_of(&lead)[0].id.clone();
+
+        assert!(kernel_live_after(&family, &digger_id, Duration::from_millis(800)).await);
+        assert_eq!(family.children_of(&lead)[0].status, ChildStatus::Running);
+        assert!(kernel_live_after(&family, &lead_id, Duration::from_millis(100)).await);
+        let (lead_kernel, digger_kernel) = {
+            let kernels = kernels.lock().unwrap();
+            (Arc::clone(&kernels[0]), Arc::clone(&kernels[1]))
+        };
+        assert_eq!(FakeKernel::count(&lead_kernel.releases), 0);
+        assert_eq!(FakeKernel::count(&digger_kernel.releases), 0);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !family.children_of(&lead)[0].status.settled() {
+            assert!(Instant::now() < deadline);
+            release.notify_one();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!kernel_live_after(&family, &lead_id, Duration::from_secs(5)).await);
+        assert_eq!(FakeKernel::count(&lead_kernel.releases), 1);
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_subagents_and_the_roster_show_kernel_liveness_and_memory() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut process = sleeper();
+        let kernel = FakeKernel::live(process.id());
+        kernel.set_background(true);
+        let family = releasing_family(requests, vec![Arc::clone(&kernel)], None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "scout".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+        let handler = RlmHandler::new(Arc::clone(&family), root.clone());
+        let listed = || async {
+            mush_kernel::HostRequestHandler::handle(
+                &handler,
+                "rlm.list_subagents",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap()[0]
+                .clone()
+        };
+
+        let live = listed().await;
+        assert_eq!(live["kernel"]["live"], true);
+        assert_eq!(live["kernel"]["pid"], process.id());
+        assert!(live["kernel"]["rss_bytes"].as_u64().unwrap() > 0);
+        let roster = family.roster(&root);
+        let view = roster
+            .iter()
+            .find(|view| view.rlm_child_id.as_deref() == Some(id.as_str()))
+            .unwrap();
+        assert_eq!(view.kernel.as_ref().unwrap().pid, Some(process.id()));
+
+        kernel.set_background(false);
+        assert!(!kernel_live_after(&family, &id, Duration::from_secs(5)).await);
+        assert_eq!(
+            listed().await["kernel"],
+            serde_json::json!({ "live": false })
+        );
+        process.kill().unwrap();
+        process.wait().unwrap();
     }
 }

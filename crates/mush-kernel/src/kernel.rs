@@ -438,6 +438,11 @@ impl Kernel {
         Ok(SnapshotReport {
             saved: names(&extra, "saved"),
             skipped: names(&extra, "skipped"),
+            background_tasks: extra
+                .get("tasks")
+                .and_then(Value::as_u64)
+                .and_then(|tasks| usize::try_from(tasks).ok())
+                .unwrap_or(0),
         })
     }
 
@@ -559,6 +564,7 @@ impl Drop for InterruptOnDrop {
 pub struct SnapshotReport {
     pub saved: Vec<String>,
     pub skipped: Vec<String>,
+    pub background_tasks: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -570,14 +576,15 @@ pub struct RestoreReport {
 pub const RESTORED_TAG: &str = "[python-state-restored]";
 
 #[must_use]
-pub fn restore_notice_text(outcome: &Result<RestoreReport, String>) -> Option<String> {
+pub fn restore_notice_text(outcome: &Result<RestoreReport, String>) -> String {
     let (restored, failed): (&[String], &[String]) = match outcome {
-        Ok(report) if report.restored.is_empty() && report.failed.is_empty() => return None,
         Ok(report) => (&report.restored, &report.failed),
         Err(_) => (&[], &[]),
     };
     let mut lines = vec![RESTORED_TAG.to_string(), String::new()];
-    if restored.is_empty() {
+    if restored.is_empty() && failed.is_empty() && outcome.is_ok() {
+        lines.push("Your Python kernel was restarted with no saved names to revive.".to_string());
+    } else if restored.is_empty() {
         lines.push(
             "Your previous Python kernel state could not be revived; the kernel is starting \
              fresh, so re-create any variables, imports, or loaded data you need."
@@ -596,8 +603,12 @@ pub fn restore_notice_text(outcome: &Result<RestoreReport, String>) -> Option<St
             failed.join(", ")
         ));
     }
-    Some(lines.join("\n"))
+    lines.push(RESTART_RESETS.to_string());
+    lines.join("\n")
 }
+
+pub const RESTART_RESETS: &str = "The working directory and environment variables were reset to \
+the session defaults; re-apply any os.chdir(...) or os.environ[...] changes you still need.";
 
 fn names(extra: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
     extra

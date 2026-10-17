@@ -591,6 +591,79 @@ impl InProcessConnection {
             .is_some_and(|kernel| kernel.background_work())
     }
 
+    fn schedule_live(&self) -> bool {
+        self.scheduler.as_ref().is_some_and(|scheduler| {
+            scheduler.jobs().iter().any(|job| {
+                matches!(
+                    job.status,
+                    crate::schedule::JobStatus::Active | crate::schedule::JobStatus::Paused
+                )
+            })
+        })
+    }
+
+    fn goal_live(&self) -> bool {
+        self.goal
+            .as_ref()
+            .and_then(|goal| goal.get())
+            .is_some_and(|goal| goal.status != crate::goal::GoalStatus::Complete)
+    }
+
+    async fn parked(&self) -> bool {
+        !self.closed
+            && self.idle().await
+            && self.deferred_deliveries.is_empty()
+            && self.deferred_jobs.is_empty()
+            && !self.runtime.kernel_restore_pending()
+            && self.runtime.kernel_release.is_none()
+            && self.side_questions.is_empty()
+            && self.branch_summary.is_none()
+            && self.refine.is_none()
+            && self.auto_review.is_none()
+            && self.gate_task.is_none()
+            && self.title.is_none()
+            && self.busy_reply.is_none()
+            && !self.schedule_live()
+            && !self.goal_live()
+            && !self.children_running()
+    }
+
+    pub async fn release_idle_kernel(&mut self) {
+        let Some(kernel) = self.runtime.kernel_state.clone() else {
+            return;
+        };
+        if self.runtime.kernel_released
+            || self.runtime.kernel_release.is_some()
+            || kernel.pid().is_none()
+            || !self.parked().await
+        {
+            return;
+        }
+        self.runtime.kernel_release = Some(tokio::spawn(async move { kernel.release().await }));
+    }
+
+    fn settle_kernel_release(&mut self) {
+        let Some(outcome) = take_finished(&mut self.runtime.kernel_release) else {
+            return;
+        };
+        match outcome {
+            Ok(mush_kernel::Release::Released(report)) => {
+                tracing::info!(
+                    session = %self.runtime.session_id,
+                    saved = report.saved.len(),
+                    skipped = report.skipped.len(),
+                    "released an idle kernel"
+                );
+                self.runtime.kernel_released = true;
+            }
+            Ok(mush_kernel::Release::Failed(error)) => {
+                tracing::warn!(%error, "kept an idle kernel whose state could not be saved");
+            }
+            Ok(mush_kernel::Release::NotRunning | mush_kernel::Release::Busy) => {}
+            Err(error) => tracing::warn!(%error, "the kernel release task failed"),
+        }
+    }
+
     async fn continue_goal(&mut self) {
         let Some(goal) = self.goal.clone() else {
             return;
@@ -1261,8 +1334,16 @@ impl InProcessConnection {
     }
 
     async fn start_pending_prompt(&mut self) -> bool {
+        self.settle_kernel_release();
+        if self.runtime.kernel_released
+            && self.runtime.pending_prompt.is_some()
+            && !self.turn_active()
+        {
+            self.runtime.begin_kernel_restore();
+        }
         if self.turn_active()
             || self.compaction.is_some()
+            || self.runtime.kernel_release.is_some()
             || self.runtime.kernel_restore_pending()
             || self.runtime.pending_prompt.is_none()
         {

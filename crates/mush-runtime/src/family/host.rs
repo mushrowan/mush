@@ -77,8 +77,13 @@ fn to_json(value: impl serde::Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-fn summaries(children: &[ChildSummary]) -> Value {
-    Value::Array(children.iter().map(summary_json).collect())
+fn summaries(family: &Family, children: &[ChildSummary]) -> Value {
+    Value::Array(
+        children
+            .iter()
+            .map(|child| summary_json(family, child))
+            .collect(),
+    )
 }
 
 impl RlmHandler {
@@ -196,7 +201,7 @@ impl RlmHandler {
             .family
             .collect(&self.identity, payload.targets(), timeout)
             .await?;
-        Ok(summaries(&children))
+        Ok(summaries(&self.family, &children))
     }
 
     fn set_paused(&self, payload: Payload<'_>, pausing: bool) -> Result<Value, HostError> {
@@ -208,7 +213,7 @@ impl RlmHandler {
         let children =
             self.family
                 .set_paused(&self.identity, &payload.targets(), pause.as_ref())?;
-        Ok(summaries(&children))
+        Ok(summaries(&self.family, &children))
     }
 
     fn progress_note(&self, payload: Payload<'_>) -> Result<Value, HostError> {
@@ -658,10 +663,13 @@ fn requested_thinking(level: Option<String>) -> Result<Option<ThinkingLevel>, Ho
     }
 }
 
-fn summary_json(child: &ChildSummary) -> Value {
+fn summary_json(family: &Family, child: &ChildSummary) -> Value {
     let mut json = to_json(child);
     if let Some(fields) = json.as_object_mut() {
         fields.insert("state".into(), json!(child.activity(Timestamp::now())));
+        if let Some(kernel) = family.kernel_status(&child.id) {
+            fields.insert("kernel".into(), json!(kernel));
+        }
     }
     json
 }
@@ -672,7 +680,10 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
         let payload = Payload(&payload);
         match kind {
             "rlm.spawn" => self.spawn(payload).await,
-            "rlm.list_subagents" => Ok(summaries(&self.family.children_of(&self.identity))),
+            "rlm.list_subagents" => Ok(summaries(
+                &self.family,
+                &self.family.children_of(&self.identity),
+            )),
             "rlm.collect" => self.collect(payload).await,
             "rlm.pause_subagents" => self.set_paused(payload, true),
             "rlm.resume_subagents" => self.set_paused(payload, false),
@@ -681,7 +692,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
                     .family
                     .delete(&self.identity, &payload.required("target")?)
                     .await?;
-                Ok(summary_json(&child))
+                Ok(summary_json(&self.family, &child))
             }
             "rlm.progress_note" => self.progress_note(payload),
             "agent_message.send" => self.send_message(payload).await,

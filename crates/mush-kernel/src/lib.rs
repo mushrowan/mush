@@ -1,13 +1,15 @@
 #![feature(sync_nonpoison, nonpoison_mutex)]
 
 pub mod kernel;
+pub mod process;
 pub mod protocol;
 pub mod python;
 pub mod venv;
 
 pub use kernel::{
     Attachment, CellError, CellOutput, DEFAULT_MAX_OUTPUT_CHARS, HostError, HostRequestHandler,
-    Kernel, KernelConfig, NoHost, RESTORED_TAG, RestoreReport, SnapshotReport, restore_notice_text,
+    Kernel, KernelConfig, NoHost, RESTART_RESETS, RESTORED_TAG, RestoreReport, SnapshotReport,
+    restore_notice_text,
 };
 pub use protocol::{Event, Request};
 pub use python::PythonPlan;
@@ -30,6 +32,20 @@ pub trait KernelState: Send + Sync {
         false
     }
     fn set_model(&self, _id: &str, _accepts_images: bool) {}
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    async fn release(&self) -> Release {
+        Release::NotRunning
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Release {
+    Released(SnapshotReport),
+    NotRunning,
+    Busy,
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

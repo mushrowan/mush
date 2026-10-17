@@ -36,6 +36,14 @@ pub struct KernelConfig {
     pub python: Option<std::path::PathBuf>,
     pub managed: bool,
     pub extra_packages: Vec<String>,
+    pub idle_release_minutes: u64,
+}
+
+impl KernelConfig {
+    #[must_use]
+    pub fn idle_release(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.idle_release_minutes.saturating_mul(60))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
@@ -186,6 +194,7 @@ impl Default for KernelConfig {
             python: None,
             managed: true,
             extra_packages: Vec::new(),
+            idle_release_minutes: 30,
         }
     }
 }
@@ -817,6 +826,16 @@ mod tests {
         assert!(config.confirm_tools);
         assert!(!config.kernel.managed);
         assert_eq!(config.max_turns, Some(7));
+    }
+
+    #[test]
+    fn an_idle_subagent_keeps_its_kernel_for_thirty_minutes_unless_configured() {
+        assert_eq!(
+            Config::default().kernel.idle_release(),
+            std::time::Duration::from_secs(30 * 60)
+        );
+        let config = overridden(&["kernel.idle_release_minutes=0"]).unwrap();
+        assert_eq!(config.kernel.idle_release(), std::time::Duration::ZERO);
     }
 
     #[test]

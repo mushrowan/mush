@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -381,6 +381,8 @@ pub struct IpythonTool {
     snapshot_generation: Arc<AtomicU64>,
     snapshot_debounce: Duration,
     model: Mutex<Option<(String, bool)>>,
+    live_pid: Mutex<Option<u32>>,
+    released: AtomicBool,
 }
 
 const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -416,6 +418,8 @@ impl IpythonTool {
             snapshot_generation: Arc::new(AtomicU64::new(0)),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
             model: Mutex::new(None),
+            live_pid: Mutex::new(None),
+            released: AtomicBool::new(false),
         }
     }
 
@@ -494,6 +498,14 @@ impl IpythonTool {
     }
 
     fn journal_kernel(&self, pid: Option<u32>, active: bool) {
+        {
+            let mut live = lock(&self.live_pid);
+            if active {
+                *live = pid;
+            } else if pid.is_none() || *live == pid {
+                *live = None;
+            }
+        }
         if let Some(host) = &self.mush_host {
             host.jobs().journal(pid, active);
         }
@@ -557,6 +569,15 @@ impl IpythonTool {
                 Kernel::start_with_progress(self.kernel_config(), self.host.clone(), &progress)
                     .await?;
             self.journal_kernel(kernel.pid(), true);
+            if self.released.swap(false, Ordering::SeqCst)
+                && let Some(path) = self.latest_snapshot()
+            {
+                let outcome = kernel
+                    .restore(&path)
+                    .await
+                    .map_err(|error| error.to_string());
+                *lock(&self.repair_notice) = Some(mush_kernel::restore_notice_text(&outcome));
+            }
             *slot = Some(kernel);
         }
         slot.as_ref().ok_or(KernelError::Pipes)
@@ -638,7 +659,7 @@ impl IpythonTool {
                 .restore(&path)
                 .await
                 .map_err(|error| error.to_string());
-            *lock(&self.repair_notice) = mush_kernel::restore_notice_text(&outcome);
+            *lock(&self.repair_notice) = Some(mush_kernel::restore_notice_text(&outcome));
             if kernel.protocol_failure().is_some() {
                 tracing::warn!("kernel broke its protocol again while restoring, starting fresh");
                 self.journal_kernel(kernel.pid(), false);
@@ -692,6 +713,7 @@ impl mush_kernel::KernelState for IpythonTool {
             return None;
         }
         let mut slot = self.kernel.lock().await;
+        self.released.store(false, Ordering::SeqCst);
         let outcome = match self.started(&mut slot, &|_| {}).await {
             Ok(kernel) => kernel.restore(path).await,
             Err(error) => Err(error),
@@ -715,6 +737,7 @@ impl mush_kernel::KernelState for IpythonTool {
 
     async fn reset(&self) {
         self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
+        self.released.store(false, Ordering::SeqCst);
         if let Some(kernel) = self.kernel.lock().await.take() {
             self.retire(kernel).await;
         }
@@ -722,6 +745,7 @@ impl mush_kernel::KernelState for IpythonTool {
 
     fn attach_session(&self, session: mush_kernel::KernelSession) {
         self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
+        self.released.store(false, Ordering::SeqCst);
         *lock(&self.session) = Some(session);
     }
 
@@ -733,6 +757,54 @@ impl mush_kernel::KernelState for IpythonTool {
         self.mush_host
             .as_ref()
             .is_some_and(|host| host.jobs().any_running())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        *lock(&self.live_pid)
+    }
+
+    async fn release(&self) -> mush_kernel::Release {
+        use mush_kernel::Release;
+        let Some(path) = lock(&self.session)
+            .as_ref()
+            .map(|session| session.state_path.clone())
+        else {
+            return Release::Failed("the kernel has no session to save its state in".into());
+        };
+        let Ok(mut slot) = self.kernel.try_lock() else {
+            return Release::Busy;
+        };
+        let Some(kernel) = slot.as_ref() else {
+            return Release::NotRunning;
+        };
+        let has_children = || {
+            kernel
+                .pid()
+                .is_some_and(|pid| mush_kernel::process::has_children(pid) != Some(false))
+        };
+        if kernel.busy() || self.background_work() || has_children() {
+            return Release::Busy;
+        }
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return Release::Failed(error.to_string());
+        }
+        let report = match kernel.snapshot(&path, None).await {
+            Ok(report) => report,
+            Err(error) => return Release::Failed(error.to_string()),
+        };
+        if report.background_tasks > 0 || self.background_work() {
+            return Release::Busy;
+        }
+        self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
+        self.released.store(true, Ordering::SeqCst);
+        let Some(kernel) = slot.take() else {
+            return Release::NotRunning;
+        };
+        drop(slot);
+        self.retire(kernel).await;
+        Release::Released(report)
     }
 }
 
@@ -1638,8 +1710,11 @@ mod tests {
         assert!(text.ends_with(KERNEL_REPAIR_NOTICE), "{text}");
         assert_eq!(
             extract_text(&after),
-            "[python-state-restored]\n\nYour Python kernel state was revived from your previous \
-             session. These names are available again: kept.\n\n(42, False)"
+            format!(
+                "[python-state-restored]\n\nYour Python kernel state was revived from your \
+                 previous session. These names are available again: kept.\n{}\n\n(42, False)",
+                mush_kernel::RESTART_RESETS
+            )
         );
         tool.shutdown().await;
     }
@@ -1686,9 +1761,12 @@ mod tests {
         assert!(after.outcome.is_success(), "{}", extract_text(&after));
         assert_eq!(
             extract_text(&after),
-            "[python-state-restored]\n\nYour previous Python kernel state could not be revived; \
-             the kernel is starting fresh, so re-create any variables, imports, or loaded data \
-             you need.\n\nFalse"
+            format!(
+                "[python-state-restored]\n\nYour previous Python kernel state could not be \
+                 revived; the kernel is starting fresh, so re-create any variables, imports, or \
+                 loaded data you need.\n{}\n\nFalse",
+                mush_kernel::RESTART_RESETS
+            )
         );
         tool.shutdown().await;
     }
@@ -1815,6 +1893,100 @@ mod tests {
 
         assert!(report.is_none());
         assert!(!dir.path().join("x.pickle").exists());
+    }
+
+    fn attached_tool(dir: &Path) -> IpythonTool {
+        use mush_kernel::KernelState;
+        let tool = tool(dir);
+        tool.attach_session(mush_kernel::KernelSession {
+            session_dir: dir.join("artifacts"),
+            state_path: dir.join("artifacts/kernel-state.pickle"),
+            depth: 0,
+            max_depth: 1,
+        });
+        tool
+    }
+
+    #[tokio::test]
+    async fn releasing_an_idle_kernel_saves_its_state_and_the_next_cell_revives_it() {
+        use mush_kernel::{KernelState, Release};
+        let dir = tempfile::tempdir().unwrap();
+        let tool = attached_tool(dir.path());
+        let _ = tool
+            .execute(json!({ "code": "kept = 41\ngen = (i for i in range(3))" }))
+            .await;
+        let pid = tool.pid().unwrap();
+
+        let Release::Released(report) = tool.release().await else {
+            panic!("the idle kernel was kept");
+        };
+        assert_eq!(report.saved, ["kept"]);
+        assert_eq!(report.skipped, ["gen"]);
+        assert_eq!(tool.pid(), None);
+        assert_eq!(mush_kernel::process::memory(pid), None);
+        assert_eq!(tool.release().await, Release::NotRunning);
+
+        let revived = tool.execute(json!({ "code": "kept + 1" })).await;
+        assert_eq!(
+            extract_text(&revived),
+            format!(
+                "[python-state-restored]\n\nYour Python kernel state was revived from your \
+                 previous session. These names are available again: kept.\nThese could not be \
+                 restored and must be recreated if needed: gen.\n{}\n\n42",
+                mush_kernel::RESTART_RESETS
+            )
+        );
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_kernel_with_a_background_job_or_a_child_process_is_not_released() {
+        use mush_kernel::{KernelState, Release};
+        let dir = tempfile::tempdir().unwrap();
+        let tool = attached_tool(dir.path());
+
+        let _ = tool
+            .execute(json!({ "code": "h = bash('sleep 30')" }))
+            .await;
+        assert_eq!(tool.release().await, Release::Busy);
+        let _ = tool.execute(json!({ "code": "await h.kill()" })).await;
+
+        let _ = tool
+            .execute(json!({ "code": "import subprocess\np = subprocess.Popen(['sleep', '30'])" }))
+            .await;
+        assert_eq!(tool.release().await, Release::Busy);
+        let _ = tool.execute(json!({ "code": "p.kill()\np.wait()" })).await;
+
+        let _ = tool
+            .execute(json!({ "code": "watcher = asyncio.ensure_future(asyncio.sleep(30))" }))
+            .await;
+        assert_eq!(tool.release().await, Release::Busy);
+        let _ = tool.execute(json!({ "code": "watcher.cancel()" })).await;
+
+        assert!(matches!(tool.release().await, Release::Released(_)));
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_kernel_running_a_cell_is_not_released() {
+        use mush_kernel::{KernelState, Release};
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Arc::new(attached_tool(dir.path()));
+        let _ = tool.execute(json!({ "code": "1" })).await;
+        let running = tokio::spawn({
+            let tool = Arc::clone(&tool);
+            async move {
+                tool.execute(json!({ "code": "await asyncio.sleep(1)" }))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(tool.release().await, Release::Busy);
+        let _ = tokio::time::timeout(Duration::from_secs(10), running)
+            .await
+            .unwrap();
+        tool.shutdown().await;
     }
 
     #[test]

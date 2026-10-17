@@ -4,8 +4,8 @@ pub const RESTORED_TAG: &str = mush_kernel::RESTORED_TAG;
 pub const PERSISTED_TAG: &str = "[python-state]";
 
 #[must_use]
-pub fn restored(outcome: &Result<mush_kernel::RestoreReport, String>) -> Option<Message> {
-    mush_kernel::restore_notice_text(outcome).map(notice)
+pub fn restored(outcome: &Result<mush_kernel::RestoreReport, String>) -> Message {
+    notice(mush_kernel::restore_notice_text(outcome))
 }
 
 #[must_use]
@@ -61,15 +61,19 @@ mod tests {
         }
     }
 
+    const RESET: &str = mush_kernel::RESTART_RESETS;
+
     #[test]
     fn a_revived_state_names_what_came_back_and_what_did_not() {
-        let message = restored(&Ok(report(&["a", "b"], &["sock"]))).unwrap();
+        let message = restored(&Ok(report(&["a", "b"], &["sock"])));
 
         assert_eq!(
             text(&message),
-            "[python-state-restored]\n\nYour Python kernel state was revived from your previous \
-             session. These names are available again: a, b.\nThese could not be restored and \
-             must be recreated if needed: sock."
+            format!(
+                "[python-state-restored]\n\nYour Python kernel state was revived from your \
+                 previous session. These names are available again: a, b.\nThese could not be \
+                 restored and must be recreated if needed: sock.\n{RESET}"
+            )
         );
         assert!(is_notice(&text(&message)));
         assert!(!is_notice("[python-state-restoredx]\n"));
@@ -78,22 +82,29 @@ mod tests {
 
     #[test]
     fn a_failed_restore_says_the_kernel_starts_fresh() {
-        let failed = restored(&Err("kernel exited".into())).unwrap();
-        let nothing_back = restored(&Ok(report(&[], &["sock"]))).unwrap();
+        let failed = restored(&Err("kernel exited".into()));
+        let nothing_back = restored(&Ok(report(&[], &["sock"])));
 
         assert_eq!(
             text(&failed),
-            "[python-state-restored]\n\nYour previous Python kernel state could not be revived; \
-             the kernel is starting fresh, so re-create any variables, imports, or loaded data \
-             you need."
+            format!(
+                "[python-state-restored]\n\nYour previous Python kernel state could not be \
+                 revived; the kernel is starting fresh, so re-create any variables, imports, or \
+                 loaded data you need.\n{RESET}"
+            )
         );
-        assert!(text(&nothing_back).starts_with(&text(&failed)));
-        assert!(text(&nothing_back).ends_with("recreated if needed: sock."));
+        assert!(text(&nothing_back).ends_with(&format!("recreated if needed: sock.\n{RESET}")));
     }
 
     #[test]
-    fn an_empty_snapshot_needs_no_notice() {
-        assert_eq!(restored(&Ok(report(&[], &[]))), None);
+    fn an_empty_snapshot_still_says_the_kernel_restarted() {
+        assert_eq!(
+            text(&restored(&Ok(report(&[], &[])))),
+            format!(
+                "[python-state-restored]\n\nYour Python kernel was restarted with no saved \
+                 names to revive.\n{RESET}"
+            )
+        );
     }
 
     #[test]

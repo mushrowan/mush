@@ -231,6 +231,8 @@ pub struct SessionRuntime {
     pub paused: Option<mush_session::Pause>,
     pub notes: Option<Arc<crate::notes::Notes>>,
     pub(crate) kernel_restore: Option<KernelRestore>,
+    pub(crate) kernel_release: Option<tokio::task::JoinHandle<mush_kernel::Release>>,
+    pub(crate) kernel_released: bool,
     pub(crate) harness_digest_pending: bool,
     streaming: Option<mush_ai::stream::PartialMessage>,
     last_save: std::time::Instant,
@@ -304,6 +306,8 @@ impl SessionRuntime {
             paused: None,
             notes: None,
             kernel_restore: None,
+            kernel_release: None,
+            kernel_released: false,
             harness_digest_pending: true,
             streaming: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
@@ -313,6 +317,7 @@ impl SessionRuntime {
 
     pub fn begin_kernel_restore(&mut self) {
         self.kernel_restore = None;
+        self.kernel_released = false;
         let Some(kernel) = self.kernel_state.clone() else {
             return;
         };
@@ -351,8 +356,9 @@ impl SessionRuntime {
             }
             Some(Ok(_)) | None => "python state restored",
         };
-        if let Some(message) = outcome.as_ref().and_then(crate::kernel_notice::restored) {
-            self.conversation.append_message(message);
+        if let Some(outcome) = &outcome {
+            self.conversation
+                .append_message(crate::kernel_notice::restored(outcome));
         }
         Some(status.to_string())
     }

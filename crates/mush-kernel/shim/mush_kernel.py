@@ -973,6 +973,7 @@ def _finish_locked(cell_id: str) -> None:
 
 
 _SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
+_SKIPPED_ENTRY = "__skipped__"
 
 
 class _SnapshotSizeLimitExceeded(Exception):
@@ -1038,13 +1039,17 @@ def _snapshot(request: dict) -> None:
         total += len(blob)
         payload[name] = blob
         saved.append(name)
+    if skipped:
+        payload[_SKIPPED_ENTRY] = skipped
     try:
         with open(request["path"], "wb") as handle:
             pickle.dump(payload, handle)
     except OSError as exc:
         emit({"type": "done", "id": cell_id, "ok": False, "reason": str(exc)})
         return
-    emit({"type": "done", "id": cell_id, "ok": True, "saved": saved, "skipped": skipped})
+    current = asyncio.current_task()
+    tasks = sum(1 for task in asyncio.all_tasks() if task is not current and not task.done())
+    emit({"type": "done", "id": cell_id, "ok": True, "saved": saved, "skipped": skipped, "tasks": tasks})
 
 
 def _restore(request: dict) -> None:
@@ -1058,8 +1063,11 @@ def _restore(request: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         emit({"type": "done", "id": cell_id, "ok": False, "reason": str(exc)})
         return
+    if not isinstance(payload, dict):
+        emit({"type": "done", "id": cell_id, "ok": False, "reason": "the snapshot is not a dict"})
+        return
     loads = getattr(_serializer(), "loads", pickle.loads)
-    restored, failed = [], []
+    restored, failed = [], [name for name in payload.pop(_SKIPPED_ENTRY, []) if isinstance(name, str)]
     for name, blob in payload.items():
         try:
             _namespace[name] = loads(blob)

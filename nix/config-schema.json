@@ -516,6 +516,12 @@
           },
           "type": "array"
         },
+        "idle_release_minutes": {
+          "default": 30,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "managed": {
           "default": true,
           "type": "boolean"
@@ -1239,6 +1245,7 @@
       "$ref": "#/$defs/KernelConfig",
       "default": {
         "extra_packages": [],
+        "idle_release_minutes": 30,
         "managed": true,
         "python": null
       }
