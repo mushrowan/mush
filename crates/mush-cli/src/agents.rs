@@ -553,6 +553,7 @@ mod tests {
         SessionMeta {
             paused: None,
             rlm_max_depth: None,
+            spawn_view: None,
             id: mush_ai::types::SessionId::from(id.to_string()),
             title: None,
             model_id: "gpt-5.4".into(),

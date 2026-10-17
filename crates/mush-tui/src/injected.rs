@@ -86,6 +86,9 @@ impl Injected {
                 Body::Shown,
             ));
         }
+        if tag == mush_runtime::models::MODELS_NOTICE_TAG.trim_matches(['[', ']']) {
+            return Some(Self::labelled("models", body, Body::Shown));
+        }
         if tag == mush_runtime::price_cliff::PRICE_CLIFF_TAG.trim_matches(['[', ']']) {
             return Some(Self::new(
                 vec![HeaderPart::Alert("\u{26a0} price cliff".into())],
@@ -312,6 +315,14 @@ mod tests {
             claimed_source: claimed.into(),
             peer_uid: 1000,
         })
+    }
+
+    #[test]
+    fn a_models_notice_shows_as_a_labelled_row() {
+        let row =
+            Injected::from_text("[models]\n\nhaiku now resolves to claude-haiku-5-5.").unwrap();
+        assert_eq!(header(&row), "models");
+        assert_eq!(row.shown, Body::Shown);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub struct SessionSnapshot {
     pub accounts: mush_ai::types::SessionAccounts,
     pub paused: Option<mush_session::Pause>,
     pub rlm_max_depth: Option<u32>,
+    pub spawn_view: Option<std::collections::BTreeMap<String, String>>,
 }
 
 pub struct PaneSnapshot {

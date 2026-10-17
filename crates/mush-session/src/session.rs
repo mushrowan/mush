@@ -23,6 +23,8 @@ pub struct SessionMeta {
     pub paused: Option<Pause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_view: Option<std::collections::BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Lifecycle::is_live")]
     pub lifecycle: Lifecycle,
 }
@@ -104,6 +106,7 @@ impl Session {
                 accounts: SessionAccounts::default(),
                 paused: None,
                 rlm_max_depth: None,
+                spawn_view: None,
                 lifecycle: Lifecycle::Live,
             },
             conversation: ConversationState::new(),

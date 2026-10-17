@@ -3352,3 +3352,65 @@ async fn the_price_cliff_pin_follows_the_settings_command() {
         mush_session::compact::PriceCliffPin::All
     );
 }
+
+#[tokio::test]
+async fn a_spawning_session_hears_once_when_what_a_child_gets_changes() {
+    let _dirs = crate::testing::IsolatedDirs::acquire().await;
+    let (mut connection, requests) = connection();
+    let family = crate::family::Family::new(
+        crate::family::Identity::root("root"),
+        "root".into(),
+        2,
+        None,
+        None,
+    );
+    connection.set_family(Some(Arc::clone(&family)));
+    connection.runtime.rlm_max_depth = 2;
+    let notices = |requests: &crate::testing::Requests| {
+        requests
+            .lock()
+            .unwrap()
+            .last()
+            .map(|request| {
+                request
+                    .messages
+                    .iter()
+                    .filter(|message| {
+                        matches!(message, Message::User(user)
+                            if user.text().starts_with(crate::models::MODELS_NOTICE_TAG))
+                    })
+                    .count()
+            })
+            .unwrap_or_default()
+    };
+
+    prompt(&mut connection, "one").await;
+    assert_eq!(
+        notices(&requests),
+        0,
+        "the first turn only records the baseline"
+    );
+    assert!(connection.runtime.spawn_view.is_some());
+
+    prompt(&mut connection, "two").await;
+    assert_eq!(notices(&requests), 0, "nothing changed");
+
+    connection
+        .runtime
+        .models
+        .set_default_subagent(Some("haiku".into()));
+    prompt(&mut connection, "three").await;
+    assert_eq!(notices(&requests), 1);
+    let last = requests.lock().unwrap().last().unwrap().messages.clone();
+    assert!(
+        last.iter()
+            .any(|message| matches!(message, Message::User(user)
+        if user.text().contains("children now default to haiku")))
+    );
+
+    prompt(&mut connection, "four").await;
+    assert_eq!(notices(&requests), 1, "the notice is not repeated");
+
+    let saved = connection.runtime.snapshot().spawn_view.unwrap();
+    assert_eq!(saved["default child model"], "haiku");
+}

@@ -44,6 +44,7 @@ pub struct WorkerConfig {
     pub subagent_model: Option<String>,
     pub accounts: mush_ai::types::SessionAccounts,
     pub paused: Option<mush_session::Pause>,
+    pub spawn_view: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl WorkerConfig {
@@ -82,6 +83,7 @@ impl WorkerConfig {
             subagent_model: None,
             accounts: mush_ai::types::SessionAccounts::default(),
             paused: None,
+            spawn_view: None,
         }
     }
 
@@ -107,6 +109,7 @@ impl WorkerConfig {
         self.models.set_subagent(self.subagent_model.clone());
         runtime.subagent_model = self.subagent_model;
         runtime.paused = self.paused;
+        runtime.spawn_view = self.spawn_view;
         runtime.models = self.models;
         runtime.set_accounts(self.accounts);
         runtime.system_prompt = self.system_prompt;

@@ -399,6 +399,99 @@ fn family_name(requested: &str) -> Option<String> {
     (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphabetic())).then(|| name.to_string())
 }
 
+pub const MODELS_NOTICE_TAG: &str = "[models]";
+const DEFAULT_CHILD: &str = "default child model";
+const PREFERRED: &str = "preferred providers";
+const SIGNED_IN: &str = "providers with credentials";
+
+#[must_use]
+pub fn spawn_view(
+    catalogue: &[mush_ai::discovery::MergedModel],
+    preferred: &[String],
+    own_provider: Option<&str>,
+    default_child: Option<&str>,
+    signed_in: impl Fn(&mush_ai::types::Provider) -> bool,
+) -> std::collections::BTreeMap<String, String> {
+    let mut providers = std::collections::BTreeMap::new();
+    for entry in catalogue {
+        providers
+            .entry(entry.model.provider.to_string())
+            .or_insert_with(|| signed_in(&entry.model.provider));
+    }
+    let usable = |provider: &mush_ai::types::Provider| {
+        providers
+            .get(&provider.to_string())
+            .copied()
+            .unwrap_or(false)
+    };
+    let order: Vec<String> = if preferred.is_empty() {
+        own_provider.map(str::to_string).into_iter().collect()
+    } else {
+        preferred.to_vec()
+    };
+    let mut view = std::collections::BTreeMap::new();
+    if let Some(child) = default_child {
+        view.insert(DEFAULT_CHILD.to_string(), child.to_string());
+    }
+    if !preferred.is_empty() {
+        view.insert(PREFERRED.to_string(), preferred.join(", "));
+    }
+    let signed: Vec<&str> = providers
+        .iter()
+        .filter(|(_, usable)| **usable)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    view.insert(SIGNED_IN.to_string(), signed.join(", "));
+    let families: std::collections::BTreeSet<String> = catalogue
+        .iter()
+        .filter(|entry| order.contains(&entry.model.provider.to_string()))
+        .filter(|entry| usable(&entry.model.provider))
+        .filter_map(|entry| lineage(entry).map(|lineage| lineage.family))
+        .collect();
+    for family in families {
+        if let Some(newest) = newest_of_family(catalogue, &family, &order, usable) {
+            view.insert(
+                family,
+                format!("{}/{}", newest.model.provider, newest.model.id),
+            );
+        }
+    }
+    view
+}
+
+#[must_use]
+pub fn models_notice(
+    before: &std::collections::BTreeMap<String, String>,
+    after: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    let lines: Vec<String> = keys
+        .into_iter()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .map(|key| {
+            let now = after.get(key);
+            match (key.as_str(), now) {
+                (DEFAULT_CHILD, Some(model)) => format!("children now default to {model}"),
+                (DEFAULT_CHILD, None) => {
+                    "children now default to the model their parent runs".into()
+                }
+                (PREFERRED, Some(order)) => format!("preferred providers: {order}"),
+                (PREFERRED, None) => "no preferred providers".into(),
+                (SIGNED_IN, Some(list)) if list.is_empty() => "no provider has credentials".into(),
+                (SIGNED_IN, Some(list)) => format!("providers with credentials: {list}"),
+                (family, Some(model)) => format!("{family} now resolves to {model}"),
+                (family, None) => format!("{family} no longer resolves to a model"),
+            }
+        })
+        .collect();
+    (!lines.is_empty()).then(|| {
+        format!(
+            "{MODELS_NOTICE_TAG}\n\n{}. `await rlm.find_models(query)` lists what a child can run.",
+            lines.join("; ")
+        )
+    })
+}
+
 #[must_use]
 pub fn provider_order(
     preferred: Vec<String>,
@@ -733,6 +826,78 @@ mod tests {
         let mut with_line = listed("claude-x-1", Provider::Anthropic, ModelSource::Discovered);
         with_line.raw = Some(serde_json::json!({ "line": "Sonnet" }));
         assert_eq!(lineage(&with_line).unwrap().family, "sonnet");
+    }
+
+    #[test]
+    fn the_spawn_view_names_defaults_providers_and_what_each_family_resolves_to() {
+        let catalogue = catalogue();
+        let view = spawn_view(&catalogue, &[], Some("anthropic"), None, anthropic_only);
+        assert_eq!(view["providers with credentials"], "anthropic");
+        assert_eq!(view["haiku"], "anthropic/claude-haiku-5-5");
+        assert_eq!(view["opus"], "anthropic/claude-opus-5-5");
+        assert!(!view.contains_key("default child model"));
+        assert!(!view.contains_key("preferred providers"));
+
+        let everyone = |_: &mush_ai::types::Provider| true;
+        let routed = spawn_view(
+            &catalogue,
+            &["openrouter".to_string()],
+            Some("anthropic"),
+            Some("haiku"),
+            everyone,
+        );
+        assert_eq!(
+            routed["providers with credentials"],
+            "anthropic, openrouter"
+        );
+        assert_eq!(routed["preferred providers"], "openrouter");
+        assert_eq!(routed["default child model"], "haiku");
+        assert_eq!(
+            routed["haiku"], "anthropic/claude-haiku-5-5",
+            "the newest model wins even off the preferred provider"
+        );
+    }
+
+    #[test]
+    fn the_models_notice_lists_only_what_changed() {
+        let view = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect()
+        };
+        let before = view(&[
+            ("providers with credentials", "anthropic"),
+            ("haiku", "anthropic/claude-haiku-4-5"),
+            ("opus", "anthropic/claude-opus-5-5"),
+        ]);
+        assert_eq!(models_notice(&before, &before), None);
+
+        let after = view(&[
+            ("providers with credentials", "anthropic, openrouter"),
+            ("haiku", "anthropic/claude-haiku-5-5"),
+            ("opus", "anthropic/claude-opus-5-5"),
+            ("default child model", "haiku"),
+        ]);
+        let notice = models_notice(&before, &after).unwrap();
+        assert!(notice.starts_with("[models]\n\n"), "{notice}");
+        assert!(notice.contains("children now default to haiku"), "{notice}");
+        assert!(
+            notice.contains("haiku now resolves to anthropic/claude-haiku-5-5"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("providers with credentials: anthropic, openrouter"),
+            "{notice}"
+        );
+        assert!(!notice.contains("opus"), "{notice}");
+        assert!(notice.contains("rlm.find_models"), "{notice}");
+
+        let back = models_notice(&after, &before).unwrap();
+        assert!(
+            back.contains("children now default to the model their parent runs"),
+            "{back}"
+        );
     }
 
     #[test]

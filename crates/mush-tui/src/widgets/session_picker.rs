@@ -157,6 +157,7 @@ mod tests {
             accounts: Default::default(),
             paused: None,
             rlm_max_depth: None,
+            spawn_view: None,
             lifecycle: mush_session::Lifecycle::Live,
         }
     }

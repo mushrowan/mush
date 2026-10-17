@@ -1548,6 +1548,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 options.clone(),
             ));
             worker.turn.compaction.below_price_cliff = family.price_cliff_pin();
+            worker.spawn_view = session.meta.spawn_view.clone();
             worker.conversation = session.conversation.clone();
             worker.session_id = session.meta.id.clone();
             worker.title = Some(spec.name.clone());
@@ -1711,6 +1712,7 @@ fn worker_config(
     worker.subagent_model = session.meta.subagent_model.clone();
     worker.accounts = session.meta.accounts.clone();
     worker.paused = session.meta.paused.clone();
+    worker.spawn_view = session.meta.spawn_view.clone();
     if let Some(ipython) = &setup.ipython_tool {
         let root = mush_runtime::Identity::root(
             session
@@ -2010,6 +2012,7 @@ fn session_from_snapshot(snapshot: mush_tui::SessionSnapshot, cwd: &str) -> Sess
     session.meta.accounts = snapshot.accounts;
     session.meta.paused = snapshot.paused;
     session.meta.rlm_max_depth = snapshot.rlm_max_depth;
+    session.meta.spawn_view = snapshot.spawn_view;
     session.meta.message_count = session.conversation.context_len();
     session.panes = snapshot
         .panes
@@ -2123,6 +2126,7 @@ mod tests {
             subagent_model: None,
             accounts: Default::default(),
             rlm_max_depth: None,
+            spawn_view: None,
         }
     }
 

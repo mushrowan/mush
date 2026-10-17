@@ -283,6 +283,7 @@ impl SessionRuntime {
             paused: self.paused.clone(),
             rlm_max_depth: (self.rlm_max_depth_source == crate::session::RlmMaxDepthSource::Chat)
                 .then_some(self.rlm_max_depth),
+            spawn_view: self.spawn_view.clone(),
         }
     }
 

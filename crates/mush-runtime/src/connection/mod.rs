@@ -1384,6 +1384,7 @@ impl InProcessConnection {
         let Some(prompt) = self.runtime.pending_prompt.take() else {
             return false;
         };
+        self.note_spawn_view();
         let mut injections = self.injections.clone();
         injections.control_endpoint = self.runtime.control_endpoint();
         let deps = TurnDeps {
@@ -1518,6 +1519,42 @@ impl InProcessConnection {
             event,
             applied,
         })
+    }
+
+    fn note_spawn_view(&mut self) {
+        let family = self.family.clone().or_else(|| {
+            self.family_member
+                .as_ref()
+                .map(|(family, _)| family.clone())
+        });
+        let Some(family) = family else {
+            return;
+        };
+        if self.runtime.rlm_depth >= self.runtime.rlm_max_depth {
+            return;
+        }
+        let catalogue = mush_ai::discovery::shared_catalogue();
+        let config_api_keys = mush_ai::auth::load_config_api_keys();
+        let store = mush_ai::credentials::default_store();
+        let model = self.runtime.model(&self.config.default_model);
+        let view = crate::models::spawn_view(
+            &catalogue,
+            &family.preferred_providers(),
+            Some(&model.provider.to_string()),
+            self.runtime.models.for_child(None).as_deref(),
+            |provider| mush_ai::auth::has_credentials(provider, &config_api_keys, store.as_ref()),
+        );
+        if let Some(before) = &self.runtime.spawn_view
+            && let Some(notice) = crate::models::models_notice(before, &view)
+        {
+            self.runtime.conversation.append_message(Message::User(
+                mush_ai::types::UserMessage::builder()
+                    .content(mush_ai::types::UserContent::Text(notice))
+                    .timestamp_ms(mush_ai::types::Timestamp::now())
+                    .build(),
+            ));
+        }
+        self.runtime.spawn_view = Some(view);
     }
 
     fn note_price_cliff(&mut self, message: &mush_ai::types::AssistantMessage) {
