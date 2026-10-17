@@ -31,11 +31,16 @@ pub(super) fn render_cell(
 
     let has_code = expanded && !code.is_empty();
     if has_code {
+        let mut highlighted = style
+            .highlight
+            .then(|| crate::syntax::highlight_block(code, "py"))
+            .flatten()
+            .unwrap_or_default()
+            .into_iter();
         for (index, raw) in code.lines().enumerate() {
             let gutter = if index == 0 { CODE_GUTTER } else { INDENT };
-            let spans = style
-                .highlight
-                .then(|| crate::syntax::highlight_line(raw, "py"))
+            let spans = highlighted
+                .next()
                 .flatten()
                 .unwrap_or_else(|| vec![Span::styled(raw.to_string(), theme.code_block)]);
             push_gutter(lines, gutter, theme.dim, spans, width);

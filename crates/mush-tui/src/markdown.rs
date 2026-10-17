@@ -6,7 +6,6 @@ use crate::syntax::{SYNTAX_SET, code_theme, syntect_to_style};
 use crate::theme::Theme;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -20,8 +19,8 @@ const HORIZONTAL_RULE_WIDTH: usize = 80;
 const HIGHLIGHT_MEMO_ENTRIES: usize = 256;
 
 thread_local! {
-    static HIGHLIGHTED_BLOCKS: RefCell<HashMap<String, Vec<Line<'static>>>> =
-        RefCell::new(HashMap::new());
+    static HIGHLIGHTED_BLOCKS: RefCell<crate::syntax::Memo<Vec<Line<'static>>>> =
+        RefCell::new(crate::syntax::Memo::new(HIGHLIGHT_MEMO_ENTRIES));
 }
 
 #[cfg(test)]
@@ -590,7 +589,7 @@ fn highlight_code_block(
     ui_theme: &Theme,
 ) -> Vec<Line<'static>> {
     let key = highlight_memo_key(syntax, code_lines);
-    if let Some(lines) = HIGHLIGHTED_BLOCKS.with_borrow(|memo| memo.get(&key).cloned()) {
+    if let Some(lines) = HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| memo.get(&key)) {
         return lines;
     }
 
@@ -631,12 +630,7 @@ fn highlight_code_block(
         lines.push(Line::from(CODE_BLOCK_INDENT));
     }
     if !themed_fallback {
-        HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| {
-            if memo.len() >= HIGHLIGHT_MEMO_ENTRIES {
-                memo.clear();
-            }
-            memo.insert(key, lines.clone());
-        });
+        HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| memo.insert(key, lines.clone()));
     }
     lines
 }

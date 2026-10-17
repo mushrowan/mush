@@ -13,11 +13,53 @@ pub(crate) static SYNTAX_SET: LazyLock<SyntaxSet> =
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 const HIGHLIGHT_MEMO_LINES: usize = 4096;
+const HIGHLIGHT_MEMO_BLOCKS: usize = 256;
 const HIGHLIGHT_MEMO_MAX_LINE_BYTES: usize = 512;
 
+type Spans = Vec<Span<'static>>;
+
 thread_local! {
-    static HIGHLIGHTED_LINES: RefCell<HashMap<String, Option<Vec<Span<'static>>>>> =
-        RefCell::new(HashMap::new());
+    static HIGHLIGHTED_LINES: RefCell<Memo<Option<Spans>>> =
+        RefCell::new(Memo::new(HIGHLIGHT_MEMO_LINES));
+    static HIGHLIGHTED_BLOCKS: RefCell<Memo<Vec<Option<Spans>>>> =
+        RefCell::new(Memo::new(HIGHLIGHT_MEMO_BLOCKS));
+}
+
+pub(crate) struct Memo<V> {
+    young: HashMap<String, V>,
+    old: HashMap<String, V>,
+    capacity: usize,
+}
+
+impl<V: Clone> Memo<V> {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            young: HashMap::new(),
+            old: HashMap::new(),
+            capacity,
+        }
+    }
+
+    pub(crate) fn get(&mut self, key: &str) -> Option<V> {
+        if let Some(value) = self.young.get(key) {
+            return Some(value.clone());
+        }
+        let value = self.old.remove(key)?;
+        self.insert(key.to_string(), value.clone());
+        Some(value)
+    }
+
+    pub(crate) fn insert(&mut self, key: String, value: V) {
+        if self.young.len() >= self.capacity {
+            self.old = std::mem::take(&mut self.young);
+        }
+        self.young.insert(key, value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, key: &str) -> bool {
+        self.young.contains_key(key) || self.old.contains_key(key)
+    }
 }
 
 pub(crate) fn code_theme() -> &'static highlighting::Theme {
@@ -58,17 +100,42 @@ pub fn highlight_line(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
         return highlight_line_uncached(line, lang);
     }
     let key = format!("{lang}\0{line}");
-    if let Some(spans) = HIGHLIGHTED_LINES.with_borrow(|memo| memo.get(&key).cloned()) {
+    if let Some(spans) = HIGHLIGHTED_LINES.with_borrow_mut(|memo| memo.get(&key)) {
         return spans;
     }
     let spans = highlight_line_uncached(line, lang);
-    HIGHLIGHTED_LINES.with_borrow_mut(|memo| {
-        if memo.len() >= HIGHLIGHT_MEMO_LINES {
-            memo.clear();
-        }
-        memo.insert(key, spans.clone());
-    });
+    HIGHLIGHTED_LINES.with_borrow_mut(|memo| memo.insert(key, spans.clone()));
     spans
+}
+
+#[must_use]
+pub fn highlight_block(code: &str, lang: &str) -> Option<Vec<Option<Spans>>> {
+    let key = format!("{lang}\0{code}");
+    if let Some(lines) = HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| memo.get(&key)) {
+        return Some(lines);
+    }
+    let ps = &*SYNTAX_SET;
+    let syntax = ps.find_syntax_by_token(lang)?;
+    let mut highlighter = HighlightLines::new(syntax, code_theme());
+    let mut line_with_nl = String::new();
+    let lines: Vec<Option<Spans>> = code
+        .lines()
+        .map(|line| {
+            line_with_nl.clear();
+            line_with_nl.push_str(line);
+            line_with_nl.push('\n');
+            let ranges = highlighter.highlight_line(&line_with_nl, ps).ok()?;
+            let spans: Spans = ranges
+                .into_iter()
+                .map(|(style, text)| (style, text.trim_end_matches('\n')))
+                .filter(|(_, text)| !text.is_empty())
+                .map(|(style, text)| Span::styled(text.to_string(), syntect_to_style(style)))
+                .collect();
+            (!spans.is_empty()).then_some(spans)
+        })
+        .collect();
+    HIGHLIGHTED_BLOCKS.with_borrow_mut(|memo| memo.insert(key, lines.clone()));
+    Some(lines)
 }
 
 fn highlight_line_uncached(line: &str, lang: &str) -> Option<Vec<Span<'static>>> {
@@ -147,7 +214,44 @@ mod tests {
         let again = highlight_line("let x = 1;", "rs");
 
         assert_eq!(first, again);
-        assert!(HIGHLIGHTED_LINES.with_borrow(|memo| memo.contains_key("rs\0let x = 1;")));
+        assert!(HIGHLIGHTED_LINES.with_borrow(|memo| memo.contains("rs\0let x = 1;")));
+    }
+
+    #[test]
+    fn a_block_keeps_its_parser_state_across_lines() {
+        let code = "x = \"\"\"\nstill inside\n\"\"\"\ny = 1";
+        let lines = highlight_block(code, "py").expect("python highlights");
+        let alone = highlight_line("still inside", "py").expect("a line highlights");
+
+        assert_eq!(lines.len(), 4);
+        let inside = lines[1].as_ref().expect("the docstring line");
+        assert_eq!(
+            inside
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "still inside"
+        );
+        assert_ne!(
+            inside[0].style, alone[0].style,
+            "the string colour carries over"
+        );
+        assert_eq!(highlight_block(code, "py"), Some(lines));
+    }
+
+    #[test]
+    fn a_full_memo_keeps_what_was_used_recently() {
+        let mut memo = Memo::new(2);
+        memo.insert("a".into(), 1);
+        memo.insert("b".into(), 2);
+        memo.insert("c".into(), 3);
+        assert_eq!(memo.get("a"), Some(1));
+        memo.insert("d".into(), 4);
+        memo.insert("e".into(), 5);
+
+        assert_eq!(memo.get("a"), Some(1));
+        assert_eq!(memo.get("b"), None);
+        assert_eq!(memo.get("e"), Some(5));
     }
 
     #[test]
