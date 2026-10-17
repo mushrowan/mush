@@ -163,3 +163,59 @@ fn live_agents_complete_nothing_without_a_daemon() {
     }
     assert!(untouched(home.path()));
 }
+
+#[test]
+fn login_providers_and_models_complete_from_what_mush_knows() {
+    let home = crate::tempdir().unwrap();
+    let providers = complete(home.path(), &["mush", "login", ""]);
+    for (id, name) in mush_ai::oauth::list_providers() {
+        let expected = format!("{id}\t{name}");
+        assert!(
+            providers.lines().any(|line| line == expected),
+            "{providers}"
+        );
+    }
+    let models = complete(home.path(), &["mush", "--model", "claude-opus-4-7"]);
+    assert!(
+        models
+            .lines()
+            .any(|line| line.starts_with("claude-opus-4-7\t")),
+        "{models}"
+    );
+    assert!(untouched(home.path()));
+}
+
+#[test]
+fn account_labels_complete_from_the_stored_logins() {
+    let home = crate::tempdir().unwrap();
+    let mut store = mush_ai::oauth::CredentialStore::default();
+    store.insert(
+        "anthropic",
+        mush_ai::types::AccountLabel::parse("work").unwrap(),
+        mush_ai::oauth::OAuthCredentials {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: 0,
+            account_id: None,
+        },
+    );
+    std::fs::create_dir_all(home.path().join("config")).unwrap();
+    std::fs::write(
+        home.path().join("config/oauth.json"),
+        serde_json::to_string(&store).unwrap(),
+    )
+    .unwrap();
+
+    for words in [
+        ["mush", "accounts", "--default", ""],
+        ["mush", "logout", "--account", "w"],
+    ] {
+        let offered = complete(home.path(), &words);
+        assert!(
+            offered
+                .lines()
+                .any(|line| line == "work\tanthropic (default)"),
+            "{words:?}: {offered}"
+        );
+    }
+}

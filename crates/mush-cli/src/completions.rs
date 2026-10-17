@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,8 @@ use clap_complete::aot::{Bash, Elvish, Fish, Generator, Zsh};
 use clap_complete::engine::CompletionCandidate;
 use clap_complete::env::{self, EnvCompleter, Shells};
 use clap_complete_nushell::Nushell;
+use mush_ai::oauth::CredentialStore;
+use mush_ai::types::Model;
 use mush_daemon::WorkerDescriptor;
 use mush_runtime::{Job, JobStatus};
 use mush_session::SessionStore;
@@ -110,6 +113,28 @@ pub fn live_agents(current: &OsStr) -> Vec<CompletionCandidate> {
 
 pub fn live_agents_and_children(current: &OsStr) -> Vec<CompletionCandidate> {
     agent_candidates(&live(), &current.to_string_lossy(), true)
+}
+
+pub fn models(current: &OsStr) -> Vec<CompletionCandidate> {
+    model_candidates(
+        &mush_ai::discovery::merged_models(),
+        &current.to_string_lossy(),
+    )
+}
+
+pub fn login_providers(current: &OsStr) -> Vec<CompletionCandidate> {
+    let prefix = current.to_string_lossy();
+    mush_ai::oauth::list_providers()
+        .into_iter()
+        .filter(|(id, _)| id.starts_with(&*prefix))
+        .map(|(id, name)| CompletionCandidate::new(id).help(Some(name.into())))
+        .collect()
+}
+
+pub fn accounts(current: &OsStr) -> Vec<CompletionCandidate> {
+    mush_ai::oauth::load_credentials()
+        .map(|store| account_candidates(&store, &current.to_string_lossy()))
+        .unwrap_or_default()
 }
 
 pub fn scheduled_jobs(current: &OsStr) -> Vec<CompletionCandidate> {
@@ -229,9 +254,54 @@ fn job_candidates(
         .collect()
 }
 
+fn model_candidates(models: &[Model], prefix: &str) -> Vec<CompletionCandidate> {
+    let mut seen = HashSet::new();
+    models
+        .iter()
+        .filter(|model| model.id.as_str().starts_with(prefix) && seen.insert(model.id.as_str()))
+        .map(|model| {
+            CompletionCandidate::new(model.id.as_str())
+                .help(Some(model.provider.to_string().into()))
+        })
+        .collect()
+}
+
+fn account_candidates(store: &CredentialStore, prefix: &str) -> Vec<CompletionCandidate> {
+    let mut providers: Vec<&String> = store.providers.keys().collect();
+    providers.sort();
+    let mut labels: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for provider in providers {
+        let Some(accounts) = store.accounts(provider) else {
+            continue;
+        };
+        let default = accounts.default_label();
+        for label in accounts
+            .labels()
+            .filter(|label| label.as_str().starts_with(prefix))
+        {
+            labels
+                .entry(label.as_str())
+                .or_default()
+                .push(if Some(label) == default {
+                    format!("{provider} (default)")
+                } else {
+                    provider.clone()
+                });
+        }
+    }
+    labels
+        .into_iter()
+        .map(|(label, providers)| {
+            CompletionCandidate::new(label).help(Some(providers.join(", ").into()))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_ai::oauth::OAuthCredentials;
+    use mush_ai::types::{AccountLabel, Provider};
     use mush_daemon::ChildDescriptor;
     use mush_runtime::{JobSource, ScheduleCommand, Scheduler};
     use mush_session::{Lifecycle, Session};
@@ -398,5 +468,58 @@ mod tests {
         );
         assert_eq!(shown(&job_candidates(&worker, &jobs, &build)).len(), 1);
         assert!(jobs_at(&dir.path().join("absent.json")).is_empty());
+    }
+
+    #[test]
+    fn each_model_id_completes_once_with_the_provider_that_resolves_it() {
+        let catalogue = mush_ai::models::all_models();
+        let first = catalogue.first().unwrap().clone();
+        let mut twin = first.clone();
+        twin.provider = Provider::OpenRouter;
+        assert_eq!(
+            shown(&model_candidates(&[first.clone(), twin], "")),
+            [(first.id.as_str().to_owned(), first.provider.to_string())]
+        );
+
+        let distinct: HashSet<&str> = catalogue.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(model_candidates(&catalogue, "").len(), distinct.len());
+        assert!(
+            model_candidates(&catalogue, first.id.as_str())
+                .iter()
+                .all(|candidate| candidate
+                    .get_value()
+                    .to_string_lossy()
+                    .starts_with(first.id.as_str()))
+        );
+    }
+
+    #[test]
+    fn account_labels_complete_with_the_providers_that_hold_them() {
+        let creds = || OAuthCredentials {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_at: 0,
+            account_id: None,
+        };
+        let label = |name: &str| AccountLabel::parse(name).unwrap();
+        let mut store = CredentialStore::default();
+        store.insert("openai-codex", label("work"), creds());
+        store.insert("anthropic", label("work"), creds());
+        store.insert("anthropic", label("home"), creds());
+
+        assert_eq!(
+            shown(&account_candidates(&store, "")),
+            [
+                ("home".to_owned(), "anthropic".to_owned()),
+                (
+                    "work".to_owned(),
+                    "anthropic (default), openai-codex (default)".to_owned()
+                ),
+            ]
+        );
+        assert_eq!(
+            shown(&account_candidates(&store, "h")),
+            [("home".to_owned(), "anthropic".to_owned())]
+        );
     }
 }

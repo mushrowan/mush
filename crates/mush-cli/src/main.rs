@@ -53,7 +53,7 @@ struct Cli {
     #[arg(long, value_name = "ID", add = ArgValueCompleter::new(completions::saved_sessions))]
     fork: Option<String>,
 
-    #[arg(short, long)]
+    #[arg(short, long, add = ArgValueCompleter::new(completions::models))]
     model: Option<String>,
 
     #[arg(long)]
@@ -396,18 +396,21 @@ enum Command {
         json: bool,
     },
     Login {
+        #[arg(add = ArgValueCompleter::new(completions::login_providers))]
         provider: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completions::accounts))]
         account: Option<mush_ai::types::AccountLabel>,
     },
     Logout {
+        #[arg(add = ArgValueCompleter::new(completions::login_providers))]
         provider: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completions::accounts))]
         account: Option<mush_ai::types::AccountLabel>,
     },
     Accounts {
+        #[arg(add = ArgValueCompleter::new(completions::login_providers))]
         provider: Option<String>,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completions::accounts))]
         default: Option<mush_ai::types::AccountLabel>,
     },
     Models,
