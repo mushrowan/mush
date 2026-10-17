@@ -305,6 +305,13 @@ fn apply_command_event(
             session.app.push_event_message(&event);
             session.app.start_streaming();
         }
+        ClientEvent::PriceCliff(cliff) => {
+            if let Some(injected) = crate::injected::Injected::from_text(&cliff.notice()) {
+                session
+                    .app
+                    .push_injected(crate::display_types::MessageRole::Injected, injected);
+            }
+        }
         ClientEvent::UserInput {
             text,
             images,

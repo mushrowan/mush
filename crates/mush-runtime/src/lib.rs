@@ -14,6 +14,7 @@ pub mod kernel_notice;
 pub mod models;
 pub mod notes;
 mod persist;
+pub mod price_cliff;
 pub mod refine;
 pub mod schedule;
 pub mod session;

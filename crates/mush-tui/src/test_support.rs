@@ -26,7 +26,9 @@ pub(crate) fn header_text(message: &crate::app::DisplayMessage) -> Option<String
         row.header
             .iter()
             .map(|part| match part {
-                HeaderPart::Text(text) | HeaderPart::Who(text) => text.as_str(),
+                HeaderPart::Text(text) | HeaderPart::Who(text) | HeaderPart::Alert(text) => {
+                    text.as_str()
+                }
             })
             .collect()
     })

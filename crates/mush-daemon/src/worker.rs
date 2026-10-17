@@ -700,6 +700,7 @@ mod tests {
             cwd: None,
             sync: Default::default(),
             auto_compact: true,
+            price_cliff: None,
         }
     }
 

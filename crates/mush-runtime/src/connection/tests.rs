@@ -3087,3 +3087,129 @@ async fn auto_compaction_switches_off_and_on_for_the_running_session() {
     assert!(requests.lock().unwrap().iter().any(is_summary_request));
     assert_eq!(answered(&connection).as_deref(), Some("ok"));
 }
+
+struct PromptOf(Arc<std::sync::atomic::AtomicU64>);
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for PromptOf {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &mush_ai::types::Model,
+        _context: &mush_ai::registry::LlmContext,
+        _options: &mush_ai::types::StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        let prompt = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: "ok".into(),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Stop)
+            .usage(mush_ai::types::Usage {
+                input_tokens: TokenCount::new(1_000),
+                output_tokens: TokenCount::new(10),
+                cache_read_tokens: TokenCount::new(prompt - 1_000),
+                cache_write_tokens: TokenCount::ZERO,
+            })
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        Ok(Box::pin(futures::stream::iter([
+            mush_ai::stream::StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            },
+        ])))
+    }
+}
+
+#[tokio::test]
+async fn crossing_a_price_cliff_warns_once_in_the_transcript_and_in_the_state() {
+    let _dirs = crate::testing::IsolatedDirs::acquire().await;
+    let prompt_size = Arc::new(std::sync::atomic::AtomicU64::new(104_312));
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(PromptOf(prompt_size.clone())));
+    let model = mush_ai::models::anthropic_models()
+        .into_iter()
+        .find(|model| model.id.as_str() == "claude-haiku-5-5")
+        .unwrap();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        crate::testing::echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    let notices = |connection: &InProcessConnection| {
+        connection
+            .runtime
+            .conversation
+            .context()
+            .iter()
+            .filter(|message| {
+                matches!(message, Message::User(user)
+                    if user.text().starts_with(crate::price_cliff::PRICE_CLIFF_TAG))
+            })
+            .count()
+    };
+    let warned = |events: &[ClientEvent]| {
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::PriceCliff(_)))
+            .count()
+    };
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "one".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let events = drain_turn(&mut connection).await;
+    assert_eq!(warned(&events), 1);
+    assert_eq!(notices(&connection), 1);
+    let cliff = connection.state().price_cliff.unwrap();
+    assert_eq!(cliff.over_prompt_tokens, 100_000);
+    assert_eq!(cliff.prompt_tokens, 104_312);
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "two".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(warned(&drain_turn(&mut connection).await), 0);
+    assert_eq!(
+        notices(&connection),
+        1,
+        "still over the cliff, no second notice"
+    );
+
+    prompt_size.store(20_000, std::sync::atomic::Ordering::Relaxed);
+    prompt(&mut connection, "three").await;
+    assert_eq!(connection.state().price_cliff, None);
+
+    prompt_size.store(120_000, std::sync::atomic::Ordering::Relaxed);
+    connection
+        .send(ClientCommand::Prompt {
+            text: "four".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        warned(&drain_turn(&mut connection).await),
+        1,
+        "crossing again warns again"
+    );
+    assert_eq!(notices(&connection), 2);
+}

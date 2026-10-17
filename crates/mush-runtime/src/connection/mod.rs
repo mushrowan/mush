@@ -150,6 +150,7 @@ pub enum ClientEvent {
     AutonomousChanged(Box<crate::autonomous::AutonomousStatus>),
     Refined(Box<mush_session::harness::RefinementResult>),
     SyncChanged(mush_session::SyncState),
+    PriceCliff(Box<crate::price_cliff::PriceCliff>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -185,6 +186,8 @@ pub struct ConnectionState {
     pub sync: mush_session::SyncState,
     #[serde(default = "auto_compact_by_default")]
     pub auto_compact: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_cliff: Option<crate::price_cliff::PriceCliff>,
 }
 
 fn auto_compact_by_default() -> bool {
@@ -1512,6 +1515,32 @@ impl InProcessConnection {
         })
     }
 
+    fn note_price_cliff(&mut self, message: &mush_ai::types::AssistantMessage) {
+        if mush_ai::models::prompt_tokens(&message.usage).get() == 0 {
+            return;
+        }
+        let model = mush_ai::discovery::resolve_model_by_id(message.model.as_str())
+            .unwrap_or_else(|| self.runtime.model(&self.config.default_model));
+        let crossed = crate::price_cliff::PriceCliff::crossed(&model, &message.usage);
+        if let Some(cliff) = &crossed
+            && self.runtime.price_cliff.is_none()
+        {
+            self.runtime.price_cliff_notice_due = true;
+            self.queued
+                .push_back(ClientEvent::PriceCliff(Box::new(cliff.clone())));
+        }
+        self.runtime.price_cliff = crossed;
+    }
+
+    fn append_price_cliff_notice(&mut self) {
+        if !std::mem::take(&mut self.runtime.price_cliff_notice_due) {
+            return;
+        }
+        if let Some(cliff) = &self.runtime.price_cliff {
+            self.runtime.conversation.append_message(cliff.message());
+        }
+    }
+
     fn on_agent_event(&mut self, event: &AgentEvent) {
         if let Some(control) = &self.runtime.control {
             match event {
@@ -1561,6 +1590,7 @@ impl InProcessConnection {
                     autonomous.record_assistant_turn();
                 }
                 self.assistant_turns_since_review += 1;
+                self.note_price_cliff(message);
                 self.runtime.save_debounced();
             }
             AgentEvent::ContextCompacted { .. } => {
@@ -1576,6 +1606,7 @@ impl InProcessConnection {
                     .turns
                     .remove(PRIMARY_PANE)
                     .is_none_or(|meta| meta.cancel.is_cancelled());
+                self.append_price_cliff_notice();
                 self.runtime.save_now_and_settle();
                 self.spawn_title();
                 self.queued.push_back(ClientEvent::TurnEnded { cancelled });
@@ -1856,6 +1887,7 @@ impl AgentConnection for InProcessConnection {
                 .runtime
                 .auto_compact
                 .load(std::sync::atomic::Ordering::Relaxed),
+            price_cliff: self.runtime.price_cliff.clone(),
         }
     }
 

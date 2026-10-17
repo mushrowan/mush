@@ -824,6 +824,7 @@ fn push_injected_lines(
     header.extend(injected.header.iter().map(|part| match part {
         HeaderPart::Text(text) => Span::styled(text.clone(), theme.dim),
         HeaderPart::Who(who) => Span::styled(who.clone(), theme.status_model),
+        HeaderPart::Alert(text) => Span::styled(text.clone(), theme.alert),
     }));
     lines.extend(indent_line(Line::from(header), cw));
     let everything = style.detail.shows_full_output();

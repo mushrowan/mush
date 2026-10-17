@@ -4,6 +4,7 @@ use mush_ai::types::{EventKind, EventMessage, EventOrigin, EventReceipt};
 pub enum HeaderPart {
     Text(String),
     Who(String),
+    Alert(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +82,13 @@ impl Injected {
         if let Some(name) = tag.strip_prefix("scheduled: ") {
             return Some(Self::labelled(
                 format!("scheduled · {name}"),
+                body,
+                Body::Shown,
+            ));
+        }
+        if tag == mush_runtime::price_cliff::PRICE_CLIFF_TAG.trim_matches(['[', ']']) {
+            return Some(Self::new(
+                vec![HeaderPart::Alert("\u{26a0} price cliff".into())],
                 body,
                 Body::Shown,
             ));
@@ -272,7 +280,9 @@ mod tests {
         row.header
             .iter()
             .map(|part| match part {
-                HeaderPart::Text(text) | HeaderPart::Who(text) => text.as_str(),
+                HeaderPart::Text(text) | HeaderPart::Who(text) | HeaderPart::Alert(text) => {
+                    text.as_str()
+                }
             })
             .collect()
     }
@@ -302,6 +312,17 @@ mod tests {
             claimed_source: claimed.into(),
             peer_uid: 1000,
         })
+    }
+
+    #[test]
+    fn a_price_cliff_notice_shows_as_an_alert_row() {
+        let row = Injected::from_text("[price cliff]\n\nEvery request over it costs 5x.").unwrap();
+        assert_eq!(
+            row.header,
+            vec![HeaderPart::Alert("\u{26a0} price cliff".into())]
+        );
+        assert_eq!(row.body, "Every request over it costs 5x.");
+        assert_eq!(row.shown, Body::Shown);
     }
 
     #[test]
