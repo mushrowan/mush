@@ -789,15 +789,7 @@ fn rendered_line_char_count(line: &Line<'_>) -> usize {
 }
 
 fn text_cell_width(text: &str) -> usize {
-    usize::from(text.cell_width())
-}
-
-fn char_cell_width(ch: char) -> usize {
-    if ch.is_control() {
-        return 0;
-    }
-    let mut buf = [0; 4];
-    text_cell_width(ch.encode_utf8(&mut buf))
+    crate::text::width(text)
 }
 
 fn spans_cell_width(spans: &[Span<'_>]) -> usize {
@@ -1341,18 +1333,18 @@ fn append_span_wrapped(
 ) {
     let style = span.style;
     let mut chunk = String::new();
-    for ch in span.content.chars() {
-        let ch_width = char_cell_width(ch);
-        if *current_width + ch_width > width && *current_width > 0 {
+    for (_, grapheme) in crate::text::graphemes(&span.content) {
+        let grapheme_width = crate::text::grapheme_width(grapheme);
+        if *current_width + grapheme_width > width && *current_width > 0 {
             flush_styled_chunk(&mut chunk, style, current);
             rows.push(std::mem::take(current));
             *current_width = 0;
-            if ch == ' ' {
+            if grapheme == " " {
                 continue;
             }
         }
-        chunk.push(ch);
-        *current_width += ch_width;
+        chunk.push_str(grapheme);
+        *current_width += grapheme_width;
     }
     flush_styled_chunk(&mut chunk, style, current);
     if *current_width == width {
@@ -1459,93 +1451,76 @@ fn indent_line<'a>(line: Line<'a>, content_width: usize) -> Vec<Line<'a>> {
         return vec![Line::from(spans).style(line_style)];
     }
 
-    let cells: Vec<(char, Style, usize)> = line
-        .spans
-        .iter()
-        .flat_map(|span| {
-            let style = span.style;
-            span.content.chars().map(move |ch| {
-                let w = char_cell_width(ch);
-                (ch, style, w)
-            })
-        })
-        .collect();
+    let mut text = String::new();
+    let mut runs: Vec<(usize, Style)> = Vec::with_capacity(line.spans.len());
+    for span in &line.spans {
+        text.push_str(&span.content);
+        runs.push((text.len(), span.style));
+    }
 
-    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut rows: Vec<std::ops::Range<usize>> = Vec::new();
     let mut breaks: Vec<Break> = Vec::new();
-    let mut row: Vec<(char, Style, usize)> = Vec::new();
-    let mut row_width: usize = 0;
-    let mut last_space: Option<usize> = None;
-
-    for (ch, style, w) in cells {
-        if row_width + w > content_width && !row.is_empty() {
-            if let Some(sp) = last_space {
-                let tail: Vec<(char, Style, usize)> = row.drain(sp + 1..).collect();
-                let _space = row.pop();
-                rows.push(strip_row(&row));
+    let mut start = 0;
+    let mut row_width = 0;
+    let mut last_space: Option<(usize, usize)> = None;
+    for (at, grapheme) in crate::text::graphemes(&text) {
+        let grapheme_width = crate::text::grapheme_width(grapheme);
+        if row_width + grapheme_width > content_width && at > start {
+            if let Some((space, through)) = last_space.take() {
+                rows.push(start..space);
                 breaks.push(Break::AtSpace);
-                row_width = tail.iter().map(|(_, _, w)| w).sum();
-                row = tail;
-                last_space = row.iter().rposition(|(c, _, _)| *c == ' ');
+                start = space + 1;
+                row_width -= through;
             } else {
-                rows.push(strip_row(&row));
+                rows.push(start..at);
                 breaks.push(Break::MidWord);
-                row.clear();
+                start = at;
                 row_width = 0;
-                last_space = None;
             }
         }
-        if ch == ' ' {
-            last_space = Some(row.len());
+        row_width += grapheme_width;
+        if grapheme == " " {
+            last_space = Some((at, row_width));
         }
-        row.push((ch, style, w));
-        row_width += w;
+    }
+    if start < text.len() {
+        rows.push(start..text.len());
     }
 
-    if !row.is_empty() {
-        rows.push(strip_row(&row));
-    }
-
-    let mut result: Vec<Line<'a>> = Vec::with_capacity(rows.len());
-    for (index, cells) in rows.into_iter().enumerate() {
-        let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
-        let mut buf = String::new();
-        let mut cur_style: Option<Style> = None;
-        for (ch, style) in cells {
-            match cur_style {
-                Some(s) if s == style => buf.push(ch),
-                _ => {
-                    if let Some(s) = cur_style
-                        && !buf.is_empty()
-                    {
-                        spans.push(Span::styled(std::mem::take(&mut buf), s));
-                    }
-                    cur_style = Some(style);
-                    buf.push(ch);
-                }
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let end = row.start + text[row.clone()].trim_end_matches(' ').len();
+            let mut spans: Vec<Span<'a>> = vec![Span::raw(" ")];
+            spans.extend(styled_slices(&text, &runs, row.start..end));
+            let row = Line::from(spans).style(line_style);
+            match index.checked_sub(1).and_then(|i| breaks.get(i)) {
+                Some(after) => soft_wrap::continuation(row, *after),
+                None => row,
             }
-        }
-        if let Some(s) = cur_style
-            && !buf.is_empty()
-        {
-            spans.push(Span::styled(buf, s));
-        }
-        let row = Line::from(spans).style(line_style);
-        result.push(match index.checked_sub(1).and_then(|i| breaks.get(i)) {
-            Some(after) => soft_wrap::continuation(row, *after),
-            None => row,
-        });
-    }
-
-    result
+        })
+        .collect()
 }
 
-fn strip_row(row: &[(char, Style, usize)]) -> Vec<(char, Style)> {
-    let end = row
-        .iter()
-        .rposition(|(c, _, _)| *c != ' ')
-        .map_or(0, |p| p + 1);
-    row[..end].iter().map(|(c, s, _)| (*c, *s)).collect()
+fn styled_slices<'a>(
+    text: &str,
+    runs: &[(usize, Style)],
+    range: std::ops::Range<usize>,
+) -> Vec<Span<'a>> {
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut from = 0;
+    for &(end, style) in runs {
+        let (lo, hi) = (from.max(range.start), end.min(range.end));
+        from = end;
+        if lo >= hi {
+            continue;
+        }
+        match spans.last_mut() {
+            Some(last) if last.style == style => last.content.to_mut().push_str(&text[lo..hi]),
+            _ => spans.push(Span::styled(text[lo..hi].to_string(), style)),
+        }
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -1613,14 +1588,14 @@ fn split_word_by_cell_width(word: &str, width: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut current = String::new();
     let mut current_width = 0usize;
-    for ch in word.chars() {
-        let ch_width = char_cell_width(ch);
-        if current_width + ch_width > width && !current.is_empty() {
+    for (_, grapheme) in crate::text::graphemes(word) {
+        let grapheme_width = crate::text::grapheme_width(grapheme);
+        if current_width + grapheme_width > width && !current.is_empty() {
             chunks.push(std::mem::take(&mut current));
             current_width = 0;
         }
-        current.push(ch);
-        current_width += ch_width;
+        current.push_str(grapheme);
+        current_width += grapheme_width;
     }
     if !current.is_empty() {
         chunks.push(current);

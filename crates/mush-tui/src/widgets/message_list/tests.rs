@@ -634,6 +634,104 @@ fn wrap_text_empty() {
     assert_eq!(wrap_text("", 10), vec![""]);
 }
 
+fn row_bodies(rows: &[Line<'_>]) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            let text: String = row.spans.iter().map(|span| span.content.as_ref()).collect();
+            text.strip_prefix(' ').unwrap_or(&text).to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn a_cjk_run_without_spaces_wraps_at_the_cell_width() {
+    let rows = indent_line(Line::raw("中文中文中文"), 7);
+
+    assert_eq!(row_bodies(&rows), ["中文中", "文中文"]);
+    assert_eq!(soft_wrap::break_before(&rows[1]), Some(Break::MidWord));
+}
+
+#[test]
+fn a_wide_char_that_would_overflow_moves_to_the_next_row() {
+    let rows = indent_line(Line::raw("abcde日本"), 6);
+
+    assert_eq!(row_bodies(&rows), ["abcde", "日本"]);
+}
+
+#[test]
+fn joined_emoji_and_combining_marks_wrap_as_one_cell_group() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let flag = "\u{1f1ef}\u{1f1f5}";
+    let fits = format!("{family} {flag} ok");
+
+    assert_eq!(indent_line(Line::raw(fits.clone()), 8).len(), 1);
+    assert_eq!(
+        row_bodies(&indent_line(Line::raw(fits), 7)),
+        [format!("{family} {flag}"), "ok".to_string()]
+    );
+
+    let accents = "e\u{301}".repeat(6);
+    let rows = wrap_styled_spans(vec![Span::raw(accents)], 4);
+    let rendered: Vec<String> = rows
+        .iter()
+        .map(|row| row.iter().map(|span| span.content.as_ref()).collect())
+        .collect();
+    assert_eq!(rendered, ["e\u{301}".repeat(4), "e\u{301}".repeat(2)]);
+}
+
+#[test]
+fn hangul_and_kana_with_dakuten_wrap_by_cells() {
+    let ga = "\u{304b}\u{3099}";
+    let words = format!("한국어 {ga}{ga}{ga} テキスト");
+    let rows = indent_line(Line::raw(words), 8);
+
+    assert_eq!(
+        row_bodies(&rows),
+        ["한국어", format!("{ga}{ga}{ga}").as_str(), "テキスト"]
+    );
+    for row in &rows {
+        assert!(
+            line_cell_width(row) <= 9,
+            "{:?}",
+            row_bodies(std::slice::from_ref(row))
+        );
+    }
+}
+
+#[test]
+fn styles_survive_a_wrap_through_wide_text() {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let line = Line::from(vec![
+        Span::raw("ab "),
+        Span::styled("中文中文", bold),
+        Span::raw(" cd"),
+    ]);
+
+    let rows = indent_line(line, 6);
+
+    assert_eq!(row_bodies(&rows), ["ab", "中文中", "文 cd"]);
+    assert_eq!(rows[1].spans[1].style, bold);
+    assert_eq!(rows[2].spans[1].content, "文");
+    assert_eq!(rows[2].spans[1].style, bold);
+    assert_eq!(rows[2].spans[2].content, " cd");
+}
+
+#[test]
+fn a_user_message_pads_joined_emoji_by_cells() {
+    let theme = crate::theme::Theme::default();
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let msg = DisplayMessage::new(MessageRole::User, format!("{family} {}", "界".repeat(14)));
+
+    for line in message_lines(&msg, &plain_style(&theme), 24) {
+        assert_eq!(
+            line_cell_width(&line),
+            24,
+            "{:?}",
+            rendered_text(std::slice::from_ref(&line))
+        );
+    }
+}
+
 #[test]
 fn a_message_rebuilds_for_every_detail_level_it_reads() {
     let theme = crate::theme::Theme::default();

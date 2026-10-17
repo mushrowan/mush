@@ -2,8 +2,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{
-    HEADER_SEPARATOR, LineStyle, char_cell_width, code_preview, spans_cell_width,
-    tool_status_label, wrap_styled_spans,
+    HEADER_SEPARATOR, LineStyle, code_preview, spans_cell_width, tool_status_label,
+    wrap_styled_spans,
 };
 use crate::app::{DisplayToolCall, ToolCallStatus};
 use crate::theme::Theme;
@@ -395,12 +395,13 @@ fn push_gutter(
     spans: Vec<Span<'static>>,
     width: usize,
 ) {
-    let available = width.saturating_sub(1 + gutter.chars().count()).max(1);
+    let gutter_width = crate::text::width(gutter);
+    let available = width.saturating_sub(1 + gutter_width).max(1);
     for (index, row) in wrap_styled_spans(spans, available).into_iter().enumerate() {
         let prefix = if index == 0 {
             Span::styled(gutter, gutter_style)
         } else {
-            Span::raw(" ".repeat(gutter.chars().count()))
+            Span::raw(" ".repeat(gutter_width))
         };
         let mut out = vec![Span::raw(" "), prefix];
         out.extend(row);
@@ -421,16 +422,8 @@ fn truncate_spans(spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
             out.push(span);
             continue;
         }
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = char_cell_width(ch);
-            if used + w > width {
-                break;
-            }
-            used += w;
-            text.push(ch);
-        }
-        out.push(Span::styled(text, span.style));
+        let text = crate::text::prefix_within(&span.content, width.saturating_sub(used));
+        out.push(Span::styled(text.to_string(), span.style));
         break;
     }
     Line::from(out)
