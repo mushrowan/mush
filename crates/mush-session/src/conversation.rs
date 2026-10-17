@@ -142,6 +142,10 @@ impl ConversationState {
         self.tree.reset_leaf();
     }
 
+    pub fn lift_out(&mut self, id: &EntryId) -> Option<SessionEntry> {
+        self.tree.lift_out(id)
+    }
+
     pub fn leaf_id(&self) -> Option<&EntryId> {
         self.tree.leaf_id()
     }

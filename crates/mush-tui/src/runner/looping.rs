@@ -358,6 +358,7 @@ fn apply_command_event(
         }
         ClientEvent::AutonomousChanged(status) => session.app.note_autonomous(*status),
         ClientEvent::SyncChanged(state) => session.app.note_sync(state),
+        ClientEvent::PromptReturned(returned) => crate::returned::apply(&mut session.app, returned),
         ClientEvent::Refined(result) => {
             session.app.status = None;
             session
@@ -503,6 +504,60 @@ mod tests {
         );
         assert_eq!(session.app.messages.len(), 1);
         assert!(!session.app.has_queued_messages());
+    }
+
+    #[test]
+    fn a_returned_prompt_leaves_the_transcript_and_refills_the_composer() {
+        let mut config = super::super::TuiConfig::for_test();
+        let mut session = crate::session::Session::new(crate::app::App::new(
+            config.model.id.clone(),
+            config.model.context_window,
+        ));
+        session
+            .app
+            .push_user_message_with_images("[image 1] look", vec![vec![1, 2, 3]]);
+
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![
+                ClientEvent::Session(mush_runtime::SessionEvent::TranscriptReplaced {
+                    reason: mush_runtime::Replaced::Undone,
+                    messages: Vec::new(),
+                    editor_text: None,
+                }),
+                ClientEvent::PromptReturned(mush_runtime::ReturnedPrompt {
+                    text: "[image 1] look".into(),
+                    images: vec![mush_runtime::PendingImage {
+                        data: vec![1, 2, 3],
+                        mime_type: mush_ai::types::ImageMimeType::Png,
+                        dimensions: None,
+                        note: None,
+                    }],
+                    error: "request failed: invalid_image".into(),
+                }),
+            ],
+        );
+
+        assert_eq!(
+            session.app.input.text,
+            format!("{} look", crate::input_buffer::IMAGE_PLACEHOLDER)
+        );
+        assert_eq!(session.app.input.images.len(), 1);
+        let shown: Vec<_> = session
+            .app
+            .messages
+            .iter()
+            .map(|message| {
+                message
+                    .content
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(shown, ["not sent: request failed: invalid_image"]);
     }
 
     #[tokio::test]

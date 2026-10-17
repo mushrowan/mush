@@ -243,6 +243,33 @@ pub fn is_retryable_stream_error_message(message: &str) -> bool {
     classify_stream_error_message(message).is_retryable()
 }
 
+const CLIENT_ERROR_STATUSES: &[&str] = &[
+    " returned 400 ",
+    " returned 404 ",
+    " returned 413 ",
+    " returned 415 ",
+    " returned 422 ",
+];
+
+const MEDIA_WORDINGS: &[&str] = &["image", "media_type", "media type"];
+
+const MEDIA_ERROR_CODES: &[&str] = &[
+    "invalid_image",
+    "image_parse_error",
+    "unsupported_image",
+    "image_too_large",
+];
+
+#[must_use]
+pub fn is_unsendable_media_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    let mentions = |wordings: &[&str]| wordings.iter().any(|wording| lower.contains(wording));
+    classify_stream_error_message(message) == StreamErrorKind::Permanent
+        && !is_context_overflow_message(message)
+        && (mentions(MEDIA_ERROR_CODES)
+            || (mentions(CLIENT_ERROR_STATUSES) && mentions(MEDIA_WORDINGS)))
+}
+
 pub fn retry_stream_error(error: &str, attempt: u32) -> bool {
     match classify_stream_error_message(error) {
         StreamErrorKind::Refusal => {
@@ -655,6 +682,34 @@ mod tests {
             "429 Too Many Requests: too many input tokens per minute",
         ] {
             assert!(!is_context_overflow_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_rejected_image_is_unsendable_content() {
+        let rejected = [
+            r#"request failed: anthropic returned 400 Bad Request (application/json): {"type":"error","error":{"type":"invalid_request_error","message":"messages.711.content.1.image.source.base64: image exceeds 10 MB maximum: 13658052 bytes > 10485760 bytes"}}"#,
+            r#"request failed: anthropic returned 400 Bad Request (application/json): {"type":"error","error":{"type":"invalid_request_error","message":"messages.3.content.1.image.source.base64.media_type: Input should be 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'"}}"#,
+            r#"request failed: openai-responses returned 400 Bad Request (application/json): {"error":{"message":"Invalid image.","type":"invalid_request_error","code":"invalid_image"}}"#,
+            r#"request failed: openrouter returned 404 Not Found (application/json): {"error":{"message":"No endpoints found that support image input"}}"#,
+            "stream error: invalid_request_error: image_parse_error: the image could not be decoded",
+        ];
+        for message in rejected {
+            assert!(is_unsendable_media_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn other_failures_are_not_blamed_on_an_image() {
+        let elsewhere = [
+            r#"request failed: anthropic returned 400 Bad Request (application/json): {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 64000 > 32000"}}"#,
+            r#"request failed: anthropic returned 413 Payload Too Large (application/json): {"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes"}}"#,
+            r#"request failed: anthropic returned 429 Too Many Requests (application/json): {"type":"error","error":{"type":"rate_limit_error","message":"image rate limit"}}"#,
+            r#"request failed: anthropic returned 500 Internal Server Error (application/json): {"type":"error","error":{"type":"api_error","message":"image pipeline crashed"}}"#,
+            "stream ended without a final message",
+        ];
+        for message in elsewhere {
+            assert!(!is_unsendable_media_message(message), "{message}");
         }
     }
 

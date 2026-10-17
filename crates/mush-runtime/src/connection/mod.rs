@@ -154,6 +154,7 @@ pub enum ClientEvent {
     Refined(Box<mush_session::harness::RefinementResult>),
     SyncChanged(mush_session::SyncState),
     PriceCliff(Box<crate::price_cliff::PriceCliff>),
+    PromptReturned(crate::returned::ReturnedPrompt),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1655,6 +1656,19 @@ impl InProcessConnection {
                 self.mark_root_running(false);
                 self.fork_compaction_due = !cancelled && self.fork_compaction_due();
                 let failed = self.turn_error.take();
+                if !cancelled
+                    && let Some(error) = &failed
+                    && let Some(returned) = self.runtime.return_rejected_prompt(error)
+                {
+                    self.runtime.save_now_and_settle();
+                    self.queued
+                        .push_back(ClientEvent::Session(SessionEvent::TranscriptReplaced {
+                            reason: crate::commands::Replaced::Undone,
+                            messages: self.runtime.conversation.context(),
+                            editor_text: None,
+                        }));
+                    self.queued.push_back(ClientEvent::PromptReturned(returned));
+                }
                 if !cancelled && let Some(goal) = &self.goal {
                     match &failed {
                         Some(error) => goal.turn_failed(error),

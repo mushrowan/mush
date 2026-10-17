@@ -16,6 +16,7 @@ pub mod notes;
 mod persist;
 pub mod price_cliff;
 pub mod refine;
+pub mod returned;
 pub mod schedule;
 pub mod session;
 pub mod side_question;
@@ -48,6 +49,7 @@ pub use harness::HarnessStore;
 pub use kernel_channels::{KernelSignals, KernelSinks, kernel_channels};
 pub use models::{ModelSelection, child_thinking};
 pub use notes::Notes;
+pub use returned::ReturnedPrompt;
 pub use schedule::{Delivery, Job, JobSource, JobStatus, ScheduleCommand, ScheduleKind, Scheduler};
 pub use session::{
     ConfirmReply, ConfirmRequest, PendingConfirmation, PendingImage, PendingPrompt,

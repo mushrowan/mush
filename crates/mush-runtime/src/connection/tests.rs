@@ -3414,3 +3414,171 @@ async fn a_spawning_session_hears_once_when_what_a_child_gets_changes() {
     let saved = connection.runtime.snapshot().spawn_view.unwrap();
     assert_eq!(saved["default child model"], "haiku");
 }
+
+struct RejectsImages {
+    requests: crate::testing::Requests,
+    body: &'static str,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for RejectsImages {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &mush_ai::types::Model,
+        context: &mush_ai::registry::LlmContext,
+        options: &mush_ai::types::StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        self.requests.lock().unwrap().push(context.clone());
+        if context.messages.iter().any(carries_image) {
+            return Err(mush_ai::registry::ProviderError::Other(format!(
+                "anthropic returned 400 Bad Request (application/json): {}",
+                self.body
+            )));
+        }
+        crate::testing::Echo {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            reply: "seen".into(),
+        }
+        .stream(model, context, options)
+        .await
+    }
+}
+
+fn carries_image(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::User(user) if matches!(
+            &user.content,
+            mush_ai::types::UserContent::Parts(parts)
+                if parts.iter().any(|part| matches!(part, mush_ai::types::UserContentPart::Image(_)))
+        )
+    )
+}
+
+const IMAGE_TOO_LARGE: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.2.content.1.image.source.base64: image exceeds 10 MB maximum: 13658052 bytes > 10485760 bytes"}}"#;
+
+fn connection_rejecting_images(
+    body: &'static str,
+) -> (InProcessConnection, crate::testing::Requests) {
+    let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(RejectsImages {
+        requests: requests.clone(),
+        body,
+    }));
+    let model = crate::testing::echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        crate::testing::echo_config(model),
+        mush_agent::AgentInjections::default(),
+    );
+    (connection, requests)
+}
+
+fn picture() -> PendingImage {
+    PendingImage {
+        data: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+        mime_type: mush_ai::types::ImageMimeType::Png,
+        dimensions: Some((3840, 2160)),
+        note: None,
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_image_message_goes_back_to_the_composer_and_the_session_carries_on() {
+    let (mut connection, requests) = connection_rejecting_images(IMAGE_TOO_LARGE);
+    prompt(&mut connection, "first").await;
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "[image 1] oh i meant to send this".into(),
+            images: vec![picture()],
+        })
+        .await
+        .unwrap();
+    drain_turn(&mut connection).await;
+    let replaced = wait_for(&mut connection, |event| {
+        matches!(
+            event,
+            ClientEvent::Session(SessionEvent::TranscriptReplaced { .. })
+        )
+    })
+    .await;
+    let returned = wait_for(&mut connection, |event| {
+        matches!(event, ClientEvent::PromptReturned(_))
+    })
+    .await;
+
+    let ClientEvent::PromptReturned(returned) = returned else {
+        unreachable!()
+    };
+    assert_eq!(returned.text, "[image 1] oh i meant to send this");
+    assert_eq!(returned.images.len(), 1);
+    assert_eq!(returned.images[0].data, picture().data);
+    assert!(returned.error.contains("image exceeds 10 MB maximum"));
+    let ClientEvent::Session(SessionEvent::TranscriptReplaced { messages, .. }) = replaced else {
+        unreachable!()
+    };
+    assert_eq!(messages.len(), 2);
+    assert!(!messages.iter().any(carries_image));
+    assert!(
+        connection
+            .runtime
+            .conversation
+            .entries()
+            .iter()
+            .any(|entry| matches!(
+                &entry.kind,
+                mush_session::EntryKind::Message { message } if carries_image(message)
+            )),
+        "the rejected message stays in the tree, off the branch"
+    );
+
+    prompt(&mut connection, "oop").await;
+
+    let transcript = connection.transcript().await;
+    let texts: Vec<String> = transcript
+        .iter()
+        .map(|message| match message {
+            Message::User(user) => user.text(),
+            Message::Assistant(reply) => reply.text(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(texts, ["first", "seen", "oop", "seen"]);
+    let last_request = requests.lock().unwrap().last().cloned().unwrap();
+    assert!(!last_request.messages.iter().any(carries_image));
+}
+
+#[tokio::test]
+async fn a_rejection_that_is_not_about_the_image_keeps_the_message() {
+    let (mut connection, _) = connection_rejecting_images(
+        r#"{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: 64000 > 32000"}}"#,
+    );
+
+    connection
+        .send(ClientCommand::Prompt {
+            text: "[image 1] look".into(),
+            images: vec![picture()],
+        })
+        .await
+        .unwrap();
+    drain_turn(&mut connection).await;
+
+    while let Some(event) = connection.try_next_event() {
+        assert!(
+            !matches!(event, ClientEvent::PromptReturned(_)),
+            "{event:?}"
+        );
+    }
+    let transcript = connection.transcript().await;
+    assert!(transcript.iter().any(carries_image));
+}

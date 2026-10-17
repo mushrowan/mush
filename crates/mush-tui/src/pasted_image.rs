@@ -80,6 +80,29 @@ pub fn annotate(text: String, images: &[PendingImage]) -> String {
     format!("{text}\n\n{}", notes.join("\n"))
 }
 
+#[must_use]
+pub fn split_notes(text: &str) -> (String, Vec<(usize, String)>) {
+    let unannotated = || (text.to_string(), Vec::new());
+    let Some((body, block)) = text.rsplit_once("\n\n") else {
+        return unannotated();
+    };
+    let mut notes = Vec::new();
+    for line in block.lines() {
+        let Some((number, note)) = line
+            .strip_prefix("[image ")
+            .and_then(|inner| inner.strip_suffix(']'))
+            .and_then(|inner| inner.split_once(": "))
+        else {
+            return unannotated();
+        };
+        match number.parse::<usize>() {
+            Ok(number) if number > 0 => notes.push((number - 1, note.to_string())),
+            _ => return unannotated(),
+        }
+    }
+    (body.to_string(), notes)
+}
+
 fn keep_original(image: &ClipboardImage, originals: &Path) -> std::io::Result<PathBuf> {
     let stamp = mush_ai::types::Timestamp::now().as_ms();
     let extension = extension(image.mime_type);
@@ -281,6 +304,40 @@ mod tests {
             "[image 1] and [image 2]\n\n[image 2: 3840x2160 PNG 10.2 MB → 2000x1125 JPEG 412 KB, original at /o.png]"
         );
         assert_eq!(annotate("hi".into(), &[plain]), "hi");
+    }
+
+    #[test]
+    fn notes_split_back_off_the_text_they_were_added_to() {
+        let images = [
+            PendingImage {
+                data: vec![1],
+                mime_type: ImageMimeType::Jpeg,
+                dimensions: None,
+                note: Some("a → b, original at /x.png".into()),
+            },
+            PendingImage {
+                data: vec![2],
+                mime_type: ImageMimeType::Jpeg,
+                dimensions: None,
+                note: Some("c → d, original at /y.png".into()),
+            },
+        ];
+        let sent = annotate("[image 1] [image 2] compare\n\nthese".into(), &images);
+
+        assert_eq!(
+            split_notes(&sent),
+            (
+                "[image 1] [image 2] compare\n\nthese".to_string(),
+                vec![
+                    (0, "a → b, original at /x.png".to_string()),
+                    (1, "c → d, original at /y.png".to_string())
+                ]
+            )
+        );
+        assert_eq!(
+            split_notes("just text\n\nmore text"),
+            ("just text\n\nmore text".to_string(), Vec::new())
+        );
     }
 
     #[test]

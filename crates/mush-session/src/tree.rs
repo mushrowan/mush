@@ -581,6 +581,34 @@ impl SessionTree {
         self.leaf_id = None;
     }
 
+    pub fn lift_out(&mut self, id: &EntryId) -> Option<SessionEntry> {
+        let branch = self.current_branch();
+        let at = branch.iter().position(|entry| entry.id == *id)?;
+        let mut carried = Vec::new();
+        for entry in &branch[at + 1..] {
+            match &entry.kind {
+                EntryKind::Message {
+                    message: Message::User(_) | Message::Event(_),
+                }
+                | EntryKind::Refinement { .. }
+                | EntryKind::ThinkingLevelChange { .. } => carried.push(entry.kind.clone()),
+                EntryKind::Message {
+                    message: Message::Assistant(reply),
+                } if !reply.is_replayable() => {}
+                EntryKind::Message { .. }
+                | EntryKind::BranchSummary { .. }
+                | EntryKind::Compaction { .. }
+                | EntryKind::Unknown(_) => return None,
+            }
+        }
+        let lifted = branch[at].clone();
+        self.leaf_id = lifted.parent_id.clone();
+        for kind in carried {
+            self.append(kind);
+        }
+        Some(lifted)
+    }
+
     pub fn leaf_id(&self) -> Option<&EntryId> {
         self.leaf_id.as_ref()
     }
@@ -1156,6 +1184,80 @@ mod tests {
             .collect();
 
         assert_eq!(abandoned, vec!["q2", "a2"]);
+    }
+
+    fn event(text: &str) -> Message {
+        Message::Event(EventMessage {
+            content: text.into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Message,
+            receipts: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn lifting_out_a_message_carries_what_arrived_after_it_onto_the_branch_before_it() {
+        let mut tree = SessionTree::new();
+        tree.append_message(user_msg("q0"));
+        let answer = tree.append_message(assistant_msg("a0"));
+        let rejected = tree.append_message(user_msg("look at this"));
+        tree.append_message(event("[agent-message from child:auth] found it"));
+        let mut failed = assistant_msg("");
+        if let Message::Assistant(reply) = &mut failed {
+            reply.stop_reason = StopReason::Error;
+        }
+        tree.append_message(failed);
+        tree.append_message(user_msg("oop"));
+
+        let lifted = tree.lift_out(&rejected).unwrap();
+
+        assert_eq!(lifted.id, rejected);
+        let context: Vec<String> = tree
+            .build_context()
+            .iter()
+            .map(|message| match message {
+                Message::Event(event) => event.content.clone(),
+                other => text_of(other),
+            })
+            .collect();
+        assert_eq!(
+            context,
+            [
+                "q0",
+                "a0",
+                "[agent-message from child:auth] found it",
+                "oop"
+            ]
+        );
+        let carried = tree.current_branch();
+        assert_eq!(carried[2].parent_id.as_ref(), Some(&answer));
+        assert!(
+            tree.by_id(&rejected).is_some(),
+            "the rejected message stays in the tree"
+        );
+    }
+
+    #[test]
+    fn a_message_with_work_after_it_is_not_lifted_out() {
+        let mut tree = SessionTree::new();
+        let asked = tree.append_message(user_msg("q0"));
+        tree.append_message(assistant_msg("a0"));
+        let leaf = tree.leaf_id().cloned();
+
+        assert!(tree.lift_out(&asked).is_none());
+        assert_eq!(tree.leaf_id(), leaf.as_ref());
+        assert!(tree.lift_out(&EntryId::from("missing")).is_none());
+    }
+
+    #[test]
+    fn lifting_out_the_first_message_empties_the_branch() {
+        let mut tree = SessionTree::new();
+        let only = tree.append_message(user_msg("hello"));
+
+        assert!(tree.lift_out(&only).is_some());
+
+        assert!(tree.leaf_id().is_none());
+        assert!(tree.build_context().is_empty());
     }
 
     #[test]

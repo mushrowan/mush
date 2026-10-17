@@ -263,6 +263,34 @@ impl InputBuffer {
         });
     }
 
+    pub fn restore_returned(&mut self, text: &str, images: Vec<PendingImage>) {
+        let mut restored = String::with_capacity(text.len());
+        let mut rest = text;
+        let mut placed = 0;
+        for number in 1..=images.len() {
+            let token = format!("[image {number}]");
+            let Some(at) = rest.find(&token) else {
+                break;
+            };
+            restored.push_str(&rest[..at]);
+            restored.push(IMAGE_PLACEHOLDER);
+            rest = &rest[at + token.len()..];
+            placed += 1;
+        }
+        restored.push_str(rest);
+        for _ in placed..images.len() {
+            restored.push(IMAGE_PLACEHOLDER);
+        }
+        let end = restored.len();
+        if !self.text.is_empty() {
+            restored.push_str("\n\n");
+        }
+        self.insert_with_images(0, &restored, images);
+        self.cursor = end;
+        self.anchor = None;
+        self.ensure_cursor_visible();
+    }
+
     pub fn attach_image(&mut self, image: PendingImage) {
         let mut buffer = [0; 4];
         let placeholder = IMAGE_PLACEHOLDER.encode_utf8(&mut buffer);
