@@ -124,12 +124,72 @@ impl ChatDetail {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DetailView {
+    thinking: bool,
+    full_output: bool,
+    diffs: bool,
+}
+
+impl DetailView {
+    #[must_use]
+    pub const fn shows_thinking(self) -> bool {
+        self.thinking
+    }
+
+    #[must_use]
+    pub const fn shows_diffs(self) -> bool {
+        self.diffs
+    }
+
+    #[must_use]
+    pub const fn shows_full_output(self) -> bool {
+        self.full_output
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DetailSensitivity(DetailView);
+
+impl DetailSensitivity {
+    pub const EVERYTHING: Self = Self(DetailView {
+        thinking: true,
+        full_output: true,
+        diffs: true,
+    });
+
+    #[must_use]
+    pub fn of(message: &DisplayMessage) -> Self {
+        let tools = &message.tool_calls;
+        Self(DetailView {
+            thinking: tools.iter().any(|tc| tc.bash_done.is_some()),
+            full_output: message.thinking.is_some()
+                || !tools.is_empty()
+                || message.injected.is_some(),
+            diffs: tools
+                .iter()
+                .any(|tc| tc.cell.as_ref().is_some_and(|cell| !cell.diffs.is_empty())),
+        })
+    }
+
+    #[must_use]
+    pub const fn view(self, detail: ChatDetail) -> DetailView {
+        DetailView {
+            thinking: self.0.thinking && detail.shows_thinking(),
+            full_output: self.0.full_output && detail.shows_full_output(),
+            diffs: self.0.diffs && detail.shows_diffs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LineCache {
     pub width: u16,
     pub show_usage: bool,
-    pub detail: ChatDetail,
+    pub sensitivity: DetailSensitivity,
+    pub view: DetailView,
     pub pulse: usize,
+    pub highlighted: bool,
     pub lines: Vec<Line<'static>>,
 }
 
@@ -192,6 +252,26 @@ impl DisplayMessage {
 
     pub fn invalidate(&mut self) {
         self.line_cache.get_mut().take();
+    }
+
+    #[must_use]
+    pub fn has_highlighting(&self) -> bool {
+        !self.tool_calls.is_empty()
+            || self.content.contains("```")
+            || self
+                .injected
+                .as_ref()
+                .is_some_and(|injected| injected.body.contains("```"))
+    }
+
+    #[must_use]
+    pub fn text_bytes(&self) -> usize {
+        let tools: usize = self
+            .tool_calls
+            .iter()
+            .map(|tc| tc.summary.len() + tc.output.as_ref().map_or(0, String::len))
+            .sum();
+        self.content.len() + self.thinking.as_ref().map_or(0, String::len) + tools
     }
 
     #[must_use]

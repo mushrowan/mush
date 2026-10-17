@@ -4,14 +4,17 @@ use std::time::{Duration, Instant};
 
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
-#[cfg(test)]
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
 
 use crate::app::App;
 use crate::ui::app_layout;
 use crate::widgets::input_box::InputBox;
-use crate::widgets::message_list::{Transcript, TranscriptChunk, transcript_guards};
+#[cfg(test)]
+use crate::widgets::message_list::Transcript;
+use crate::widgets::message_list::{
+    MessageStyle, TranscriptChunk, TranscriptChunkId, streaming_lines, transcript,
+};
 use crate::widgets::status_bar::StatusBar;
 use crate::widgets::top_bar::TopBar;
 
@@ -45,6 +48,7 @@ pub struct Viewport {
     area: Cell<Rect>,
     anchor: Cell<Option<(usize, usize)>>,
     kind: Cell<SelectionKind>,
+    marks: RefCell<crate::normal::MarkTable>,
 }
 
 impl Default for Viewport {
@@ -62,17 +66,33 @@ impl Default for Viewport {
             area: Cell::new(Rect::default()),
             anchor: Cell::new(None),
             kind: Cell::new(SelectionKind::Char),
+            marks: RefCell::new(crate::normal::MarkTable::default()),
         }
     }
 }
 
 impl Viewport {
+    #[cfg(test)]
     pub(crate) fn place(&self, transcript: &Transcript<'_>, area: Rect) -> Range<usize> {
+        let window = self.arrange(&transcript.chunks, transcript.len(), area);
+        self.settle(&transcript[window.clone()]);
+        window
+    }
+
+    pub(crate) fn arrange(
+        &self,
+        chunks: &[TranscriptChunk],
+        total: usize,
+        area: Rect,
+    ) -> Range<usize> {
         self.area.set(area);
-        self.remap_chunks(&transcript.chunks);
-        let window = self.window(transcript.len(), usize::from(area.height));
+        self.remap_chunks(chunks);
+        self.window(total, usize::from(area.height))
+    }
+
+    pub(crate) fn settle(&self, window: &[&Line<'_>]) {
         self.widths.replace(
-            transcript[window.clone()]
+            window
                 .iter()
                 .map(|line| {
                     line.spans
@@ -83,21 +103,43 @@ impl Viewport {
                 .collect(),
         );
         self.hold_cursor_on_screen();
-        window
+    }
+
+    pub(crate) fn set_mark(&self, name: char, at: (usize, usize)) {
+        self.marks.borrow_mut().set(name, at);
+    }
+
+    pub(crate) fn resolve_marks(
+        &self,
+        command: crate::normal::keys::Command,
+    ) -> Option<crate::normal::keys::Command> {
+        self.marks.borrow().resolve(command)
+    }
+
+    pub(crate) fn top_message(&self) -> Option<usize> {
+        let chunks = self.chunks.borrow();
+        match chunk_at(&chunks, self.scroll_top.get())?.id {
+            TranscriptChunkId::Message(index) => Some(index),
+            TranscriptChunkId::Streaming => None,
+        }
     }
 
     pub(crate) fn remap_chunks(&self, chunks: &[TranscriptChunk]) {
-        let previous = self.chunks.replace(chunks.to_vec());
-        if previous.is_empty() || self.following.get() {
+        if *self.chunks.borrow() == chunks {
             return;
         }
-        if chunks
-            .iter()
-            .any(|chunk| previous.iter().all(|seen| seen.id != chunk.id))
-        {
-            self.unread.set(true);
+        let previous = self.chunks.replace(chunks.to_vec());
+        if previous.is_empty() {
+            return;
         }
         let map = |line| remap_line(line, &previous, chunks);
+        self.marks.borrow_mut().remap(map);
+        if self.following.get() {
+            return;
+        }
+        if has_new_chunk(&previous, chunks) {
+            self.unread.set(true);
+        }
         self.scroll_top.set(map(self.scroll_top.get()));
         let mut cursor = self.cursor.get();
         cursor.line = map(cursor.line);
@@ -376,6 +418,20 @@ impl Viewport {
     }
 }
 
+fn has_new_chunk(previous: &[TranscriptChunk], current: &[TranscriptChunk]) -> bool {
+    let same_ids = previous.len() == current.len()
+        && previous
+            .iter()
+            .zip(current)
+            .all(|(before, now)| before.id == now.id);
+    if same_ids {
+        return false;
+    }
+    let seen: std::collections::HashSet<TranscriptChunkId> =
+        previous.iter().map(|chunk| chunk.id).collect();
+    current.iter().any(|chunk| !seen.contains(&chunk.id))
+}
+
 fn remap_line(line: usize, previous: &[TranscriptChunk], current: &[TranscriptChunk]) -> usize {
     let Some(chunk) = chunk_at(previous, line) else {
         return line;
@@ -471,10 +527,16 @@ impl Screen {
         let regions = app_layout(app, area);
         app.input.area.set(regions.input);
 
-        let transcript = transcript_guards(app, area.width);
-        let lines = transcript.flatten();
-        let window = app.viewport.place(&lines, regions.messages);
-        for (row, line) in regions.messages.rows().zip(&lines[window.clone()]) {
+        let style = MessageStyle::for_app(app);
+        let streaming = streaming_lines(app, area.width);
+        let arranged =
+            transcript::arrange(app, &style, area.width, streaming.len(), regions.messages);
+        let window = arranged.window;
+        let visible =
+            transcript::Visible::collect(app, &arranged.chunks, window.clone(), &streaming);
+        let lines = visible.lines(window.clone());
+        app.viewport.settle(&lines);
+        for (row, line) in regions.messages.rows().zip(&lines) {
             line.render(row, buf);
             redraw_stitched_row(row, buf);
         }
@@ -592,6 +654,19 @@ mod tests {
         assert_eq!(viewport.cursor().line, 103);
         assert_eq!(viewport.selection().unwrap().start().0, 103);
         assert_eq!(viewport.scroll_top.get(), 103);
+    }
+
+    #[test]
+    fn only_a_chunk_that_was_not_there_before_counts_as_new() {
+        assert!(!has_new_chunk(&[chunk(0, 0, 10)], &[chunk(0, 0, 20)]));
+        assert!(has_new_chunk(
+            &[chunk(0, 0, 10)],
+            &[chunk(0, 0, 10), chunk(1, 10, 20)]
+        ));
+        assert!(!has_new_chunk(
+            &[chunk(0, 0, 10), chunk(1, 10, 20)],
+            &[chunk(1, 0, 10)]
+        ));
     }
 
     #[test]

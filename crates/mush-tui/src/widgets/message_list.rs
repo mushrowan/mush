@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
 use crate::app::{App, ChatDetail, DisplayMessage, DisplayToolCall, MessageRole, ToolCallStatus};
+use crate::display_types::{DetailSensitivity, DetailView, LineCache};
 use crate::soft_wrap::{self, Break};
 use crate::theme::Theme;
 use crate::widgets::shimmer::shimmer_spans;
@@ -99,7 +100,11 @@ pub(crate) fn image_placeholder(index: usize, bytes: &[u8]) -> String {
     }
 }
 
-fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+pub fn settle_transcript(app: &App, deadline: std::time::Instant) -> bool {
+    transcript::settle(app, deadline)
+}
+
+pub(crate) fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if app.stream.active {
         let now = std::time::Instant::now();
@@ -216,7 +221,7 @@ fn push_live_thinking(
     lines.push(Line::raw(""));
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TranscriptChunkId {
     Message(usize),
     Streaming,
@@ -229,11 +234,13 @@ pub(crate) struct TranscriptChunk {
     pub(crate) end: usize,
 }
 
+#[cfg(test)]
 pub(crate) struct Transcript<'a> {
     pub(crate) lines: Vec<&'a Line<'static>>,
     pub(crate) chunks: Vec<TranscriptChunk>,
 }
 
+#[cfg(test)]
 impl<'a> std::ops::Deref for Transcript<'a> {
     type Target = [&'a Line<'static>];
 
@@ -242,6 +249,7 @@ impl<'a> std::ops::Deref for Transcript<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct TranscriptGuards<'a> {
     blank: Line<'static>,
     settled: Vec<(usize, Ref<'a, [Line<'static>]>)>,
@@ -249,6 +257,7 @@ pub(crate) struct TranscriptGuards<'a> {
     queued: Vec<(usize, Ref<'a, [Line<'static>]>)>,
 }
 
+#[cfg(test)]
 impl TranscriptGuards<'_> {
     pub(crate) fn flatten(&self) -> Transcript<'_> {
         let chunks = self.chunks();
@@ -310,6 +319,7 @@ impl TranscriptGuards<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn transcript_guards(app: &App, width: u16) -> TranscriptGuards<'_> {
     let style = MessageStyle::for_app(app);
     let chunks = |queued: bool| {
@@ -364,6 +374,24 @@ impl<'a> MessageStyle<'a> {
             pulse: app.shimmer_phase() / crate::widgets::working_icon::WORKING_ICON_TICKS,
         }
     }
+
+    fn lines_for(&self, detail: DetailView, highlight: bool) -> LineStyle<'a> {
+        LineStyle {
+            theme: self.theme,
+            show_usage: self.show_usage,
+            detail,
+            pulse: self.pulse,
+            highlight,
+        }
+    }
+}
+
+pub(crate) struct LineStyle<'a> {
+    pub(crate) theme: &'a Theme,
+    pub(crate) show_usage: bool,
+    pub(crate) detail: DetailView,
+    pub(crate) pulse: usize,
+    pub(crate) highlight: bool,
 }
 
 pub fn message_lines(
@@ -379,23 +407,40 @@ pub(crate) fn cached_message_lines<'a>(
     style: &MessageStyle<'_>,
     width: u16,
 ) -> Ref<'a, [Line<'static>]> {
-    let fresh = msg.line_cache.borrow().as_ref().is_some_and(|cache| {
-        cache.width == width
-            && cache.show_usage == style.show_usage
-            && cache.detail == style.detail
-            && (cache.pulse == style.pulse || !msg.is_live())
-    });
-    if !fresh {
-        let lines = build_message_lines(msg, style, width);
-        msg.line_cache
-            .replace(Some(crate::display_types::LineCache {
-                width,
-                show_usage: style.show_usage,
-                detail: style.detail,
-                pulse: style.pulse,
-                lines,
-            }));
+    if cached_height(msg, style, width) != Cached::Fresh {
+        rebuild(msg, style, width, true);
     }
+    built_lines(msg)
+}
+
+pub(crate) fn laid_out_lines<'a>(
+    msg: &'a DisplayMessage,
+    style: &MessageStyle<'_>,
+    width: u16,
+) -> Ref<'a, [Line<'static>]> {
+    if cached_height(msg, style, width) == Cached::Stale {
+        rebuild(msg, style, width, false);
+    }
+    built_lines(msg)
+}
+
+fn rebuild(msg: &DisplayMessage, style: &MessageStyle<'_>, width: u16, highlight: bool) {
+    let sensitivity = DetailSensitivity::of(msg);
+    let view = sensitivity.view(style.detail);
+    let highlight = highlight && msg.has_highlighting();
+    let lines = build_message_lines(msg, &style.lines_for(view, highlight), width);
+    msg.line_cache.replace(Some(LineCache {
+        width,
+        show_usage: style.show_usage,
+        sensitivity,
+        view,
+        pulse: style.pulse,
+        highlighted: highlight || !msg.has_highlighting(),
+        lines,
+    }));
+}
+
+pub(crate) fn built_lines(msg: &DisplayMessage) -> Ref<'_, [Line<'static>]> {
     Ref::map(msg.line_cache.borrow(), |cache| {
         cache
             .as_ref()
@@ -403,9 +448,47 @@ pub(crate) fn cached_message_lines<'a>(
     })
 }
 
-fn build_message_lines(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cached {
+    Fresh,
+    Settled,
+    Stale,
+}
+
+pub(crate) fn cached_height(msg: &DisplayMessage, style: &MessageStyle<'_>, width: u16) -> Cached {
+    cache_state(msg, style, width).0
+}
+
+pub(crate) fn cache_state(
     msg: &DisplayMessage,
     style: &MessageStyle<'_>,
+    width: u16,
+) -> (Cached, usize) {
+    let cache = msg.line_cache.borrow();
+    let Some(cache) = cache.as_ref() else {
+        return (Cached::Stale, estimated_height(msg));
+    };
+    let laid_out = cache.width == width
+        && cache.show_usage == style.show_usage
+        && cache.view == cache.sensitivity.view(style.detail);
+    let state = if !laid_out {
+        Cached::Stale
+    } else if cache.highlighted && (cache.pulse == style.pulse || !msg.is_live()) {
+        Cached::Fresh
+    } else {
+        Cached::Settled
+    };
+    (state, cache.lines.len())
+}
+
+fn estimated_height(msg: &DisplayMessage) -> usize {
+    const BYTES_PER_ROW: usize = 96;
+    2 + msg.tool_calls.len() + msg.content.len() / BYTES_PER_ROW
+}
+
+fn build_message_lines(
+    msg: &DisplayMessage,
+    style: &LineStyle<'_>,
     width: u16,
 ) -> Vec<Line<'static>> {
     #[cfg(test)]
@@ -432,11 +515,18 @@ fn build_message_lines(
         render_user_message_box(style.theme, msg, width, &mut lines);
     } else {
         let content_width = message_content_width(width as usize);
-        let md = if matches!(msg.role, MessageRole::System) {
-            crate::markdown::render_lines_with_width(&msg.content, style.theme, Some(content_width))
+        let breaks = if matches!(msg.role, MessageRole::System) {
+            crate::markdown::Breaks::Hard
         } else {
-            crate::markdown::render_with_width(&msg.content, style.theme, Some(content_width))
+            crate::markdown::Breaks::Soft
         };
+        let md = crate::markdown::render_message(
+            &msg.content,
+            style.theme,
+            Some(content_width),
+            breaks,
+            style.highlight,
+        );
         for line in md.lines {
             lines.extend(indent_line(line, content_width));
         }
@@ -492,7 +582,7 @@ fn is_markdown_heading(line: &str) -> bool {
 
 fn push_thinking_lines(
     msg: &DisplayMessage,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
     width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
@@ -553,7 +643,7 @@ fn push_queued_lines(
     lines.extend(indent_line(Line::styled(QUEUED_HINT, theme.dim), cw));
 }
 
-fn push_usage_line(msg: &DisplayMessage, style: &MessageStyle<'_>, lines: &mut Vec<Line<'static>>) {
+fn push_usage_line(msg: &DisplayMessage, style: &LineStyle<'_>, lines: &mut Vec<Line<'static>>) {
     if !style.show_usage || msg.is_live() {
         return;
     }
@@ -722,7 +812,7 @@ fn line_cell_width(line: &Line<'_>) -> usize {
 }
 
 fn push_tool_box_lines(
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
     msg: &DisplayMessage,
     width: u16,
     lines: &mut Vec<Line<'static>>,
@@ -736,7 +826,7 @@ fn render_tool_box_group(
     tools: &[DisplayToolCall],
     total_width: u16,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     if total_width < 8 {
         return;
@@ -772,7 +862,7 @@ fn push_panel_line(
     lines.push(Line::from(spans));
 }
 
-fn visible_tool_output(tc: &DisplayToolCall, detail: ChatDetail) -> Option<String> {
+fn visible_tool_output(tc: &DisplayToolCall, detail: DetailView) -> Option<String> {
     let output = tc.output.as_deref()?;
     if detail.shows_full_output() || tc.name == "edit" {
         return Some(output.to_string());
@@ -784,7 +874,7 @@ fn render_tool_panel(
     tc: &DisplayToolCall,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     let theme = style.theme;
     let bg = theme.tool_panel_bg;
@@ -805,7 +895,7 @@ fn render_tool_panel(
         lines,
     );
 
-    if let Some(lang) = tool_summary_language(tc) {
+    if let Some(lang) = tool_summary_language(tc).filter(|_| style.highlight) {
         push_highlighted_box_line(
             &tc.summary,
             inner,
@@ -865,7 +955,7 @@ const CLIPPED_ROWS: usize = 5;
 
 fn push_injected_lines(
     injected: &crate::injected::Injected,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
     width: u16,
     expanded: bool,
     lines: &mut Vec<Line<'static>>,
@@ -901,7 +991,13 @@ fn push_injected_lines(
                 lines,
             ),
             Body::Shown | Body::Preview | Body::Folded => {
-                let md = crate::markdown::render_lines_with_width(&injected.body, theme, Some(cw));
+                let md = crate::markdown::render_message(
+                    &injected.body,
+                    theme,
+                    Some(cw),
+                    crate::markdown::Breaks::Hard,
+                    style.highlight,
+                );
                 for line in md.lines {
                     lines.extend(indent_line(line, cw));
                 }
@@ -1059,13 +1155,13 @@ fn render_tool_output(
     output: &str,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     let theme = style.theme;
     let bg = theme.tool_panel_bg;
     let inner = panel_content_width(width);
     if tc.name == "edit" {
-        let lang = crate::syntax::lang_from_path(&tc.summary);
+        let lang = crate::syntax::lang_from_path(&tc.summary).filter(|_| style.highlight);
         for row in super::diff::render_diff_with_lang_mode(
             output,
             inner,
@@ -1080,14 +1176,14 @@ fn render_tool_output(
             bg,
             gutter_width: read_line_number_width(output),
             strip_indent: read_min_content_indent(output),
-            lang: crate::syntax::lang_from_path(&tc.summary),
+            lang: crate::syntax::lang_from_path(&tc.summary).filter(|_| style.highlight),
             theme,
         };
         for text_line in output.lines() {
             push_read_content_line(text_line, inner, &ctx, lines);
         }
     } else {
-        let lang = tool_output_language(tc);
+        let lang = tool_output_language(tc).filter(|_| style.highlight);
         for text_line in output.lines() {
             let base_style = diff_line_style(text_line, theme);
             if text_line.contains('\x1b') {
@@ -1570,3 +1666,4 @@ fn write_lines_to_buf(lines: &[Line<'_>], buf: &mut Buffer, area: Rect, start_y:
 mod cell;
 #[cfg(test)]
 mod tests;
+pub(crate) mod transcript;

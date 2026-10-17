@@ -17,7 +17,6 @@ pub(crate) struct NormalState {
 #[derive(Debug, Default)]
 pub(crate) struct Marks {
     pub(crate) composer: MarkTable,
-    pub(crate) log: MarkTable,
 }
 
 #[derive(Debug, Default)]
@@ -27,6 +26,12 @@ impl MarkTable {
     pub(crate) fn set(&mut self, name: char, at: (usize, usize)) {
         if let Some(slot) = Self::slot(name).and_then(|slot| self.0.get_mut(slot)) {
             *slot = Some(at);
+        }
+    }
+
+    pub(crate) fn remap(&mut self, line: impl Fn(usize) -> usize) {
+        for (at, _) in self.0.iter_mut().flatten() {
+            *at = line(*at);
         }
     }
 
@@ -91,6 +96,10 @@ pub(crate) trait NormalTarget {
         let last = self.rows().len().saturating_sub(1);
         self.place_cursor((line.min(last), 0));
     }
+
+    fn line_count(&self) -> usize {
+        self.rows().len()
+    }
 }
 
 pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion, count: Option<usize>) {
@@ -108,7 +117,7 @@ pub(crate) fn apply_motion(target: &mut impl NormalTarget, motion: Motion, count
         },
         Motion::MatchPair if let Some(percent) = count => {
             if percent <= 100 {
-                let lines = target.rows().len();
+                let lines = target.line_count();
                 target.to_line((percent * lines).div_ceil(100).saturating_sub(1));
             }
         }
@@ -150,14 +159,13 @@ pub(crate) fn select_object(
 
 pub(crate) fn resolve_screen(
     command: keys::Command,
-    target: &impl NormalTarget,
+    (top, bottom): (usize, usize),
     count: Option<usize>,
 ) -> keys::Command {
     let resolve = |motion| {
         let Motion::Screen(screen) = motion else {
             return motion;
         };
-        let (top, bottom) = target.visible_lines();
         let skip = count.unwrap_or(1) - 1;
         Motion::Line(match screen {
             motion::Screen::Top => (top + skip).min(bottom),
@@ -227,34 +235,77 @@ pub(crate) fn resolve_search(
     })
 }
 
+const LOG_REACH: usize = 400;
+
 pub(crate) struct LogTarget<'a> {
-    rows: std::cell::OnceCell<Vec<String>>,
-    app: &'a crate::app::App,
+    rows: Vec<String>,
+    base: usize,
+    total: usize,
     viewport: &'a crate::screen::Viewport,
 }
 
 impl<'a> LogTarget<'a> {
     pub(crate) fn new(app: &'a crate::app::App) -> Self {
+        Self::reaching(app, None)
+    }
+
+    pub(crate) fn reaching(app: &'a crate::app::App, line: Option<usize>) -> Self {
+        let reach = (app.viewport.page() * 4).max(LOG_REACH);
+        let rows = crate::widgets::message_list::transcript::rows(app, |viewport| {
+            let anchor = viewport.selection_ends().map(|(anchor, _)| anchor.0);
+            let cursor = viewport.cursor().line;
+            let lines = [Some(cursor), anchor, line];
+            let low = lines.iter().flatten().min().copied().unwrap_or(cursor);
+            let high = lines.iter().flatten().max().copied().unwrap_or(cursor);
+            low.saturating_sub(reach)..high.saturating_add(reach + 1)
+        });
         Self {
-            rows: std::cell::OnceCell::new(),
-            app,
+            rows: rows.rows,
+            base: rows.base,
+            total: rows.total,
             viewport: &app.viewport,
+        }
+    }
+
+    fn local(&self, (line, column): (usize, usize)) -> (usize, usize) {
+        (line.saturating_sub(self.base), column)
+    }
+
+    fn global(&self, (line, column): (usize, usize)) -> (usize, usize) {
+        (line + self.base, column)
+    }
+
+    pub(crate) fn localise(&self, command: keys::Command) -> keys::Command {
+        let localise = |motion| match motion {
+            Motion::Jump { to, linewise } => Motion::Jump {
+                to: self.local(to),
+                linewise,
+            },
+            Motion::Line(line) => Motion::Line(line.saturating_sub(self.base)),
+            motion => motion,
+        };
+        match command {
+            keys::Command::Move(motion) => keys::Command::Move(localise(motion)),
+            keys::Command::Operate(operator, keys::Target::Motion(motion)) => {
+                keys::Command::Operate(operator, keys::Target::Motion(localise(motion)))
+            }
+            command => command,
         }
     }
 }
 
 impl NormalTarget for LogTarget<'_> {
     fn rows(&self) -> &[String] {
-        self.rows
-            .get_or_init(|| crate::selection::transcript_rows(self.app))
+        &self.rows
     }
 
     fn cursor(&self) -> (usize, usize) {
         let cursor = self.viewport.cursor();
-        (cursor.line, cursor.column)
+        self.local((cursor.line, cursor.column))
     }
 
-    fn place_cursor(&mut self, (line, column): (usize, usize)) {
+    fn place_cursor(&mut self, at: (usize, usize)) {
+        let (line, column) = self.global(at);
         self.viewport.cursor_to(line);
         self.viewport.cursor_to_column(column);
     }
@@ -272,15 +323,18 @@ impl NormalTarget for LogTarget<'_> {
     }
 
     fn select(&mut self, selection: Selection) {
-        self.viewport
-            .select(selection.anchor, selection.head, selection.kind);
+        self.viewport.select(
+            self.global(selection.anchor),
+            self.global(selection.head),
+            selection.kind,
+        );
     }
 
     fn selection(&self) -> Option<Selection> {
         let (anchor, head) = self.viewport.selection_ends()?;
         Some(Selection {
-            anchor,
-            head,
+            anchor: self.local(anchor),
+            head: self.local(head),
             kind: self.viewport.selection_kind(),
         })
     }
@@ -290,7 +344,11 @@ impl NormalTarget for LogTarget<'_> {
     }
 
     fn visible_lines(&self) -> (usize, usize) {
-        self.viewport.visible_lines()
+        let (top, bottom) = self.viewport.visible_lines();
+        (
+            top.saturating_sub(self.base),
+            bottom.saturating_sub(self.base),
+        )
     }
 
     fn to_top(&mut self) {
@@ -303,6 +361,10 @@ impl NormalTarget for LogTarget<'_> {
 
     fn to_line(&mut self, line: usize) {
         self.viewport.cursor_to(line);
+    }
+
+    fn line_count(&self) -> usize {
+        self.total
     }
 }
 

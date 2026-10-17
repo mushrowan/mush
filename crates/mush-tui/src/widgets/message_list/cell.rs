@@ -2,7 +2,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use super::{
-    HEADER_SEPARATOR, MessageStyle, char_cell_width, code_preview, spans_cell_width,
+    HEADER_SEPARATOR, LineStyle, char_cell_width, code_preview, spans_cell_width,
     tool_status_label, wrap_styled_spans,
 };
 use crate::app::{DisplayToolCall, ToolCallStatus};
@@ -19,7 +19,7 @@ pub(super) fn render_cell(
     tc: &DisplayToolCall,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     let theme = style.theme;
     let cell = tc.cell.as_ref();
@@ -33,7 +33,10 @@ pub(super) fn render_cell(
     if has_code {
         for (index, raw) in code.lines().enumerate() {
             let gutter = if index == 0 { CODE_GUTTER } else { INDENT };
-            let spans = crate::syntax::highlight_line(raw, "py")
+            let spans = style
+                .highlight
+                .then(|| crate::syntax::highlight_line(raw, "py"))
+                .flatten()
                 .unwrap_or_else(|| vec![Span::styled(raw.to_string(), theme.code_block)]);
             push_gutter(lines, gutter, theme.dim, spans, width);
         }
@@ -114,7 +117,7 @@ fn top_line(
     code: &str,
     output: &CellOutputView,
     width: usize,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) -> Line<'static> {
     let theme = style.theme;
     let (_, colour) = tool_status_label(tc, theme);
@@ -248,7 +251,7 @@ fn render_sent_messages(
     cell: &mush_tools::ipython::CellDetails,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     let theme = style.theme;
     let expanded = style.detail.shows_full_output();
@@ -286,7 +289,7 @@ fn render_diffs(
     cell: &mush_tools::ipython::CellDetails,
     width: usize,
     lines: &mut Vec<Line<'static>>,
-    style: &MessageStyle<'_>,
+    style: &LineStyle<'_>,
 ) {
     let theme = style.theme;
     let mut by_path: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -317,7 +320,7 @@ fn render_diffs(
         if !style.detail.shows_diffs() {
             continue;
         }
-        let lang = crate::syntax::lang_from_path(path);
+        let lang = crate::syntax::lang_from_path(path).filter(|_| style.highlight);
         let inner = width.saturating_sub(1 + INDENT.len()).max(1);
         for diff in diffs {
             for row in super::super::diff::render_diff_with_lang_mode(

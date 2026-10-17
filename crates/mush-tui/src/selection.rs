@@ -92,24 +92,73 @@ pub(crate) fn strip_padding(text: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn transcript_rows(app: &App) -> Vec<String> {
-    crate::widgets::message_list::transcript_guards(app, app.viewport.area().width)
-        .flatten()
-        .iter()
-        .map(std::string::ToString::to_string)
-        .collect()
+pub(crate) fn resolve_log_search(
+    app: &mut App,
+    command: crate::normal::keys::Command,
+    count: Option<usize>,
+) -> Result<crate::normal::keys::Command, String> {
+    use crate::motion::Motion;
+    use crate::normal::keys::{Command, Search, Target};
+    let motion = match command {
+        Command::Move(motion) | Command::Operate(_, Target::Motion(motion)) => motion,
+        command => return Ok(command),
+    };
+    let (pattern, forward) = match motion {
+        Motion::Search { reverse } => {
+            let search = app
+                .interaction
+                .normal
+                .keys
+                .last_search()
+                .ok_or("no earlier search")?;
+            (search.pattern.clone(), search.forward != reverse)
+        }
+        Motion::SearchWord { forward } => {
+            let pattern = {
+                use crate::normal::NormalTarget;
+                let target = crate::normal::LogTarget::new(app);
+                crate::motion::word_pattern(target.rows(), target.cursor())
+            }
+            .ok_or("no word under the cursor")?;
+            app.interaction.normal.keys.remember_search(Search {
+                pattern: pattern.clone(),
+                forward,
+            });
+            (pattern, forward)
+        }
+        _ => return Ok(command),
+    };
+    let not_found = || format!("pattern not found: {pattern}");
+    let regex = crate::motion::search_regex(&pattern).ok_or_else(not_found)?;
+    let to =
+        crate::widgets::message_list::transcript::search(app, &regex, forward, count.unwrap_or(1))
+            .ok_or_else(not_found)?;
+    let jump = Motion::Jump {
+        to,
+        linewise: false,
+    };
+    Ok(match command {
+        Command::Operate(operator, _) => Command::Operate(operator, Target::Motion(jump)),
+        _ => Command::Move(jump),
+    })
 }
 
 pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
+    app.viewport.selection()?;
+    let rows = crate::widgets::message_list::transcript::rows(app, |viewport| {
+        viewport
+            .selection()
+            .map_or(0..0, |range| range.start().0..range.end().0 + 1)
+    });
     let range = app.viewport.selection()?;
-    let guards = crate::widgets::message_list::transcript_guards(app, app.viewport.area().width);
-    let transcript = guards.flatten();
-    let lines: Vec<String> = transcript.iter().map(ToString::to_string).collect();
-    let breaks: Vec<Option<Break>> = transcript
-        .iter()
-        .map(|line| crate::soft_wrap::break_before(line))
-        .collect();
-    let text = text_for(&lines, &breaks, &range, app.viewport.selection_kind());
+    let local = |(line, column): (usize, usize)| (line.saturating_sub(rows.base), column);
+    let range = local(*range.start())..=local(*range.end());
+    let text = text_for(
+        &rows.rows,
+        &rows.breaks,
+        &range,
+        app.viewport.selection_kind(),
+    );
     Some(if strip_indent {
         strip_padding(&text)
     } else {

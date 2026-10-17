@@ -429,6 +429,12 @@ impl Text {
     }
 }
 
+pub(crate) fn search_regex(pattern: &str) -> Option<regex::Regex> {
+    regex::Regex::new(&pattern.replace("\\<", "\\b").replace("\\>", "\\b"))
+        .or_else(|_| regex::Regex::new(&regex::escape(pattern)))
+        .ok()
+}
+
 pub(crate) fn search(
     rows: &[String],
     at: (usize, usize),
@@ -436,9 +442,7 @@ pub(crate) fn search(
     forward: bool,
     count: usize,
 ) -> Option<(usize, usize)> {
-    let regex = regex::Regex::new(&pattern.replace("\\<", "\\b").replace("\\>", "\\b"))
-        .or_else(|_| regex::Regex::new(&regex::escape(pattern)))
-        .ok()?;
+    let regex = search_regex(pattern)?;
     let text = rows.join("\n");
     let starts: Vec<usize> = regex.find_iter(&text).map(|found| found.start()).collect();
     let mut from = byte_of(rows, at);

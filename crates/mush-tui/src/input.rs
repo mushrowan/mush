@@ -41,7 +41,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 
 fn current_selection(app: &mut App) -> Option<crate::normal::Selection> {
     if app.interaction.focus.is_log() {
-        crate::normal::LogTarget::new(app).selection()
+        let (anchor, head) = app.viewport.selection_ends()?;
+        Some(crate::normal::Selection {
+            anchor,
+            head,
+            kind: app.viewport.selection_kind(),
+        })
     } else {
         crate::normal::ComposerTarget::new(&mut app.input).selection()
     }
@@ -984,23 +989,13 @@ fn handle_log_motion(app: &mut App, key: KeyEvent, context: Context) {
 }
 
 fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
-    let Some(command) = app.interaction.normal.marks.log.resolve(command) else {
+    let Some(command) = app.viewport.resolve_marks(command) else {
         app.status = Some("mark not set".into());
         return;
     };
-    let command =
-        crate::normal::resolve_screen(command, &crate::normal::LogTarget::new(app), count);
+    let command = crate::normal::resolve_screen(command, app.viewport.visible_lines(), count);
     let command = if crate::normal::wants_search(command) {
-        let rows = crate::selection::transcript_rows(app);
-        let cursor = app.viewport.cursor();
-        let at = (cursor.line, cursor.column);
-        match crate::normal::resolve_search(
-            command,
-            &mut app.interaction.normal.keys,
-            &rows,
-            at,
-            count,
-        ) {
+        match crate::selection::resolve_log_search(app, command, count) {
             Ok(command) => command,
             Err(message) => {
                 app.status = Some(message.into());
@@ -1012,7 +1007,20 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
     };
     let scroll = match command {
         Command::Move(motion) => {
-            let mut target = crate::normal::LogTarget::new(app);
+            use crate::motion::Motion;
+            let line = app.viewport.cursor().line;
+            let times = count.unwrap_or(1);
+            let reach = match motion {
+                Motion::Jump { to, .. } => Some(to.0),
+                Motion::Line(line) => Some(line),
+                Motion::Up => Some(line.saturating_sub(times)),
+                Motion::Down => Some(line.saturating_add(times)),
+                _ => None,
+            };
+            let mut target = crate::normal::LogTarget::reaching(app, reach);
+            let Command::Move(motion) = target.localise(command) else {
+                return;
+            };
             crate::normal::apply_motion(&mut target, motion, count);
             return;
         }
@@ -1028,16 +1036,13 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         }
         Command::SetMark(name) => {
             let cursor = app.viewport.cursor();
-            app.interaction
-                .normal
-                .marks
-                .log
-                .set(name, (cursor.line, cursor.column));
+            app.viewport.set_mark(name, (cursor.line, cursor.column));
             return;
         }
         Command::Reselect => {
             if let Some(selection) = app.interaction.normal.last_selection.log {
-                crate::normal::LogTarget::new(app).select(selection);
+                app.viewport
+                    .select(selection.anchor, selection.head, selection.kind);
                 app.interaction.mode = AppMode::Visual;
             }
             return;
@@ -1052,7 +1057,15 @@ fn run_log_motion(app: &mut App, command: Command, count: Option<usize>) {
         | Command::ToggleCase
         | Command::Repeat => return,
     };
-    for _ in 0..count.unwrap_or(1) {
+
+    let times = count.unwrap_or(1);
+    let span = times.saturating_mul(app.viewport.page());
+    let line = app.viewport.cursor().line;
+    crate::widgets::message_list::transcript::reach(
+        app,
+        line.saturating_sub(span)..line + span + 1,
+    );
+    for _ in 0..times {
         let page = app.viewport.page() as isize;
         match scroll {
             Scroll::LineUp => app.viewport.scroll_by(-1),

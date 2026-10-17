@@ -503,20 +503,20 @@ fn resizing_a_long_scrolled_log_keeps_the_same_message() {
     switch_focus(&mut app);
     app.viewport.page_by(-200);
     draw(&mut terminal, &mut screen, &mut app);
-    let cursor_message = app.viewport.cursor().line;
-    let before = crate::selection::transcript_rows(&app)[cursor_message]
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
+    let first_word = |app: &App| {
+        use crate::normal::NormalTarget;
+        let target = crate::normal::LogTarget::new(app);
+        target.rows()[target.cursor().0]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let before = first_word(&app);
 
     terminal.backend_mut().resize(50, 24);
     draw(&mut terminal, &mut screen, &mut app);
-    let after = crate::selection::transcript_rows(&app)[app.viewport.cursor().line]
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string();
+    let after = first_word(&app);
 
     assert_eq!(after, before);
 }

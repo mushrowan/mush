@@ -635,6 +635,71 @@ fn wrap_text_empty() {
 }
 
 #[test]
+fn a_message_rebuilds_for_every_detail_level_it_reads() {
+    let theme = crate::theme::Theme::default();
+    let mut thinking = DisplayMessage::new(MessageRole::Assistant, "the reply");
+    thinking.thinking = Some("**weighing it**\n\nfirst idea\nsecond idea".into());
+    let mut tool = DisplayMessage::new(MessageRole::Assistant, "ran it");
+    let mut call = DisplayToolCall::new(
+        "tc".into(),
+        "bash".into(),
+        "seq 1 40".into(),
+        ToolCallStatus::Done,
+        0,
+    );
+    call.output = Some(
+        (1..=40)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    call.bash_done = mush_tools::kernel_jobs::BashDone::parse(
+        "[bash-done pid:7 exit:0]\n\nCommand: \"seq 1 40\"",
+    );
+    assert!(call.bash_done.is_some());
+    tool.tool_calls.push(call);
+    let cell = cell_message(cell_details(), ToolCallStatus::Done);
+    let plain = DisplayMessage::new(MessageRole::User, "just words");
+    let styled = |lines: Vec<Line<'static>>| -> Vec<(String, Vec<Style>)> {
+        lines
+            .into_iter()
+            .map(|line| {
+                (
+                    line.to_string(),
+                    line.spans.iter().map(|span| span.style).collect(),
+                )
+            })
+            .collect()
+    };
+    for message in [&thinking, &tool, &cell, &plain] {
+        for detail in [ChatDetail::Overview, ChatDetail::Details, ChatDetail::All] {
+            let style = MessageStyle {
+                theme: &theme,
+                show_usage: false,
+                detail,
+                pulse: 0,
+            };
+            let masked = DetailSensitivity::of(message).view(detail);
+            let full = DetailSensitivity::EVERYTHING.view(detail);
+            assert_eq!(
+                styled(build_message_lines(
+                    message,
+                    &style.lines_for(masked, false),
+                    60
+                )),
+                styled(build_message_lines(
+                    message,
+                    &style.lines_for(full, false),
+                    60
+                )),
+                "{detail:?} {:?}",
+                message.content
+            );
+        }
+    }
+}
+
+#[test]
 fn wrap_text_uses_terminal_cell_width_for_wide_chars() {
     assert_eq!(wrap_text("界界界", 4), vec!["界界", "界"]);
 }

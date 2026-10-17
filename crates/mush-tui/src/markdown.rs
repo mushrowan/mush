@@ -101,9 +101,24 @@ enum CodeHighlighting {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Breaks {
+pub(crate) enum Breaks {
     Soft,
     Hard,
+}
+
+pub(crate) fn render_message(
+    source: &str,
+    theme: &Theme,
+    width: Option<usize>,
+    breaks: Breaks,
+    highlight: bool,
+) -> Text<'static> {
+    let code_highlighting = if highlight {
+        CodeHighlighting::Enabled
+    } else {
+        CodeHighlighting::Disabled
+    };
+    render_with_options(source, theme, width, code_highlighting, breaks)
 }
 
 fn render_pulldown(

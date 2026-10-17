@@ -291,6 +291,7 @@ pub struct RenderState {
     pub tool_box_cache: RefCell<Vec<Option<CachedToolBoxLines>>>,
     pub status_bar_cache: RefCell<Option<CachedStatusBar>>,
     pub force_clear: Cell<bool>,
+    pub transcript_pending: Cell<bool>,
 }
 
 impl RenderState {
@@ -302,6 +303,7 @@ impl RenderState {
             tool_box_cache: RefCell::new(Vec::new()),
             status_bar_cache: RefCell::new(None),
             force_clear: Cell::new(false),
+            transcript_pending: Cell::new(false),
         }
     }
 }

@@ -251,7 +251,8 @@ fn execute(app: &mut App, order: Order) -> Option<AppEvent> {
         return None;
     };
     let (count, register) = (order.count, order.register);
-    let command = super::resolve_screen(command, &ComposerTarget::new(&mut app.input), count);
+    let visible = ComposerTarget::new(&mut app.input).visible_lines();
+    let command = super::resolve_screen(command, visible, count);
     let command = if super::wants_search(command) {
         let rows = rows(&app.input.text);
         let at = composer_position(&app.input);

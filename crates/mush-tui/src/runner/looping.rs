@@ -52,6 +52,11 @@ pub(super) async fn run_loop_iteration(
     } else {
         action
     };
+    let action = if matches!(action, LoopAction::Continue) && settle_transcript(runtime) {
+        LoopAction::Redraw
+    } else {
+        action
+    };
     Ok(
         if runtime.resize.pending() && matches!(action, LoopAction::Redraw) {
             LoopAction::Continue
@@ -59,6 +64,13 @@ pub(super) async fn run_loop_iteration(
             action
         },
     )
+}
+
+const TRANSCRIPT_SETTLE_SLICE: std::time::Duration = std::time::Duration::from_millis(12);
+
+fn settle_transcript(runtime: &RunnerRuntime) -> bool {
+    let deadline = std::time::Instant::now() + TRANSCRIPT_SETTLE_SLICE;
+    crate::widgets::message_list::settle_transcript(&runtime.session.app, deadline)
 }
 
 fn input_parts<'a>(

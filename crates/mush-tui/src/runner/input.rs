@@ -515,6 +515,11 @@ pub(super) async fn handle_idle_terminal_events(
                 .saturating_duration_since(now)
                 .min(std::time::Duration::from_millis(50))
         });
+    let wait = if session.app.render_state.transcript_pending.get() {
+        std::time::Duration::ZERO
+    } else {
+        wait
+    };
     if !event::poll(wait)? {
         return Ok(LoopAction::Continue);
     }
