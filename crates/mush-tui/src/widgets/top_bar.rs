@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use mush_ai::types::{Dollars, TokenCount};
 
@@ -44,24 +44,48 @@ fn cwd_name(cwd: &str) -> &str {
         .unwrap_or(cwd)
 }
 
+fn fit_title(title: &str, room: usize) -> String {
+    if title.width() <= room {
+        return title.to_string();
+    }
+    if room < 2 {
+        return String::new();
+    }
+    let mut fitted = String::new();
+    let mut used = 0;
+    for ch in title.chars() {
+        let cells = ch.width().unwrap_or(0);
+        if used + cells + 1 > room {
+            break;
+        }
+        fitted.push(ch);
+        used += cells;
+    }
+    let mut fitted = fitted.trim_end().to_string();
+    fitted.push('\u{2026}');
+    fitted
+}
+
 pub fn top_bar_line(app: &App, width: u16) -> Line<'static> {
     let title = sanitise_title(app.session_title.as_deref().unwrap_or(cwd_name(&app.cwd)));
     if title.is_empty() {
         return Line::default();
     }
     let width = usize::from(width);
+    let (tokens, cost) = app.session_spend();
+    let spend = format!("  {}", spend_label(tokens, cost));
+    let room = width.saturating_sub(spend.width());
+    let title = fit_title(&title, room);
+    if title.is_empty() {
+        return Line::from(Span::styled(spend.trim_start().to_string(), app.theme.dim));
+    }
     let title_width = title.width();
-    let start = width.saturating_sub(title_width) / 2;
-    let mut spans = vec![
+    let start = (width.saturating_sub(title_width) / 2).min(room.saturating_sub(title_width));
+    Line::from(vec![
         Span::raw(" ".repeat(start)),
         Span::styled(title, app.theme.status_model),
-    ];
-    let (tokens, cost) = app.session_spend();
-    spans.push(Span::styled(
-        format!("  {}", spend_label(tokens, cost)),
-        app.theme.dim,
-    ));
-    Line::from(spans)
+        Span::styled(spend, app.theme.dim),
+    ])
 }
 
 impl Widget for TopBar<'_> {
@@ -197,13 +221,38 @@ mod tests {
     }
 
     #[test]
-    fn a_title_wider_than_the_bar_is_clipped() {
+    fn a_title_wider_than_the_bar_is_cut_short_and_the_spend_stays() {
         let mut app = app();
         app.session_title = Some("x".repeat(60));
 
         let row = render(&app, 20);
 
-        assert_eq!(row.len(), 20);
-        assert_eq!(row, "x".repeat(20));
+        assert_eq!(
+            row,
+            format!("{}\u{2026}  0 tok \u{b7} $0.00", "x".repeat(4))
+        );
+    }
+
+    #[test]
+    fn a_long_title_moves_left_before_it_is_cut() {
+        let mut app = app();
+        app.session_title = Some("t".repeat(20));
+
+        let row = render(&app, 40);
+
+        assert_eq!(
+            row,
+            format!("{}{}  0 tok \u{b7} $0.00", " ".repeat(5), "t".repeat(20))
+        );
+    }
+
+    #[test]
+    fn a_bar_too_narrow_for_any_title_keeps_the_spend() {
+        let mut app = app();
+        app.session_title = Some("hello".into());
+
+        let row = render(&app, 14);
+
+        assert_eq!(row.trim_end(), "0 tok \u{b7} $0.00");
     }
 }
