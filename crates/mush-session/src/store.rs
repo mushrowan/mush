@@ -244,7 +244,11 @@ impl SessionStore {
     }
 
     pub fn default_artifact_dir(id: &SessionId) -> PathBuf {
-        data_dir().join("session-artifacts").join(id.as_str())
+        artifact_dir_under(&data_dir(), id)
+    }
+
+    pub fn pasted_images_dir(id: &SessionId) -> PathBuf {
+        Self::default_artifact_dir(id).join(PASTED_IMAGES)
     }
 
     pub fn kernel_state_path(id: &SessionId) -> PathBuf {
@@ -518,6 +522,9 @@ impl SessionStore {
         }
         let _ = std::fs::remove_file(self.lease_path(id));
         let _ = std::fs::remove_file(self.history_path(id));
+        if let Some(root) = self.base_dir.parent() {
+            let _ = std::fs::remove_dir_all(artifact_dir_under(root, id).join(PASTED_IMAGES));
+        }
         self.logged
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -669,6 +676,12 @@ pub fn load_meta(path: &Path) -> Result<SessionMeta, StoreError> {
 }
 
 pub use mush_ai::dirs::data_dir;
+
+const PASTED_IMAGES: &str = "images";
+
+fn artifact_dir_under(root: &Path, id: &SessionId) -> PathBuf {
+    root.join("session-artifacts").join(id.as_str())
+}
 
 #[cfg(test)]
 mod tests {
@@ -1380,6 +1393,30 @@ mod tests {
 
         store.delete(&session.meta.id).unwrap();
         assert!(store.load(&session.meta.id).is_err());
+    }
+
+    #[test]
+    fn deleting_a_session_drops_its_pasted_image_originals_and_keeps_its_other_artifacts() {
+        let (dir, store) = temp_store();
+        let session = Session::new("test-model", "/tmp");
+        store.save(&session).unwrap();
+        let artifacts = artifact_dir_under(dir.path(), &session.meta.id);
+        std::fs::create_dir_all(artifacts.join(PASTED_IMAGES)).unwrap();
+        std::fs::write(artifacts.join(PASTED_IMAGES).join("pasted-1.png"), b"png").unwrap();
+        std::fs::write(artifacts.join("notes.json"), b"{}").unwrap();
+        let other = Session::new("test-model", "/tmp");
+        let kept = artifact_dir_under(dir.path(), &other.meta.id).join(PASTED_IMAGES);
+        std::fs::create_dir_all(&kept).unwrap();
+
+        store.delete(&session.meta.id).unwrap();
+
+        assert!(!artifacts.join(PASTED_IMAGES).exists());
+        assert!(artifacts.join("notes.json").exists());
+        assert!(kept.exists());
+        assert_eq!(
+            SessionStore::pasted_images_dir(&session.meta.id),
+            SessionStore::default_artifact_dir(&session.meta.id).join(PASTED_IMAGES)
+        );
     }
 
     #[test]

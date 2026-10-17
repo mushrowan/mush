@@ -786,8 +786,7 @@ async fn paste_clipboard_image(session: &mut Session, tui_config: &TuiConfig) {
     let state = session.connection.state();
     let model = mush_ai::discovery::resolve_model_by_id(&state.model_id)
         .unwrap_or_else(|| tui_config.model.clone());
-    let originals =
-        mush_session::SessionStore::default_artifact_dir(&state.session_id).join("images");
+    let originals = mush_session::SessionStore::pasted_images_dir(&state.session_id);
     let prepared = tokio::task::spawn_blocking(move || {
         crate::pasted_image::prepare(image, &model, &originals)
     })
