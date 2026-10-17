@@ -41,6 +41,7 @@
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
   kernelPython = pkgs.python3.withPackages (ps: [
+    ps.dill
     ps.requests
     ps.httpx
     ps.pyyaml
