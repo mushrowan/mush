@@ -74,6 +74,36 @@ pub fn prefix_within(text: &str, max_width: usize) -> &str {
     text
 }
 
+pub struct LowercaseNeedle<'a> {
+    needle: &'a str,
+    ascii: Option<regex::Regex>,
+}
+
+impl<'a> LowercaseNeedle<'a> {
+    #[must_use]
+    pub fn new(needle: &'a str) -> Self {
+        let ascii = needle
+            .is_ascii()
+            .then(|| {
+                regex::RegexBuilder::new(&regex::escape(needle))
+                    .case_insensitive(true)
+                    .unicode(false)
+                    .build()
+                    .ok()
+            })
+            .flatten();
+        Self { needle, ascii }
+    }
+
+    #[must_use]
+    pub fn in_text(&self, text: &str) -> bool {
+        match &self.ascii {
+            Some(regex) if text.is_ascii() => regex.is_match(text),
+            _ => text.to_lowercase().contains(self.needle),
+        }
+    }
+}
+
 #[must_use]
 pub fn truncate_with_ellipsis(s: &str, max_width: usize) -> String {
     assert!(max_width > 0, "max_width must leave room for ellipsis");

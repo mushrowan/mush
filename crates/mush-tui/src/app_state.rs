@@ -97,6 +97,7 @@ pub struct SearchState {
     pub query: String,
     pub matches: Vec<usize>,
     pub selected: usize,
+    pub(crate) scanned: Option<(String, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]

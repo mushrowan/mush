@@ -1614,6 +1614,72 @@ fn ctrl_bracket_closes_slash_menu() {
     assert!(app.completion.slash_menu.is_none());
 }
 
+fn search_typing(app: &mut App, typed: &str) -> Vec<usize> {
+    for c in typed.chars() {
+        handle_key(app, key(KeyCode::Char(c)));
+    }
+    app.interaction.search.matches.clone()
+}
+
+fn every_match(app: &App, query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    app.messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.content.to_lowercase().contains(&query))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+#[test]
+fn a_growing_search_query_matches_what_a_fresh_scan_would() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    for text in [
+        "Error in the build",
+        "the ERRORS pile up",
+        "no problem",
+        "\u{c9}COLE \u{e9}rror spelling",
+        "K\u{212a} kelvin",
+        "\u{3a3}\u{3a3}A greek",
+    ] {
+        app.push_user_message(text);
+    }
+    app.interaction.mode = AppMode::Search;
+
+    for typed in ["e", "r", "r", "o", "r"] {
+        let query = format!("{}{typed}", app.interaction.search.query);
+        assert_eq!(
+            search_typing(&mut app, typed),
+            every_match(&app, &query),
+            "{query}"
+        );
+    }
+    handle_key(&mut app, key(KeyCode::Backspace));
+    assert_eq!(app.interaction.search.matches, every_match(&app, "erro"));
+
+    for query in ["k", "kk", "\u{3c3}", "\u{3c3}a", "\u{3c3}\u{3c3}a"] {
+        app.interaction.search.query = query.into();
+        app.update_search();
+        assert_eq!(
+            app.interaction.search.matches,
+            every_match(&app, query),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn a_message_that_arrives_mid_search_is_found_as_the_query_grows() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.push_user_message("first panic");
+    app.interaction.mode = AppMode::Search;
+    assert_eq!(search_typing(&mut app, "pan"), [0]);
+
+    app.push_user_message("second panic");
+
+    assert_eq!(search_typing(&mut app, "ic"), [0, 1]);
+}
+
 #[test]
 fn ctrl_bracket_exits_search_mode() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));

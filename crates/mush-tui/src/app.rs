@@ -795,17 +795,31 @@ impl App {
     }
 
     pub fn update_search(&mut self) {
-        let q = self.interaction.search.query.to_lowercase();
-        self.interaction.search.matches = if q.is_empty() {
+        let query = self.interaction.search.query.to_lowercase();
+        let revision = self.messages.revision();
+        let search = &mut self.interaction.search;
+        let narrows = search.scanned.as_ref().is_some_and(|(scanned, at)| {
+            *at == revision && !scanned.is_empty() && query.contains(scanned.as_str())
+        });
+        let candidates: Vec<usize> = if narrows {
+            std::mem::take(&mut search.matches)
+        } else {
+            (0..self.messages.len()).collect()
+        };
+        search.matches = if query.is_empty() {
             Vec::new()
         } else {
-            self.messages
-                .iter()
-                .enumerate()
-                .filter(|(_, m)| m.content.to_lowercase().contains(&q))
-                .map(|(i, _)| i)
+            let found = crate::text::LowercaseNeedle::new(&query);
+            candidates
+                .into_iter()
+                .filter(|index| {
+                    self.messages
+                        .get(*index)
+                        .is_some_and(|m| found.in_text(&m.content))
+                })
                 .collect()
         };
+        search.scanned = Some((query, revision));
         if self.interaction.search.matches.is_empty() {
             self.interaction.search.selected = 0;
         } else if self.interaction.search.selected >= self.interaction.search.matches.len() {

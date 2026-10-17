@@ -3,59 +3,75 @@ use ratatui::text::Line;
 use std::cell::RefCell;
 
 #[derive(Debug, Clone, Default)]
-pub struct Messages(Vec<DisplayMessage>);
+pub struct Messages {
+    messages: Vec<DisplayMessage>,
+    revision: u64,
+}
 
 impl std::ops::Deref for Messages {
     type Target = [DisplayMessage];
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.messages
     }
 }
 
 impl From<Vec<DisplayMessage>> for Messages {
     fn from(messages: Vec<DisplayMessage>) -> Self {
-        Self(messages)
+        Self {
+            messages,
+            revision: 0,
+        }
     }
 }
 
 impl FromIterator<DisplayMessage> for Messages {
     fn from_iter<I: IntoIterator<Item = DisplayMessage>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
+        Self::from(iter.into_iter().collect::<Vec<_>>())
     }
 }
 
 impl Messages {
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn touch(&mut self) -> &mut Vec<DisplayMessage> {
+        self.revision = self.revision.wrapping_add(1);
+        &mut self.messages
+    }
+
     pub fn push(&mut self, message: DisplayMessage) {
-        self.0.push(message);
+        self.touch().push(message);
     }
 
     pub fn insert(&mut self, index: usize, message: DisplayMessage) {
-        self.0.insert(index, message);
+        self.touch().insert(index, message);
     }
 
     pub fn remove(&mut self, index: usize) -> DisplayMessage {
-        self.0.remove(index)
+        self.touch().remove(index)
     }
 
     pub fn clear(&mut self) {
-        self.0.clear();
+        self.touch().clear();
     }
 
     pub fn retain(&mut self, keep: impl FnMut(&DisplayMessage) -> bool) {
-        self.0.retain(keep);
+        self.touch().retain(keep);
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<MessageMut<'_>> {
-        self.0.get_mut(index).map(MessageMut)
+        self.touch().get_mut(index).map(MessageMut)
     }
 
     pub fn last_mut(&mut self) -> Option<MessageMut<'_>> {
-        self.0.last_mut().map(MessageMut)
+        self.touch().last_mut().map(MessageMut)
     }
 
     pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = MessageMut<'_>> {
-        self.0.iter_mut().map(MessageMut)
+        self.touch().iter_mut().map(MessageMut)
     }
 }
 
