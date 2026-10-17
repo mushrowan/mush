@@ -133,14 +133,8 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             }
         }
         if app.stream.text.is_empty() && app.stream.thinking.is_empty() {
-            let mut spans = vec![Span::raw(" ")];
-            spans.extend(shimmer_spans(
-                " working",
-                &app.theme.shimmer,
-                app.shimmer_phase(),
-                dim,
-            ));
-            lines.push(Line::from(spans));
+            let (verb, elapsed) = live_activity(app, std::time::Instant::now());
+            lines.push(activity_line(app, verb, elapsed));
         }
     }
 
@@ -167,6 +161,39 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+fn live_activity(
+    app: &App,
+    now: std::time::Instant,
+) -> (&'static str, Option<std::time::Duration>) {
+    use crate::turn_activity::StreamPart;
+    match app.stream.last_part {
+        None => ("waiting", app.stream.phase_elapsed(now)),
+        Some(StreamPart::Thinking) => ("thinking", app.stream.thinking_elapsed(now)),
+        Some(StreamPart::Text) => ("writing", app.stream.phase_elapsed(now)),
+        Some(StreamPart::ToolArgs) => ("writing code", app.stream.phase_elapsed(now)),
+    }
+}
+
+fn activity_line(app: &App, verb: &str, elapsed: Option<std::time::Duration>) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(shimmer_spans(
+        &format!(" {verb}"),
+        &app.theme.shimmer,
+        app.shimmer_phase(),
+        app.theme.dim,
+    ));
+    if let Some(elapsed) = elapsed {
+        spans.push(Span::styled(
+            format!(
+                "{HEADER_SEPARATOR}{}",
+                crate::turn_activity::format_elapsed(elapsed)
+            ),
+            app.theme.dim,
+        ));
+    }
+    Line::from(spans)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

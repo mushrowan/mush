@@ -13,6 +13,8 @@ pub struct StreamingState {
     pub tool_args: String,
     pub last_part: Option<StreamPart>,
     pub streamed_chars: usize,
+    phase_since: Option<Instant>,
+    thinking_since: Option<Instant>,
     text_tw: TypewriterState,
     think_tw: TypewriterState,
 }
@@ -84,14 +86,28 @@ impl StreamingState {
     }
 
     pub fn start(&mut self) {
+        self.start_at(Instant::now());
+    }
+
+    pub fn start_at(&mut self, now: Instant) {
         self.active = true;
         self.text.clear();
         self.thinking.clear();
         self.tool_args.clear();
         self.last_part = None;
         self.streamed_chars = 0;
+        self.phase_since = Some(now);
+        self.thinking_since = None;
         self.text_tw.reset();
         self.think_tw.reset();
+    }
+
+    pub fn begin(&mut self, part: StreamPart) {
+        self.begin_at(part, Instant::now());
+    }
+
+    pub fn begin_at(&mut self, part: StreamPart, now: Instant) {
+        self.enter(part, now);
     }
 
     pub fn push_text(&mut self, delta: &str) {
@@ -107,7 +123,7 @@ impl StreamingState {
         let chars = delta.chars().count();
         self.text_tw.record_push(chars, now);
         self.text.push_str(delta);
-        self.streamed(StreamPart::Text, chars);
+        self.streamed(StreamPart::Text, chars, now);
     }
 
     pub fn push_thinking(&mut self, delta: &str) {
@@ -118,17 +134,39 @@ impl StreamingState {
         let chars = delta.chars().count();
         self.think_tw.record_push(chars, now);
         self.thinking.push_str(delta);
-        self.streamed(StreamPart::Thinking, chars);
+        self.streamed(StreamPart::Thinking, chars, now);
     }
 
     pub fn push_tool_args(&mut self, delta: &str) {
         self.tool_args.push_str(delta);
-        self.streamed(StreamPart::ToolArgs, delta.chars().count());
+        self.streamed(StreamPart::ToolArgs, delta.chars().count(), Instant::now());
     }
 
-    fn streamed(&mut self, part: StreamPart, chars: usize) {
-        self.last_part = Some(part);
+    fn streamed(&mut self, part: StreamPart, chars: usize, now: Instant) {
+        self.enter(part, now);
         self.streamed_chars += chars;
+    }
+
+    fn enter(&mut self, part: StreamPart, now: Instant) {
+        if part == StreamPart::Thinking {
+            self.thinking_since.get_or_insert(now);
+        }
+        if self.last_part != Some(part) {
+            self.last_part = Some(part);
+            self.phase_since = Some(now);
+        }
+    }
+
+    #[must_use]
+    pub fn phase_elapsed(&self, now: Instant) -> Option<Duration> {
+        self.phase_since
+            .map(|since| now.saturating_duration_since(since))
+    }
+
+    #[must_use]
+    pub fn thinking_elapsed(&self, now: Instant) -> Option<Duration> {
+        self.thinking_since
+            .map(|since| now.saturating_duration_since(since))
     }
 
     #[must_use]
@@ -171,6 +209,8 @@ impl StreamingState {
         self.tool_args.clear();
         self.last_part = None;
         self.streamed_chars = 0;
+        self.phase_since = None;
+        self.thinking_since = None;
         self.text_tw.reset();
         self.think_tw.reset();
         (text, thinking)

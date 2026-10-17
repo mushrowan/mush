@@ -5,6 +5,7 @@ use mush_ai::types::*;
 
 use crate::app::App;
 use crate::session::ImageProtocols;
+use crate::turn_activity::StreamPart;
 
 pub struct EventCtx<'a> {
     pub app: &'a mut App,
@@ -22,6 +23,9 @@ pub fn handle_agent_event(
     let EventCtx { app, image_protos } = ctx;
     match event {
         AgentEvent::StreamEvent { event } => match event {
+            StreamEvent::ThinkingStart { .. } => app.stream.begin(StreamPart::Thinking),
+            StreamEvent::TextStart { .. } => app.stream.begin(StreamPart::Text),
+            StreamEvent::ToolCallStart { .. } => app.stream.begin(StreamPart::ToolArgs),
             StreamEvent::TextDelta { delta, .. } => app.push_text_delta(delta),
             StreamEvent::ThinkingDelta { delta, .. } => app.push_thinking_delta(delta),
             StreamEvent::ToolCallDelta { delta, .. } => app.push_tool_args_delta(delta),

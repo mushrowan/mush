@@ -99,7 +99,7 @@ fn inline_busy_rows_do_not_render_braille_spinners() {
 
     let content = buffer_to_string(&render_app(&app, 40, 10));
 
-    assert!(content.contains("working"));
+    assert!(content.contains("waiting"));
     assert_no_braille_spinner(&content);
 }
 
@@ -1393,10 +1393,11 @@ fn a_streaming_reply_shows_in_the_live_region() {
 }
 
 #[test]
-fn a_stream_with_nothing_yet_still_says_it_is_working() {
+fn a_stream_with_nothing_yet_says_it_is_waiting_and_for_how_long() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.start_streaming();
-    assert!(live_text(&app, 80).contains("working"));
+    app.stream
+        .start_at(std::time::Instant::now() - std::time::Duration::from_secs(7));
+    assert!(live_text(&app, 80).contains("waiting · 7s"));
 }
 
 #[test]
@@ -2381,4 +2382,19 @@ fn a_compaction_shows_a_two_line_preview_until_all_output() {
     assert!(text.contains("Goal"), "{text}");
     assert!(!text.contains("## Goal"), "{text}");
     assert!(text.contains("24 → 6 messages"), "{text}");
+}
+
+#[test]
+fn hidden_thinking_names_itself_with_its_own_clock() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let start = std::time::Instant::now() - std::time::Duration::from_secs(45);
+    app.stream
+        .start_at(start - std::time::Duration::from_secs(3));
+    app.stream
+        .begin_at(crate::turn_activity::StreamPart::Thinking, start);
+    app.stream.push_thinking_at("", start);
+
+    let text = live_text(&app, 80);
+    assert!(text.contains("thinking · 45s"), "{text}");
+    assert!(!text.contains("waiting"), "{text}");
 }
