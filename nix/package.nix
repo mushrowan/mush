@@ -71,10 +71,10 @@
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.makeWrapper pkgs.installShellFiles];
       postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
         installShellCompletion --cmd mush \
-          --bash <($out/bin/mush completions bash) \
-          --fish <($out/bin/mush completions fish) \
+          --bash <(COMPLETE=bash $out/bin/mush) \
+          --fish <(COMPLETE=fish $out/bin/mush) \
           --nushell <($out/bin/mush completions nushell) \
-          --zsh <($out/bin/mush completions zsh)
+          --zsh <(COMPLETE=zsh $out/bin/mush)
       '';
       postFixup = ''
         wrapProgram $out/bin/mush \
@@ -97,14 +97,16 @@ in {
     XDG_DATA_DIRS=$share ${pkgs.lib.getExe pkgs.bashInteractive} --norc --noprofile -c '
       source ${pkgs.bash-completion}/share/bash-completion/bash_completion
       _comp_load mush
-      COMP_WORDS=(mush comp) COMP_CWORD=1
-      _mush mush comp mush
+      COMP_WORDS=(mush comp) COMP_CWORD=1 COMP_TYPE=9
+      _clap_complete_mush mush comp mush
       [[ "''${COMPREPLY[*]}" == completions ]]
     '
     ${pkgs.lib.getExe pkgs.zsh} -f -c "
       fpath=($share/zsh/site-functions \$fpath)
       autoload -U compinit && compinit -u -D
       [[ \$_comps[mush] == _mush ]]
+      source $share/zsh/site-functions/_mush
+      [[ \$_comps[mush] == _clap_dynamic_completer_mush ]]
     "
     ${pkgs.lib.getExe pkgs.fish} --no-config -c "
       set -g fish_complete_path $share/fish/vendor_completions.d
