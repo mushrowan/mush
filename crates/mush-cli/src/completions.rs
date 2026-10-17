@@ -61,6 +61,7 @@ pub const SHELLS: Shells<'static> = Shells(&[
     &AutoloadedZsh,
 ]);
 
+// as an fpath #compdef file, clap's script spends the first tab registering itself
 struct AutoloadedZsh;
 
 impl EnvCompleter for AutoloadedZsh {

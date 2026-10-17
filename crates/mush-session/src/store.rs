@@ -314,6 +314,7 @@ impl SessionStore {
                     use std::io::Write;
                     let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
                     file.write_all(&appended)?;
+                    // the meta written next points at these entries, so they reach the disk first
                     file.sync_data()?;
                 }
                 logged.bytes + appended.len() as u64
