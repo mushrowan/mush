@@ -5,6 +5,7 @@ pub mod at_template;
 pub mod batch_output;
 pub mod browser_login;
 pub mod clipboard;
+pub mod clock;
 pub mod config_watcher;
 pub mod context_view;
 mod conversation_display;

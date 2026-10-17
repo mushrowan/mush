@@ -107,7 +107,7 @@ pub fn settle_transcript(app: &App, deadline: std::time::Instant) -> bool {
 pub(crate) fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if app.stream.active {
-        let now = std::time::Instant::now();
+        let now = app.clock.now();
         let stream_content_width = message_content_width(width as usize);
         push_live_thinking(app, stream_content_width, now, &mut lines);
         if !app.stream.text.is_empty() {

@@ -1261,6 +1261,19 @@ fn activity_label_waits_when_streaming_with_nothing_received() {
 }
 
 #[test]
+fn activity_label_counts_the_turn_on_the_app_clock() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.begin_turn();
+    app.start_streaming();
+    app.clock = crate::clock::Clock::frozen_at(
+        std::time::Instant::now() + std::time::Duration::from_secs(7),
+    );
+
+    assert_eq!(app.activity_label().as_deref(), Some("waiting · 7s"));
+    assert_eq!(app.activity_label().as_deref(), Some("waiting · 7s"));
+}
+
+#[test]
 fn activity_label_follows_the_latest_stream_part() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();

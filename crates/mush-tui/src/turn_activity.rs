@@ -69,7 +69,13 @@ impl TurnActivity {
 
     #[must_use]
     pub fn elapsed(&self) -> Option<Duration> {
-        self.started_at.map(|started| started.elapsed())
+        self.elapsed_at(Instant::now())
+    }
+
+    #[must_use]
+    pub fn elapsed_at(&self, now: Instant) -> Option<Duration> {
+        self.started_at
+            .map(|started| now.saturating_duration_since(started))
     }
 }
 

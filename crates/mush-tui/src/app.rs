@@ -147,6 +147,7 @@ pub struct App {
     pub jobs: Vec<mush_runtime::Job>,
     pub autonomous: Option<mush_runtime::AutonomousStatus>,
     pub last_request: Option<mush_ai::request_snapshot::RequestDigest>,
+    pub clock: crate::clock::Clock,
 }
 
 mod modals;
@@ -224,6 +225,7 @@ impl App {
             jobs: Vec::new(),
             autonomous: None,
             last_request: None,
+            clock: crate::clock::Clock::default(),
         }
     }
 
@@ -403,7 +405,7 @@ impl App {
         self.interaction.feature_hints
             && self
                 .turn
-                .elapsed()
+                .elapsed_at(self.clock.now())
                 .is_some_and(|elapsed| elapsed >= crate::feature_hints::FEATURE_HINT_DELAY)
             && self.is_busy()
     }
@@ -476,7 +478,7 @@ impl App {
         };
         Some(crate::turn_activity::TurnReadout {
             verb,
-            elapsed: self.turn.elapsed(),
+            elapsed: self.turn.elapsed_at(self.clock.now()),
             tokens,
             arrow,
         })

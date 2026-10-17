@@ -4,6 +4,7 @@ use mush_ai::oauth::usage::{OAuthUsage, UsageWindow};
 use mush_ai::types::{TokenCount, ToolCallId};
 use mush_tui::AppEvent;
 use mush_tui::app::{App, Caret, DisplayMessage, MessageRole};
+use mush_tui::clock::Clock;
 use mush_tui::input::{handle_key, handle_mouse};
 use mush_tui::keybinds::{BindingSource, ScopedKeysConfig};
 use mush_tui::screen::Screen;
@@ -13,6 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
+use std::time::{Duration, Instant};
 
 const SCREEN: u16 = 25 + TOP;
 
@@ -1652,6 +1654,7 @@ fn two_running_tools_stack_in_call_order() {
 fn bash_with_output(lines: usize) -> App {
     let mut app = conversation(1);
     app.start_streaming();
+    app.clock = Clock::frozen_at(Instant::now());
     app.start_tool(&ToolCallId::from("tc_1"), "bash", "seq");
     let output: Vec<String> = (1..=lines).map(|i| format!("line {i}")).collect();
     app.push_tool_output_by_exec_id("tc_1", &output.join("\n"));
@@ -1771,6 +1774,23 @@ fn the_detail_key_cycles_from_the_composer_and_the_log() {
     press_with(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
 
     assert_eq!(app.detail, mush_tui::app::ChatDetail::Overview);
+}
+
+#[test]
+fn the_live_line_counts_time_on_the_app_clock() {
+    let mut app = conversation(1);
+    let started = Instant::now();
+    app.stream.start_at(started);
+    app.clock = Clock::frozen_at(started + Duration::from_secs(65));
+
+    let transcript = window_rows(&app);
+
+    assert!(
+        transcript
+            .iter()
+            .any(|row| row.trim() == "waiting \u{b7} 1m 05s"),
+        "{transcript:#?}"
+    );
 }
 
 #[test]
