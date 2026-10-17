@@ -15,6 +15,7 @@ pub struct StreamingState {
     pub streamed_chars: usize,
     phase_since: Option<Instant>,
     thinking_since: Option<Instant>,
+    thinking_break: bool,
     text_tw: TypewriterState,
     think_tw: TypewriterState,
 }
@@ -98,6 +99,7 @@ impl StreamingState {
         self.streamed_chars = 0;
         self.phase_since = Some(now);
         self.thinking_since = None;
+        self.thinking_break = false;
         self.text_tw.reset();
         self.think_tw.reset();
     }
@@ -107,6 +109,9 @@ impl StreamingState {
     }
 
     pub fn begin_at(&mut self, part: StreamPart, now: Instant) {
+        if part == StreamPart::Thinking && !self.thinking.trim().is_empty() {
+            self.thinking_break = true;
+        }
         self.enter(part, now);
     }
 
@@ -131,6 +136,18 @@ impl StreamingState {
     }
 
     pub fn push_thinking_at(&mut self, delta: &str, now: Instant) {
+        if self.thinking_break && !delta.trim().is_empty() {
+            self.thinking_break = false;
+            let separator = if self.thinking.ends_with("\n\n") {
+                ""
+            } else if self.thinking.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            self.think_tw.record_push(separator.len(), now);
+            self.thinking.push_str(separator);
+        }
         let chars = delta.chars().count();
         self.think_tw.record_push(chars, now);
         self.thinking.push_str(delta);
@@ -170,6 +187,11 @@ impl StreamingState {
     }
 
     #[must_use]
+    pub fn reply_started(&self) -> bool {
+        !self.text.is_empty() || self.last_part == Some(StreamPart::ToolArgs)
+    }
+
+    #[must_use]
     pub fn visible_text(&self) -> &str {
         self.text_tw.visible(&self.text)
     }
@@ -200,7 +222,8 @@ impl StreamingState {
 
     pub fn take(&mut self) -> (String, Option<String>) {
         self.active = false;
-        let thinking = if self.thinking.is_empty() {
+        let thinking = if self.thinking.trim().is_empty() {
+            self.thinking.clear();
             None
         } else {
             Some(std::mem::take(&mut self.thinking))
@@ -211,6 +234,7 @@ impl StreamingState {
         self.streamed_chars = 0;
         self.phase_since = None;
         self.thinking_since = None;
+        self.thinking_break = false;
         self.text_tw.reset();
         self.think_tw.reset();
         (text, thinking)

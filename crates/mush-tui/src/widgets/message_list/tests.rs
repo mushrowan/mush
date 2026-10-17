@@ -2384,6 +2384,22 @@ fn a_compaction_shows_a_two_line_preview_until_all_output() {
     assert!(text.contains("24 → 6 messages"), "{text}");
 }
 
+fn thinking_app(display: crate::app::ThinkingDisplay) -> (App, std::time::Instant) {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.thinking_display = display;
+    let start = std::time::Instant::now() - std::time::Duration::from_secs(12);
+    app.stream.start_at(start);
+    app.stream
+        .begin_at(crate::turn_activity::StreamPart::Thinking, start);
+    app.stream.push_thinking_at(
+        "**Weighing the options**\n\nthe first idea is cheap\nthe second one is safer",
+        start,
+    );
+    app.stream
+        .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
+    (app, start)
+}
+
 #[test]
 fn hidden_thinking_names_itself_with_its_own_clock() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -2397,4 +2413,173 @@ fn hidden_thinking_names_itself_with_its_own_clock() {
     let text = live_text(&app, 80);
     assert!(text.contains("thinking · 45s"), "{text}");
     assert!(!text.contains("waiting"), "{text}");
+}
+
+#[test]
+fn live_thinking_grows_dim_under_a_thinking_clock() {
+    let (app, _) = thinking_app(crate::app::ThinkingDisplay::Collapse);
+
+    let lines = live_lines(&app, 80);
+    let text = rendered_text(&lines);
+    assert!(text.contains("thinking · 12s"), "{text}");
+    assert!(text.contains("the first idea is cheap"), "{text}");
+    assert!(text.contains("the second one is safer"), "{text}");
+    let idea_lines: Vec<_> = lines
+        .iter()
+        .filter(|line| line.to_string().contains("idea"))
+        .collect();
+    assert!(!idea_lines.is_empty());
+    assert!(
+        idea_lines
+            .iter()
+            .all(|line| line.style == app.theme.thinking),
+        "thinking text is drawn in the dim thinking style"
+    );
+}
+
+#[test]
+fn live_thinking_folds_to_one_line_once_the_reply_starts() {
+    let (mut app, start) = thinking_app(crate::app::ThinkingDisplay::Collapse);
+    app.stream
+        .begin_at(crate::turn_activity::StreamPart::Text, start);
+    app.stream.push_text_at("the answer is the second", start);
+    app.stream
+        .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
+
+    let text = live_text(&app, 80);
+    assert!(text.contains("thinking · Weighing the options"), "{text}");
+    assert!(!text.contains("the first idea is cheap"), "{text}");
+    assert!(text.contains("the answer is the second"), "{text}");
+}
+
+#[test]
+fn a_tool_call_also_folds_the_live_thinking() {
+    let (mut app, start) = thinking_app(crate::app::ThinkingDisplay::Collapse);
+    app.stream
+        .begin_at(crate::turn_activity::StreamPart::ToolArgs, start);
+
+    let text = live_text(&app, 80);
+    assert!(text.contains("thinking · Weighing the options"), "{text}");
+    assert!(!text.contains("the second one is safer"), "{text}");
+}
+
+#[test]
+fn all_output_and_expanded_keep_the_live_thinking_open_after_the_reply_starts() {
+    for (display, detail) in [
+        (crate::app::ThinkingDisplay::Expanded, ChatDetail::Details),
+        (crate::app::ThinkingDisplay::Collapse, ChatDetail::All),
+    ] {
+        let (mut app, start) = thinking_app(display);
+        app.detail = detail;
+        app.stream.push_text_at("the answer", start);
+        app.stream
+            .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
+
+        let text = live_text(&app, 80);
+        assert!(
+            text.contains("the second one is safer"),
+            "{display:?} {detail:?}: {text}"
+        );
+        assert!(text.contains("the answer"), "{text}");
+    }
+}
+
+#[test]
+fn hidden_display_shows_only_the_thinking_clock() {
+    let (mut app, start) = thinking_app(crate::app::ThinkingDisplay::Hidden);
+
+    let text = live_text(&app, 80);
+    assert!(text.contains("thinking · 12s"), "{text}");
+    assert!(!text.contains("idea"), "{text}");
+
+    app.stream.push_text_at("the answer", start);
+    app.stream
+        .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
+    let text = live_text(&app, 80);
+    assert!(!text.contains("thinking"), "{text}");
+    assert!(text.contains("the answer"), "{text}");
+}
+
+#[test]
+fn a_second_thinking_block_starts_its_own_paragraph() {
+    let (mut app, start) = thinking_app(crate::app::ThinkingDisplay::Collapse);
+    app.stream
+        .begin_at(crate::turn_activity::StreamPart::Thinking, start);
+    app.stream
+        .push_thinking_at("Checked the cache, editing it next.", start);
+
+    assert!(
+        app.stream
+            .thinking
+            .ends_with("the second one is safer\n\nChecked the cache, editing it next."),
+        "{:?}",
+        app.stream.thinking
+    );
+}
+
+#[test]
+fn a_settled_turn_keeps_one_thinking_line_until_all_output() {
+    let theme = crate::theme::Theme::default();
+    let mut msg = DisplayMessage::new(MessageRole::Assistant, "the answer");
+    msg.thinking = Some("**Weighing the options**\n\nthe first idea is cheap".into());
+    let render = |detail| {
+        rendered_text(&message_lines(
+            &msg,
+            &MessageStyle {
+                theme: &theme,
+                show_usage: false,
+                detail,
+                pulse: 0,
+            },
+            80,
+        ))
+    };
+
+    for detail in [ChatDetail::Overview, ChatDetail::Details] {
+        let text = render(detail);
+        assert!(text.contains("thinking · Weighing the options"), "{text}");
+        assert!(!text.contains("cheap"), "{text}");
+    }
+    assert!(render(ChatDetail::All).contains("the first idea is cheap"));
+}
+
+#[test]
+fn a_reloaded_turn_shows_its_thinking_but_never_a_signature() {
+    use mush_ai::types::{AssistantContentPart, AssistantMessage, TextContent, ThinkingContent};
+    let model = mush_ai::models::all_models().first().unwrap().clone();
+    let assistant = AssistantMessage::builder()
+        .content(vec![
+            AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: String::new(),
+                signature: Some("SIGNATURE_OF_HIDDEN_REASONING".into()),
+            }),
+            AssistantContentPart::Thinking(ThinkingContent::Redacted {
+                data: "REDACTED_BLOB".into(),
+            }),
+            AssistantContentPart::Thinking(ThinkingContent::Thinking {
+                thinking: "Found the bug in the cache.".into(),
+                signature: Some("SIGNATURE_OF_THE_UPDATE".into()),
+            }),
+            AssistantContentPart::Text(TextContent {
+                text: "fixed it".into(),
+            }),
+        ])
+        .model(model.id.clone())
+        .provider(model.provider.clone())
+        .api(model.api)
+        .timestamp_ms(mush_ai::types::Timestamp::zero())
+        .build();
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.detail = ChatDetail::All;
+    crate::conversation_display::rebuild_display(
+        &mut app,
+        &[mush_ai::types::Message::Assistant(assistant)],
+    );
+
+    let content = buffer_to_string(&render_app(&app, 80, 20));
+    assert!(content.contains("Found the bug in the cache."), "{content}");
+    assert!(content.contains("fixed it"), "{content}");
+    for secret in ["SIGNATURE", "REDACTED_BLOB", "reasoning redacted"] {
+        assert!(!content.contains(secret), "{secret} leaked:\n{content}");
+    }
 }

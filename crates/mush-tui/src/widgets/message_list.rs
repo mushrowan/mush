@@ -102,29 +102,9 @@ pub(crate) fn image_placeholder(index: usize, bytes: &[u8]) -> String {
 fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if app.stream.active {
-        let dim = app.theme.dim;
+        let now = std::time::Instant::now();
         let stream_content_width = message_content_width(width as usize);
-
-        if !app.stream.thinking.is_empty()
-            && app.thinking_display != crate::app::ThinkingDisplay::Hidden
-        {
-            let mut spans = vec![Span::raw(" ")];
-            spans.extend(shimmer_spans(
-                " thinking",
-                &app.theme.shimmer,
-                app.shimmer_phase(),
-                dim,
-            ));
-            lines.push(Line::from(spans));
-            let visible_thinking = app.visible_streaming_thinking();
-            let strip = common_leading_space(visible_thinking);
-            for text_line in visible_thinking.lines() {
-                let body = drop_leading_spaces(text_line, strip);
-                let styled = Line::styled(body.to_string(), app.theme.thinking);
-                lines.extend(indent_line(styled, stream_content_width));
-            }
-            lines.push(Line::raw(""));
-        }
+        push_live_thinking(app, stream_content_width, now, &mut lines);
         if !app.stream.text.is_empty() {
             let visible_text = app.visible_streaming_text();
             let md_text = render_streaming_markdown_cached(app, visible_text, stream_content_width);
@@ -132,8 +112,8 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 lines.extend(indent_line(line, stream_content_width));
             }
         }
-        if app.stream.text.is_empty() && app.stream.thinking.is_empty() {
-            let (verb, elapsed) = live_activity(app, std::time::Instant::now());
+        if app.stream.text.is_empty() && app.stream.thinking.trim().is_empty() {
+            let (verb, elapsed) = live_activity(app, now);
             lines.push(activity_line(app, verb, elapsed));
         }
     }
@@ -194,6 +174,46 @@ fn activity_line(app: &App, verb: &str, elapsed: Option<std::time::Duration>) ->
         ));
     }
     Line::from(spans)
+}
+
+fn push_live_thinking(
+    app: &App,
+    content_width: usize,
+    now: std::time::Instant,
+    lines: &mut Vec<Line<'static>>,
+) {
+    use crate::app::ThinkingDisplay;
+    let thinking = app.stream.thinking.as_str();
+    if thinking.trim().is_empty() {
+        return;
+    }
+    let expanded =
+        app.thinking_display == ThinkingDisplay::Expanded || app.detail.shows_full_output();
+    if app.stream.reply_started() && !expanded {
+        if app.thinking_display != ThinkingDisplay::Hidden {
+            lines.extend(indent_line(
+                thinking_recap_line(thinking, &app.theme, content_width),
+                content_width,
+            ));
+        }
+        return;
+    }
+    lines.push(activity_line(
+        app,
+        "thinking",
+        app.stream.thinking_elapsed(now),
+    ));
+    if app.thinking_display == ThinkingDisplay::Hidden && !app.detail.shows_full_output() {
+        return;
+    }
+    let visible_thinking = app.visible_streaming_thinking().trim_end();
+    let strip = common_leading_space(visible_thinking);
+    for text_line in visible_thinking.lines() {
+        let body = drop_leading_spaces(text_line, strip);
+        let styled = Line::styled(body.to_string(), app.theme.thinking);
+        lines.extend(indent_line(styled, content_width));
+    }
+    lines.push(Line::raw(""));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,21 +501,8 @@ fn push_thinking_lines(
         return;
     };
     let cw = message_content_width(width as usize);
-    if !(msg.thinking_expanded || style.detail.shows_thinking()) {
-        let label = "thinking";
-        let prefix = usize::from(label.cell_width()) + usize::from(HEADER_SEPARATOR.cell_width());
-        let recap = Line::from(vec![
-            Span::styled(label, theme.dim),
-            Span::styled(HEADER_SEPARATOR, theme.dim),
-            Span::styled(
-                crate::text::truncate_with_ellipsis(
-                    &thinking_recap(thinking),
-                    cw.saturating_sub(prefix).max(1),
-                ),
-                theme.thinking,
-            ),
-        ]);
-        lines.extend(indent_line(recap, cw));
+    if !(msg.thinking_expanded || style.detail.shows_full_output()) {
+        lines.extend(indent_line(thinking_recap_line(thinking, theme, cw), cw));
         return;
     }
     let strip = common_leading_space(thinking);
@@ -504,6 +511,22 @@ fn push_thinking_lines(
         let styled = Line::styled(body.to_string(), theme.thinking);
         lines.extend(indent_line(styled, cw));
     }
+}
+
+fn thinking_recap_line(thinking: &str, theme: &Theme, content_width: usize) -> Line<'static> {
+    let label = "thinking";
+    let prefix = usize::from(label.cell_width()) + usize::from(HEADER_SEPARATOR.cell_width());
+    Line::from(vec![
+        Span::styled(label, theme.dim),
+        Span::styled(HEADER_SEPARATOR, theme.dim),
+        Span::styled(
+            crate::text::truncate_with_ellipsis(
+                &thinking_recap(thinking),
+                content_width.saturating_sub(prefix).max(1),
+            ),
+            theme.thinking,
+        ),
+    ])
 }
 
 const QUEUED_LABEL: &str = "steering \u{b7} ";

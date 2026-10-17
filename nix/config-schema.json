@@ -1508,7 +1508,7 @@
     },
     "thinking_display": {
       "$ref": "#/$defs/ThinkingDisplay",
-      "default": "expanded"
+      "default": "collapse"
     },
     "web_search": {
       "$ref": "#/$defs/WebSearchConfig",

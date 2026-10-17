@@ -1728,19 +1728,30 @@ fn all_output_shows_every_line_of_a_finished_tool() {
 }
 
 #[test]
-fn details_reveals_collapsed_thinking() {
+fn all_output_reveals_collapsed_thinking() {
     let mut app = conversation(1);
     let mut reply = DisplayMessage::new(MessageRole::Assistant, "done");
     reply.thinking = Some("first weigh the options\nthen pick one".into());
     app.messages.push(reply);
-    app.detail = mush_tui::app::ChatDetail::Overview;
-    let before = window_rows(&app);
-    assert!(
-        !before.iter().any(|r| r.contains("then pick one")),
-        "{before:#?}"
-    );
+    for detail in [
+        mush_tui::app::ChatDetail::Overview,
+        mush_tui::app::ChatDetail::Details,
+    ] {
+        app.detail = detail;
+        let collapsed = window_rows(&app);
+        assert!(
+            collapsed
+                .iter()
+                .any(|r| r.contains("thinking · first weigh the options")),
+            "{collapsed:#?}"
+        );
+        assert!(
+            !collapsed.iter().any(|r| r.contains("then pick one")),
+            "{collapsed:#?}"
+        );
+    }
 
-    app.detail = mush_tui::app::ChatDetail::Details;
+    app.detail = mush_tui::app::ChatDetail::All;
     let after = window_rows(&app);
 
     assert!(

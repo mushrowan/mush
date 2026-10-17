@@ -111,7 +111,7 @@ fn typewriter_advances_with_ticks() {
 fn a_burst_eases_in_but_is_all_on_screen_within_the_reveal_window() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let start = std::time::Instant::now();
-    app.start_streaming();
+    app.stream.start_at(start);
     app.stream.push_text_at(&"x".repeat(200), start);
 
     app.stream.advance_typewriter_at(start);
@@ -128,7 +128,7 @@ fn a_burst_eases_in_but_is_all_on_screen_within_the_reveal_window() {
 fn a_slow_trickle_never_falls_behind_the_reveal_window() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let start = std::time::Instant::now();
-    app.start_streaming();
+    app.stream.start_at(start);
     let frame = std::time::Duration::from_millis(16);
     for step in 0..60u32 {
         let now = start + frame * step;
@@ -596,12 +596,24 @@ fn toggle_thinking() {
     app.push_text_delta("answer");
     app.finish_streaming(None, None);
 
+    assert!(!app.messages[0].thinking_expanded);
+
+    app.toggle_thinking_expanded();
     assert!(app.messages[0].thinking_expanded);
 
     app.toggle_thinking_expanded();
     assert!(!app.messages[0].thinking_expanded);
+}
 
-    app.toggle_thinking_expanded();
+#[test]
+fn thinking_display_expanded_starts_expanded() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.thinking_display = ThinkingDisplay::Expanded;
+    app.start_streaming();
+    app.push_thinking_delta("deep thoughts");
+    app.push_text_delta("answer");
+    app.finish_streaming(None, None);
+
     assert!(app.messages[0].thinking_expanded);
 }
 
@@ -620,8 +632,8 @@ fn toggle_thinking_targets_last_assistant() {
     app.finish_streaming(None, None);
 
     app.toggle_thinking_expanded();
-    assert!(app.messages[0].thinking_expanded);
-    assert!(!app.messages[1].thinking_expanded);
+    assert!(!app.messages[0].thinking_expanded);
+    assert!(app.messages[1].thinking_expanded);
 }
 
 #[test]

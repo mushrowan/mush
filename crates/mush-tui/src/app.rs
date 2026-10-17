@@ -71,8 +71,8 @@ fn context_management_mode_for_model_id(
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingDisplay {
     Hidden,
-    Collapse,
     #[default]
+    Collapse,
     Expanded,
 }
 
