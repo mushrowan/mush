@@ -262,7 +262,7 @@ fn idle_renders_at_each_width() {
             (
                 180,
                 [
-                    " ◇ ready · last turn 2m 05s                                                  c-o-5-5 high  ctx 182k/1.0m 18% · cache 3:12/58:12  5h ━━━━──── 37% · 7d ━━━───── 26%  ~/dev/ai-safety",
+                    " c-o-5-5 high  ctx 182k/1.0m 18% · cache 3:12/58:12  ◇ ready · last turn 2m 05s                                                  5h ━━━━──── 37% · 7d ━━━───── 26%  ~/dev/ai-safety",
                     "",
                 ],
             ),
@@ -306,7 +306,7 @@ fn streaming_with_a_tool_renders_at_each_width() {
             (
                 180,
                 [
-                    " ⠋ using bash · 1m 05s · ↓ 1.2k tokens                                       c-o-5-5 high  ctx 482k/1.0m 48% · cache 4:00/59:00  5h ━━━━──── 41% · 7d ━━━───── 27%  ~/dev/ai-safety",
+                    " c-o-5-5 high  ctx 482k/1.0m 48% · cache 4:00/59:00  ⠋ using bash · 1m 05s · ↓ 1.2k tokens                                       5h ━━━━──── 41% · 7d ━━━───── 27%  ~/dev/ai-safety",
                     "",
                 ],
             ),
@@ -350,7 +350,7 @@ fn children_with_notes_render_at_each_width() {
             (
                 180,
                 [
-                    " ◇ ready  ◆ 4/6 agents · 1 waiting on you  ◷ heartbeat every 10m  mush-quickwins: items 8,6,3,2,4b,4a,5 comm…    c-o-5-5 high  ctx 312k/1.0m 31% · 2:48  5h 52% · 7d 31%  ai-safety",
+                    " c-o-5-5 high  ctx 312k/1.0m 31% · 2:48  ◇ ready  ◆ 4/6 agents · 1 waiting on you  ◷ heartbeat every 10m  mush-quickwins: items 8,6,3,2,4b,4a,5 comm…    5h 52% · 7d 31%  ai-safety",
                     "",
                 ],
             ),
@@ -394,7 +394,7 @@ fn children_with_a_busy_root_render_at_each_width() {
             (
                 180,
                 [
-                    " ⠋ using ipython · 3m 12s  ◆ 4/6 agents · 1 waiting on you  ◷ heartbeat every 10m  mush-quickwins: items 8,6,3,2,4b,4a…     c-o-5-5 high  ctx 312k/1.0m 31% · 2:48  5h 52% · 7d 31%",
+                    " c-o-5-5 high  ctx 312k/1.0m 31% · 2:48  ⠋ using ipython · 3m 12s  ◆ 4/6 agents · 1 waiting on you  ◷ heartbeat every 10m  mush-quickwins: items 8,6,3,2,4b,4a…     5h 52% · 7d 31%",
                     "",
                 ],
             ),
@@ -438,7 +438,7 @@ fn near_the_context_limit_renders_at_each_width() {
             (
                 180,
                 [
-                    " ⠋ writing · 4m 33s · ↓ 3.1k tokens  ◆ 2/3 agents                            c-o-5-5 high  ctx 912k/1.0m 91% · cache 0:42/55:42  5h ━━━━━━━─ 83% · 7d ━━━━━─── 64%  ~/dev/ai-safety",
+                    " c-o-5-5 high  ctx 912k/1.0m 91% · cache 0:42/55:42  ⠋ writing · 4m 33s · ↓ 3.1k tokens  ◆ 2/3 agents                            5h ━━━━━━━─ 83% · 7d ━━━━━─── 64%  ~/dev/ai-safety",
                     "",
                 ],
             ),
@@ -482,7 +482,7 @@ fn vim_normal_mode_renders_at_each_width() {
             (
                 180,
                 [
-                    " ◇ ready · last turn 2m 05s  ◆ 1/2 agents  mush-vim: round 2 done and re…    c-o-5-5 high  ctx 182k/1.0m 18% · cache 3:12/58:12  5h ━━━━──── 37% · 7d ━━━───── 26%  ~/dev/ai-safety",
+                    " c-o-5-5 high  ctx 182k/1.0m 18% · cache 3:12/58:12  ◇ ready · last turn 2m 05s  ◆ 1/2 agents  mush-vim: round 2 done and re…    5h ━━━━──── 37% · 7d ━━━───── 26%  ~/dev/ai-safety",
                     "",
                 ],
             ),
@@ -1243,4 +1243,29 @@ fn decisions_waiting_on_the_user_are_counted_and_never_drop() {
     app.decisions.truncate(1);
     app.decisions[0].blocking = false;
     assert!(status(&app, 200).contains("? 1 decision"));
+}
+
+#[test]
+fn the_model_starts_its_row_at_every_width_and_layout() {
+    for (name, app) in states() {
+        for width in 40..=240 {
+            let rows = status_rows(&app, width);
+            let model_row = rows.last().unwrap();
+            assert!(
+                model_row.starts_with(" c-o-5-5 "),
+                "{name} at {width} cols: {rows:?}"
+            );
+        }
+    }
+    for layout in [StatusBarLayout::Single, StatusBarLayout::Stacked] {
+        let mut app = idle();
+        app.interaction.status_bar.layout = layout;
+        for width in [60, 100, 139, 140, 180] {
+            let rows = status_rows(&app, width);
+            assert!(
+                rows.last().unwrap().starts_with(" c-o-5-5 "),
+                "{layout:?} at {width} cols: {rows:?}"
+            );
+        }
+    }
 }

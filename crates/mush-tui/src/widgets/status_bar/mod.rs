@@ -42,8 +42,11 @@ fn rows(app: &App, width: u16) -> Rows {
     let built = segments::build(app);
     let width_cells = usize::from(width);
     let lines = if app.interaction.status_bar.rows(width) == 1 {
-        let mut left = built.activity;
-        let mut right = built.identity;
+        let (mut left, mut right): (Vec<Segment>, Vec<Segment>) = built
+            .identity
+            .into_iter()
+            .partition(|segment| segment.side == Side::Left);
+        left.extend(built.activity);
         fit::fit(&mut left, &mut right, width_cells);
         vec![fit::compose(&left, &right, width_cells)]
     } else {
