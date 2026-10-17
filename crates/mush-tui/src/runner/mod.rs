@@ -161,7 +161,6 @@ async fn run_tui_with(
             .flatten();
     }
     let mut last_draw = std::time::Instant::now();
-    let mut last_animation = std::time::Instant::now();
     let mut progress = LoopProgress {
         watchdog: diag::StallWatchdog::from_env(),
         iteration: 0,
@@ -214,11 +213,8 @@ async fn run_tui_with(
         let should_draw =
             matches!(action, LoopAction::Redraw) || discovery_updated || maintenance_tick;
         if should_draw {
-            if last_animation.elapsed() >= looping::ANIMATION_FRAME_INTERVAL
-                && runtime.tick_animation_panes()
-            {
-                last_animation = std::time::Instant::now();
-            }
+            runtime.step_animation(std::time::Instant::now());
+            runtime.tick_streaming_text_panes();
             trace_draw_reasons(action, discovery_updated, maintenance_tick);
             runtime.poll_usage();
             progress.report(&runtime, "draw", "before draw_panes");
@@ -228,6 +224,7 @@ async fn run_tui_with(
                 &mut runtime.session,
                 &tui_config.settings,
             )?;
+            runtime.drew();
             progress.draws = progress.draws.wrapping_add(1);
             last_draw = std::time::Instant::now();
         }

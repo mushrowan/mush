@@ -118,6 +118,8 @@ pub(super) struct RunnerRuntime {
     pub pending_prompt: Option<String>,
     pub connection_closed: bool,
     pub resize: super::input::ResizeState,
+    frame_owed: bool,
+    animated_at: std::time::Instant,
     usage_rx: Option<UsageReceiver>,
     usage_poller: Option<mush_ai::oauth::usage::UsagePoller>,
     _config_watcher: Option<RecommendedWatcher>,
@@ -133,6 +135,8 @@ impl RunnerRuntime {
             pending_prompt: None,
             connection_closed: false,
             resize: super::input::ResizeState::default(),
+            frame_owed: false,
+            animated_at: std::time::Instant::now(),
             usage_rx: None,
             usage_poller: None,
             _config_watcher: None,
@@ -172,6 +176,8 @@ impl RunnerRuntime {
             pending_prompt: None,
             connection_closed: false,
             resize: super::input::ResizeState::default(),
+            frame_owed: false,
+            animated_at: std::time::Instant::now(),
             usage_rx,
             usage_poller,
             _config_watcher,
@@ -214,13 +220,36 @@ impl RunnerRuntime {
         self.session.app.should_quit
     }
 
-    pub(super) fn tick_animation_panes(&mut self) -> bool {
+    pub(super) fn step_animation(&mut self, now: std::time::Instant) -> bool {
+        if now.saturating_duration_since(self.animated_at)
+            < super::looping::ANIMATION_FRAME_INTERVAL
+        {
+            return false;
+        }
+        self.animated_at = now;
         let app = &mut self.session.app;
         let ticked = app.has_visible_animation();
         if ticked {
             app.tick_animation();
         }
         ticked
+    }
+
+    pub(super) fn animated_at(&self) -> std::time::Instant {
+        self.animated_at
+    }
+
+    pub(super) fn owe_frame(&mut self) {
+        self.frame_owed = true;
+    }
+
+    pub(super) fn frame_owed(&self) -> bool {
+        let stream = &self.session.app.stream;
+        self.frame_owed || (stream.active && stream.reveal_pending())
+    }
+
+    pub(super) fn drew(&mut self) {
+        self.frame_owed = false;
     }
 
     pub(super) fn tick_streaming_text_panes(&mut self) {
@@ -1119,8 +1148,15 @@ mod tests {
                 output: None,
             });
         let mut runtime = RunnerRuntime::from_pane(Session::new(app));
+        let start = runtime.animated_at();
 
-        assert!(runtime.tick_animation_panes());
+        assert!(!runtime.step_animation(start));
+        assert!(runtime.step_animation(start + super::super::looping::ANIMATION_FRAME_INTERVAL));
+        assert_eq!(runtime.session.app.shimmer_phase(), 1);
+        assert!(
+            !runtime
+                .step_animation(start + super::super::looping::ANIMATION_FRAME_INTERVAL * 3 / 2)
+        );
         assert_eq!(runtime.session.app.shimmer_phase(), 1);
     }
 

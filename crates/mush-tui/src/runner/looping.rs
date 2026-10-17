@@ -15,6 +15,8 @@ use mush_runtime::ClientEvent;
 
 pub(super) const ANIMATION_FRAME_INTERVAL: std::time::Duration =
     crate::app::ANIMATION_FRAME_INTERVAL;
+pub(super) const STREAM_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+const MIN_STREAMING_WAKE: std::time::Duration = std::time::Duration::from_millis(1);
 const MAX_AGENT_EVENTS_PER_FRAME: usize = 32;
 const MAX_AGENT_EVENT_DRAIN: std::time::Duration = std::time::Duration::from_millis(8);
 
@@ -88,7 +90,13 @@ async fn handle_streaming_iteration(
     image_picker: &Option<ratatui_image::picker::Picker>,
     last_redraw: std::time::Instant,
 ) -> io::Result<LoopAction> {
-    let tick = tokio::time::sleep(ANIMATION_FRAME_INTERVAL);
+    let wake = streaming_wake(
+        runtime.frame_owed(),
+        last_redraw,
+        runtime.animated_at(),
+        std::time::Instant::now(),
+    );
+    let tick = tokio::time::sleep_until(wake.into());
     tokio::pin!(tick);
     let mut saw_agent_event = false;
     let mut saw_settling_agent_event = false;
@@ -118,7 +126,7 @@ async fn handle_streaming_iteration(
             }
         }
         _ = tick => {
-            if runtime.tick_animation_panes() {
+            if runtime.step_animation(std::time::Instant::now()) {
                 tick_changed = true;
                 trace_draw_reason("animation_tick");
             }
@@ -141,6 +149,9 @@ async fn handle_streaming_iteration(
             }
         }
     }
+    if saw_agent_event {
+        runtime.owe_frame();
+    }
 
     let (session, mut deps) = input_parts(runtime, tui_config, image_picker);
     let terminal_action =
@@ -150,13 +161,28 @@ async fn handle_streaming_iteration(
     }
 
     Ok(streaming_iteration_action(
-        saw_agent_event,
+        runtime.frame_owed(),
         saw_settling_agent_event,
         terminal_action,
         tick_changed,
         last_redraw,
         std::time::Instant::now(),
     ))
+}
+
+fn streaming_wake(
+    frame_owed: bool,
+    last_redraw: std::time::Instant,
+    animated_at: std::time::Instant,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    let animation = animated_at + ANIMATION_FRAME_INTERVAL;
+    let wake = if frame_owed {
+        animation.min(last_redraw + STREAM_FRAME_INTERVAL)
+    } else {
+        animation
+    };
+    wake.max(now + MIN_STREAMING_WAKE)
 }
 
 fn is_settling_client_event(event: &ClientEvent) -> bool {
@@ -179,7 +205,7 @@ fn should_continue_agent_drain(
 }
 
 fn streaming_iteration_action(
-    saw_agent_event: bool,
+    frame_owed: bool,
     saw_settling_agent_event: bool,
     terminal_action: LoopAction,
     tick_changed: bool,
@@ -192,9 +218,7 @@ fn streaming_iteration_action(
     if saw_settling_agent_event {
         return LoopAction::Redraw;
     }
-    if should_defer_streaming_redraw(saw_agent_event, last_redraw, now) {
-        LoopAction::Continue
-    } else if saw_agent_event {
+    if frame_owed && !should_defer_streaming_redraw(frame_owed, last_redraw, now) {
         LoopAction::Redraw
     } else {
         LoopAction::Continue
@@ -202,11 +226,11 @@ fn streaming_iteration_action(
 }
 
 fn should_defer_streaming_redraw(
-    saw_agent_event: bool,
+    frame_owed: bool,
     last_redraw: std::time::Instant,
     now: std::time::Instant,
 ) -> bool {
-    saw_agent_event && now.duration_since(last_redraw) < ANIMATION_FRAME_INTERVAL
+    frame_owed && now.duration_since(last_redraw) < STREAM_FRAME_INTERVAL
 }
 
 fn trace_draw_reason(reason: &'static str) {
@@ -817,7 +841,7 @@ mod tests {
     #[test]
     fn defers_streaming_redraw_when_agent_events_arrive_inside_frame_budget() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+        let now = last_redraw + STREAM_FRAME_INTERVAL / 2;
 
         assert!(should_defer_streaming_redraw(true, last_redraw, now));
     }
@@ -825,7 +849,7 @@ mod tests {
     #[test]
     fn does_not_defer_streaming_redraw_after_frame_budget() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL;
+        let now = last_redraw + STREAM_FRAME_INTERVAL;
 
         assert!(!should_defer_streaming_redraw(true, last_redraw, now));
     }
@@ -833,15 +857,166 @@ mod tests {
     #[test]
     fn tick_only_iterations_do_not_force_redraws() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+        let now = last_redraw + STREAM_FRAME_INTERVAL / 2;
 
         assert!(!should_defer_streaming_redraw(false, last_redraw, now));
     }
 
     #[test]
+    fn an_owed_frame_wakes_at_its_deadline_not_a_whole_animation_tick_later() {
+        let last_redraw = std::time::Instant::now();
+        let now = last_redraw + std::time::Duration::from_millis(3);
+
+        assert_eq!(
+            streaming_wake(true, last_redraw, last_redraw, now),
+            last_redraw + STREAM_FRAME_INTERVAL
+        );
+        assert_eq!(
+            streaming_wake(false, last_redraw, last_redraw, now),
+            last_redraw + ANIMATION_FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn a_frame_held_back_past_its_deadline_does_not_spin_the_loop() {
+        let last_redraw = std::time::Instant::now();
+        let late = last_redraw + ANIMATION_FRAME_INTERVAL * 2;
+
+        assert_eq!(
+            streaming_wake(true, last_redraw, last_redraw, late),
+            late + MIN_STREAMING_WAKE
+        );
+    }
+
+    #[test]
+    fn an_owed_frame_draws_once_the_frame_budget_has_passed() {
+        let last_redraw = std::time::Instant::now();
+
+        let early = streaming_iteration_action(
+            true,
+            false,
+            LoopAction::Continue,
+            false,
+            last_redraw,
+            last_redraw + STREAM_FRAME_INTERVAL / 2,
+        );
+        let due = streaming_iteration_action(
+            true,
+            false,
+            LoopAction::Continue,
+            false,
+            last_redraw,
+            last_redraw + STREAM_FRAME_INTERVAL,
+        );
+
+        assert!(matches!(early, LoopAction::Continue));
+        assert!(matches!(due, LoopAction::Redraw));
+    }
+
+    fn timed_fixture() -> Vec<(u64, &'static str)> {
+        let mut fixture = Vec::new();
+        let mut at = 0;
+        for index in 0..240u64 {
+            at += match index % 30 {
+                0 => 640,
+                n if n % 4 == 0 => 0,
+                n if n % 7 == 0 => 120,
+                _ => 48,
+            };
+            fixture.push((at, "sixteen chars ok"));
+        }
+        fixture
+    }
+
+    #[test]
+    fn a_timed_stream_fixture_is_never_more_than_two_frames_behind_on_screen() {
+        let start = std::time::Instant::now();
+        let fixture = timed_fixture();
+        let mut stream = crate::streaming::StreamingState::new();
+        stream.start();
+        let mut owed = false;
+        let mut last_redraw = start;
+        let mut animated_at = start;
+        let mut next = 0;
+        let mut arrivals: Vec<(std::time::Instant, usize)> = Vec::new();
+        let mut shown_at: Vec<Option<std::time::Instant>> = Vec::new();
+        let mut now = start;
+        let end = start + std::time::Duration::from_millis(fixture[fixture.len() - 1].0 + 500);
+
+        while now < end {
+            let wake = streaming_wake(
+                owed || stream.reveal_pending(),
+                last_redraw,
+                animated_at,
+                now,
+            );
+            let event_at = fixture
+                .get(next)
+                .map(|(ms, _)| start + std::time::Duration::from_millis(*ms));
+            let mut tick_changed = false;
+            match event_at {
+                Some(at) if at <= wake => {
+                    now = at.max(now);
+                    while let Some((ms, delta)) = fixture.get(next)
+                        && start + std::time::Duration::from_millis(*ms) <= now
+                    {
+                        stream.push_text_at(delta, now);
+                        stream.advance_typewriter_at(now);
+                        arrivals.push((now, stream.text.chars().count()));
+                        shown_at.push(None);
+                        next += 1;
+                    }
+                    owed = true;
+                }
+                _ => {
+                    now = wake;
+                    if now.duration_since(animated_at) >= ANIMATION_FRAME_INTERVAL {
+                        animated_at = now;
+                        tick_changed = true;
+                    }
+                }
+            }
+            let action = streaming_iteration_action(
+                owed || stream.reveal_pending(),
+                false,
+                LoopAction::Continue,
+                tick_changed,
+                last_redraw,
+                now,
+            );
+            if matches!(action, LoopAction::Redraw) {
+                stream.advance_typewriter_at(now);
+                let visible = stream.visible_text_len();
+                for ((_, total), shown) in arrivals.iter().zip(shown_at.iter_mut()) {
+                    if shown.is_none() && visible >= *total {
+                        *shown = Some(now);
+                    }
+                }
+                last_redraw = now;
+                owed = false;
+            }
+        }
+
+        let lags: Vec<std::time::Duration> = arrivals
+            .iter()
+            .zip(&shown_at)
+            .map(|((arrived, _), shown)| {
+                shown
+                    .expect("every delta reaches the screen")
+                    .duration_since(*arrived)
+            })
+            .collect();
+        let worst = lags.iter().max().copied().unwrap_or_default();
+        assert!(
+            worst <= crate::streaming::REVEAL_WINDOW + STREAM_FRAME_INTERVAL,
+            "worst lag {worst:?}"
+        );
+    }
+
+    #[test]
     fn terminal_redraw_wins_over_streaming_frame_deferral() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+        let now = last_redraw + STREAM_FRAME_INTERVAL / 2;
 
         let action =
             streaming_iteration_action(true, false, LoopAction::Redraw, false, last_redraw, now);
@@ -852,7 +1027,7 @@ mod tests {
     #[test]
     fn final_agent_event_redraws_even_inside_frame_budget() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+        let now = last_redraw + STREAM_FRAME_INTERVAL / 2;
 
         let action =
             streaming_iteration_action(true, true, LoopAction::Continue, false, last_redraw, now);
@@ -866,7 +1041,7 @@ mod tests {
     #[test]
     fn tick_branch_preserves_terminal_redraws() {
         let last_redraw = std::time::Instant::now();
-        let now = last_redraw + ANIMATION_FRAME_INTERVAL / 2;
+        let now = last_redraw + STREAM_FRAME_INTERVAL / 2;
 
         let action =
             streaming_iteration_action(false, false, LoopAction::Redraw, false, last_redraw, now);
