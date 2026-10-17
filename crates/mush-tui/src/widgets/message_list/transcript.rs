@@ -7,7 +7,7 @@ use ratatui::text::Line;
 
 use super::{
     Cached, MessageStyle, TranscriptChunk, TranscriptChunkId, built_lines, cache_state,
-    cached_message_lines, laid_out_lines, streaming_lines,
+    cached_message_lines, laid_out_lines, laid_out_state, streaming_lines,
 };
 use crate::app::App;
 use crate::soft_wrap::Break;
@@ -36,29 +36,30 @@ pub(crate) fn measure(
     };
     for queued in [false, true] {
         if queued && streaming > 0 {
-            measure.push(TranscriptChunkId::Streaming, streaming);
+            measure.push(TranscriptChunkId::Streaming, streaming, width);
         }
         for (index, message) in app.messages.iter().enumerate() {
             if message.queued != queued {
                 continue;
             }
-            let (state, height) = cache_state(message, style, width);
+            let (state, height, laid_at) = laid_out_state(message, style, width);
             if state == Cached::Stale {
                 measure.stale.push(index);
                 measure.stale_bytes += message.text_bytes();
             }
-            measure.push(TranscriptChunkId::Message(index), height + 1);
+            measure.push(TranscriptChunkId::Message(index), height + 1, laid_at);
         }
     }
     measure
 }
 
 impl Measure {
-    fn push(&mut self, id: TranscriptChunkId, len: usize) {
+    fn push(&mut self, id: TranscriptChunkId, len: usize, width: u16) {
         self.chunks.push(TranscriptChunk {
             id,
             start: self.total,
             end: self.total + len,
+            width,
         });
         self.total += len;
     }

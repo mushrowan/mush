@@ -232,6 +232,7 @@ pub(crate) struct TranscriptChunk {
     pub(crate) id: TranscriptChunkId,
     pub(crate) start: usize,
     pub(crate) end: usize,
+    pub(crate) width: u16,
 }
 
 #[cfg(test)]
@@ -294,6 +295,7 @@ impl TranscriptGuards<'_> {
                 id: TranscriptChunkId::Message(*index),
                 start,
                 end,
+                width: 0,
             });
             start = end;
         }
@@ -303,6 +305,7 @@ impl TranscriptGuards<'_> {
                 id: TranscriptChunkId::Streaming,
                 start,
                 end,
+                width: 0,
             });
             start = end;
         }
@@ -312,6 +315,7 @@ impl TranscriptGuards<'_> {
                 id: TranscriptChunkId::Message(*index),
                 start,
                 end,
+                width: 0,
             });
             start = end;
         }
@@ -464,9 +468,18 @@ pub(crate) fn cache_state(
     style: &MessageStyle<'_>,
     width: u16,
 ) -> (Cached, usize) {
+    let (state, height, _) = laid_out_state(msg, style, width);
+    (state, height)
+}
+
+pub(crate) fn laid_out_state(
+    msg: &DisplayMessage,
+    style: &MessageStyle<'_>,
+    width: u16,
+) -> (Cached, usize, u16) {
     let cache = msg.line_cache.borrow();
     let Some(cache) = cache.as_ref() else {
-        return (Cached::Stale, estimated_height(msg));
+        return (Cached::Stale, estimated_height(msg), 0);
     };
     let laid_out = cache.width == width
         && cache.show_usage == style.show_usage
@@ -478,7 +491,7 @@ pub(crate) fn cache_state(
     } else {
         Cached::Settled
     };
-    (state, cache.lines.len())
+    (state, cache.lines.len(), cache.width)
 }
 
 fn estimated_height(msg: &DisplayMessage) -> usize {

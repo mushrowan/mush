@@ -507,7 +507,13 @@ fn remap_line(line: usize, previous: &[TranscriptChunk], current: &[TranscriptCh
         .iter()
         .find(|candidate| candidate.id == chunk.id)
         .map_or(line, |candidate| {
-            candidate.start + offset.min(candidate.end.saturating_sub(candidate.start + 1))
+            let (before, after) = (chunk.end - chunk.start, candidate.end - candidate.start);
+            let offset = if chunk.width == candidate.width {
+                offset
+            } else {
+                offset * after / before.max(1)
+            };
+            candidate.start + offset.min(after.saturating_sub(1))
         })
 }
 
@@ -660,6 +666,7 @@ mod tests {
             id: crate::widgets::message_list::TranscriptChunkId::Message(message),
             start,
             end,
+            width: 80,
         }
     }
 
@@ -735,6 +742,23 @@ mod tests {
             &[chunk(0, 0, 10), chunk(1, 10, 20)],
             &[chunk(1, 0, 10)]
         ));
+    }
+
+    #[test]
+    fn a_rewrap_moves_a_line_in_proportion_to_its_message() {
+        let previous = [chunk(0, 0, 40)];
+        let narrower = [TranscriptChunk {
+            width: 40,
+            ..chunk(0, 0, 80)
+        }];
+        let grown = [chunk(0, 0, 80)];
+
+        assert_eq!(remap_line(20, &previous, &narrower), 40);
+        assert_eq!(
+            remap_line(20, &previous, &grown),
+            20,
+            "more output keeps the row"
+        );
     }
 
     #[test]

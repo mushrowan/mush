@@ -489,6 +489,41 @@ fn a_trailing_slash_does_not_blank_the_cwd() {
 }
 
 #[test]
+fn resizing_keeps_the_text_in_view_inside_a_long_message() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let words: Vec<String> = (0..600).map(|index| format!("w{index:03}")).collect();
+    app.messages.push(crate::app::DisplayMessage::new(
+        crate::app::MessageRole::Assistant,
+        words.join(" "),
+    ));
+    app.push_user_message("after");
+    let mut screen = Screen::new();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    draw(&mut terminal, &mut screen, &mut app);
+    switch_focus(&mut app);
+    app.viewport.scroll_by(-15);
+    draw(&mut terminal, &mut screen, &mut app);
+    let top_word = |terminal: &Terminal<TestBackend>, app: &App| -> usize {
+        let text = buffer_to_string(terminal.backend().buffer());
+        let row = text
+            .lines()
+            .nth(usize::from(app.viewport.area().y))
+            .unwrap()
+            .to_string();
+        row.split_whitespace()
+            .find_map(|word| word.strip_prefix('w')?.parse().ok())
+            .unwrap()
+    };
+    let before = top_word(&terminal, &app);
+
+    terminal.backend_mut().resize(50, 24);
+    draw(&mut terminal, &mut screen, &mut app);
+    let after = top_word(&terminal, &app);
+
+    assert!(after.abs_diff(before) <= 12, "{before} then {after}");
+}
+
+#[test]
 fn resizing_a_long_scrolled_log_keeps_the_same_message() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for index in 0..400 {
