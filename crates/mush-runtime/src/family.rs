@@ -65,6 +65,7 @@ pub struct ChildSpec {
     pub parent: Identity,
     pub parent_session_id: String,
     pub parent_thinking: Option<ThinkingLevel>,
+    pub parent_model: Option<String>,
     pub resume_session: Option<String>,
 }
 
@@ -1090,7 +1091,7 @@ impl Family {
             }
             inner.reserved_names.insert(reservation.clone());
         }
-        let (parent_session_id, parent_thinking) = {
+        let (parent_session_id, parent_thinking, parent_model) = {
             let inner = self.lock();
             match caller.id.as_deref() {
                 Some(id) => inner
@@ -1100,10 +1101,11 @@ impl Family {
                         (
                             node.summary.session_id.clone(),
                             node.summary.thinking.clone(),
+                            Some(node.summary.model_id.clone()),
                         )
                     })
                     .unwrap_or_default(),
-                None => (inner.root_session_id.clone(), None),
+                None => (inner.root_session_id.clone(), None, None),
             }
         };
         let spec = ChildSpec {
@@ -1116,6 +1118,7 @@ impl Family {
             parent: caller.clone(),
             parent_session_id,
             parent_thinking,
+            parent_model,
             resume_session: None,
         };
         let parts = match (factory)(spec, Arc::clone(this)).await {
@@ -1241,7 +1244,7 @@ impl Family {
                 .get(id)
                 .ok_or_else(|| format!("{id} is not in the family"))?;
             let summary = &node.summary;
-            let (parent_name, parent_depth, parent_session_id, parent_thinking) =
+            let (parent_name, parent_depth, parent_session_id, parent_thinking, parent_model) =
                 match &summary.parent {
                     Some(parent) => inner
                         .children
@@ -1252,6 +1255,7 @@ impl Family {
                                 parent.summary.depth,
                                 parent.summary.session_id.clone(),
                                 parent.summary.thinking.clone(),
+                                Some(parent.summary.model_id.clone()),
                             )
                         })
                         .unwrap_or_default(),
@@ -1259,6 +1263,7 @@ impl Family {
                         inner.root.name.clone(),
                         inner.root.depth,
                         inner.root_session_id.clone(),
+                        None,
                         None,
                     ),
                 };
@@ -1276,6 +1281,7 @@ impl Family {
                 },
                 parent_session_id,
                 parent_thinking,
+                parent_model,
                 resume_session: Some(summary.session_id.clone()),
             };
             (spec, summary.status == ChildStatus::Interrupted)
@@ -2488,6 +2494,47 @@ mod tests {
             &asked[0].messages[0],
             Message::User(user) if user.text().starts_with("[task from parent]\n\nreview the auth flow")
         ));
+    }
+
+    #[tokio::test]
+    async fn a_grandchild_is_told_the_model_its_parent_runs() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let seen: Arc<StdMutex<Vec<Option<String>>>> = Arc::default();
+        let echo = echo_factory(Arc::clone(&requests), "hi");
+        let factory: ChildFactory = Arc::new({
+            let seen = Arc::clone(&seen);
+            move |spec: ChildSpec, family: Arc<Family>| {
+                seen.lock().unwrap().push(spec.parent_model.clone());
+                echo(spec, family)
+            }
+        });
+        let family = Family::new(
+            Identity::root("root"),
+            "root-session".into(),
+            3,
+            Some(factory),
+            None,
+        );
+        let root = Identity::root("root");
+        let parent = family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        let alpha = Identity {
+            id: Some(parent.rlm_child_id.clone()),
+            name: "alpha".into(),
+            depth: 1,
+        };
+        family
+            .spawn(&alpha, "two".into(), "beta".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some(echo_model().id.to_string())]
+        );
     }
 
     #[tokio::test]

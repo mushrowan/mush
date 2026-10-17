@@ -1471,32 +1471,35 @@ fn open_child_session(
     }
 }
 
+fn child_model(seed: &ChildSeed, spec: &mush_runtime::ChildSpec) -> Result<Model, String> {
+    let chosen = seed
+        .models
+        .for_child(spec.model.as_deref())
+        .or_else(|| seed.subagent_model.clone());
+    let Some(id) = chosen else {
+        let parent = spec
+            .parent_model
+            .clone()
+            .unwrap_or_else(|| seed.models.current());
+        return Ok(
+            mush_ai::discovery::resolve_model_by_id(&parent).unwrap_or_else(|| seed.model.clone())
+        );
+    };
+    let store = mush_ai::credentials::default_store();
+    mush_runtime::models::resolve_child_model(
+        &mush_ai::discovery::shared_catalogue(),
+        &id,
+        |provider| {
+            mush_ai::auth::has_credentials(provider, &seed.provider_api_keys, store.as_ref())
+        },
+    )
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
         Box::pin(async move {
-            let chosen = seed
-                .models
-                .for_child(spec.model.as_deref())
-                .or_else(|| seed.subagent_model.clone());
-            let model = match chosen {
-                Some(id) => {
-                    let store = mush_ai::credentials::default_store();
-                    mush_runtime::models::resolve_child_model(
-                        &mush_ai::discovery::shared_catalogue(),
-                        &id,
-                        |provider| {
-                            mush_ai::auth::has_credentials(
-                                provider,
-                                &seed.provider_api_keys,
-                                store.as_ref(),
-                            )
-                        },
-                    )?
-                }
-                None => mush_ai::discovery::resolve_model_by_id(&seed.models.current())
-                    .unwrap_or_else(|| seed.model.clone()),
-            };
+            let model = child_model(&seed, &spec)?;
             let mut options = seed.options.clone();
             let parent_thinking = spec
                 .parent_thinking
@@ -2179,6 +2182,7 @@ mod tests {
             parent: mush_runtime::Identity::root("root"),
             parent_session_id: "parent".into(),
             parent_thinking: None,
+            parent_model: None,
             resume_session,
         }
     }
@@ -2276,6 +2280,32 @@ mod tests {
         assert!(turn.compaction_model.is_none());
     }
 
+    #[test]
+    fn a_child_without_a_model_runs_on_the_model_its_parent_runs() {
+        let seed = child_seed(config::CompactionConfig::default(), None);
+        let mut spec = child_spec("scout", None);
+
+        assert_eq!(child_model(&seed, &spec).unwrap().id, seed.model.id);
+
+        spec.parent_model = Some("claude-haiku-5-5".into());
+        assert_eq!(
+            child_model(&seed, &spec).unwrap().id.as_str(),
+            "claude-haiku-5-5"
+        );
+
+        spec.model = Some("claude-haiku-4-5".into());
+        let asked = child_model(&seed, &spec);
+        assert!(
+            asked
+                .as_ref()
+                .is_ok_and(|model| model.id.as_str() == "claude-haiku-4-5")
+                || asked
+                    .as_ref()
+                    .is_err_and(|error| error.contains("credentials")),
+            "{asked:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_child_on_an_unknown_model_is_refused_before_it_starts() {
         let seed = child_seed(config::CompactionConfig::default(), None);
@@ -2291,6 +2321,7 @@ mod tests {
             parent: root,
             parent_session_id: "root-session".into(),
             parent_thinking: None,
+            parent_model: None,
             resume_session: None,
         };
 
