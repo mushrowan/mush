@@ -4515,6 +4515,105 @@ mod tests {
         )
     }
 
+    fn near_full_history(window: u64) -> Vec<Message> {
+        let model = echo_model();
+        let mut history: Vec<Message> = (0..8)
+            .flat_map(|i| {
+                [
+                    Message::User(
+                        mush_ai::types::UserMessage::builder()
+                            .content(mush_ai::types::UserContent::Text(format!("step {i}")))
+                            .timestamp_ms(Timestamp::zero())
+                            .build(),
+                    ),
+                    Message::Assistant(
+                        mush_ai::types::AssistantMessage::builder()
+                            .content(vec![mush_ai::types::AssistantContentPart::Text(
+                                mush_ai::types::TextContent {
+                                    text: format!("done {i}"),
+                                },
+                            )])
+                            .model(model.id.clone())
+                            .provider(model.provider.clone())
+                            .api(model.api)
+                            .timestamp_ms(Timestamp::zero())
+                            .build(),
+                    ),
+                ]
+            })
+            .collect();
+        if let Some(Message::Assistant(last)) = history.last_mut() {
+            last.usage.input_tokens = mush_ai::types::TokenCount::new(window - 1_000);
+        }
+        history
+    }
+
+    #[tokio::test]
+    async fn a_child_reopened_near_a_full_window_compacts_before_its_first_request() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory: ChildFactory = Arc::new({
+            let overflowed = Arc::clone(&overflowed);
+            move |_spec: ChildSpec, _family: Arc<Family>| {
+                let overflowed = Arc::clone(&overflowed);
+                Box::pin(async move {
+                    let mut registry = ApiRegistry::new();
+                    registry.register(Box::new(FillsThenOverflows {
+                        scenario: Overflowing::UntilCompacted,
+                        overflowed,
+                    }));
+                    let mut tools = ToolRegistry::new();
+                    tools.register_shared(Arc::new(crate::testing::NoteTool));
+                    let mut turn = echo_config(echo_model());
+                    turn.max_turns = 20;
+                    turn.auto_compact = true;
+                    turn.compaction = mush_session::compact::CompactionSettings {
+                        keep_recent_tokens: 10,
+                        ..Default::default()
+                    };
+                    let mut config = WorkerConfig::new(turn);
+                    config.conversation = mush_session::ConversationState::from_messages(
+                        near_full_history(echo_model().compaction_window().get()),
+                    );
+                    Ok(ChildParts {
+                        config,
+                        tools,
+                        registry,
+                    })
+                })
+            }
+        });
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(factory),
+            None,
+        );
+        let mut root_inbox = family.root_inbox();
+        let root = Identity::root("root");
+        family
+            .spawn(
+                &root,
+                "write the report".into(),
+                "newspapers".into(),
+                None,
+                None,
+                &family,
+            )
+            .await
+            .unwrap();
+        let child = settle(&family, &root).await.remove(0);
+        notices_until(&mut root_inbox, 1).await;
+
+        assert!(
+            !overflowed.load(std::sync::atomic::Ordering::SeqCst),
+            "the first request overflowed instead of compacting first"
+        );
+        assert_eq!(child.status, ChildStatus::Idle, "{child:?}");
+        assert_eq!(child.answer.as_deref(), Some("report done"));
+    }
+
     #[tokio::test]
     async fn a_child_that_overflows_its_context_compacts_retries_and_answers() {
         let (child, seen, overflowed) = run_overflowing_child(Overflowing::UntilCompacted).await;

@@ -278,7 +278,6 @@ impl SessionRuntime {
                 model.input.contains(&mush_ai::types::InputModality::Image),
             );
         }
-        let context_tokens = self.context_tokens;
         let TurnDeps {
             ref config,
             ref injections,
@@ -295,6 +294,13 @@ impl SessionRuntime {
         self.persist_pending_prompt();
         let conversation_snapshot = self.conversation.context();
         self.pending_prompt = None;
+        if self.context_tokens.get() == 0
+            && let Some(measured) =
+                mush_session::compact::last_measured_tokens(&conversation_snapshot)
+        {
+            self.context_tokens = measured;
+        }
+        let context_tokens = self.context_tokens;
 
         let measured_len = mush_session::compact::measured_len(&conversation_snapshot);
         let context_tokens_shared =
@@ -429,6 +435,9 @@ pub fn build_context_transform(
         return None;
     }
     let measured_len = Arc::new(std::sync::atomic::AtomicUsize::new(measured_len));
+    let overhead = live
+        .as_ref()
+        .map_or(0, mush_session::compact::overhead_tokens);
     let hooks = Arc::new(lifecycle_hooks);
     let cwd = Arc::new(cwd);
     let registry = Arc::new(registry);
@@ -451,6 +460,7 @@ pub fn build_context_transform(
                 current_tokens,
                 &owned_messages,
                 measured_len.load(std::sync::atomic::Ordering::Relaxed),
+                overhead,
             );
             let effective_compaction_tokens = match pressure {
                 mush_agent::ContextPressure::Normal => measured_tokens,

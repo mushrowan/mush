@@ -2821,3 +2821,236 @@ async fn changing_the_session_model_moves_what_a_spawn_inherits() {
 
     assert_eq!(connection.runtime.models.current(), "now");
 }
+
+struct Window {
+    requests: crate::testing::Requests,
+    chars_per_token: usize,
+    limit: usize,
+}
+
+impl Window {
+    fn tokens(&self, context: &mush_ai::registry::LlmContext) -> usize {
+        let system = context.system_prompt.as_deref().map_or(0, str::len);
+        let tools: usize = context
+            .tools
+            .iter()
+            .map(|tool| {
+                tool.name.len() + tool.description.len() + tool.parameters.to_string().len()
+            })
+            .sum();
+        let messages: usize = context
+            .messages
+            .iter()
+            .map(|message| serde_json::to_string(message).map_or(0, |text| text.len()))
+            .sum();
+        (system + tools + messages) / self.chars_per_token
+    }
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for Window {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &mush_ai::types::Model,
+        context: &mush_ai::registry::LlmContext,
+        _options: &mush_ai::types::StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        self.requests.lock().unwrap().push(context.clone());
+        let tokens = self.tokens(context);
+        if tokens > self.limit {
+            return Err(mush_ai::registry::ProviderError::Other(format!(
+                "anthropic returned 400 Bad Request: prompt is too long: {tokens} tokens > {} maximum",
+                self.limit
+            )));
+        }
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: "ok".into(),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::Stop)
+            .usage(mush_ai::types::Usage {
+                input_tokens: TokenCount::new(tokens as u64),
+                ..Default::default()
+            })
+            .timestamp_ms(Timestamp::now())
+            .build();
+        Ok(Box::pin(futures::stream::iter([
+            mush_ai::stream::StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            },
+        ])))
+    }
+}
+
+fn is_summary_request(request: &mush_ai::registry::LlmContext) -> bool {
+    matches!(
+        request.messages.last(),
+        Some(Message::User(user)) if user.text().starts_with("[context checkpoint]")
+    )
+}
+
+fn windowed(
+    chars_per_token: usize,
+    history: Vec<Message>,
+) -> (InProcessConnection, crate::testing::Requests) {
+    let requests: crate::testing::Requests = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ApiRegistry::new();
+    let mut model = crate::testing::echo_model();
+    model.id = "a-model-with-a-small-window".into();
+    model.context_window = TokenCount::new(20_000);
+    model.effective_context_window = None;
+    registry.register(Box::new(Window {
+        requests: requests.clone(),
+        chars_per_token,
+        limit: 20_000,
+    }));
+    let mut config = crate::testing::echo_config(model.clone());
+    config.auto_compact = true;
+    config.options.max_tokens = Some(TokenCount::new(1_000));
+    config.compaction = mush_session::compact::CompactionSettings {
+        reserve_tokens: 1_000,
+        keep_recent_tokens: 1_000,
+        ..Default::default()
+    };
+    let mut runtime = SessionRuntime::new(ConversationState::from_messages(history));
+    runtime.model_id = model.id.to_string();
+    runtime.system_prompt = Some("you are a careful agent. ".repeat(600));
+    let connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        config,
+        mush_agent::AgentInjections::default(),
+    );
+    (connection, requests)
+}
+
+fn long_history(pairs: usize, chars: usize) -> Vec<Message> {
+    let model = crate::testing::echo_model();
+    (0..pairs)
+        .flat_map(|i| {
+            [
+                user(&format!("step {i}: {}", "x".repeat(chars))),
+                Message::Assistant(
+                    AssistantMessage::builder()
+                        .content(vec![AssistantContentPart::Text(TextContent {
+                            text: format!("done {i}"),
+                        })])
+                        .model(model.id.clone())
+                        .provider(model.provider.clone())
+                        .api(model.api)
+                        .stop_reason(StopReason::Stop)
+                        .timestamp_ms(Timestamp::zero())
+                        .build(),
+                ),
+            ]
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_woken_session_counts_the_system_prompt_before_its_first_request() {
+    let (mut connection, requests) = windowed(4, long_history(20, 3_000));
+
+    prompt(&mut connection, "one short paragraph from the parent").await;
+
+    let window = Window {
+        requests: Arc::default(),
+        chars_per_token: 4,
+        limit: 20_000,
+    };
+    let asked = requests.lock().unwrap();
+    let turn_requests: Vec<usize> = asked
+        .iter()
+        .filter(|request| !is_summary_request(request))
+        .map(|request| window.tokens(request))
+        .collect();
+    assert_eq!(turn_requests.len(), 1, "{turn_requests:?}");
+    assert!(turn_requests[0] <= 20_000, "{turn_requests:?}");
+    assert!(
+        matches!(
+            connection.runtime.conversation.context().last(),
+            Some(Message::Assistant(reply)) if reply.text() == "ok"
+        ),
+        "the turn answered"
+    );
+    assert!(
+        connection
+            .runtime
+            .conversation
+            .context()
+            .iter()
+            .any(|message| match message {
+                Message::Event(event) => event.kind.is_summary(),
+                Message::User(user) => {
+                    mush_ai::types::strip_compaction_summary_prefix(&user.text()).is_some()
+                }
+                _ => false,
+            }),
+        "the turn compacted first"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_too_long_on_the_first_request_compacts_and_retries() {
+    let (mut connection, requests) = windowed(2, long_history(20, 1_500));
+
+    prompt(&mut connection, "one short paragraph from the parent").await;
+
+    let asked = requests.lock().unwrap();
+    assert!(asked.len() >= 2, "{}", asked.len());
+    assert!(
+        matches!(
+            connection.runtime.conversation.context().last(),
+            Some(Message::Assistant(reply)) if reply.text() == "ok"
+        ),
+        "the turn answered"
+    );
+    let last = connection.runtime.conversation.context();
+    assert!(
+        matches!(last.last(), Some(Message::Assistant(reply)) if reply.text() == "ok"),
+        "{:?}",
+        last.last()
+    );
+}
+
+#[tokio::test]
+async fn a_woken_session_trusts_the_size_its_last_reply_measured() {
+    let mut history = long_history(10, 1_800);
+    if let Some(Message::Assistant(last)) = history.last_mut() {
+        last.usage.input_tokens = TokenCount::new(19_500);
+    }
+    let (mut connection, requests) = windowed(1, history);
+    connection.runtime.system_prompt = None;
+
+    prompt(&mut connection, "one short paragraph from the parent").await;
+
+    let window = Window {
+        requests: Arc::default(),
+        chars_per_token: 1,
+        limit: 20_000,
+    };
+    let asked = requests.lock().unwrap();
+    let turn_requests: Vec<usize> = asked
+        .iter()
+        .filter(|request| !is_summary_request(request))
+        .map(|request| window.tokens(request))
+        .collect();
+    assert_eq!(turn_requests.len(), 1, "{turn_requests:?}");
+    assert!(turn_requests[0] <= 20_000, "{turn_requests:?}");
+    assert!(
+        matches!(
+            connection.runtime.conversation.context().last(),
+            Some(Message::Assistant(reply)) if reply.text() == "ok"
+        ),
+        "the turn answered"
+    );
+}

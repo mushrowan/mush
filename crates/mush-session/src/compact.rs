@@ -633,6 +633,7 @@ pub fn compaction_tokens(
     context_tokens: TokenCount,
     messages: &[Message],
     measured_len: usize,
+    overhead: usize,
 ) -> TokenCount {
     let unmeasured: u64 = messages
         .get(measured_len..)
@@ -640,8 +641,42 @@ pub fn compaction_tokens(
         .iter()
         .map(unmeasured_message_tokens)
         .sum();
+    let estimated = estimate_tokens(messages).saturating_add(overhead);
     TokenCount::new(context_tokens.get().saturating_add(unmeasured))
-        .max(TokenCount::new(estimate_tokens(messages) as u64))
+        .max(TokenCount::new(estimated as u64))
+}
+
+#[must_use]
+pub fn overhead_tokens(live: &LiveContext) -> usize {
+    let prompt = live.system_prompt.as_deref().map_or(0, str::len);
+    let tools: usize = live
+        .tools
+        .iter()
+        .map(|tool| tool.name.len() + tool.description.len() + tool.parameters.to_string().len())
+        .sum();
+    (prompt + tools).div_ceil(CHARS_PER_TOKEN)
+}
+
+#[must_use]
+pub fn last_measured_tokens(messages: &[Message]) -> Option<TokenCount> {
+    let compacted_at = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Event(event) if event.kind.is_summary() => Some(event.timestamp_ms),
+            Message::User(user) if strip_compaction_summary_prefix(&user.text()).is_some() => {
+                Some(user.timestamp_ms)
+            }
+            _ => None,
+        })
+        .max();
+    messages.iter().rev().find_map(|message| match message {
+        Message::Assistant(assistant)
+            if compacted_at.is_none_or(|at| assistant.timestamp_ms > at) =>
+        {
+            Some(assistant.usage.total_input_tokens()).filter(|tokens| tokens.get() > 0)
+        }
+        _ => None,
+    })
 }
 
 #[must_use]
@@ -1857,6 +1892,48 @@ mod tests {
     }
 
     #[test]
+    fn the_last_reply_measures_the_context_unless_a_compaction_came_after_it() {
+        let mut before = assistant_msg("before");
+        if let Message::Assistant(reply) = &mut before {
+            reply.usage.input_tokens = TokenCount::new(900);
+            reply.usage.cache_read_tokens = TokenCount::new(99_000);
+            reply.timestamp_ms = Timestamp::from_ms(10);
+        }
+        let mut messages = vec![user_msg("start"), before.clone()];
+        assert_eq!(
+            last_measured_tokens(&messages),
+            Some(TokenCount::new(99_900))
+        );
+
+        let summary = Message::User(
+            UserMessage::builder()
+                .content(UserContent::Text(compaction_summary_text("earlier work")))
+                .timestamp_ms(Timestamp::from_ms(20))
+                .build(),
+        );
+        messages = vec![summary, before];
+        assert_eq!(last_measured_tokens(&messages), None);
+        assert_eq!(last_measured_tokens(&[user_msg("only a user")]), None);
+    }
+
+    #[test]
+    fn the_overhead_counts_the_system_prompt_and_the_tools() {
+        let live = LiveContext {
+            system_prompt: Some("x".repeat(400)),
+            tools: vec![mush_ai::registry::ToolDefinition {
+                name: "ipython".into(),
+                description: "y".repeat(91),
+                parameters: serde_json::json!({}),
+            }],
+        };
+        assert_eq!(overhead_tokens(&live), 125);
+        assert_eq!(
+            compaction_tokens(TokenCount::ZERO, &[user_msg(&"z".repeat(400))], 1, 125),
+            TokenCount::new(225)
+        );
+    }
+
+    #[test]
     fn a_short_conversation_over_the_threshold_still_compacts() {
         assert!(needs_compaction_at(
             TokenCount::new(9600),
@@ -1905,7 +1982,7 @@ mod tests {
         let previous_api_tokens = TokenCount::new(6_000);
 
         assert!(needs_compaction_at(
-            compaction_tokens(previous_api_tokens, &messages, 20),
+            compaction_tokens(previous_api_tokens, &messages, 20, 0),
             context_window,
             &CompactionSettings::default(),
         ));
@@ -1934,13 +2011,13 @@ mod tests {
 
         assert_eq!(measured_len(&messages), 20);
         assert!(needs_compaction_at(
-            compaction_tokens(reported, &messages, measured_len(&messages)),
+            compaction_tokens(reported, &messages, measured_len(&messages), 0),
             window,
             &settings,
         ));
         assert!(
             !needs_compaction_at(
-                compaction_tokens(reported, &messages, messages.len()),
+                compaction_tokens(reported, &messages, messages.len(), 0),
                 window,
                 &settings,
             ),
