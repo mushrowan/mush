@@ -292,7 +292,7 @@ impl MushHost {
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
     fn cancellable(&self, kind: &str) -> bool {
-        matches!(kind, "bash.wait" | "websearch")
+        matches!(kind, "bash.wait" | "rlm.collect" | "websearch")
     }
 
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
@@ -383,9 +383,19 @@ pub struct IpythonTool {
     model: Mutex<Option<(String, bool)>>,
     live_pid: Mutex<Option<u32>>,
     released: AtomicBool,
+    waker: Mutex<Option<mush_kernel::Waker>>,
+    waiting: Mutex<Option<mush_kernel::Waiting>>,
 }
 
 const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(1500);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
 
 const LIVE_OUTPUT_INTERVAL: Duration = Duration::from_millis(100);
 const LIVE_OUTPUT_CAP_BYTES: usize = 2 * mush_kernel::DEFAULT_MAX_OUTPUT_CHARS;
@@ -420,6 +430,8 @@ impl IpythonTool {
             model: Mutex::new(None),
             live_pid: Mutex::new(None),
             released: AtomicBool::new(false),
+            waker: Mutex::new(None),
+            waiting: Mutex::new(None),
         }
     }
 
@@ -513,6 +525,7 @@ impl IpythonTool {
 
     async fn retire(&self, kernel: Kernel) {
         let pid = kernel.pid();
+        *lock(&self.waker) = None;
         let _ = kernel.shutdown().await;
         self.journal_kernel(pid, false);
     }
@@ -569,6 +582,7 @@ impl IpythonTool {
                 Kernel::start_with_progress(self.kernel_config(), self.host.clone(), &progress)
                     .await?;
             self.journal_kernel(kernel.pid(), true);
+            *lock(&self.waker) = Some(kernel.waker());
             if self.released.swap(false, Ordering::SeqCst)
                 && let Some(path) = self.latest_snapshot()
             {
@@ -606,6 +620,13 @@ impl IpythonTool {
         let origin = (!exec_id.is_empty()).then_some(exec_id.as_str());
         let outcome = kernel
             .execute_from(code, origin, |event| {
+                if let mush_kernel::Event::Wait { on, .. } = event {
+                    *lock(&self.waiting) = on.clone().map(|on| mush_kernel::Waiting {
+                        on,
+                        since_ms: now_ms(),
+                    });
+                    return;
+                }
                 let Some(sink) = &sink else { return };
                 let text = match event {
                     mush_kernel::Event::Stdout { text, .. }
@@ -625,6 +646,7 @@ impl IpythonTool {
                 }
             })
             .await;
+        *lock(&self.waiting) = None;
         if pending && let Some(sink) = &sink {
             sink(&exec_id, live.trim_end());
         }
@@ -654,6 +676,7 @@ impl IpythonTool {
             }
         };
         self.journal_kernel(kernel.pid(), true);
+        *lock(&self.waker) = Some(kernel.waker());
         if let Some(path) = self.latest_snapshot() {
             let outcome = kernel
                 .restore(&path)
@@ -761,6 +784,23 @@ impl mush_kernel::KernelState for IpythonTool {
 
     fn pid(&self) -> Option<u32> {
         *lock(&self.live_pid)
+    }
+
+    fn waiting(&self) -> Option<mush_kernel::Waiting> {
+        lock(&self.waiting).clone()
+    }
+
+    fn wake_waits(&self) {
+        let Some(waker) = lock(&self.waker).clone() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(error) = waker.wake().await {
+                    tracing::debug!(%error, "could not wake the kernel's waits");
+                }
+            });
+        }
     }
 
     async fn release(&self) -> mush_kernel::Release {
@@ -1976,16 +2016,127 @@ mod tests {
         let running = tokio::spawn({
             let tool = Arc::clone(&tool);
             async move {
-                tool.execute(json!({ "code": "await asyncio.sleep(1)" }))
+                tool.execute(json!({ "code": "await asyncio.sleep(30)" }))
                     .await
             }
         });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_until_waiting(&tool).await;
 
         assert_eq!(tool.release().await, Release::Busy);
+        tool.wake_waits();
         let _ = tokio::time::timeout(Duration::from_secs(10), running)
             .await
             .unwrap();
+        tool.shutdown().await;
+    }
+
+    async fn wait_until_waiting(tool: &IpythonTool) -> mush_kernel::Waiting {
+        use mush_kernel::KernelState;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(waiting) = tool.waiting() {
+                return waiting;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cell never waited"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn woken(tool: &Arc<IpythonTool>, code: &str) -> (mush_kernel::Waiting, ToolResult) {
+        use mush_kernel::KernelState;
+        let cell = tokio::spawn({
+            let tool = Arc::clone(tool);
+            let code = code.to_string();
+            async move { tool.execute(json!({ "code": code })).await }
+        });
+        let waiting = wait_until_waiting(tool).await;
+        tool.wake_waits();
+        let result = tokio::time::timeout(Duration::from_secs(10), cell)
+            .await
+            .unwrap()
+            .unwrap();
+        (waiting, result)
+    }
+
+    #[tokio::test]
+    async fn a_message_stops_a_cell_waiting_on_bash_and_the_job_keeps_running() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Arc::new(tool(dir.path()));
+
+        let (waiting, result) =
+            woken(&tool, "r = await bash('sleep 30; echo late')\nr.output").await;
+
+        assert_eq!(waiting.on, "bash job-1: sleep 30; echo late");
+        assert!(result.outcome.is_error());
+        let text = extract_text(&result);
+        assert!(
+            text.contains(
+                "WaitInterrupted: a message arrived while this cell waited on bash job-1: sleep \
+                 30; echo late, so the wait stopped."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("saved as `_wait`"), "{text}");
+        assert_eq!(tool.waiting(), None);
+        let still = tool
+            .execute(json!({ "code": "await _wait.running()" }))
+            .await;
+        assert_eq!(extract_text(&still), "True");
+        let _ = tool.execute(json!({ "code": "await _wait.kill()" })).await;
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_message_stops_sleeps_in_cell_code_even_one_that_starts_after_it() {
+        use mush_kernel::KernelState;
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Arc::new(tool(dir.path()));
+
+        let (waiting, result) = woken(&tool, "await asyncio.sleep(30)").await;
+        assert_eq!(waiting.on, "asyncio.sleep(30)");
+        assert!(
+            extract_text(&result).contains("WaitInterrupted"),
+            "{}",
+            extract_text(&result)
+        );
+
+        let (waiting, result) = woken(&tool, "import time\ntime.sleep(30)").await;
+        assert_eq!(waiting.on, "time.sleep(30)");
+        assert!(
+            extract_text(&result).contains("WaitInterrupted"),
+            "{}",
+            extract_text(&result)
+        );
+
+        let cell = tokio::spawn({
+            let tool = Arc::clone(&tool);
+            async move {
+                tool.execute(json!({
+                    "code": "import time\nend = time.monotonic() + 1.5\nwhile time.monotonic() < end:\n    pass\nawait asyncio.sleep(30)"
+                }))
+                .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        tool.wake_waits();
+        let late = tokio::time::timeout(Duration::from_secs(10), cell)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            extract_text(&late).contains("WaitInterrupted"),
+            "{}",
+            extract_text(&late)
+        );
+
+        let after = tool
+            .execute(json!({ "code": "await asyncio.sleep(0.1)\n'slept'" }))
+            .await;
+        assert_eq!(extract_text(&after), "'slept'");
         tool.shutdown().await;
     }
 

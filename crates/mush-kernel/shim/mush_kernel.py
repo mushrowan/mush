@@ -264,6 +264,135 @@ class HostError(RuntimeError):
     pass
 
 
+class WaitInterrupted(Exception):
+    """A message arrived while the cell waited; the wait stopped so the agent can read it."""
+
+    def __init__(self, on: str, handle=None):
+        self.on = on
+        self.handle = handle
+        detail = ""
+        if handle is not None:
+            detail = (
+                " The command keeps running and its handle is saved as `_wait`: `await _wait` to"
+                " keep waiting, or check it with `await _wait.poll()` or `await _wait.tail()`."
+                " A [bash-done] notice still arrives when it finishes."
+            )
+        super().__init__(f"a message arrived while this cell waited on {on}, so the wait stopped.{detail}")
+
+
+class _Wait:
+    def __init__(self, on: str, announce: bool = True):
+        self.on = on
+        self.announce = announce
+        self.woken = threading.Event()
+        self.future = None
+
+
+_waits: dict = {}
+_woken_cells: set = set()
+_WAIT_LABEL_CAP = 200
+
+
+def _wait_label(text: str) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= _WAIT_LABEL_CAP else text[: _WAIT_LABEL_CAP - 1] + "\u2026"
+
+
+def _waiting_cell():
+    cell_id = _current_cell.get()
+    with _interrupt_lock:
+        return cell_id if cell_id is not None and cell_id == _running["id"] else None
+
+
+def _from_cell(frame) -> bool:
+    return frame is not None and frame.f_code.co_filename.startswith("<cell-")
+
+
+def _announce_wait(cell_id: str) -> None:
+    with _interrupt_lock:
+        announced = [wait.on for wait in _waits.get(cell_id, []) if wait.announce]
+    emit({"type": "wait", "id": cell_id, "on": announced[-1] if announced else None})
+
+
+def _enter_wait(cell_id: str, wait: _Wait) -> bool:
+    with _interrupt_lock:
+        _waits.setdefault(cell_id, []).append(wait)
+        woken = cell_id in _woken_cells
+    if wait.announce:
+        _announce_wait(cell_id)
+    return woken
+
+
+def _leave_wait(cell_id: str, wait: _Wait) -> None:
+    with _interrupt_lock:
+        waits = _waits.get(cell_id, [])
+        if wait in waits:
+            waits.remove(wait)
+        if not waits:
+            _waits.pop(cell_id, None)
+    if wait.announce:
+        _announce_wait(cell_id)
+
+
+def _wake_waits() -> None:
+    with _interrupt_lock:
+        cell_id = _running["id"]
+        if cell_id is None:
+            return
+        _woken_cells.add(cell_id)
+        waits = list(_waits.get(cell_id, []))
+    for wait in waits:
+        wait.woken.set()
+        if wait.future is not None and _loop is not None:
+            _loop.call_soon_threadsafe(_resolve, wait.future, None)
+
+
+async def _pure_wait(awaitable, on: str, handle=None, announce: bool = True):
+    cell_id = _waiting_cell()
+    if cell_id is None:
+        return await awaitable
+    task = asyncio.ensure_future(awaitable)
+    wait = _Wait(_wait_label(on), announce)
+    wait.future = asyncio.get_running_loop().create_future()
+    if _enter_wait(cell_id, wait):
+        wait.future.set_result(None)
+    try:
+        await asyncio.wait((task, wait.future), return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        task.cancel()
+        raise
+    finally:
+        _leave_wait(cell_id, wait)
+    if task.done():
+        return task.result()
+    task.cancel()
+    raise WaitInterrupted(wait.on, handle)
+
+
+_real_sleep = time.sleep
+_real_asleep = asyncio.sleep
+
+
+def _cell_sleep(seconds):
+    cell_id = _waiting_cell() if _from_cell(sys._getframe(1)) else None
+    if cell_id is None or threading.get_ident() != _main_thread:
+        return _real_sleep(seconds)
+    if seconds < 0:
+        raise ValueError("sleep length must be non-negative")
+    wait = _Wait(f"time.sleep({seconds!r})", seconds >= 1)
+    try:
+        if _enter_wait(cell_id, wait) or wait.woken.wait(seconds):
+            raise WaitInterrupted(wait.on)
+    finally:
+        _leave_wait(cell_id, wait)
+
+
+def _cell_asleep(delay, result=None):
+    if not _from_cell(sys._getframe(1)):
+        return _real_asleep(delay, result)
+    return _pure_wait(_real_asleep(delay, result), f"asyncio.sleep({delay!r})", announce=delay >= 1)
+
+
 class BashResult:
     def __init__(self, exit_code: int, output: str, duration: float = 0.0, timed_out: bool = False, killed: bool = False):
         self.exit_code = exit_code
@@ -334,7 +463,14 @@ class BashHandle:
         return (self._wait_owned() if owned else self.wait()).__await__()
 
     async def wait(self) -> BashResult:
-        return _result_from(await host_request("bash.wait", await self._job()))
+        job = await self._job()
+        try:
+            reply = await _pure_wait(host_request("bash.wait", job), f"bash {self._job_id}: {self.command}", self)
+        except WaitInterrupted:
+            self._released = True
+            _namespace["_wait"] = self
+            raise
+        return _result_from(reply)
 
     async def _wait_owned(self) -> BashResult:
         try:
@@ -452,7 +588,9 @@ class _Rlm:
 
     async def collect(self, targets=None, *, timeout_ms: int = 0) -> list:
         payload = {"targets": _child_targets(targets), "timeout_ms": int(timeout_ms)}
-        return [ChildSummary(entry) for entry in await host_request("rlm.collect", payload)]
+        request = host_request("rlm.collect", payload)
+        reply = await (_pure_wait(request, "subagents to settle") if timeout_ms > 0 else request)
+        return [ChildSummary(entry) for entry in reply]
 
     async def pause_subagents(self, targets=None, *, reason: str | None = None) -> list:
         payload = _with_optional({"targets": _child_targets(targets)}, reason=reason)
@@ -817,6 +955,7 @@ def _install_preload() -> None:
             "BashResult": BashResult,
             "BashHandle": BashHandle,
             "HostError": HostError,
+            "WaitInterrupted": WaitInterrupted,
             "rlm": rlm,
             "agent_message": agent_message,
             "goal": goal,
@@ -968,6 +1107,8 @@ def _finish_locked(cell_id: str) -> None:
     global _interrupt_next
     _inflight.discard(cell_id)
     _parked_interrupts.discard(cell_id)
+    _woken_cells.discard(cell_id)
+    _waits.pop(cell_id, None)
     if not _inflight:
         _interrupt_next = False
 
@@ -1151,6 +1292,9 @@ def _reader(queue: asyncio.Queue) -> None:
         if kind == "interrupt":
             _interrupt(request.get("id"))
             continue
+        if kind == "wake":
+            _wake_waits()
+            continue
         if kind == "host_reply":
             future = _pending_replies.pop(request.get("id"), None)
             if future is None:
@@ -1263,6 +1407,8 @@ def main() -> None:
     sys.modules["__main__"] = user_module
     _namespace = user_module.__dict__
     _install_preload()
+    time.sleep = _cell_sleep
+    asyncio.sleep = _cell_asleep
     _capture_fds()
     _install_skills()
     _PRELOADED = frozenset(_namespace)

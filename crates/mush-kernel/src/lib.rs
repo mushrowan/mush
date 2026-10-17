@@ -9,7 +9,7 @@ pub mod venv;
 pub use kernel::{
     Attachment, CellError, CellOutput, DEFAULT_MAX_OUTPUT_CHARS, HostError, HostRequestHandler,
     Kernel, KernelConfig, NoHost, RESTART_RESETS, RESTORED_TAG, RestoreReport, SnapshotReport,
-    restore_notice_text,
+    Waker, restore_notice_text,
 };
 pub use protocol::{Event, Request};
 pub use python::PythonPlan;
@@ -38,6 +38,10 @@ pub trait KernelState: Send + Sync {
     async fn release(&self) -> Release {
         Release::NotRunning
     }
+    fn waiting(&self) -> Option<Waiting> {
+        None
+    }
+    fn wake_waits(&self) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +50,12 @@ pub enum Release {
     NotRunning,
     Busy,
     Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Waiting {
+    pub on: String,
+    pub since_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -591,6 +591,12 @@ impl InProcessConnection {
             .is_some_and(|kernel| kernel.background_work())
     }
 
+    fn wake_kernel_waits(&self) {
+        if let Some(kernel) = &self.runtime.kernel_state {
+            kernel.wake_waits();
+        }
+    }
+
     fn schedule_live(&self) -> bool {
         self.scheduler.as_ref().is_some_and(|scheduler| {
             scheduler.jobs().iter().any(|job| {
@@ -782,6 +788,7 @@ impl InProcessConnection {
             }
             if busy {
                 self.steer(delivery.event.text(), Vec::new()).await;
+                self.wake_kernel_waits();
                 delivery.ack(Receipt::Queued);
             } else if self.runtime.pending_prompt.is_some() {
                 delivery.ack(Receipt::Queued);
@@ -1379,6 +1386,7 @@ impl InProcessConnection {
         }
         if self.turn_active() {
             self.steer(text, images).await;
+            self.wake_kernel_waits();
         } else {
             self.queue_prompt(&text, images);
             self.start_pending_prompt().await;
@@ -1628,7 +1636,10 @@ impl AgentConnection for InProcessConnection {
         match command {
             ClientCommand::Prompt { text, images } => self.prompt(text, images).await,
             ClientCommand::QueuePrompt { text, images } => self.queue_prompt(&text, images),
-            ClientCommand::Steer { text, images } => self.steer(text, images).await,
+            ClientCommand::Steer { text, images } => {
+                self.steer(text, images).await;
+                self.wake_kernel_waits();
+            }
             ClientCommand::RetractSteer { text } => {
                 if !self.retract_steer(&text).await {
                     tracing::warn!(%text, "no steering queue entry matched the retracted message");

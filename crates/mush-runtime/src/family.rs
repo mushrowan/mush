@@ -430,7 +430,7 @@ pub struct AgentView {
     pub kernel: Option<ChildKernel>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildKernel {
     pub live: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -439,14 +439,21 @@ pub struct ChildKernel {
     pub rss_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swap_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<mush_kernel::Waiting>,
 }
 
 fn kernel_view(kernel: Option<&KernelHandle>) -> ChildKernel {
-    let Some(pid) = kernel
-        .and_then(std::sync::Weak::upgrade)
-        .and_then(|kernel| kernel.pid())
-    else {
-        return ChildKernel::default();
+    let kernel = kernel.and_then(std::sync::Weak::upgrade);
+    let waiting = kernel.as_ref().and_then(|kernel| kernel.waiting());
+    let Some(pid) = kernel.as_ref().and_then(|kernel| kernel.pid()) else {
+        return ChildKernel {
+            live: false,
+            pid: None,
+            rss_bytes: None,
+            swap_bytes: None,
+            waiting,
+        };
     };
     let memory = mush_kernel::process::memory(pid);
     ChildKernel {
@@ -454,6 +461,7 @@ fn kernel_view(kernel: Option<&KernelHandle>) -> ChildKernel {
         pid: Some(pid),
         rss_bytes: memory.map(|memory| memory.rss_bytes),
         swap_bytes: memory.and_then(|memory| memory.swap_bytes),
+        waiting,
     }
 }
 
@@ -5086,6 +5094,8 @@ mod tests {
         background: std::sync::atomic::AtomicBool,
         releases: std::sync::atomic::AtomicUsize,
         restores: std::sync::atomic::AtomicUsize,
+        wakes: std::sync::atomic::AtomicUsize,
+        waiting: StdMutex<Option<mush_kernel::Waiting>>,
     }
 
     impl FakeKernel {
@@ -5146,6 +5156,14 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.live_pid.lock().unwrap() = None;
             mush_kernel::Release::Released(mush_kernel::SnapshotReport::default())
+        }
+
+        fn waiting(&self) -> Option<mush_kernel::Waiting> {
+            self.waiting.lock().unwrap().clone()
+        }
+
+        fn wake_waits(&self) {
+            self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -5465,12 +5483,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_subagents_and_the_roster_show_kernel_liveness_and_memory() {
+    async fn list_subagents_and_the_roster_show_kernel_liveness_memory_and_waits() {
         let _dirs = crate::testing::IsolatedDirs::acquire().await;
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let mut process = sleeper();
         let kernel = FakeKernel::live(process.id());
         kernel.set_background(true);
+        *kernel.waiting.lock().unwrap() = Some(mush_kernel::Waiting {
+            on: "bash job-3: make test".into(),
+            since_ms: 5,
+        });
         let family = releasing_family(requests, vec![Arc::clone(&kernel)], None);
         let root = Identity::root("root");
         family
@@ -5494,6 +5516,7 @@ mod tests {
         assert_eq!(live["kernel"]["live"], true);
         assert_eq!(live["kernel"]["pid"], process.id());
         assert!(live["kernel"]["rss_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(live["kernel"]["waiting"]["on"], "bash job-3: make test");
         let roster = family.roster(&root);
         let view = roster
             .iter()
@@ -5501,6 +5524,7 @@ mod tests {
             .unwrap();
         assert_eq!(view.kernel.as_ref().unwrap().pid, Some(process.id()));
 
+        *kernel.waiting.lock().unwrap() = None;
         kernel.set_background(false);
         assert!(!kernel_live_after(&family, &id, Duration::from_secs(5)).await);
         assert_eq!(
@@ -5509,5 +5533,49 @@ mod tests {
         );
         process.kill().unwrap();
         process.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_message_to_a_busy_child_wakes_its_kernel_waits() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let kernels = Arc::new(StdMutex::new(Vec::new()));
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stalling_factory(
+                Arc::clone(&release),
+                1,
+                Arc::clone(&kernels),
+                std::process::id(),
+            )),
+            None,
+        );
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "slow".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family.children_of(&root)[0].status != ChildStatus::Running {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let kernel = Arc::clone(&kernels.lock().unwrap()[0]);
+        assert_eq!(FakeKernel::count(&kernel.wakes), 0);
+
+        let receipt = family
+            .send_message(&root, "child", Some("slow"), "stop waiting", &family)
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.delivery_status, Receipt::Queued);
+        assert_eq!(FakeKernel::count(&kernel.wakes), 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !family.children_of(&root)[0].status.settled() {
+            assert!(Instant::now() < deadline);
+            release.notify_one();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

@@ -366,7 +366,10 @@ impl Kernel {
                     finished = true;
                     break;
                 }
-                Event::Ready { .. } | Event::HostRequest { .. } | Event::HostCancel { .. } => {}
+                Event::Ready { .. }
+                | Event::HostRequest { .. }
+                | Event::HostCancel { .. }
+                | Event::Wait { .. } => {}
             }
         }
         abandon.shared.take();
@@ -395,6 +398,13 @@ impl Kernel {
     #[must_use]
     pub fn busy(&self) -> bool {
         self.shared.running().is_some()
+    }
+
+    #[must_use]
+    pub fn waker(&self) -> Waker {
+        Waker {
+            shared: self.shared.clone(),
+        }
     }
 
     async fn wait_until_idle(&self) -> Result<(), KernelError> {
@@ -535,6 +545,20 @@ impl Kernel {
             return Err(KernelError::Corrupted(reason));
         }
         write_request(&self.shared.stdin, request).await
+    }
+}
+
+#[derive(Clone)]
+pub struct Waker {
+    shared: Arc<Shared>,
+}
+
+impl Waker {
+    pub async fn wake(&self) -> Result<(), KernelError> {
+        if let Some(reason) = self.shared.protocol_failure() {
+            return Err(KernelError::Corrupted(reason));
+        }
+        write_request(&self.shared.stdin, &Request::Wake).await
     }
 }
 

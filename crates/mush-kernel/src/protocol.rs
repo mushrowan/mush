@@ -37,6 +37,7 @@ pub enum Request {
     ListNames {
         id: String,
     },
+    Wake,
     Shutdown,
 }
 
@@ -85,6 +86,10 @@ pub enum Event {
     HostCancel {
         id: String,
     },
+    Wait {
+        id: Option<String>,
+        on: Option<String>,
+    },
 }
 
 impl Event {
@@ -95,7 +100,8 @@ impl Event {
             Self::Stdout { id, .. }
             | Self::Stderr { id, .. }
             | Self::Error { id, .. }
-            | Self::Display { id, .. } => id.as_deref(),
+            | Self::Display { id, .. }
+            | Self::Wait { id, .. } => id.as_deref(),
             Self::Result { id, .. } | Self::Done { id, .. } => Some(id),
             Self::HostRequest { cell, .. } => cell.as_deref(),
         }
