@@ -542,12 +542,61 @@ const FALLBACK_SUMMARY_HEADING: &str = "## Summary of earlier conversation";
 pub const MIN_HEADROOM_TOKENS: u64 = 5_000;
 pub const DEFAULT_THRESHOLD_PERCENT: u8 = 95;
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum PriceCliffPin {
+    Off,
+    #[default]
+    Children,
+    All,
+}
+
+impl PriceCliffPin {
+    #[must_use]
+    pub fn pins(self, child: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Children => child,
+            Self::All => true,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Children => "children",
+            Self::All => "all",
+        }
+    }
+
+    #[must_use]
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::Off => Self::Children,
+            Self::Children => Self::All,
+            Self::All => Self::Off,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CompactionSettings {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
     pub threshold_percent: u8,
+    pub below_price_cliff: PriceCliffPin,
     #[serde(skip)]
     pub price_cliff: Option<u64>,
 }
@@ -558,6 +607,7 @@ impl Default for CompactionSettings {
             reserve_tokens: 16_384,
             keep_recent_tokens: 20_000,
             threshold_percent: DEFAULT_THRESHOLD_PERCENT,
+            below_price_cliff: PriceCliffPin::default(),
             price_cliff: None,
         }
     }
@@ -575,6 +625,16 @@ impl CompactionSettings {
             price_cliff: cliff_tokens,
             ..self
         }
+    }
+
+    #[must_use]
+    pub fn for_session(self, model: &mush_ai::types::Model, child: bool) -> Self {
+        let cliff = self
+            .below_price_cliff
+            .pins(child)
+            .then(|| model.cost.first_cliff().map(|tier| tier.over_prompt_tokens))
+            .flatten();
+        self.under_price_cliff(cliff)
     }
 
     #[must_use]
@@ -1968,6 +2028,30 @@ mod tests {
             TokenCount::new(10_000),
             &CompactionSettings::default(),
         ));
+    }
+
+    #[test]
+    fn the_pin_applies_to_children_by_default_and_to_every_session_when_asked() {
+        let haiku = mush_ai::models::anthropic_models()
+            .into_iter()
+            .find(|model| model.id.as_str() == "claude-haiku-5-5")
+            .unwrap();
+        let window = haiku.context_window;
+        let threshold = |pin: PriceCliffPin, child: bool| {
+            CompactionSettings {
+                below_price_cliff: pin,
+                ..CompactionSettings::default()
+            }
+            .for_session(&haiku, child)
+            .threshold(window)
+            .get()
+        };
+
+        assert_eq!(threshold(PriceCliffPin::Children, true), 90_000);
+        assert_eq!(threshold(PriceCliffPin::Children, false), 950_000);
+        assert_eq!(threshold(PriceCliffPin::All, false), 90_000);
+        assert_eq!(threshold(PriceCliffPin::Off, true), 950_000);
+        assert_eq!(PriceCliffPin::default(), PriceCliffPin::Children);
     }
 
     #[test]

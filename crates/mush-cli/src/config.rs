@@ -53,6 +53,7 @@ pub struct CompactionConfig {
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
     pub threshold_percent: u8,
+    pub below_price_cliff: mush_session::compact::PriceCliffPin,
     pub agent_callable: bool,
 }
 
@@ -64,6 +65,7 @@ impl Default for CompactionConfig {
             reserve_tokens: defaults.reserve_tokens,
             keep_recent_tokens: defaults.keep_recent_tokens,
             threshold_percent: defaults.threshold_percent,
+            below_price_cliff: defaults.below_price_cliff,
             agent_callable: true,
         }
     }
@@ -76,6 +78,7 @@ impl CompactionConfig {
             reserve_tokens: self.reserve_tokens,
             keep_recent_tokens: self.keep_recent_tokens,
             threshold_percent: self.threshold_percent,
+            below_price_cliff: self.below_price_cliff,
             ..Default::default()
         }
     }
@@ -628,11 +631,17 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
         if persisted.rlm_max_depth.is_some() {
             config.rlm_max_depth = persisted.rlm_max_depth;
         }
+        if let Some(pin) = persisted.compact_below_price_cliff {
+            config.compaction.below_price_cliff = pin;
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
         let repo = cwd.join(".mush").join("settings.toml");
         if let Some(persisted) = try_load_persisted_settings(&repo) {
             config.settings.anthropic_betas = persisted.anthropic_betas;
+            if let Some(pin) = persisted.compact_below_price_cliff {
+                config.compaction.below_price_cliff = pin;
+            }
         }
     }
 

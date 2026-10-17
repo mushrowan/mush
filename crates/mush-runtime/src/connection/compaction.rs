@@ -39,7 +39,10 @@ impl InProcessConnection {
             self.runtime.context_tokens,
             model.compaction_window(),
             &self.runtime.conversation.context(),
-            &self.config.compaction,
+            &self
+                .config
+                .compaction
+                .for_session(&model, self.runtime.rlm_depth > 0),
         )
     }
 

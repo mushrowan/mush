@@ -57,6 +57,7 @@ pub struct ScopedSettings {
     pub scope: SettingsScope,
     pub anthropic_betas: AnthropicBetas,
     pub auto_compact: bool,
+    pub price_cliff_pin: mush_session::compact::PriceCliffPin,
 }
 
 impl Default for ScopedSettings {
@@ -65,6 +66,7 @@ impl Default for ScopedSettings {
             scope: SettingsScope::default(),
             anthropic_betas: AnthropicBetas::default(),
             auto_compact: true,
+            price_cliff_pin: mush_session::compact::PriceCliffPin::default(),
         }
     }
 }
@@ -73,6 +75,7 @@ impl Default for ScopedSettings {
 pub enum MenuItemKind {
     Scope,
     AutoCompact,
+    PriceCliffPin,
     ContextOneM,
     Effort,
     ContextManagement,
@@ -89,6 +92,7 @@ impl MenuItemKind {
         &[
             Self::Scope,
             Self::AutoCompact,
+            Self::PriceCliffPin,
             Self::ContextOneM,
             Self::Effort,
             Self::ContextManagement,
@@ -105,6 +109,7 @@ impl MenuItemKind {
         match self {
             Self::Scope => "scope",
             Self::AutoCompact => "auto_compact",
+            Self::PriceCliffPin => "compact_below_price_cliff",
             Self::ContextOneM => "context_1m",
             Self::Effort => "effort",
             Self::ContextManagement => "context_management",
@@ -123,6 +128,9 @@ impl MenuItemKind {
             Self::AutoCompact => {
                 "compact automatically as the context fills, for this session only"
             }
+            Self::PriceCliffPin => {
+                "compact before a model's price cliff: off, for children, or for every session"
+            }
             Self::ContextOneM => "context-1m-2025-08-07: 1M context on claude models",
             Self::Effort => "effort-2025-11-24: send output_config.effort",
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
@@ -139,13 +147,13 @@ impl MenuItemKind {
     }
 
     pub fn activate(self, settings: &mut ScopedSettings) -> String {
-        if self == Self::AutoCompact {
-            settings.auto_compact = !settings.auto_compact;
-        } else {
-            match self.beta_mut(&mut settings.anthropic_betas) {
+        match self {
+            Self::AutoCompact => settings.auto_compact = !settings.auto_compact,
+            Self::PriceCliffPin => settings.price_cliff_pin = settings.price_cliff_pin.cycle_next(),
+            _ => match self.beta_mut(&mut settings.anthropic_betas) {
                 Some(flag) => *flag = !*flag,
                 None => settings.scope = settings.scope.cycle_next(),
-            }
+            },
         }
         self.value(settings)
     }
@@ -154,6 +162,9 @@ impl MenuItemKind {
     pub fn value(self, settings: &ScopedSettings) -> String {
         if self == Self::AutoCompact {
             return bool_str(settings.auto_compact).to_string();
+        }
+        if self == Self::PriceCliffPin {
+            return settings.price_cliff_pin.as_str().to_string();
         }
         let mut betas = settings.anthropic_betas.clone();
         match self.beta_mut(&mut betas) {
@@ -169,7 +180,7 @@ impl MenuItemKind {
 
     pub(crate) fn beta_mut(self, betas: &mut AnthropicBetas) -> Option<&mut bool> {
         Some(match self {
-            Self::Scope | Self::AutoCompact => return None,
+            Self::Scope | Self::AutoCompact | Self::PriceCliffPin => return None,
             Self::ContextOneM => &mut betas.context_1m,
             Self::Effort => &mut betas.effort,
             Self::ContextManagement => &mut betas.context_management,
@@ -223,6 +234,8 @@ pub struct PersistedSettings {
     pub anthropic_betas: AnthropicBetas,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_max_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_below_price_cliff: Option<mush_session::compact::PriceCliffPin>,
 }
 
 impl From<&ScopedSettings> for PersistedSettings {
@@ -230,6 +243,7 @@ impl From<&ScopedSettings> for PersistedSettings {
         Self {
             anthropic_betas: s.anthropic_betas.clone(),
             rlm_max_depth: None,
+            compact_below_price_cliff: Some(s.price_cliff_pin),
         }
     }
 }
@@ -325,6 +339,27 @@ mod tests {
                 "{expected:?} missing from {listed:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_price_cliff_row_cycles_and_is_saved_with_the_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut settings = ScopedSettings {
+            scope: SettingsScope::Repo,
+            ..Default::default()
+        };
+        assert_eq!(MenuItemKind::PriceCliffPin.value(&settings), "children");
+        assert_eq!(MenuItemKind::PriceCliffPin.activate(&mut settings), "all");
+        assert_eq!(MenuItemKind::PriceCliffPin.activate(&mut settings), "off");
+        assert!(MenuItemKind::PriceCliffPin.persists());
+
+        let path = persist(&settings, tmp.path()).unwrap().unwrap();
+        let loaded: PersistedSettings =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            loaded.compact_below_price_cliff,
+            Some(mush_session::compact::PriceCliffPin::Off)
+        );
     }
 
     #[test]

@@ -992,7 +992,12 @@ fn compaction_transform(
         system_prompt: Some(setup.system_prompt.clone()),
         tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
     });
-    let compaction_settings = setup.client.cfg.compaction.settings();
+    let compaction_settings = setup
+        .client
+        .cfg
+        .compaction
+        .settings()
+        .for_session(&setup.client.model, false);
     let after = mush_runtime::AfterCompaction {
         kernel: setup.kernel_state.clone(),
         ..Default::default()
@@ -1544,6 +1549,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 model,
                 options.clone(),
             ));
+            worker.turn.compaction.below_price_cliff = family.price_cliff_pin();
             worker.conversation = session.conversation.clone();
             worker.session_id = session.meta.id.clone();
             worker.title = Some(spec.name.clone());
@@ -1725,6 +1731,7 @@ fn worker_config(
             artifacts.as_ref().map(|dir| dir.join("subagents.json")),
         );
         family.set_idle_release(Some(setup.client.cfg.kernel.idle_release()));
+        family.set_price_cliff_pin(setup.client.cfg.compaction.below_price_cliff);
         let mut handler = mush_runtime::RlmHandler::new(family.clone(), root)
             .with_compaction_callable(setup.client.cfg.compaction.agent_callable);
         if !cli.no_session {
@@ -1847,6 +1854,7 @@ fn client_config(
             scope: client.cfg.settings.scope,
             anthropic_betas: client.cfg.settings.anthropic_betas.clone(),
             auto_compact: client.cfg.compaction.enabled,
+            price_cliff_pin: client.cfg.compaction.below_price_cliff,
         },
         favourite_models,
         favourites_locked,
@@ -2241,6 +2249,7 @@ mod tests {
                 reserve_tokens: 8_000,
                 keep_recent_tokens: 12_000,
                 threshold_percent: 90,
+                below_price_cliff: mush_session::compact::PriceCliffPin::All,
                 agent_callable: true,
             },
             Some((summariser.clone(), StreamOptions::default())),
@@ -2256,6 +2265,7 @@ mod tests {
                 reserve_tokens: 8_000,
                 keep_recent_tokens: 12_000,
                 threshold_percent: 90,
+                below_price_cliff: mush_session::compact::PriceCliffPin::All,
                 ..Default::default()
             }
         );

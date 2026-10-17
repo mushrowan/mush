@@ -186,6 +186,7 @@ mod tests {
             sync: Default::default(),
             auto_compact: true,
             price_cliff: None,
+            below_price_cliff: Default::default(),
         }
     }
 

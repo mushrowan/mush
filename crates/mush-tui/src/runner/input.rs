@@ -671,6 +671,14 @@ async fn apply_settings_toggle(
         return;
     }
     tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+    if item == crate::settings::MenuItemKind::PriceCliffPin {
+        super::commands::send_command(
+            session,
+            tui_config,
+            mush_runtime::ClientCommand::SetPriceCliffPin(tui_config.settings.price_cliff_pin),
+        )
+        .await;
+    }
 
     let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
         Ok(Some(path)) => format!(" (saved to {})", path.display()),

@@ -3295,3 +3295,60 @@ async fn a_200k_window_with_a_128k_reply_limit_does_not_compact_at_100k_and_the_
         "cap {cap} for a {prompt_tokens} token prompt"
     );
 }
+
+#[tokio::test]
+async fn a_child_on_a_model_with_a_price_cliff_compacts_before_it_and_the_root_does_not() {
+    let _dirs = crate::testing::IsolatedDirs::acquire().await;
+    let model = mush_ai::models::anthropic_models()
+        .into_iter()
+        .find(|model| model.id.as_str() == "claude-haiku-5-5")
+        .unwrap();
+    let run = |depth: u32| {
+        let model = model.clone();
+        async move {
+            let sent: Sent = Arc::default();
+            let mut registry = ApiRegistry::new();
+            registry.register(Box::new(Recorder(sent.clone())));
+            let mut config = crate::testing::echo_config(model.clone());
+            config.auto_compact = true;
+            let mut runtime =
+                SessionRuntime::new(ConversationState::from_messages(long_history(19, 20_000)));
+            runtime.model_id = model.id.to_string();
+            runtime.rlm_depth = depth;
+            let mut connection = InProcessConnection::new(
+                runtime,
+                ToolRegistry::new(),
+                registry,
+                config,
+                mush_agent::AgentInjections::default(),
+            );
+            prompt(&mut connection, "carry on").await;
+            sent.lock()
+                .unwrap()
+                .iter()
+                .any(|(context, _)| is_summary_request(context))
+        }
+    };
+
+    assert!(run(1).await, "a child stays under the 100k cliff");
+    assert!(!run(0).await, "the root keeps the plain threshold");
+}
+
+#[tokio::test]
+async fn the_price_cliff_pin_follows_the_settings_command() {
+    let (mut connection, _requests) = connection();
+    assert_eq!(
+        connection.state().below_price_cliff,
+        mush_session::compact::PriceCliffPin::Children
+    );
+    connection
+        .send(ClientCommand::SetPriceCliffPin(
+            mush_session::compact::PriceCliffPin::All,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        connection.state().below_price_cliff,
+        mush_session::compact::PriceCliffPin::All
+    );
+}

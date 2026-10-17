@@ -316,7 +316,7 @@ impl SessionRuntime {
         let transform = build_context_transform(
             target,
             self.auto_compact.clone(),
-            config.compaction,
+            config.compaction.for_session(&model, self.rlm_depth > 0),
             model.compaction_window(),
             registry.clone(),
             context_tokens_shared.clone(),

@@ -604,6 +604,7 @@ pub struct Family {
     persist_scheduled: std::sync::atomic::AtomicBool,
     revision: std::sync::atomic::AtomicU64,
     max_depth: std::sync::atomic::AtomicU32,
+    price_cliff_pin: std::sync::atomic::AtomicU8,
     idle_release_ms: std::sync::atomic::AtomicU64,
     waking: tokio::sync::Mutex<()>,
 }
@@ -611,6 +612,14 @@ pub struct Family {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Registry {
     children: Vec<ChildSummary>,
+}
+
+fn pin_code(pin: mush_session::compact::PriceCliffPin) -> u8 {
+    match pin {
+        mush_session::compact::PriceCliffPin::Off => 0,
+        mush_session::compact::PriceCliffPin::Children => 1,
+        mush_session::compact::PriceCliffPin::All => 2,
+    }
 }
 
 fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
@@ -679,6 +688,9 @@ impl Family {
             persist_scheduled: std::sync::atomic::AtomicBool::new(false),
             revision: std::sync::atomic::AtomicU64::new(0),
             max_depth: std::sync::atomic::AtomicU32::new(max_depth),
+            price_cliff_pin: std::sync::atomic::AtomicU8::new(pin_code(
+                mush_session::compact::PriceCliffPin::default(),
+            )),
             idle_release_ms: std::sync::atomic::AtomicU64::new(0),
             waking: tokio::sync::Mutex::new(()),
         })
@@ -692,6 +704,24 @@ impl Family {
     pub fn set_max_depth(&self, max_depth: u32) {
         self.max_depth
             .store(max_depth, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_price_cliff_pin(&self, pin: mush_session::compact::PriceCliffPin) {
+        self.price_cliff_pin
+            .store(pin_code(pin), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn price_cliff_pin(&self) -> mush_session::compact::PriceCliffPin {
+        use mush_session::compact::PriceCliffPin;
+        match self
+            .price_cliff_pin
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => PriceCliffPin::Off,
+            2 => PriceCliffPin::All,
+            _ => PriceCliffPin::Children,
+        }
     }
 
     pub fn set_idle_release(&self, after: Option<Duration>) {

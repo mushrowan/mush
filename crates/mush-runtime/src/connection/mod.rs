@@ -73,6 +73,7 @@ pub enum ClientCommand {
     ReloadSystemPrompt,
     SetStreamOptions(Box<mush_ai::types::StreamOptions>),
     SetAutoCompact(bool),
+    SetPriceCliffPin(mush_session::compact::PriceCliffPin),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
     SummariseAndNavigate {
@@ -188,6 +189,8 @@ pub struct ConnectionState {
     pub auto_compact: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_cliff: Option<crate::price_cliff::PriceCliff>,
+    #[serde(default)]
+    pub below_price_cliff: mush_session::compact::PriceCliffPin,
 }
 
 fn auto_compact_by_default() -> bool {
@@ -1659,6 +1662,7 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::ConfirmTool { .. }
         | ClientCommand::SetStreamOptions(_)
         | ClientCommand::SetAutoCompact(_)
+        | ClientCommand::SetPriceCliffPin(_)
         | ClientCommand::SetCompactionModel(_)
         | ClientCommand::AnswerKernelBusy(_)
         | ClientCommand::SideQuestion(_)
@@ -1788,6 +1792,12 @@ impl AgentConnection for InProcessConnection {
                 .runtime
                 .auto_compact
                 .store(on, std::sync::atomic::Ordering::Relaxed),
+            ClientCommand::SetPriceCliffPin(pin) => {
+                self.config.compaction.below_price_cliff = pin;
+                if let Some(family) = self.root_family() {
+                    family.set_price_cliff_pin(pin);
+                }
+            }
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);
             }
@@ -1888,6 +1898,7 @@ impl AgentConnection for InProcessConnection {
                 .auto_compact
                 .load(std::sync::atomic::Ordering::Relaxed),
             price_cliff: self.runtime.price_cliff.clone(),
+            below_price_cliff: self.config.compaction.below_price_cliff,
         }
     }
 
