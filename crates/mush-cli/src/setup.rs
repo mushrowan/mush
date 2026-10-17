@@ -651,6 +651,10 @@ for the child. Pass `model=` to use another model. Spawn independent pieces of w
 separate children in one cell, then end your turn.\n\
 - A child's answer arrives in your conversation as a message labelled `[agent-message from \
 child:<name>]`. Do not poll for it. Files the child writes are also yours to read.\n\
+- For fan-in, have each child write its results to a file and read those files, rather than \
+relaying long results through messages.\n\
+- Delegate parallel, context-heavy research or independent implementation. Do a single known \
+lookup, edit or command yourself.\n\
 - `await rlm.list_subagents()` lists your children (name, status, latest progress note, last \
 answer). `await rlm.collect(targets=None, timeout_ms=0)` returns the same snapshots and, with \
 a timeout, waits until they settle. `await rlm.delete_subagent(child)` stops one and drops \
@@ -712,6 +716,7 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          Python in a persistent REPL: the `ipython` tool is your only tool. Break a task into \
          steps, run code, read what comes back, and iterate. When the task is done, stop \
          calling tools and give your answer.\n\n\
+         Current date: {date}\n\
          Working directory: {cwd_str}\n\
          {packages}\n\n\
          The kernel:\n\
@@ -724,9 +729,14 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          `await h.poll()` is the result or None, `await h.output()` and `await h.tail(n)` show \
          output so far, `await h.kill()` stops it. Each call is its own process; use \
          `os.chdir` and `os.environ` for state that should carry over.\n\
+         - Run commands through `bash()`, never `subprocess` or `os.system`: those block the \
+         kernel, show the user nothing while they run and start processes the harness cannot \
+         see or stop.\n\
          - For slow work (tests, builds, long scripts) start it, keep the handle in a variable \
          and end your turn. You get a message when it finishes; read the handle then. Do not \
          poll in a loop or sleep to wait.\n\
+         - A notice that needs no action needs no reply. Never write a status message that \
+         adds nothing; answer only when there is something to relay or decide.\n\
          - `await edit(path, old, new)` replaces exactly one occurrence of `old` in the file. \
          `old` must match the file text exactly, so read the file first and keep `old` as \
          small as it can be while still unique.\n\
@@ -747,14 +757,15 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          keep. Applied edits reach you as a short refinement notice; the full harness digest \
          is delivered when the session starts, after a compaction and after moving in the \
          tree.\n\
-         - Continual harness state is `rlm.harness` (also bare `harness`). \
-         `await harness.search(query, kind=None, limit=10)`, `harness.list(kind=None)`, \
-         `harness.get(kind, id)` and `harness.overview()` read the entries the digest \
-         summarises; the digest is a routing hint, so read the entry when the detail \
-         matters. `harness.create_memory(title, content)`, `harness.update_memory(id, \
-         title, content)`, `harness.delete_memory(id)` and the matching `*_prompt_note`, \
-         `*_skill` and `*_subagent` calls are the single-entry edits, with \
-         `harness.create(kind, title, content, ...)` as the generic form. Skill entries \
+         - Continual harness state is `rlm.harness` (also bare `harness`), and every \
+         `harness.*` call is a coroutine to await. `await harness.search(query, kind=None, \
+         limit=10)`, `await harness.list(kind=None)`, `await harness.get(kind, id)` and \
+         `await harness.overview()` read the entries the digest summarises; the digest is \
+         a routing hint, so read the entry when the detail matters. `await \
+         harness.create_memory(title, content)`, `await harness.update_memory(id, title, \
+         content)`, `await harness.delete_memory(id)` and the matching `*_prompt_note`, \
+         `*_skill` and `*_subagent` calls are the single-entry edits, with `await \
+         harness.create(kind, title, content, ...)` as the generic form. Skill entries \
          need a python `reference` and `arguments`. `refine.run()` is the reviewed pass \
          over the whole trajectory. Ids carry a `local:` or `global:` prefix in the digest \
          and are accepted with it. CRUD is local by default; `global_=True` for stable \
@@ -775,7 +786,8 @@ fn rlm_base_prompt(cwd_str: &str, packages: &[String]) -> String {
          Long results are truncated.\n\n\
          Your final answers are plain text styled by the terminal TUI: short paragraphs, simple \
          lists, inline backticks for paths and commands, fenced code blocks for snippets. No \
-         HTML or ANSI codes."
+         HTML or ANSI codes.",
+        date = chrono::Local::now().format("%Y-%m-%d")
     )
 }
 
@@ -813,6 +825,25 @@ impl RlmRole {
         self.parent_name = Some(parent.into());
         self
     }
+
+    fn depth_line(&self) -> String {
+        let place = if self.depth == 0 {
+            "the root"
+        } else {
+            "a child"
+        };
+        if self.depth < self.max_depth {
+            format!(
+                "Agent depth: {} ({place}). Subagents can nest down to depth {}.",
+                self.depth, self.max_depth
+            )
+        } else {
+            format!(
+                "Agent depth: {} ({place}), the deepest level, so you cannot spawn subagents.",
+                self.depth
+            )
+        }
+    }
 }
 
 pub fn build_rlm_system_prompt(
@@ -828,6 +859,11 @@ pub fn build_rlm_system_prompt(
         .map(|file| file.content.trim_end());
     let mut prompt = custom.map_or_else(|| rlm_base_prompt(&cwd_str, packages), str::to_string);
     let mut role_sections = String::new();
+    let in_a_family = role.depth < role.max_depth || role.child_name.is_some();
+    if in_a_family {
+        role_sections.push_str("\n\n");
+        role_sections.push_str(&role.depth_line());
+    }
     if role.depth < role.max_depth {
         role_sections.push_str("\n\n");
         role_sections.push_str(SUBAGENTS_PROMPT);
@@ -836,7 +872,7 @@ pub fn build_rlm_system_prompt(
         role_sections.push_str("\n\n");
         role_sections.push_str(&child_doctrine(role.parent_name.as_deref()));
     }
-    if role.depth < role.max_depth || role.child_name.is_some() {
+    if in_a_family {
         role_sections.push_str("\n\n");
         role_sections.push_str(OBSERVE_PROMPT);
     }
@@ -1380,6 +1416,58 @@ mod tests {
         assert!(!prompt.contains("Use the skill tool"));
         assert!(!prompt.contains("Batch tool"));
         assert!(!prompt.contains("goal.fail"));
+    }
+
+    #[test]
+    fn the_rlm_prompt_dates_itself_awaits_every_harness_call_and_states_the_depth() {
+        let root = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(2),
+        );
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(root.contains(&format!("Current date: {today}\nWorking directory: /repo")));
+        let calls: Vec<usize> = root.match_indices("harness.").map(|(at, _)| at).collect();
+        assert!(calls.len() > 8, "{root}");
+        for at in calls {
+            let name: String = root[at + "harness.".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if root[at..].starts_with(&format!("harness.{name}(")) {
+                assert!(
+                    root[..at].ends_with("await ") || root[..at].ends_with("await rlm."),
+                    "harness.{name} is shown without await"
+                );
+            }
+        }
+        assert!(root.contains("every `harness.*` call is a coroutine to await"));
+        assert!(root.contains("never `subprocess` or `os.system`"));
+        assert!(root.contains("A notice that needs no action needs no reply."));
+        assert!(root.contains("have each child write its results to a file"));
+        assert!(root.contains("Delegate parallel, context-heavy research"));
+        assert!(root.contains("Agent depth: 0 (the root). Subagents can nest down to depth 2."));
+
+        let deepest = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::child("auth", 2, 2),
+        );
+        assert!(deepest.contains(
+            "Agent depth: 2 (a child), the deepest level, so you cannot spawn subagents."
+        ));
+        assert!(!deepest.contains("Delegate parallel"));
+
+        let alone = build_rlm_system_prompt(
+            &ProjectContext::default(),
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
+        assert!(!alone.contains("Agent depth"));
     }
 
     #[test]
