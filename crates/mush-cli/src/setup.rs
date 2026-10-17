@@ -675,8 +675,9 @@ failed, was cancelled or was interrupted; message it by name to wake it.\n\
 - Give a child one clear task with the context it needs; it starts from an empty conversation.\n\
 - `await rlm.find_models(query='', limit=10, all_providers=False)` searches the models a child \
 can run here, one row per model with its context window, output limit, `thinking` levels, cost \
-and `also_on`, the other providers that offer it. Pass a row's `id` as `model=`, or \
-`provider/id` to pin the provider; spawn refuses an unknown id or one without credentials.\n\
+and `also_on`, the other providers that offer it. Pass a row's `id` as `model=`, \
+`provider/id` to pin the provider, or a family name such as `haiku` for its newest model; spawn \
+refuses an unknown id or one without credentials.\n\
 - `await rlm.create_session(prompt, name=...)` starts a separate top-level session in its own \
 worker for work that should outlive this conversation; it runs on its own and reports \
 nothing back. `mush send <id> ...` from bash reaches it.";
@@ -1403,6 +1404,7 @@ mod tests {
         assert!(prompt.contains("await rlm.spawn(prompt, name=...)"));
         assert!(prompt.contains("await rlm.find_models(query='', limit=10, all_providers=False)"));
         assert!(prompt.contains("`provider/id` to pin the provider"));
+        assert!(prompt.contains("a family name such as `haiku` for its newest model"));
         assert!(!prompt.contains("You are a child agent"));
         assert!(prompt.contains("Pre-installed Python packages: requests, numpy."));
         assert!(prompt.contains("`bash(command, timeout=None)` starts a command"));

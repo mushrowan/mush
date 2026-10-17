@@ -304,6 +304,89 @@ pub fn find_models(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lineage {
+    pub family: String,
+    pub version: Vec<u64>,
+    pub variant_words: usize,
+}
+
+#[must_use]
+pub fn lineage(entry: &mush_ai::discovery::MergedModel) -> Option<Lineage> {
+    let key = mush_ai::models::canonical_model_key(entry.model.id.as_str());
+    if key.contains(':') {
+        return None;
+    }
+    let tokens: Vec<&str> = key.split('-').filter(|token| !token.is_empty()).collect();
+    let is_word = |token: &str| token.bytes().all(|b| b.is_ascii_alphabetic());
+    let words: Vec<&str> = tokens
+        .iter()
+        .copied()
+        .filter(|token| is_word(token))
+        .collect();
+    let (parsed, variant_words) = match tokens.first() {
+        Some(&"claude") => (words.get(1).copied(), words.len().saturating_sub(2)),
+        Some(first) if is_word(first) => (Some(*first), words.len() - 1),
+        _ => (None, 0),
+    };
+    let line = entry
+        .raw
+        .as_ref()
+        .and_then(|raw| raw.get("line"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase);
+    let family = line.or_else(|| parsed.map(str::to_string))?;
+    let version: Vec<u64> = tokens
+        .iter()
+        .filter_map(|token| token.parse::<u64>().ok())
+        .collect();
+    Some(Lineage {
+        family,
+        version,
+        variant_words,
+    })
+}
+
+fn created_at(entry: &mush_ai::discovery::MergedModel) -> Option<&str> {
+    entry
+        .raw
+        .as_ref()
+        .and_then(|raw| raw.get("created_at"))
+        .and_then(serde_json::Value::as_str)
+}
+
+#[must_use]
+pub fn newest_of_family<'a>(
+    catalogue: &'a [mush_ai::discovery::MergedModel],
+    family: &str,
+    order: &[String],
+    signed_in: impl Fn(&mush_ai::types::Provider) -> bool,
+) -> Option<&'a mush_ai::discovery::MergedModel> {
+    let family = family.to_ascii_lowercase();
+    catalogue
+        .iter()
+        .filter(|entry| entry.source != mush_ai::discovery::ModelSource::DiscoveredStale)
+        .filter_map(|entry| Some((lineage(entry)?, entry)))
+        .filter(|(lineage, _)| lineage.family == family && !lineage.version.is_empty())
+        .filter(|(_, entry)| signed_in(&entry.model.provider))
+        .min_by(|(a, a_entry), (b, b_entry)| {
+            b.version
+                .cmp(&a.version)
+                .then_with(|| a.variant_words.cmp(&b.variant_words))
+                .then_with(|| created_at(b_entry).cmp(&created_at(a_entry)))
+                .then_with(|| {
+                    preference(&a_entry.model, order).cmp(&preference(&b_entry.model, order))
+                })
+        })
+        .map(|(_, entry)| entry)
+}
+
+fn family_name(requested: &str) -> Option<String> {
+    let lowered = requested.to_ascii_lowercase();
+    let name = lowered.strip_prefix("claude-").unwrap_or(&lowered);
+    (!name.is_empty() && name.bytes().all(|b| b.is_ascii_alphabetic())).then(|| name.to_string())
+}
+
 #[must_use]
 pub fn provider_order(
     preferred: Vec<String>,
@@ -342,6 +425,12 @@ pub fn resolve_child_model(
                 .collect()
         }
     };
+    if candidates.is_empty()
+        && let Some(family) = family_name(requested)
+        && let Some(newest) = newest_of_family(catalogue, &family, order, &signed_in)
+    {
+        return Ok(newest.model.clone());
+    }
     if let Some(best) = candidates
         .iter()
         .filter(|entry| signed_in(&entry.model.provider))
@@ -549,6 +638,92 @@ mod tests {
     }
 
     #[test]
+    fn a_family_name_spawns_the_newest_model_of_the_family() {
+        use mush_ai::discovery::ModelSource;
+        use mush_ai::types::Provider;
+        let mut catalogue = catalogue();
+        let everyone = |_: &mush_ai::types::Provider| true;
+        let resolve =
+            |catalogue: &[mush_ai::discovery::MergedModel], requested: &str, order: &[&str]| {
+                let order: Vec<String> = order.iter().map(ToString::to_string).collect();
+                resolve_child_model(catalogue, requested, &order, everyone)
+                    .map(|model| format!("{}/{}", model.provider, model.id))
+            };
+
+        assert_eq!(
+            resolve(&catalogue, "haiku", &["anthropic"]).unwrap(),
+            "anthropic/claude-haiku-5-5"
+        );
+        assert_eq!(
+            resolve(&catalogue, "Claude-Haiku", &["anthropic"]).unwrap(),
+            "anthropic/claude-haiku-5-5"
+        );
+        assert_eq!(
+            resolve(&catalogue, "opus", &[]).unwrap(),
+            "anthropic/claude-opus-5-5"
+        );
+
+        catalogue.push(listed(
+            "anthropic/claude-haiku-5.5",
+            Provider::OpenRouter,
+            ModelSource::Discovered,
+        ));
+        catalogue.push(listed(
+            "claude-opus-5-5-fast",
+            Provider::Anthropic,
+            ModelSource::Discovered,
+        ));
+        assert_eq!(
+            resolve(&catalogue, "haiku", &["openrouter", "anthropic"]).unwrap(),
+            "openrouter/anthropic/claude-haiku-5.5",
+            "the same newest model goes to the preferred provider"
+        );
+        assert_eq!(
+            resolve(&catalogue, "opus", &[]).unwrap(),
+            "anthropic/claude-opus-5-5",
+            "a variant ranks after the plain model"
+        );
+
+        catalogue.push(listed(
+            "anthropic/claude-haiku-6",
+            Provider::OpenRouter,
+            ModelSource::Discovered,
+        ));
+        assert_eq!(
+            resolve(&catalogue, "haiku", &["anthropic"]).unwrap(),
+            "openrouter/anthropic/claude-haiku-6",
+            "a newer model beats the preferred provider"
+        );
+        let direct_only = resolve_child_model(&catalogue, "haiku", &[], anthropic_only).unwrap();
+        assert_eq!(direct_only.id.as_str(), "claude-haiku-5-5");
+
+        assert!(resolve(&catalogue, "sonet", &[]).is_err());
+    }
+
+    #[test]
+    fn lineage_reads_the_family_version_and_variant_words() {
+        use mush_ai::discovery::ModelSource;
+        use mush_ai::types::Provider;
+        let lineage_of =
+            |id: &str| lineage(&listed(id, Provider::Anthropic, ModelSource::Static)).unwrap();
+        assert_eq!(
+            lineage_of("claude-haiku-4-5-20251001"),
+            Lineage {
+                family: "haiku".into(),
+                version: vec![4, 5],
+                variant_words: 0
+            }
+        );
+        assert_eq!(lineage_of("claude-3-5-sonnet").family, "sonnet");
+        assert_eq!(lineage_of("claude-opus-4-8-fast").variant_words, 1);
+        assert_eq!(lineage_of("gpt-5.4-mini").family, "gpt");
+        assert_eq!(lineage_of("gpt-5.4-mini").version, vec![5, 4]);
+        let mut with_line = listed("claude-x-1", Provider::Anthropic, ModelSource::Discovered);
+        with_line.raw = Some(serde_json::json!({ "line": "Sonnet" }));
+        assert_eq!(lineage(&with_line).unwrap().family, "sonnet");
+    }
+
+    #[test]
     fn the_order_falls_back_to_the_provider_the_caller_runs_on() {
         let catalogue = catalogue();
         assert_eq!(
@@ -630,10 +805,14 @@ mod tests {
             resolve_child_model(&catalogue, "claude-haiku-5-5", none, anthropic_only).unwrap();
         assert_eq!(haiku.id.as_str(), "claude-haiku-5-5");
 
-        let unknown = resolve_child_model(&catalogue, "haiku", none, anthropic_only).unwrap_err();
-        assert!(unknown.starts_with("unknown model haiku."), "{unknown}");
+        let unknown =
+            resolve_child_model(&catalogue, "claude-haiku-4", none, anthropic_only).unwrap_err();
         assert!(
-            unknown.contains("Close matches: claude-haiku-4-5, claude-haiku-5-5."),
+            unknown.starts_with("unknown model claude-haiku-4."),
+            "{unknown}"
+        );
+        assert!(
+            unknown.contains("Close matches: claude-haiku-4-5."),
             "{unknown}"
         );
         assert!(
