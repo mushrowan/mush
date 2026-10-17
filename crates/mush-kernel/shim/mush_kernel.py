@@ -657,6 +657,107 @@ class _Rlm:
         await host_request("rlm.clear_notes", {})
 
 
+def _decision_options(options):
+    if options is None:
+        return None
+    if isinstance(options, (str, dict)):
+        raise TypeError("options must be a list of strings or {label, detail} dicts")
+    shaped = []
+    for option in options:
+        if isinstance(option, str):
+            shaped.append(option)
+        elif isinstance(option, dict):
+            shaped.append({str(key): value for key, value in option.items()})
+        elif isinstance(option, (tuple, list)) and len(option) == 2:
+            shaped.append({"label": str(option[0]), "detail": str(option[1])})
+        else:
+            raise TypeError("each option is a string, a {label, detail} dict or a (label, detail) pair")
+    return shaped
+
+
+def _decision_refs(refs):
+    if refs is None:
+        return None
+    if isinstance(refs, (str, os.PathLike)):
+        refs = [refs]
+    return [os.fspath(ref) for ref in refs]
+
+
+def _decision_duration(value):
+    if value is None:
+        return None
+    if hasattr(value, "total_seconds"):
+        return int(value.total_seconds())
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    return str(value)
+
+
+class _Decisions:
+    async def add(
+        self,
+        id: str,
+        question: str,
+        options=None,
+        *,
+        lean=None,
+        context: str | None = None,
+        refs=None,
+        blocking: bool = False,
+        assume_after=None,
+        supersedes: str | None = None,
+    ) -> dict:
+        payload = _with_optional(
+            {"id": str(id), "question": str(question)},
+            options=_decision_options(options),
+            lean=lean,
+            context=context,
+            refs=_decision_refs(refs),
+            assume_after=_decision_duration(assume_after),
+            supersedes=supersedes,
+        )
+        if blocking:
+            payload["blocking"] = True
+        return await host_request("decisions.add", payload)
+
+    async def update(
+        self,
+        id: str,
+        *,
+        question: str | None = None,
+        options=None,
+        lean=None,
+        context: str | None = None,
+        refs=None,
+        blocking: bool | None = None,
+        assume_after=None,
+    ) -> dict:
+        payload = _with_optional(
+            {"id": str(id)},
+            question=question,
+            options=_decision_options(options),
+            lean=lean,
+            context=context,
+            refs=_decision_refs(refs),
+            blocking=blocking,
+            assume_after=_decision_duration(assume_after),
+        )
+        return await host_request("decisions.update", payload)
+
+    async def withdraw(self, id: str, reason: str | None = None) -> dict:
+        return await host_request("decisions.withdraw", _with_optional({"id": str(id)}, reason=reason))
+
+    async def list(self, scope: str = "mine") -> list:
+        if scope not in ("mine", "family"):
+            raise ValueError('scope must be "mine" or "family"')
+        return await host_request("decisions.list", {"scope": scope})
+
+    async def wait(self, ids, *, timeout_ms: int = 3_600_000) -> list:
+        ids = [str(ids)] if isinstance(ids, str) else [str(each) for each in ids]
+        request = host_request("decisions.wait", {"ids": ids, "timeout_ms": int(timeout_ms)})
+        return await (_pure_wait(request, "the user to decide") if timeout_ms > 0 else request)
+
+
 class _AgentMessage:
     async def send(self, message: str, broadcast_message: str | None = None, *, receiver_role: str | None = None, receiver_name: str | None = None, mode: str | None = None) -> dict:
         if broadcast_message is not None:
@@ -885,6 +986,7 @@ class _RlmHeartbeat:
 
 harness = _Harness()
 _Rlm.harness = harness
+_Rlm.decisions = _Decisions()
 rlm = _Rlm()
 agent_message = _AgentMessage()
 goal = _Goal()

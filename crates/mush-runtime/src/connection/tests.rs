@@ -3582,3 +3582,169 @@ async fn a_rejection_that_is_not_about_the_image_keeps_the_message() {
     let transcript = connection.transcript().await;
     assert!(transcript.iter().any(carries_image));
 }
+
+fn root_with_family() -> (
+    InProcessConnection,
+    crate::testing::Requests,
+    Arc<crate::family::Family>,
+) {
+    let (mut connection, requests) = connection();
+    let family = crate::family::Family::new(
+        crate::family::Identity::root("lead"),
+        "root-s".into(),
+        2,
+        None,
+        None,
+    );
+    connection.set_family(Some(Arc::clone(&family)));
+    (connection, requests, family)
+}
+
+fn root_decision(family: &crate::family::Family, id: &str) -> crate::decisions::DecisionKey {
+    family
+        .ask_user(
+            &crate::family::Identity::root("lead"),
+            crate::decisions::Ask {
+                id: id.into(),
+                question: format!("{id}?"),
+                options: ["yes", "no"]
+                    .into_iter()
+                    .map(|label| crate::decisions::DecisionOption {
+                        label: label.into(),
+                        detail: None,
+                    })
+                    .collect(),
+                lean: Some(crate::decisions::Lean::Index(0)),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .decision
+        .key
+}
+
+#[tokio::test]
+async fn the_decision_list_reaches_the_client_when_it_changes() {
+    let (mut connection, _requests, family) = root_with_family();
+    assert!(
+        !matches!(
+            connection.try_next_event(),
+            Some(ClientEvent::DecisionsChanged(_))
+        ),
+        "an empty list stays quiet at first"
+    );
+    root_decision(&family, "push");
+    let event = connection.try_next_event();
+    let Some(ClientEvent::DecisionsChanged(list)) = event else {
+        panic!("expected the decision list, got {event:?}");
+    };
+    assert_eq!(list.len(), 1);
+    assert!(connection.try_next_event().is_none());
+
+    let events = connection
+        .send(ClientCommand::Decisions(
+            crate::decisions::DecisionsCommand::Refresh,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        &events[..],
+        [ClientEvent::DecisionsChanged(list)] if list.len() == 1
+    ));
+}
+
+#[tokio::test]
+async fn answering_the_roots_own_decision_arrives_as_the_users_message() {
+    let (mut connection, requests, family) = root_with_family();
+    let key = root_decision(&family, "push");
+    root_decision(&family, "tag");
+    connection
+        .send(ClientCommand::Decisions(
+            crate::decisions::DecisionsCommand::Draft {
+                key: key.clone(),
+                answer: Some(crate::decisions::Answer::Pick {
+                    option: 1,
+                    label: String::new(),
+                    note: None,
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let events = connection
+        .send(ClientCommand::Decisions(
+            crate::decisions::DecisionsCommand::Send { keys: vec![key] },
+        ))
+        .await
+        .unwrap();
+    let text = events
+        .iter()
+        .find_map(|event| match event {
+            ClientEvent::UserInput {
+                text,
+                queued: false,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the answer shows as the user's message");
+    assert_eq!(
+        text,
+        "Answers to your decisions:\n\n[push] push?\nb) no\n\nStill open with me: [tag]."
+    );
+    let user_input = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::UserInput { .. }));
+    let started = events
+        .iter()
+        .position(|event| matches!(event, ClientEvent::TurnStarted));
+    assert!(user_input < started, "{events:?}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::Session(SessionEvent::Status(status)) if status == "sent 1 answer to 1 agent"
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::DecisionsChanged(list) if list.len() == 1
+    )));
+    drain_turn(&mut connection).await;
+    let asked = requests.lock().unwrap();
+    assert!(asked[0].messages.iter().any(|message| {
+        matches!(message, Message::User(user) if user.text().starts_with("Answers to your decisions:"))
+    }));
+}
+
+#[tokio::test]
+async fn a_child_decision_is_news_at_the_parents_next_turn() {
+    let (mut connection, requests, family) = root_with_family();
+    family
+        .decisions()
+        .post_news("root-s", "- auth asked the user [push]: Push?".into());
+    connection.runtime.session_id = mush_ai::types::SessionId::from("root-s");
+    connection.runtime.decisions = Some(Arc::clone(family.decisions()));
+    connection
+        .send(ClientCommand::Prompt {
+            text: "carry on".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    drain_turn(&mut connection).await;
+    let asked = requests.lock().unwrap();
+    let texts: Vec<String> = asked[0]
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts[0].starts_with(mush_session::decisions::NEWS_PREFIX),
+        "{texts:?}"
+    );
+    assert!(texts[0].contains("- auth asked the user [push]: Push?"));
+    assert_eq!(texts[1], "carry on");
+    assert_eq!(family.decisions().take_news("root-s"), None);
+}

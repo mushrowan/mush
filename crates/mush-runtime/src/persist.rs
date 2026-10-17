@@ -19,3 +19,14 @@ pub(crate) fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) {
         write_private(path, bytes);
     }
 }
+
+pub(crate) fn append_private(path: &Path, text: &str) {
+    use std::io::Write as _;
+    if !path.exists() {
+        write_private(path, text);
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+        let _ = file.write_all(text.as_bytes());
+    }
+}

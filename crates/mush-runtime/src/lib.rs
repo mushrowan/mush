@@ -5,6 +5,7 @@ pub mod commands;
 pub mod compaction;
 pub mod connection;
 pub mod cron;
+pub mod decisions;
 pub mod family;
 pub mod goal;
 pub mod harness;
@@ -38,6 +39,10 @@ pub use commands::{Replaced, SessionCommand, SessionEvent};
 pub use connection::{
     AgentConnection, ClientCommand, ClientEvent, ConnectionError, ConnectionState, ContextUsage,
     HostCommands, InProcessConnection, PRIMARY_PANE, SystemPromptBuilder,
+};
+pub use decisions::{
+    Answer, Asker, Decision, DecisionKey, DecisionOption, DecisionStatus, Decisions,
+    DecisionsCommand, Draft,
 };
 pub use family::{
     Activity, ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,

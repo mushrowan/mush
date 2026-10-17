@@ -292,7 +292,10 @@ impl MushHost {
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
     fn cancellable(&self, kind: &str) -> bool {
-        matches!(kind, "bash.wait" | "rlm.collect" | "websearch")
+        matches!(
+            kind,
+            "bash.wait" | "rlm.collect" | "decisions.wait" | "websearch"
+        )
     }
 
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {

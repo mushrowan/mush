@@ -330,7 +330,7 @@ impl Notes {
         }
         state.archive_written = state.archive.len();
         if !lines.is_empty() {
-            append_private(&dir.join(ARCHIVE_FILE), &lines);
+            crate::persist::append_private(&dir.join(ARCHIVE_FILE), &lines);
         }
     }
 
@@ -540,17 +540,6 @@ fn legacy(path: &Path) -> Store {
         });
     }
     store
-}
-
-fn append_private(path: &Path, text: &str) {
-    use std::io::Write as _;
-    if !path.exists() {
-        crate::persist::write_private(path, text);
-        return;
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
-        let _ = file.write_all(text.as_bytes());
-    }
 }
 
 pub use mush_session::notes::{extract, fingerprint, latest_fingerprint, message, update_message};

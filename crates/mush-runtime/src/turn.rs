@@ -294,6 +294,7 @@ impl SessionRuntime {
         let unsent_prompt = (!prompt.is_persisted()).then_some(prompt.text.as_str());
         self.deliver_pending_harness_digest(goal.as_deref(), unsent_prompt);
         self.refresh_notes();
+        self.refresh_decisions();
         self.restate_task_brief();
         self.record_thinking_level();
         self.pending_prompt = Some(prompt);
@@ -333,6 +334,10 @@ impl SessionRuntime {
             AfterCompaction {
                 kernel: self.kernel_state.clone(),
                 notes: self.notes.clone(),
+                decisions: self
+                    .decisions
+                    .clone()
+                    .map(|decisions| (decisions, self.session_id.to_string())),
                 task: self.conversation.task_brief(),
             },
             next_prompt.clone(),
@@ -388,6 +393,7 @@ impl SessionRuntime {
 pub struct AfterCompaction {
     pub kernel: Option<Arc<dyn mush_kernel::KernelState>>,
     pub notes: Option<Arc<crate::notes::Notes>>,
+    pub decisions: Option<(Arc<crate::decisions::Decisions>, String)>,
     pub task: Option<String>,
 }
 
@@ -417,10 +423,18 @@ impl AfterCompaction {
         let notes = self.notes.as_ref().and_then(|notes| {
             notes.delivery(crate::notes::latest_fingerprint(compacted).as_deref())
         });
-        [notice, task, notes.map(|delivery| delivery.message)]
-            .into_iter()
-            .flatten()
-            .collect()
+        let decisions = self.decisions.as_ref().and_then(|(decisions, session)| {
+            crate::decisions::digest_after_compaction(decisions, session, compacted)
+        });
+        [
+            notice,
+            task,
+            notes.map(|delivery| delivery.message),
+            decisions,
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 }
 
@@ -1041,6 +1055,48 @@ mod tests {
             context[context.len() - 2..],
             compaction.messages[compaction.messages.len() - 2..]
         );
+    }
+
+    #[tokio::test]
+    async fn an_auto_compaction_lists_the_open_decisions_again() {
+        let decisions = crate::decisions::Decisions::new(None);
+        decisions
+            .ask(
+                crate::decisions::Asker {
+                    session: "child-s".into(),
+                    child: Some("sub-1".into()),
+                    name: "worker".into(),
+                    depth: 1,
+                    path: Vec::new(),
+                    ancestors: vec!["root-s".into()],
+                },
+                crate::decisions::Ask {
+                    id: "push".into(),
+                    question: "Push main now?".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let transform = grown_child_transform(AfterCompaction {
+            decisions: Some((decisions, "child-s".into())),
+            ..AfterCompaction::default()
+        });
+        let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
+        grown.push(user_msg("x".repeat(16_000)));
+
+        let mush_agent::ContextTransformResult::Compacted(compaction) =
+            transform(&grown, mush_agent::ContextPressure::Normal).await
+        else {
+            panic!("expected a compaction");
+        };
+
+        assert_eq!(compaction.appended, 1);
+        let last = user_text_of(compaction.messages.last().unwrap());
+        assert!(
+            last.starts_with(mush_session::decisions::DIGEST_PREFIX),
+            "{last}"
+        );
+        assert!(last.contains("- [push] Push main now?"), "{last}");
     }
 
     #[tokio::test]

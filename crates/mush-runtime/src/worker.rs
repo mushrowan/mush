@@ -118,6 +118,11 @@ impl WorkerConfig {
         runtime.restore_rlm_max_depth(self.rlm_max_depth_chat);
         runtime.thinking_level = thinking_level;
         runtime.parent = self.parent;
+        runtime.decisions = self
+            .family
+            .as_ref()
+            .or(self.family_member.as_ref().map(|(family, _)| family))
+            .map(|family| Arc::clone(family.decisions()));
         runtime.set_kernel_state(self.kernel_state);
         runtime.begin_kernel_restore();
         runtime.save_now();

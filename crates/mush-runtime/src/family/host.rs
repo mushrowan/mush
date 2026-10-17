@@ -60,8 +60,12 @@ impl Payload<'_> {
     }
 
     fn targets(self) -> Vec<String> {
+        self.targets_named("targets")
+    }
+
+    fn targets_named(self, key: &str) -> Vec<String> {
         self.0
-            .get("targets")
+            .get(key)
             .and_then(Value::as_array)
             .map(|targets| {
                 targets
@@ -422,6 +426,82 @@ impl RlmHandler {
         })
         .await?;
         Ok(to_json(created))
+    }
+
+    fn caller_session(&self) -> Result<String, HostError> {
+        Ok(self.family.asker(&self.identity)?.session)
+    }
+
+    fn add_decision(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let ask = crate::decisions::Ask::from_payload(payload.0)?;
+        let asked = self.family.ask_user(&self.identity, ask)?;
+        Ok(json!({
+            "id": asked.decision.key.id,
+            "status": if asked.updated { "updated" } else { "open" },
+            "open_with_user": asked.open_with_user,
+        }))
+    }
+
+    fn update_decision(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let id = payload.required("id")?;
+        let change = crate::decisions::Change::from_payload(payload.0)?;
+        let decision = self
+            .family
+            .decisions()
+            .update(&self.caller_session()?, &id, change)?;
+        Ok(crate::decisions::agent_view(&decision))
+    }
+
+    fn withdraw_decision(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let id = payload.required("id")?;
+        let decision = self.family.decisions().withdraw(
+            &self.caller_session()?,
+            &id,
+            payload.text("reason"),
+        )?;
+        Ok(crate::decisions::agent_view(&decision))
+    }
+
+    fn list_decisions(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let session = self.caller_session()?;
+        let scope = match payload.text("scope").as_deref() {
+            None | Some("mine") => crate::decisions::Scope::Mine(&session),
+            Some("family") => crate::decisions::Scope::Family(&session),
+            Some(other) => {
+                return Err(HostError(format!(
+                    "scope must be \"mine\" or \"family\", not {other:?}"
+                )));
+            }
+        };
+        Ok(Value::Array(
+            self.family
+                .decisions()
+                .list(scope)
+                .iter()
+                .map(crate::decisions::agent_view)
+                .collect(),
+        ))
+    }
+
+    async fn wait_decisions(&self, payload: Payload<'_>) -> Result<Value, HostError> {
+        let mut ids = payload.targets_named("ids");
+        if ids.is_empty()
+            && let Some(id) = payload.text("ids")
+        {
+            ids.push(id);
+        }
+        if ids.is_empty() {
+            return Err(HostError("ids is required".into()));
+        }
+        let timeout = Duration::from_millis(payload.number("timeout_ms").unwrap_or(0));
+        let decisions = self
+            .family
+            .decisions()
+            .wait(&self.caller_session()?, &ids, timeout)
+            .await?;
+        Ok(Value::Array(
+            decisions.iter().map(crate::decisions::agent_view).collect(),
+        ))
     }
 
     fn notes(&self, kind: &str, payload: Payload<'_>) -> Result<Value, HostError> {
@@ -785,6 +865,11 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
             "goal.get" => Ok(self.goal_reply(false)),
             "goal.create" => self.create_goal(payload),
             "goal.complete" => self.complete_goal(payload),
+            "decisions.add" => self.add_decision(payload),
+            "decisions.update" => self.update_decision(payload),
+            "decisions.withdraw" => self.withdraw_decision(payload),
+            "decisions.list" => self.list_decisions(payload),
+            "decisions.wait" => self.wait_decisions(payload).await,
             other => Err(HostError(format!("unknown host request {other}"))),
         }
     }

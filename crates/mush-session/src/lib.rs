@@ -1,6 +1,7 @@
 pub mod brief;
 pub mod compact;
 pub mod conversation;
+pub mod decisions;
 pub mod file_ops;
 pub mod harness;
 pub mod inbox;

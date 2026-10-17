@@ -1164,6 +1164,7 @@ fn is_regenerated(message: &Message) -> bool {
 pub fn is_regenerated_text(text: &str) -> bool {
     crate::harness::extract_digest(text).is_some()
         || crate::notes::extract(text).is_some()
+        || crate::decisions::extract(text).is_some()
         || crate::brief::is_restated(text)
 }
 

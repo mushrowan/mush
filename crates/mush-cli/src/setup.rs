@@ -682,6 +682,27 @@ refuses an unknown id or one without credentials.\n\
 worker for work that should outlive this conversation; it runs on its own and reports \
 nothing back. `mush send <id> ...` from bash reaches it.";
 
+const DECISIONS_PROMPT: &str = "\
+Decisions for the user:\n\
+- When you need the user to choose, add a decision instead of asking in chat: `await \
+rlm.decisions.add(id, question, options=[...], lean=0, context=None, refs=None, \
+blocking=False)`. `id` is your short name for it (letters, digits, `-`, `_`), `options` are \
+strings or `{label, detail}`, `lean` is the option you would pick (an index or a label) and \
+`refs` are paths or URLs worth a look. Leave `options` out for a free-text question. It returns \
+at once: carry on with your lean, and set `blocking=True` only when you cannot go on without the \
+answer. Adding the same id again updates it.\n\
+- The user sees every open decision from the whole family in one menu and answers them in a \
+batch. Answers reach you as a message from the user: an option, their own words, or a request \
+to clarify. To clarify, update the decision with what they asked for and it goes back on their \
+list.\n\
+- `await rlm.decisions.update(id, question=..., options=..., lean=..., context=...)` changes \
+one, `await rlm.decisions.withdraw(id, reason=...)` drops one you no longer need (also when the \
+user answered in chat), `await rlm.decisions.list(scope=\"mine\")` shows yours with their \
+status and answers (`scope=\"family\"` adds the agents below you), and `await \
+rlm.decisions.wait(ids, timeout_ms=3600000)` waits for answers to blocking ones.\n\
+- A decision an agent below you adds is listed for you at the start of your next turn. Only the \
+user answers decisions.";
+
 const OBSERVE_PROMPT: &str = "\
 `await agent_observe.list_agents()` names everyone you can reach (yourself, your parent, your \
 siblings, your children) with their status and latest progress note. \
@@ -878,6 +899,8 @@ pub fn build_rlm_system_prompt(
         role_sections.push_str("\n\n");
         role_sections.push_str(OBSERVE_PROMPT);
     }
+    role_sections.push_str("\n\n");
+    role_sections.push_str(DECISIONS_PROMPT);
     if custom.is_none() {
         prompt.push_str(&role_sections);
     }
@@ -1472,6 +1495,32 @@ mod tests {
             &RlmRole::root(0),
         );
         assert!(!alone.contains("Agent depth"));
+    }
+
+    #[test]
+    fn every_rlm_prompt_tells_the_agent_how_to_ask_the_user_for_a_decision() {
+        for role in [
+            RlmRole::root(2),
+            RlmRole::root(0),
+            RlmRole::child("auth", 2, 2),
+        ] {
+            let prompt = build_rlm_system_prompt(
+                &ProjectContext::default(),
+                std::path::Path::new("/repo"),
+                &[],
+                &role,
+            );
+            assert!(prompt.contains("Decisions for the user:"), "{role:?}");
+            for call in [
+                "await rlm.decisions.add(",
+                "await rlm.decisions.update(",
+                "await rlm.decisions.withdraw(",
+                "await rlm.decisions.list(",
+                "await rlm.decisions.wait(",
+            ] {
+                assert!(prompt.contains(call), "{call} missing for {role:?}");
+            }
+        }
     }
 
     #[test]

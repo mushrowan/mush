@@ -17,7 +17,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::connection::{AgentConnection, ClientCommand, ClientEvent, InProcessConnection};
 use crate::worker::WorkerConfig;
 
+mod decisions;
 mod host;
+
+pub use self::decisions::AnswerTarget;
 pub use host::RlmHandler;
 
 pub const MAX_CHILDREN: usize = 32;
@@ -608,6 +611,7 @@ pub struct Family {
     preferred_providers: Mutex<Vec<String>>,
     idle_release_ms: std::sync::atomic::AtomicU64,
     waking: tokio::sync::Mutex<()>,
+    decisions: Arc<crate::decisions::Decisions>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -621,6 +625,12 @@ fn pin_code(pin: mush_session::compact::PriceCliffPin) -> u8 {
         mush_session::compact::PriceCliffPin::Children => 1,
         mush_session::compact::PriceCliffPin::All => 2,
     }
+}
+
+fn artifact_dir(registry_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    registry_path
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
 }
 
 fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
@@ -669,6 +679,7 @@ impl Family {
         registry_path: Option<PathBuf>,
     ) -> Arc<Self> {
         let children = load_registry(registry_path.as_deref());
+        let decisions = crate::decisions::Decisions::new(artifact_dir(registry_path.as_deref()));
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             inner: Mutex::new(Inner {
@@ -695,6 +706,7 @@ impl Family {
             preferred_providers: Mutex::new(Vec::new()),
             idle_release_ms: std::sync::atomic::AtomicU64::new(0),
             waking: tokio::sync::Mutex::new(()),
+            decisions,
         })
     }
 
@@ -795,6 +807,8 @@ impl Family {
             inner.children = children;
         }
         self.bump_revision();
+        self.decisions
+            .rebind(artifact_dir(registry_path.as_deref()));
         *self
             .registry_path
             .lock()
@@ -5872,5 +5886,182 @@ mod tests {
             release.notify_one();
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+    fn auth_identity(children: &[ChildSummary]) -> Identity {
+        Identity {
+            id: Some(children[0].id.clone()),
+            name: "auth".into(),
+            depth: 1,
+        }
+    }
+
+    fn push_ask() -> crate::decisions::Ask {
+        crate::decisions::Ask {
+            id: "push".into(),
+            question: "Push main now?".into(),
+            options: ["push", "hold"]
+                .into_iter()
+                .map(|label| crate::decisions::DecisionOption {
+                    label: label.into(),
+                    detail: None,
+                })
+                .collect(),
+            lean: Some(crate::decisions::Lean::Index(1)),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_child_kernel_asks_the_user_and_its_parent_hears_of_it() {
+        use mush_agent::tool::AgentTool;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        let children = settle(&family, &root).await;
+        let dir = tempfile::tempdir().unwrap();
+        let host = mush_tools::ipython::MushHost::new(dir.path().into());
+        host.set_extension(Arc::new(RlmHandler::new(
+            Arc::clone(&family),
+            auth_identity(&children),
+        )));
+        let tool = mush_tools::ipython::IpythonTool::with_mush_host(host, dir.path().into());
+
+        let added = tool
+            .execute(serde_json::json!({
+                "code": "r = await rlm.decisions.add('push', 'Push main now?', ['push', 'hold'], lean='hold', refs='/tmp/x.png')\nprint(r['id'], r['status'], r['open_with_user'])"
+            }))
+            .await;
+        let text = mush_tools::util::extract_text(&added);
+        assert!(added.outcome.is_success(), "{text}");
+        assert_eq!(text.trim(), "push open 1");
+        let visible = family.decisions().visible();
+        assert_eq!(visible[0].asker.name, "auth");
+        assert_eq!(visible[0].asker.ancestors, vec!["root-session".to_string()]);
+        assert_eq!(visible[0].lean, Some(1));
+        assert_eq!(visible[0].refs, vec!["/tmp/x.png".to_string()]);
+        assert_eq!(
+            family.decisions().take_news("root-session").as_deref(),
+            Some("- auth asked the user [push]: Push main now? (it carries on with hold)")
+        );
+
+        let listed = tool
+            .execute(serde_json::json!({
+                "code": "print([(d['id'], d['status'], d['lean']) for d in await rlm.decisions.list()])"
+            }))
+            .await;
+        assert_eq!(
+            mush_tools::util::extract_text(&listed).trim(),
+            "[('push', 'open', 'hold')]"
+        );
+        let refused = tool
+            .execute(serde_json::json!({
+                "code": "await rlm.decisions.update('nope', context='more')"
+            }))
+            .await;
+        assert!(!refused.outcome.is_success());
+        assert!(mush_tools::util::extract_text(&refused).contains("no open decision nope"));
+        tool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaches_an_idle_child_as_a_prompt() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        let children = settle(&family, &root).await;
+        let asked = family
+            .ask_user(&auth_identity(&children), push_ask())
+            .unwrap();
+        let key = asked.decision.key.clone();
+        family
+            .decisions()
+            .set_draft(
+                &key,
+                Some(crate::decisions::Answer::Pick {
+                    option: 0,
+                    label: String::new(),
+                    note: None,
+                }),
+            )
+            .unwrap();
+        let out = family
+            .decisions()
+            .send(std::slice::from_ref(&key))
+            .unwrap()
+            .remove(0);
+        let AnswerTarget::Child { id, text } = family.answer_target(&out.asker, out.text) else {
+            panic!("a live child takes its own answers");
+        };
+        family.deliver_to_child(id, text, out.keys);
+
+        let heard = |requests: &Requests| {
+            requests.lock().unwrap().iter().any(|context| {
+                context.messages.iter().any(|message| {
+                    matches!(message, Message::User(user)
+                        if user.text().starts_with("Answers to your decisions:"))
+                })
+            })
+        };
+        for _ in 0..250 {
+            if heard(&requests) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(heard(&requests), "the child never saw its answers");
+        let decision = &family
+            .decisions()
+            .list(crate::decisions::Scope::Mine(&key.session))[0];
+        assert!(decision.delivered);
+    }
+
+    #[tokio::test]
+    async fn answers_for_a_deleted_child_go_to_its_parent() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        let children = settle(&family, &root).await;
+        let asker = family.asker(&auth_identity(&children)).unwrap();
+        family.delete(&root, "auth").await.unwrap();
+        match family.answer_target(&asker, "Answers to your decisions:".into()) {
+            AnswerTarget::Root(text) => {
+                assert!(
+                    text.starts_with("These answers were for auth, which is no longer running."),
+                    "{text}"
+                );
+            }
+            AnswerTarget::Child { .. } => panic!("a deleted child cannot take answers"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_user_can_answer_a_childs_tool_confirmation() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 2, None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "auth".into(), None, None, &family)
+            .await
+            .unwrap();
+        let children = settle(&family, &root).await;
+        let id = children[0].id.clone();
+        family.record_update(&id, |child| {
+            child.awaiting_confirmation = Some("bash rm -rf build".into());
+        });
+        family.confirm_child(&id, false).unwrap();
+        assert!(family.all()[0].awaiting_confirmation.is_none());
+        assert!(family.confirm_child("sub-nobody", true).is_err());
     }
 }

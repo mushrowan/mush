@@ -96,6 +96,11 @@ pub enum ClientCommand {
     StopChild {
         session_id: String,
     },
+    Decisions(crate::decisions::DecisionsCommand),
+    ConfirmChildTool {
+        child: ChildId,
+        allow: bool,
+    },
     Shutdown,
 }
 
@@ -155,6 +160,7 @@ pub enum ClientEvent {
     SyncChanged(mush_session::SyncState),
     PriceCliff(Box<crate::price_cliff::PriceCliff>),
     PromptReturned(crate::returned::ReturnedPrompt),
+    DecisionsChanged(Vec<crate::decisions::Decision>),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -276,6 +282,7 @@ pub struct InProcessConnection {
     turn_error: Option<String>,
     known_children: HashMap<ChildId, ChildSummary>,
     known_family_revision: Option<u64>,
+    known_decisions_revision: Option<u64>,
     goal: Option<Arc<GoalStore>>,
     known_goal: Option<Goal>,
     scheduler: Option<Arc<Scheduler>>,
@@ -362,6 +369,7 @@ impl InProcessConnection {
             turn_error: None,
             known_children: HashMap::new(),
             known_family_revision: None,
+            known_decisions_revision: None,
             goal: None,
             known_goal: None,
             scheduler: None,
@@ -532,6 +540,7 @@ impl InProcessConnection {
         }
         self.known_children.clear();
         self.known_family_revision = None;
+        self.known_decisions_revision = None;
     }
 
     pub fn set_scheduler(&mut self, scheduler: Option<Arc<Scheduler>>) {
@@ -739,6 +748,87 @@ impl InProcessConnection {
     pub fn set_family(&mut self, family: Option<Arc<Family>>) {
         self.family = family;
         self.known_family_revision = None;
+        self.known_decisions_revision = None;
+    }
+
+    fn try_poll_decisions(&mut self) -> Option<ClientEvent> {
+        let decisions = Arc::clone(self.root_family()?.decisions());
+        let revision = decisions.revision();
+        if self.known_decisions_revision == Some(revision) {
+            return None;
+        }
+        let first = self.known_decisions_revision.is_none();
+        self.known_decisions_revision = Some(revision);
+        let visible = decisions.visible();
+        if first && visible.is_empty() {
+            return None;
+        }
+        Some(ClientEvent::DecisionsChanged(visible))
+    }
+
+    async fn handle_decisions(
+        &mut self,
+        command: crate::decisions::DecisionsCommand,
+    ) -> Result<(), ConnectionError> {
+        use crate::decisions::DecisionsCommand;
+        let family = self
+            .root_family()
+            .cloned()
+            .ok_or_else(|| ConnectionError::Refused("decisions are not available here".into()))?;
+        let decisions = Arc::clone(family.decisions());
+        match command {
+            DecisionsCommand::Refresh => {}
+            DecisionsCommand::Draft { key, answer } => decisions
+                .set_draft(&key, answer)
+                .map_err(ConnectionError::Refused)?,
+            DecisionsCommand::Send { keys } => {
+                let outgoing = decisions.send(&keys).map_err(ConnectionError::Refused)?;
+                let agents = outgoing.len();
+                let answers: usize = outgoing.iter().map(|out| out.keys.len()).sum();
+                for out in outgoing {
+                    match family.answer_target(&out.asker, out.text) {
+                        crate::family::AnswerTarget::Root(text) => {
+                            self.deliver_root_answers(text, &out.keys, &decisions).await;
+                        }
+                        crate::family::AnswerTarget::Child { id, text } => {
+                            family.deliver_to_child(id, text, out.keys);
+                        }
+                    }
+                }
+                if answers > 0 {
+                    self.queued.push_back(status_event(format!(
+                        "sent {answers} answer{} to {agents} agent{}",
+                        if answers == 1 { "" } else { "s" },
+                        if agents == 1 { "" } else { "s" }
+                    )));
+                }
+            }
+        }
+        self.known_decisions_revision = Some(decisions.revision());
+        self.queued
+            .push_back(ClientEvent::DecisionsChanged(decisions.visible()));
+        Ok(())
+    }
+
+    async fn deliver_root_answers(
+        &mut self,
+        text: String,
+        keys: &[crate::decisions::DecisionKey],
+        decisions: &crate::decisions::Decisions,
+    ) {
+        decisions.mark_delivered(keys, true);
+        let paused = self.runtime.paused.is_some();
+        let queued = paused || self.turn_active() || self.compaction.is_some();
+        self.queued.push_back(ClientEvent::UserInput {
+            text: text.clone(),
+            images: Vec::new(),
+            queued,
+        });
+        if paused {
+            self.queue_prompt(&text, Vec::new());
+        } else {
+            self.prompt(text, Vec::new()).await;
+        }
     }
 
     fn root_family(&self) -> Option<&Arc<Family>> {
@@ -1046,6 +1136,7 @@ impl InProcessConnection {
             .or_else(|| self.try_poll_refine())
             .or_else(|| self.try_poll_auto_review())
             .or_else(|| self.try_poll_family())
+            .or_else(|| self.try_poll_decisions())
             .or_else(|| self.try_poll_goal())
             .or_else(|| self.try_poll_schedule())
             .or_else(|| self.try_poll_autonomous())
@@ -1709,7 +1800,8 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::CompactionFallback
         | ClientCommand::Goal(_)
         | ClientCommand::Schedule(_)
-        | ClientCommand::Autonomous(_) => true,
+        | ClientCommand::Autonomous(_)
+        | ClientCommand::Decisions(_) => true,
         ClientCommand::RetractSteer { .. }
         | ClientCommand::Abort
         | ClientCommand::ConfirmTool { .. }
@@ -1722,6 +1814,7 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::AnswerKernelBusy(_)
         | ClientCommand::SideQuestion(_)
         | ClientCommand::StopChild { .. }
+        | ClientCommand::ConfirmChildTool { .. }
         | ClientCommand::Shutdown => false,
     }
 }
@@ -1881,6 +1974,15 @@ impl AgentConnection for InProcessConnection {
                 })?;
                 family
                     .stop_session(&session_id)
+                    .map_err(ConnectionError::Refused)?;
+            }
+            ClientCommand::Decisions(command) => self.handle_decisions(command).await?,
+            ClientCommand::ConfirmChildTool { child, allow } => {
+                let family = self.root_family().ok_or_else(|| {
+                    ConnectionError::Refused("this agent has no subagents".into())
+                })?;
+                family
+                    .confirm_child(&child, allow)
                     .map_err(ConnectionError::Refused)?;
             }
             ClientCommand::Shutdown => self.shutdown().await,
