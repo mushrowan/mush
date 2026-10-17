@@ -43,7 +43,7 @@ pub struct Viewport {
     height: Cell<usize>,
     moved: Cell<Option<Instant>>,
     cursor: Cell<Cursor>,
-    widths: RefCell<Vec<usize>>,
+    cells: RefCell<(usize, Vec<Vec<usize>>)>,
     chunks: RefCell<Vec<TranscriptChunk>>,
     area: Cell<Rect>,
     anchor: Cell<Option<(usize, usize)>>,
@@ -61,7 +61,7 @@ impl Default for Viewport {
             height: Cell::new(0),
             moved: Cell::new(None),
             cursor: Cell::new(Cursor::default()),
-            widths: RefCell::new(Vec::new()),
+            cells: RefCell::new((0, Vec::new())),
             chunks: RefCell::new(Vec::new()),
             area: Cell::new(Rect::default()),
             anchor: Cell::new(None),
@@ -91,18 +91,53 @@ impl Viewport {
     }
 
     pub(crate) fn settle(&self, window: &[&Line<'_>]) {
-        self.widths.replace(
-            window
-                .iter()
-                .map(|line| {
-                    line.spans
-                        .iter()
-                        .map(|span| span.content.chars().count())
-                        .sum()
-                })
-                .collect(),
-        );
+        let cells = window
+            .iter()
+            .map(|line| {
+                let text: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                crate::text::cell_offsets(&text)
+            })
+            .collect();
+        self.cells.replace((self.scroll_top.get(), cells));
         self.hold_cursor_on_screen();
+    }
+
+    fn row_cells<T>(&self, line: usize, read: impl FnOnce(Option<&[usize]>) -> T) -> T {
+        let cells = self.cells.borrow();
+        let (top, rows) = &*cells;
+        read(
+            line.checked_sub(*top)
+                .and_then(|row| rows.get(row))
+                .map(Vec::as_slice),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn cell_of(&self, line: usize, column: usize) -> usize {
+        self.row_cells(line, |cells| {
+            cells.map_or(column, |cells| {
+                cells
+                    .get(column)
+                    .or(cells.last())
+                    .copied()
+                    .unwrap_or(column)
+            })
+        })
+    }
+
+    fn column_at_cell(&self, line: usize, cell: usize) -> usize {
+        self.row_cells(line, |cells| {
+            cells.map_or(cell, |cells| {
+                cells
+                    .windows(2)
+                    .position(|pair| pair[1] > cell)
+                    .unwrap_or(cells.len().saturating_sub(1))
+            })
+        })
     }
 
     pub(crate) fn set_mark(&self, name: char, at: (usize, usize)) {
@@ -218,7 +253,7 @@ impl Viewport {
         let mut cursor = self.cursor.get();
         if columns != 0 {
             cursor.column = cursor.column.saturating_add_signed(columns);
-            cursor.wanted = cursor.column;
+            cursor.wanted = self.cell_of(cursor.line, cursor.column);
         }
         if lines != 0 {
             let line = cursor.line.saturating_add_signed(lines);
@@ -232,7 +267,7 @@ impl Viewport {
     pub fn cursor_to_column(&self, column: usize) {
         let mut cursor = self.cursor.get();
         cursor.column = column;
-        cursor.wanted = column;
+        cursor.wanted = self.cell_of(cursor.line, column);
         self.cursor.set(cursor);
         self.clamp_cursor();
         self.moved.set(Some(Instant::now()));
@@ -392,16 +427,47 @@ impl Viewport {
 
     fn clamp_cursor(&self) {
         let mut cursor = self.cursor.get();
-        let width = self.line_width(cursor.line);
-        cursor.column = cursor.wanted.min(width.saturating_sub(1));
+        let laid_out = self.row_cells(cursor.line, |cells| cells.is_some());
+        cursor.column = if laid_out {
+            let width = self.line_width(cursor.line);
+            self.column_at_cell(cursor.line, cursor.wanted)
+                .min(width.saturating_sub(1))
+        } else {
+            cursor.wanted
+        };
         self.cursor.set(cursor);
     }
 
     fn line_width(&self, line: usize) -> usize {
-        let widths = self.widths.borrow();
-        line.checked_sub(self.scroll_top.get())
-            .and_then(|row| widths.get(row).copied())
-            .unwrap_or(0)
+        self.row_cells(line, |cells| {
+            cells.map_or(0, |cells| cells.len().saturating_sub(1))
+        })
+    }
+
+    #[must_use]
+    pub fn selected_cells(&self, line: usize) -> Option<Range<usize>> {
+        if self.kind.get() == SelectionKind::Block {
+            let selection = self.selection()?;
+            let (start, end) = (*selection.start(), *selection.end());
+            if line < start.0 || line > end.0 {
+                return None;
+            }
+            let span = |(line, column): (usize, usize)| {
+                self.cell_of(line, column)
+                    ..self
+                        .cell_of(line, column + 1)
+                        .max(self.cell_of(line, column) + 1)
+            };
+            let (a, b) = (span(start), span(end));
+            let width = self.cell_of(line, self.line_width(line));
+            return Some(a.start.min(b.start)..a.end.max(b.end).min(width));
+        }
+        let columns = self.selected_columns(line)?;
+        let start = self.cell_of(line, columns.start);
+        let end = self
+            .cell_of(line, columns.end)
+            .max(start + usize::from(!columns.is_empty()));
+        Some(start..end)
     }
 
     pub(crate) fn visible_lines(&self) -> (usize, usize) {
@@ -467,7 +533,7 @@ fn render_follow_hint(app: &App, area: Rect, buf: &mut Buffer) {
     } else {
         format!(" {follow} ")
     };
-    let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    let width = u16::try_from(crate::text::width(&label)).unwrap_or(u16::MAX);
     if width > area.width {
         return;
     }
@@ -512,7 +578,9 @@ impl Screen {
             return None;
         }
         let window = app_layout(app, area).messages;
-        let column = u16::try_from(app.viewport.cursor().column).unwrap_or(u16::MAX);
+        let cursor = app.viewport.cursor();
+        let column =
+            u16::try_from(app.viewport.cell_of(cursor.line, cursor.column)).unwrap_or(u16::MAX);
         Some((
             window.x + column.min(window.width.saturating_sub(1)),
             window.y
@@ -552,7 +620,7 @@ impl Screen {
 
     fn paint_selection(&self, app: &App, area: Rect, window: Range<usize>, buf: &mut Buffer) {
         for (row, line) in area.rows().zip(window) {
-            let Some(columns) = app.viewport.selected_columns(line) else {
+            let Some(columns) = app.viewport.selected_cells(line) else {
                 continue;
             };
             for column in columns {
@@ -683,6 +751,64 @@ mod tests {
         let current = [chunk(0, 0, 5)];
 
         assert_eq!(remap_line(13, &previous, &current), 4);
+    }
+
+    fn placed(viewport: &Viewport, rows: &[&str]) {
+        let lines: Vec<Line<'static>> = rows.iter().map(|row| Line::raw(row.to_string())).collect();
+        place(viewport, &lines, log_area(20));
+        viewport.pause();
+    }
+
+    #[test]
+    fn the_log_cursor_on_wide_text_sits_on_the_cell_where_its_grapheme_starts() {
+        let viewport = Viewport::default();
+        placed(&viewport, &["中文中文 abc"]);
+        viewport.cursor_to(0);
+
+        viewport.cursor_to_column(5);
+
+        assert_eq!(viewport.cursor().column, 5);
+        assert_eq!(viewport.cell_of(0, 5), 9);
+    }
+
+    #[test]
+    fn moving_down_keeps_the_cell_column_through_a_cjk_row() {
+        let viewport = Viewport::default();
+        placed(&viewport, &["abcdefgh", "中文中文", "abcdefgh"]);
+        viewport.cursor_to(0);
+        viewport.cursor_to_column(4);
+
+        viewport.move_cursor(0, 1);
+        assert_eq!(viewport.cursor().column, 2, "the wide char covering cell 4");
+        viewport.move_cursor(0, 1);
+        assert_eq!(viewport.cursor().column, 4);
+    }
+
+    #[test]
+    fn a_selected_wide_char_paints_both_of_its_cells() {
+        let viewport = Viewport::default();
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        placed(&viewport, &[&format!("a{family}中b")]);
+        viewport.cursor_to(0);
+        viewport.cursor_to_column(1);
+        viewport.start_selection(SelectionKind::Char);
+        viewport.move_cursor(1, 0);
+
+        assert_eq!(viewport.selected_columns(0), Some(1..3));
+        assert_eq!(viewport.selected_cells(0), Some(1..5));
+    }
+
+    #[test]
+    fn a_block_selection_spans_the_same_cells_on_wide_and_narrow_rows() {
+        let viewport = Viewport::default();
+        placed(&viewport, &["abcdef", "中文中"]);
+        viewport.cursor_to(0);
+        viewport.cursor_to_column(2);
+        viewport.start_selection(SelectionKind::Block);
+        viewport.move_cursor(0, 1);
+
+        assert_eq!(viewport.selected_cells(0), Some(2..4));
+        assert_eq!(viewport.selected_cells(1), Some(2..4));
     }
 
     #[test]

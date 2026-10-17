@@ -359,12 +359,7 @@ impl ChunkText {
             }
         }
         let row_end = body[start..].find('\n').map_or(body.len(), |at| start + at);
-        let row = &body[start..row_end];
-        start
-            + row
-                .char_indices()
-                .nth(column)
-                .map_or(row.len(), |(byte, _)| byte)
+        start + crate::text::byte_of_grapheme(&body[start..row_end], column)
     }
 
     fn spot_of(&self, chunk: usize, byte: usize) -> Spot {
@@ -374,7 +369,7 @@ impl ChunkText {
         Spot {
             chunk,
             line,
-            column: before[row_start..].chars().count(),
+            column: crate::text::grapheme_count(&before[row_start..]),
         }
     }
 

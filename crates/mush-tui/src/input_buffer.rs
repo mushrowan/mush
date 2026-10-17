@@ -39,10 +39,7 @@ impl InputBuffer {
     pub fn selected_bytes(&self) -> Option<std::ops::Range<usize>> {
         let anchor = self.anchor?;
         let (from, to) = (anchor.min(self.cursor), anchor.max(self.cursor));
-        let to = self.text[to..]
-            .chars()
-            .next()
-            .map_or(self.text.len(), |c| to + c.len_utf8());
+        let to = crate::text::next_grapheme(&self.text, to);
         if self.selection_kind == crate::screen::SelectionKind::Line {
             let start = self.text[..from].rfind('\n').map_or(0, |i| i + 1);
             let end = self.text[to..]
@@ -60,17 +57,11 @@ impl InputBuffer {
     }
 
     fn prev_char_boundary(&self) -> usize {
-        self.text[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(byte, _)| byte)
+        crate::text::previous_grapheme(&self.text, self.cursor)
     }
 
     fn next_char_boundary(&self) -> usize {
-        self.text[self.cursor..]
-            .chars()
-            .next()
-            .map_or(self.text.len(), |c| self.cursor + c.len_utf8())
+        crate::text::next_grapheme(&self.text, self.cursor)
     }
 
     #[must_use]
@@ -159,7 +150,7 @@ impl InputBuffer {
         let Some(line_start) = self.text[..self.cursor].rfind('\n').map(|i| i + 1) else {
             return false;
         };
-        let column = self.text[line_start..self.cursor].chars().count();
+        let column = crate::text::width(&self.text[line_start..self.cursor]);
         let above_start = self.text[..line_start - 1].rfind('\n').map_or(0, |i| i + 1);
         self.cursor = column_offset(&self.text, above_start, line_start - 1, column);
         self.ensure_cursor_visible();
@@ -171,7 +162,7 @@ impl InputBuffer {
             return false;
         };
         let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
-        let column = self.text[line_start..self.cursor].chars().count();
+        let column = crate::text::width(&self.text[line_start..self.cursor]);
         let below_start = line_end + 1;
         let below_end = self.text[below_start..]
             .find('\n')
@@ -378,50 +369,50 @@ impl Default for InputBuffer {
 pub const IMAGE_PLACEHOLDER: char = '\u{FFFC}';
 
 fn column_offset(text: &str, start: usize, end: usize, column: usize) -> usize {
-    text[start..end]
-        .char_indices()
-        .nth(column)
-        .map_or(end, |(offset, _)| start + offset)
+    let row = &text[start..end];
+    start + crate::text::byte_of_grapheme(row, crate::text::grapheme_at_cell(row, column))
 }
 
-fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
+fn class_of(grapheme: &str) -> crate::motion::Class {
+    grapheme
+        .chars()
+        .next()
+        .map_or(crate::motion::Class::Blank, crate::motion::Class::of)
 }
 
 pub(crate) fn word_boundary_left(s: &str, cursor: usize) -> usize {
-    let before = &s[..cursor];
-    if before.is_empty() {
-        return 0;
+    let graphemes: Vec<(usize, &str)> = crate::text::graphemes(&s[..cursor]).collect();
+    let mut at = graphemes.len();
+    while at > 0 && !class_of(graphemes[at - 1].1).is_word() {
+        at -= 1;
     }
-    let skip_end = before
-        .char_indices()
-        .rev()
-        .find(|(_, c)| is_word_char(*c))
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
-    if skip_end == 0 {
+    let Some(word) = at.checked_sub(1).map(|last| class_of(graphemes[last].1)) else {
         return 0;
+    };
+    while at > 0 && class_of(graphemes[at - 1].1) == word {
+        at -= 1;
     }
-    before[..skip_end]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !is_word_char(*c))
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0)
+    graphemes.get(at).map_or(0, |(byte, _)| *byte)
 }
 
 pub(crate) fn word_boundary_right(s: &str, cursor: usize) -> usize {
-    let after = &s[cursor..];
-    let mut chars = after.char_indices();
-    let word_end = chars
-        .by_ref()
-        .find(|(_, c)| !is_word_char(*c))
-        .map(|(i, _)| i)
-        .unwrap_or(after.len());
-    let past_ws = after[word_end..]
-        .char_indices()
-        .find(|(_, c)| is_word_char(*c))
-        .map(|(i, _)| word_end + i)
-        .unwrap_or(after.len());
-    cursor + past_ws
+    let mut graphemes = crate::text::graphemes(&s[cursor..]).peekable();
+    if let Some(word) = graphemes
+        .peek()
+        .map(|(_, grapheme)| class_of(grapheme))
+        .filter(|class| class.is_word())
+    {
+        while graphemes
+            .next_if(|(_, grapheme)| class_of(grapheme) == word)
+            .is_some()
+        {}
+    }
+    while graphemes
+        .next_if(|(_, grapheme)| !class_of(grapheme).is_word())
+        .is_some()
+    {}
+    graphemes.peek().map_or(s.len(), |(byte, _)| cursor + byte)
 }
+
+#[cfg(test)]
+mod tests;

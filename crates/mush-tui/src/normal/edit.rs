@@ -232,11 +232,9 @@ fn select_extent(app: &mut App, extent: Extent) {
     match extent {
         Extent::Chars(chars) => {
             app.input.selection_kind = crate::screen::SelectionKind::Char;
-            app.input.cursor = app.input.text[cursor..]
-                .char_indices()
-                .take(chars)
-                .last()
-                .map_or(cursor, |(i, _)| cursor + i);
+            let text = &app.input.text;
+            let start = motion::index_of_byte(text, cursor);
+            app.input.cursor = motion::byte_of_index(text, start + chars.saturating_sub(1));
         }
         Extent::Lines(lines) => {
             app.input.selection_kind = crate::screen::SelectionKind::Line;
@@ -513,15 +511,15 @@ fn put(app: &mut App, register: Register, before: bool, count: Option<usize>) {
     } else {
         let block = register.text.repeat(times);
         let cursor = app.input.cursor;
-        let at = match app.input.text[cursor..].chars().next() {
-            Some(c) if !before && c != '\n' => cursor + c.len_utf8(),
+        let at = match after_grapheme(&app.input.text, cursor) {
+            Some(end) if !before => end,
             _ => cursor,
         };
         app.input.insert_with_images(at, &block, images);
         app.input.cursor = if block.contains('\n') {
             at
         } else {
-            at + block.len() - block.chars().next_back().map_or(0, char::len_utf8)
+            at + crate::text::previous_grapheme(&block, block.len())
         };
     }
     edited(app);
@@ -538,10 +536,8 @@ fn insert_at(app: &mut App, entry: Entry) {
     match entry {
         Entry::Before => {}
         Entry::After => {
-            if let Some(c) = input.text[input.cursor..].chars().next()
-                && c != '\n'
-            {
-                input.cursor += c.len_utf8();
+            if let Some(end) = after_grapheme(&input.text, input.cursor) {
+                input.cursor = end;
             }
         }
         Entry::LineStart => input.cursor = start + indent.len(),
@@ -647,20 +643,23 @@ fn put_over_selection(
         app.input.cursor = if block.contains('\n') {
             bytes.start
         } else {
-            bytes.start + block.len() - block.chars().next_back().map_or(0, char::len_utf8)
+            bytes.start + crate::text::previous_grapheme(&block, block.len())
         };
     }
 }
 
 fn line_span(input: &InputBuffer, count: Option<usize>) -> Range<usize> {
     let cursor = input.cursor;
-    let end = input.text[cursor..]
-        .char_indices()
-        .take_while(|(_, c)| *c != '\n')
-        .take(count.unwrap_or(1))
-        .last()
-        .map_or(cursor, |(i, c)| cursor + i + c.len_utf8());
-    cursor..end
+    let row = &input.text[cursor..];
+    let row = &row[..row.find('\n').unwrap_or(row.len())];
+    let end = crate::text::byte_of_grapheme(row, count.unwrap_or(1));
+    cursor..cursor + end
+}
+
+fn after_grapheme(text: &str, at: usize) -> Option<usize> {
+    let row = &text[at..];
+    let row = &row[..row.find('\n').unwrap_or(row.len())];
+    (!row.is_empty()).then(|| at + crate::text::byte_of_grapheme(row, 1))
 }
 
 fn selected_bytes(app: &mut App) -> Option<Range<usize>> {
@@ -673,9 +672,12 @@ fn selected_bytes(app: &mut App) -> Option<Range<usize>> {
     Some(bytes)
 }
 
-fn rewrite(app: &mut App, bytes: Range<usize>, change: impl Fn(char) -> String) -> usize {
-    let rewritten: String = app.input.text[bytes.clone()].chars().map(&change).collect();
-    if change(IMAGE_PLACEHOLDER) != IMAGE_PLACEHOLDER.to_string() {
+fn rewrite(app: &mut App, bytes: Range<usize>, change: impl Fn(&str) -> String) -> usize {
+    let rewritten: String = crate::text::graphemes(&app.input.text[bytes.clone()])
+        .map(|(_, grapheme)| change(grapheme))
+        .collect();
+    let placeholder = IMAGE_PLACEHOLDER.to_string();
+    if change(&placeholder) != placeholder {
         app.input.take_images_in(bytes.clone());
     }
     app.input.text.replace_range(bytes, &rewritten);
@@ -686,13 +688,19 @@ fn rewrite(app: &mut App, bytes: Range<usize>, change: impl Fn(char) -> String) 
 fn replace(app: &mut App, with: char, count: Option<usize>) {
     if let Some(bytes) = selected_bytes(app) {
         let start = bytes.start;
-        rewrite(app, bytes, |c| if c == '\n' { c } else { with }.to_string());
+        rewrite(app, bytes, |grapheme| {
+            if grapheme == "\n" {
+                grapheme.to_string()
+            } else {
+                with.to_string()
+            }
+        });
         app.input.cursor = start;
         return;
     }
     let times = count.unwrap_or(1);
     let bytes = line_span(&app.input, count);
-    if app.input.text[bytes.clone()].chars().count() < times {
+    if crate::text::grapheme_count(&app.input.text[bytes.clone()]) < times {
         return;
     }
     let start = bytes.start;
@@ -701,14 +709,19 @@ fn replace(app: &mut App, with: char, count: Option<usize>) {
 }
 
 fn toggle_case(app: &mut App, count: Option<usize>) {
-    let flip = |c: char| {
-        if c.is_lowercase() {
-            c.to_uppercase().collect()
-        } else if c.is_uppercase() {
-            c.to_lowercase().collect()
-        } else {
-            c.to_string()
-        }
+    let flip = |grapheme: &str| {
+        grapheme
+            .chars()
+            .flat_map(|c| -> Vec<char> {
+                if c.is_lowercase() {
+                    c.to_uppercase().collect()
+                } else if c.is_uppercase() {
+                    c.to_lowercase().collect()
+                } else {
+                    vec![c]
+                }
+            })
+            .collect::<String>()
     };
     if let Some(bytes) = selected_bytes(app) {
         let start = bytes.start;
@@ -764,12 +777,13 @@ fn selection_region(input: &InputBuffer) -> Option<Region> {
         let line = |byte: usize| input.text[..byte].matches('\n').count();
         return Some(Region::Lines(line(from)..=line(to)));
     }
-    let end = input.text[to..]
-        .chars()
-        .next()
-        .map_or(to, |c| to + c.len_utf8());
-    let index = |byte: usize| input.text[..byte].chars().count();
-    Some(Region::Chars(index(from)..index(end)))
+    let index = |byte: usize| motion::index_of_byte(&input.text, byte);
+    let end = if to < input.text.len() {
+        index(to) + 1
+    } else {
+        index(to)
+    };
+    Some(Region::Chars(index(from)..end))
 }
 
 fn region_bytes(text: &str, region: &Region) -> (Range<usize>, bool) {
@@ -841,9 +855,7 @@ fn rows(text: &str) -> Vec<String> {
 }
 
 fn byte_offset(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map_or(text.len(), |(byte, _)| byte)
+    motion::byte_of_index(text, index)
 }
 
 fn line_bounds(text: &str, lines: &RangeInclusive<usize>) -> (usize, usize) {

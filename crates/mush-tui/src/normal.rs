@@ -378,7 +378,7 @@ fn byte_position(text: &str, offset: usize) -> (usize, usize) {
     let column = before
         .rsplit('\n')
         .next()
-        .map_or(0, |row| row.chars().count());
+        .map_or(0, crate::text::grapheme_count);
     (line, column)
 }
 
@@ -403,11 +403,12 @@ impl<'a> ComposerTarget<'a> {
             offset += row.len() + 1;
         }
         let row = self.rows.get(line).map_or("", String::as_str);
-        offset
-            + row
-                .char_indices()
-                .nth(column)
-                .map_or_else(|| row.len(), |(byte, _)| byte)
+        offset + crate::text::byte_of_grapheme(row, column)
+    }
+
+    fn cells_at(&self, (line, column): (usize, usize)) -> usize {
+        let row = self.rows.get(line).map_or("", String::as_str);
+        crate::text::width_before_grapheme(row, column)
     }
 }
 
@@ -427,12 +428,16 @@ impl NormalTarget for ComposerTarget<'_> {
     }
 
     fn move_line(&mut self, delta: isize) {
-        let (line, column) = self.cursor();
-        let goal = self.input.goal_column().unwrap_or(column);
-        let line = line
-            .saturating_add_signed(delta)
-            .min(self.rows.len().saturating_sub(1));
-        self.place_cursor((line, goal));
+        let at = self.cursor();
+        let goal = self
+            .input
+            .goal_column()
+            .unwrap_or_else(|| self.cells_at(at));
+        let line =
+            at.0.saturating_add_signed(delta)
+                .min(self.rows.len().saturating_sub(1));
+        let row = self.rows.get(line).map_or("", String::as_str);
+        self.place_cursor((line, crate::text::grapheme_at_cell(row, goal)));
         self.input.hold_goal_column(goal);
     }
 

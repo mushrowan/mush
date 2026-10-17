@@ -62,6 +62,46 @@ pub fn width_before_grapheme(text: &str, index: usize) -> usize {
 }
 
 #[must_use]
+pub fn cell_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = Vec::with_capacity(text.len() + 1);
+    let mut cells = 0;
+    offsets.push(0);
+    for (_, grapheme) in graphemes(text) {
+        cells += grapheme_width(grapheme);
+        offsets.push(cells);
+    }
+    offsets
+}
+
+#[must_use]
+pub fn grapheme_at_cell(text: &str, cell: usize) -> usize {
+    let mut cells = 0;
+    for (index, (_, grapheme)) in graphemes(text).enumerate() {
+        cells += grapheme_width(grapheme);
+        if cells > cell {
+            return index;
+        }
+    }
+    grapheme_count(text)
+}
+
+#[must_use]
+pub fn previous_grapheme(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    graphemes(&text[..byte])
+        .last()
+        .map_or(0, |(start, _)| start)
+}
+
+#[must_use]
+pub fn next_grapheme(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    graphemes(&text[byte..])
+        .nth(1)
+        .map_or(text.len(), |(start, _)| byte + start)
+}
+
+#[must_use]
 pub fn prefix_within(text: &str, max_width: usize) -> &str {
     let mut used = 0;
     for (at, grapheme) in graphemes(text) {
@@ -152,6 +192,27 @@ mod tests {
         assert_eq!(byte_of_grapheme(&text, 9), text.len());
         assert_eq!(grapheme_at_byte(&text, "中".len() + FAMILY.len()), 2);
         assert_eq!(width_before_grapheme(&text, 3), 5);
+    }
+
+    #[test]
+    fn cells_and_grapheme_steps_agree() {
+        let text = format!("a中{FAMILY}{ACUTE_E}");
+        assert_eq!(cell_offsets(&text), [0, 1, 3, 5, 6]);
+        assert_eq!(grapheme_at_cell(&text, 2), 1);
+        assert_eq!(grapheme_at_cell(&text, 3), 2);
+        assert_eq!(grapheme_at_cell(&text, 9), 4);
+        let end = text.len();
+        assert_eq!(previous_grapheme(&text, end), end - ACUTE_E.len());
+        assert_eq!(
+            previous_grapheme(&text, end - ACUTE_E.len()),
+            1 + "中".len()
+        );
+        assert_eq!(
+            next_grapheme(&text, 1 + "中".len()),
+            1 + "中".len() + FAMILY.len()
+        );
+        assert_eq!(next_grapheme(&text, end), end);
+        assert_eq!(previous_grapheme(&text, 0), 0);
     }
 
     #[test]

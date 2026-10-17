@@ -13,18 +13,24 @@ pub(crate) fn text_for(
     let (start_line, start_column) = *range.start();
     let (end_line, end_column) = *range.end();
     if kind == SelectionKind::Block {
-        let left = start_column.min(end_column);
-        let right = start_column.max(end_column);
+        let cells = |(line, column): (usize, usize)| {
+            let offsets = crate::text::cell_offsets(lines.get(line).map_or("", String::as_str));
+            let at = |column: usize| {
+                offsets
+                    .get(column)
+                    .or(offsets.last())
+                    .copied()
+                    .unwrap_or(column)
+            };
+            at(column)..at(column + 1).max(at(column) + 1)
+        };
+        let (a, b) = (cells(*range.start()), cells(*range.end()));
+        let (left, right) = (a.start.min(b.start), a.end.max(b.end));
         return lines
             .iter()
             .take(end_line + 1)
             .skip(start_line)
-            .map(|line| {
-                line.chars()
-                    .skip(left)
-                    .take(right + 1 - left)
-                    .collect::<String>()
-            })
+            .map(|line| within_cells(line, left..right))
             .collect::<Vec<_>>()
             .join("\n");
     }
@@ -37,24 +43,45 @@ pub(crate) fn text_for(
             return String::new();
         };
         if start_line == end_line {
-            return line
-                .chars()
-                .skip(start_column)
-                .take(end_column + 1 - start_column)
-                .collect();
+            return graphemes_between(line, start_column, end_column + 1).to_string();
         }
-        let mut pieces = vec![(start_line, line.chars().skip(start_column).collect())];
+        let mut pieces = vec![(
+            start_line,
+            graphemes_between(line, start_column, usize::MAX).to_string(),
+        )];
         for row in start_line + 1..end_line {
             if let Some(line) = lines.get(row) {
                 pieces.push((row, line.clone()));
             }
         }
         if let Some(line) = lines.get(end_line) {
-            pieces.push((end_line, line.chars().take(end_column + 1).collect()));
+            pieces.push((
+                end_line,
+                graphemes_between(line, 0, end_column + 1).to_string(),
+            ));
         }
         pieces
     };
     join_rows(&pieces, breaks)
+}
+
+fn graphemes_between(line: &str, from: usize, to: usize) -> &str {
+    let start = crate::text::byte_of_grapheme(line, from);
+    let end = crate::text::byte_of_grapheme(line, to).max(start);
+    &line[start..end]
+}
+
+fn within_cells(line: &str, cells: std::ops::Range<usize>) -> String {
+    let mut at = 0;
+    let mut out = String::new();
+    for (_, grapheme) in crate::text::graphemes(line) {
+        let width = crate::text::grapheme_width(grapheme);
+        if at < cells.end && at + width.max(1) > cells.start {
+            out.push_str(grapheme);
+        }
+        at += width;
+    }
+    out
 }
 
 fn join_rows(pieces: &[(usize, String)], breaks: &[Option<Break>]) -> String {
@@ -169,6 +196,27 @@ pub(crate) fn selected_text(app: &App, strip_indent: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_takes_whole_graphemes_by_column() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let lines = vec![format!(" a{family}e\u{301}中b")];
+
+        assert_eq!(
+            text_for(&lines, &[], &((0, 2)..=(0, 4)), SelectionKind::Char),
+            format!("{family}e\u{301}中")
+        );
+    }
+
+    #[test]
+    fn a_block_copy_takes_the_same_cells_from_wide_and_narrow_rows() {
+        let lines = vec!["abcdef".to_string(), "中文中".to_string()];
+
+        assert_eq!(
+            text_for(&lines, &[], &((0, 2)..=(1, 1)), SelectionKind::Block),
+            "cd\n文"
+        );
+    }
 
     #[test]
     fn a_blockwise_range_takes_the_same_columns_from_each_row() {

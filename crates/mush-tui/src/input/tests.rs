@@ -1597,6 +1597,54 @@ fn deleting_to_the_start_closes_the_slash_menu() {
     assert!(app.completion.slash_menu.is_none());
 }
 
+fn normal_composer(text: &str, cursor: usize) -> App {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.text = text.into();
+    app.input.cursor = cursor;
+    app.interaction.mode = AppMode::Normal;
+    app
+}
+
+#[test]
+fn normal_mode_edits_whole_graphemes() {
+    let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+    let mut app = normal_composer(&format!("{family}b"), 0);
+    handle_key(&mut app, key(KeyCode::Char('x')));
+    assert_eq!(app.input.text, "b");
+
+    let mut app = normal_composer("\u{304b}\u{3099}\u{304b}", 0);
+    handle_key(&mut app, key(KeyCode::Char('r')));
+    handle_key(&mut app, key(KeyCode::Char('x')));
+    assert_eq!(app.input.text, "x\u{304b}");
+
+    let mut app = normal_composer("e\u{301}e\u{301}", 0);
+    handle_key(&mut app, key(KeyCode::Char('l')));
+    assert_eq!(app.input.cursor, "e\u{301}".len());
+    handle_key(&mut app, key(KeyCode::Char('~')));
+    assert_eq!(app.input.text, "e\u{301}E\u{301}");
+}
+
+#[test]
+fn normal_mode_word_objects_follow_the_script_of_the_word() {
+    let mut app = normal_composer("日本語のテキスト", "日本語のテ".len());
+
+    handle_key(&mut app, key(KeyCode::Char('d')));
+    handle_key(&mut app, key(KeyCode::Char('i')));
+    handle_key(&mut app, key(KeyCode::Char('w')));
+
+    assert_eq!(app.input.text, "日本語の");
+}
+
+#[test]
+fn j_and_k_in_the_composer_keep_the_screen_column() {
+    let mut app = normal_composer("abcdefgh\n中文中文\nabcdefgh", 4);
+
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(&app.input.text[app.input.cursor..], "中文\nabcdefgh");
+    handle_key(&mut app, key(KeyCode::Char('j')));
+    assert_eq!(&app.input.text[app.input.cursor..], "efgh");
+}
+
 #[test]
 fn ctrl_bracket_closes_slash_menu() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));

@@ -73,10 +73,48 @@ pub(crate) enum Region {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
+pub(crate) enum Class {
     Blank,
     Word,
     Punct,
+    Hiragana,
+    Katakana,
+    Ideograph,
+    Hangul,
+    Emoji,
+}
+
+impl Class {
+    pub(crate) fn of(c: char) -> Self {
+        let code = u32::from(c);
+        if c.is_whitespace() {
+            return Self::Blank;
+        }
+        if c.is_ascii() {
+            return if c.is_ascii_alphanumeric() || c == '_' {
+                Self::Word
+            } else {
+                Self::Punct
+            };
+        }
+        match code {
+            0x3001..=0x303f | 0xff00..=0xff0f | 0xff1a..=0xff20 | 0xff3b..=0xff40 => Self::Punct,
+            0xff5b..=0xff65 | 0xfe30..=0xfe6f | 0x2000..=0x206f | 0x2e00..=0x2e7f => Self::Punct,
+            0x3040..=0x309f => Self::Hiragana,
+            0x30a0..=0x30ff | 0x31f0..=0x31ff | 0xff66..=0xff9f => Self::Katakana,
+            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3134f => {
+                Self::Ideograph
+            }
+            0x1100..=0x11ff | 0x3130..=0x318f | 0xa960..=0xa97f | 0xac00..=0xd7ff => Self::Hangul,
+            0x1f000..=0x1faff | 0x2600..=0x27bf => Self::Emoji,
+            _ if c.is_alphanumeric() => Self::Word,
+            _ => Self::Punct,
+        }
+    }
+
+    pub(crate) fn is_word(self) -> bool {
+        !matches!(self, Self::Blank | Self::Punct)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -113,7 +151,9 @@ impl Text {
                 chars.push('\n');
             }
             starts.push(chars.len());
-            chars.extend(row.chars());
+            chars.extend(
+                crate::text::graphemes(row).filter_map(|(_, grapheme)| grapheme.chars().next()),
+            );
         }
         Self { chars, starts }
     }
@@ -162,12 +202,10 @@ impl Text {
         let Some(c) = self.chars.get(index) else {
             return Class::Blank;
         };
-        if c.is_whitespace() {
-            Class::Blank
-        } else if word == Word::Big || c.is_alphanumeric() || *c == '_' {
-            Class::Word
-        } else {
-            Class::Punct
+        match Class::of(*c) {
+            Class::Blank => Class::Blank,
+            _ if word == Word::Big => Class::Word,
+            class => class,
         }
     }
 
@@ -464,29 +502,63 @@ pub(crate) fn search(
     }
     let line = text[..from].matches('\n').count();
     let line_start = text[..from].rfind('\n').map_or(0, |at| at + 1);
-    Some((line, text[line_start..from].chars().count()))
+    Some((line, crate::text::grapheme_count(&text[line_start..from])))
 }
 
 pub(crate) fn word_pattern(rows: &[String], (line, column): (usize, usize)) -> Option<String> {
-    let chars: Vec<char> = rows.get(line)?.chars().collect();
-    let keyword = |c: &char| c.is_alphanumeric() || *c == '_';
-    let start = (column..chars.len()).find(|i| keyword(&chars[*i]))?;
+    let graphemes: Vec<&str> = crate::text::graphemes(rows.get(line)?)
+        .map(|(_, grapheme)| grapheme)
+        .collect();
+    let class = |grapheme: &str| grapheme.chars().next().map_or(Class::Blank, Class::of);
+    let start = (column..graphemes.len()).find(|i| class(graphemes[*i]).is_word())?;
+    let word_class = class(graphemes[start]);
     let start = (0..=start)
         .rev()
-        .take_while(|i| keyword(&chars[*i]))
+        .take_while(|i| class(graphemes[*i]) == word_class)
         .last()?;
-    let word: String = chars[start..].iter().take_while(|c| keyword(c)).collect();
-    Some(format!("\\b{}\\b", regex::escape(&word)))
+    let word: String = graphemes[start..]
+        .iter()
+        .take_while(|grapheme| class(grapheme) == word_class)
+        .copied()
+        .collect();
+    Some(if word_class == Class::Word {
+        format!("\\b{}\\b", regex::escape(&word))
+    } else {
+        regex::escape(&word)
+    })
 }
 
 fn byte_of(rows: &[String], (line, column): (usize, usize)) -> usize {
     let before: usize = rows.iter().take(line).map(|row| row.len() + 1).sum();
     let row = rows.get(line).map_or("", String::as_str);
-    before
-        + row
-            .char_indices()
-            .nth(column)
-            .map_or(row.len(), |(byte, _)| byte)
+    before + crate::text::byte_of_grapheme(row, column)
+}
+
+pub(crate) fn byte_of_index(text: &str, index: usize) -> usize {
+    let mut left = index;
+    let mut offset = 0;
+    for row in text.split('\n') {
+        let count = crate::text::grapheme_count(row);
+        if left <= count {
+            return offset + crate::text::byte_of_grapheme(row, left);
+        }
+        left -= count + 1;
+        offset += row.len() + 1;
+    }
+    text.len()
+}
+
+pub(crate) fn index_of_byte(text: &str, byte: usize) -> usize {
+    let mut index = 0;
+    let mut offset = 0;
+    for row in text.split('\n') {
+        if byte <= offset + row.len() {
+            return index + crate::text::grapheme_at_byte(row, byte - offset);
+        }
+        index += crate::text::grapheme_count(row) + 1;
+        offset += row.len() + 1;
+    }
+    index.saturating_sub(1)
 }
 
 fn blank(row: &str) -> bool {
@@ -525,11 +597,13 @@ pub(crate) fn first_non_blank(row: &str) -> usize {
 }
 
 pub(crate) fn last_cell(row: &str) -> usize {
-    row.chars().count().saturating_sub(1)
+    crate::text::grapheme_count(row).saturating_sub(1)
 }
 
 fn find_in_row(row: &str, column: usize, find: Find, count: usize) -> Option<usize> {
-    let chars: Vec<char> = row.chars().collect();
+    let chars: Vec<char> = crate::text::graphemes(row)
+        .filter_map(|(_, grapheme)| grapheme.chars().next())
+        .collect();
     let skip_adjacent = find.till && find.repeat && count == 1;
     let nth = count.saturating_sub(1);
     let hit = if find.forward {
@@ -680,7 +754,7 @@ pub(crate) fn span(
         Motion::ParagraphForward | Motion::ParagraphBack => {
             let forward = motion == Motion::ParagraphForward;
             let edge = paragraph_edge(rows, line, forward, times)?;
-            let width = rows[edge].chars().count();
+            let width = crate::text::grapheme_count(&rows[edge]);
             if forward && edge == last && width > 0 {
                 (text.index_of((edge, width - 1))?, true)
             } else {
@@ -701,6 +775,70 @@ mod tests {
 
     fn go(rows: &[String], at: (usize, usize), motion: Motion) -> (usize, usize) {
         destination(rows, at, motion, 1).unwrap_or(at)
+    }
+
+    #[test]
+    fn word_motions_stop_where_the_script_changes() {
+        let rows = rows(&["日本語のテキストです"]);
+
+        assert_eq!(go(&rows, (0, 0), Motion::WordForward(Word::Small)), (0, 3));
+        assert_eq!(go(&rows, (0, 3), Motion::WordForward(Word::Small)), (0, 4));
+        assert_eq!(go(&rows, (0, 4), Motion::WordForward(Word::Small)), (0, 8));
+        assert_eq!(go(&rows, (0, 9), Motion::WordBack(Word::Small)), (0, 8));
+        assert_eq!(go(&rows, (0, 8), Motion::WordBack(Word::Small)), (0, 4));
+        assert_eq!(go(&rows, (0, 0), Motion::WordEnd(Word::Small)), (0, 2));
+        assert_eq!(go(&rows, (0, 0), Motion::WordForward(Word::Big)), (0, 9));
+    }
+
+    #[test]
+    fn hangul_words_and_cjk_punctuation_are_their_own_words() {
+        let rows = rows(&["한국어 텍스트", "中文，日本"]);
+
+        assert_eq!(go(&rows, (0, 0), Motion::WordForward(Word::Small)), (0, 4));
+        assert_eq!(go(&rows, (1, 0), Motion::WordForward(Word::Small)), (1, 2));
+        assert_eq!(go(&rows, (1, 2), Motion::WordForward(Word::Small)), (1, 3));
+    }
+
+    #[test]
+    fn columns_count_graphemes_not_chars() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let rows = rows(&[&format!("e\u{301}{family}x")]);
+
+        assert_eq!(go(&rows, (0, 0), Motion::Right), (0, 1));
+        assert_eq!(go(&rows, (0, 0), Motion::LineEnd), (0, 2));
+        assert_eq!(last_cell(&rows[0]), 2);
+        let find_x = Find {
+            target: 'x',
+            forward: true,
+            till: false,
+            repeat: false,
+        };
+        assert_eq!(go(&rows, (0, 0), Motion::Find(find_x)), (0, 2));
+        assert_eq!(search(&rows, (0, 0), "x", true, 1), Some((0, 2)));
+    }
+
+    #[test]
+    fn a_composer_index_maps_to_bytes_through_its_rows() {
+        let text = "a\u{301}b\r\n中";
+
+        assert_eq!(byte_of_index(text, 1), 3);
+        assert_eq!(
+            byte_of_index(text, 3),
+            5,
+            "the carriage return keeps its own cell"
+        );
+        assert_eq!(byte_of_index(text, 4), 6);
+        assert_eq!(index_of_byte(text, 6), 4);
+        assert_eq!(index_of_byte(text, text.len()), 5);
+    }
+
+    #[test]
+    fn star_takes_the_cjk_word_under_the_cursor() {
+        let kana = rows(&["日本語のテキスト"]);
+        let ascii = rows(&["call foo"]);
+
+        assert_eq!(word_pattern(&kana, (0, 5)), Some("テキスト".to_string()));
+        assert_eq!(word_pattern(&ascii, (0, 5)), Some("\\bfoo\\b".to_string()));
     }
 
     #[test]

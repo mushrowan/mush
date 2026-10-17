@@ -1,21 +1,13 @@
 use std::cell::Ref;
 use std::ops::Range;
 
-use ratatui::buffer::{Buffer, CellWidth};
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Widget};
 
 use crate::app::{App, InputBuffer, PendingImage};
-
-fn char_width(ch: char) -> usize {
-    if ch.is_control() {
-        return 0;
-    }
-    let mut buf = [0; 4];
-    usize::from(ch.encode_utf8(&mut buf).cell_width())
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedInput {
@@ -169,7 +161,7 @@ fn cursor_in_segments(
         let is_last_seg = seg_i == segments.len() - 1;
         if cursor_in_line < seg.end || (is_last_seg && cursor_in_line <= seg.end) {
             let seg_text = &line_text[seg.start..cursor_in_line];
-            let visual_offset: usize = seg_text.chars().map(char_width).sum();
+            let visual_offset = crate::text::width(seg_text);
             let seg_indent = if seg_i == 0 { indent } else { 0 };
             return (seg_i, seg_indent + visual_offset);
         }
@@ -253,33 +245,43 @@ pub fn word_wrap_segments(text: &str, width: usize, indent: usize) -> Vec<Range<
     let mut col: usize = indent;
     let mut last_space: Option<(usize, usize)> = None;
 
-    for (byte_pos, ch) in text.char_indices() {
-        let ch_bytes = ch.len_utf8();
-        let ch_cols = char_width(ch);
+    for (byte_pos, grapheme) in crate::text::graphemes(text) {
+        let end = byte_pos + grapheme.len();
+        let cols = crate::text::grapheme_width(grapheme);
 
-        if ch == ' ' {
-            col += ch_cols;
-            last_space = Some((byte_pos + ch_bytes, col));
+        if grapheme == " " {
+            col += cols;
+            last_space = Some((end, col));
 
             if col >= width {
-                segments.push(seg_start..byte_pos + ch_bytes);
-                seg_start = byte_pos + ch_bytes;
+                segments.push(seg_start..end);
+                seg_start = end;
                 col = 0;
                 last_space = None;
             }
-        } else {
-            col += ch_cols;
-            if col >= width {
-                if let Some((sp_byte, sp_col)) = last_space.take() {
-                    segments.push(seg_start..sp_byte);
-                    seg_start = sp_byte;
-                    col -= sp_col;
-                } else {
-                    let seg_end = byte_pos + ch_bytes;
-                    segments.push(seg_start..seg_end);
-                    seg_start = seg_end;
-                    col -= width;
-                }
+            continue;
+        }
+        if col + cols > width && byte_pos > seg_start {
+            if let Some((sp_byte, sp_col)) = last_space.take() {
+                segments.push(seg_start..sp_byte);
+                seg_start = sp_byte;
+                col -= sp_col;
+            } else {
+                segments.push(seg_start..byte_pos);
+                seg_start = byte_pos;
+                col = 0;
+            }
+        }
+        col += cols;
+        if col >= width {
+            if let Some((sp_byte, sp_col)) = last_space.take() {
+                segments.push(seg_start..sp_byte);
+                seg_start = sp_byte;
+                col -= sp_col;
+            } else {
+                segments.push(seg_start..end);
+                seg_start = end;
+                col = col.saturating_sub(width);
             }
         }
     }
@@ -334,8 +336,10 @@ impl InputBox<'_> {
                 continue;
             };
             let mut column = if line.show_prompt { 2 } else { 0 };
-            for (offset, c) in layout.expanded.text[line.start..line.end].char_indices() {
-                let width = u16::try_from(char_width(c)).unwrap_or(1);
+            for (offset, grapheme) in
+                crate::text::graphemes(&layout.expanded.text[line.start..line.end])
+            {
+                let width = u16::try_from(crate::text::grapheme_width(grapheme)).unwrap_or(1);
                 if selected.contains(&(line.start + offset)) {
                     for x in column..column + width {
                         if x < inner.width
@@ -602,6 +606,44 @@ mod tests {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
         app.interaction.mode = crate::app::AppMode::ModelPicker;
         assert_eq!(top_border(&app), "─".repeat(40));
+    }
+
+    #[test]
+    fn a_cjk_run_wraps_before_the_char_that_would_overflow() {
+        let text = "中文中文中文";
+        assert_eq!(word_wrap_segments(text, 5, 0), [0..6, 6..12, 12..18]);
+        assert_eq!(
+            word_wrap_segments(text, 4, 0),
+            [0..6, 6..12, 12..18, 18..18]
+        );
+        assert_eq!(word_wrap_segments("ab 中中", 5, 0), [0..3, 3..9]);
+    }
+
+    #[test]
+    fn the_cursor_sits_after_joined_emoji_by_their_cells() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "ab中\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{1f1ef}\u{1f1f5}".into();
+        app.input.cursor = app.input.text.len();
+        let area = Rect::new(0, 10, 40, 3);
+
+        let (x, _) = InputBox::new(&app).cursor_position(area);
+
+        assert_eq!(x, 1 + 2 + 2 + 2 + 2 + 2);
+    }
+
+    #[test]
+    fn a_wrapped_cjk_composer_keeps_every_char_on_screen() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "中文字幕".repeat(4);
+        app.input.cursor = app.input.text.len();
+
+        let buf = render_input(&app, 12, 8);
+        let shown: String = buffer_to_string(&buf)
+            .chars()
+            .filter(|c| !c.is_whitespace() && !"─>".contains(*c))
+            .collect();
+
+        assert_eq!(shown, "中文字幕".repeat(4));
     }
 
     #[test]
