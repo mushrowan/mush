@@ -20,7 +20,17 @@ const RECENT_TURNS_TO_KEEP: usize = 3;
 pub const MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
 
 #[must_use]
-pub fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
+pub fn reply_budget(model: &Model, options: &StreamOptions) -> u64 {
+    match model.api {
+        crate::types::Api::AnthropicMessages => {
+            let oauth = options.api_key.as_ref().is_none_or(ApiKey::is_oauth_token);
+            anthropic::sent_max_tokens(model, options, oauth)
+        }
+        _ => effective_max_output_tokens(model, options),
+    }
+}
+
+pub(crate) fn effective_max_output_tokens(model: &Model, options: &StreamOptions) -> u64 {
     if let Some(explicit) = options.max_tokens {
         return explicit.get();
     }
@@ -891,5 +901,31 @@ mod tests {
         };
         let got = effective_max_output_tokens(&model, &opts);
         assert_eq!(got, 120_000);
+    }
+
+    #[test]
+    fn the_reply_budget_follows_the_key_the_request_will_use() {
+        let catalogue = crate::models::anthropic_models();
+        let model = |id: &str| {
+            catalogue
+                .iter()
+                .find(|model| model.id.as_str() == id)
+                .unwrap()
+                .clone()
+        };
+        let with_key = |key: &str| StreamOptions {
+            api_key: ApiKey::new(key),
+            ..StreamOptions::default()
+        };
+        let oauth = with_key("sk-ant-oat01-fixture");
+        let api = with_key("sk-ant-api03-fixture");
+
+        assert_eq!(reply_budget(&model("claude-opus-5-5"), &oauth), 128_000);
+        assert_eq!(reply_budget(&model("claude-opus-5-5"), &api), 32_000);
+        assert_eq!(
+            reply_budget(&model("claude-opus-5-5"), &StreamOptions::default()),
+            128_000
+        );
+        assert_eq!(reply_budget(&model("claude-haiku-4-5"), &oauth), 64_000);
     }
 }

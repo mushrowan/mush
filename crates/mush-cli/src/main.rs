@@ -989,9 +989,16 @@ fn compaction_transform(
         system_prompt: Some(setup.system_prompt.clone()),
         tools: mush_agent::tool_definitions(&setup.tools, setup.client.model.api),
     });
-    let compaction_settings = setup.client.cfg.compaction.settings().leaving_room_for(
-        mush_ai::providers::effective_max_output_tokens(&setup.client.model, &setup.client.options),
-    );
+    let compaction_settings =
+        setup
+            .client
+            .cfg
+            .compaction
+            .settings()
+            .leaving_room_for(mush_ai::providers::reply_budget(
+                &setup.client.model,
+                &setup.client.options,
+            ));
     let after = mush_runtime::AfterCompaction {
         kernel: setup.kernel_state.clone(),
         ..Default::default()

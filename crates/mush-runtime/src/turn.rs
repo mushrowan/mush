@@ -308,7 +308,11 @@ impl SessionRuntime {
         let cwd = injections.cwd.clone().unwrap_or_default();
         let tool_registry = aligned_tools(tools, &model, config, cwd.clone());
         let live = Some(self.live_context(&tool_registry, &model));
-        let reply = mush_ai::providers::effective_max_output_tokens(&model, &config.options);
+        let mut call_options = self.call_options(config);
+        call_options.api_key = api_key;
+        call_options.account_id = account_id;
+        call_options.oauth_account = oauth_account;
+        let reply = mush_ai::providers::reply_budget(&model, &call_options);
         let transform = build_context_transform(
             target,
             self.auto_compact.clone(),
@@ -330,11 +334,6 @@ impl SessionRuntime {
         let steering = build_steering_callback(steering_queue.clone());
         let follow_up = build_steering_callback(steering_queue.clone());
         let (confirm_req_rx, confirm) = build_confirm_callback(config.confirm_tools);
-
-        let mut call_options = self.call_options(config);
-        call_options.api_key = api_key;
-        call_options.account_id = account_id;
-        call_options.oauth_account = oauth_account;
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let generation = self.turns.register_active(

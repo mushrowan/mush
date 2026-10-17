@@ -968,6 +968,20 @@ fn anthropic_cache_control(
     })
 }
 
+pub(crate) fn sent_max_tokens(model: &Model, options: &StreamOptions, is_oauth: bool) -> u64 {
+    let max_tokens = request_max_tokens(model, options, is_oauth);
+    match &options.thinking {
+        Some(level)
+            if *level != ThinkingLevel::Off
+                && model.reasoning
+                && !(model.supports_adaptive_thinking && !options.force_budget_thinking) =>
+        {
+            budget_thinking_tokens(level, max_tokens, model.max_output_tokens.get()).0
+        }
+        _ => max_tokens,
+    }
+}
+
 fn request_max_tokens(model: &Model, options: &StreamOptions, is_oauth: bool) -> u64 {
     let requested = if is_oauth {
         options
@@ -4994,5 +5008,48 @@ mod tests {
             .api(Api::AnthropicMessages)
             .timestamp_ms(Timestamp::zero())
             .build()
+    }
+
+    #[test]
+    fn the_sent_max_tokens_match_the_request_body() {
+        let catalogue = crate::models::anthropic_models();
+        let opus = catalogue
+            .iter()
+            .find(|model| model.id.as_str() == "claude-opus-5-5")
+            .unwrap()
+            .clone();
+        let budget = Model {
+            reasoning: true,
+            ..test_model()
+        };
+        let thinking = StreamOptions {
+            thinking: Some(ThinkingLevel::High),
+            ..Default::default()
+        };
+        let capped = StreamOptions {
+            max_tokens: Some(TokenCount::new(10_000)),
+            ..Default::default()
+        };
+        for (model, options) in [
+            (&opus, StreamOptions::default()),
+            (&opus, thinking.clone()),
+            (&budget, thinking),
+            (&budget, StreamOptions::default()),
+            (&opus, capped),
+        ] {
+            for oauth in [true, false] {
+                let body = build_request_body(model, &None, &[], &[], &options, oauth);
+                assert_eq!(
+                    sent_max_tokens(model, &options, oauth),
+                    body.max_tokens,
+                    "{} oauth={oauth}",
+                    model.id
+                );
+            }
+        }
+        assert_eq!(
+            sent_max_tokens(&opus, &StreamOptions::default(), true),
+            128_000
+        );
     }
 }

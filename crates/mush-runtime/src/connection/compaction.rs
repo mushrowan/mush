@@ -35,7 +35,7 @@ impl InProcessConnection {
             return false;
         }
         let model = self.runtime.model(&self.config.default_model);
-        let reply = mush_ai::providers::effective_max_output_tokens(&model, &self.config.options);
+        let reply = mush_ai::providers::reply_budget(&model, &self.config.options);
         mush_session::compact::needs_compaction_for_messages(
             self.runtime.context_tokens,
             model.compaction_window(),
