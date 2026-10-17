@@ -14,6 +14,7 @@ pub enum ModelPickerPurpose {
     #[default]
     Session,
     Subagent,
+    SubagentDefault,
 }
 
 pub const INHERIT_ID: &str = "";

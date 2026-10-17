@@ -8,6 +8,7 @@ pub struct ModelSelection(Arc<Mutex<Selection>>);
 struct Selection {
     current: String,
     subagent: Option<String>,
+    default_subagent: Option<String>,
     thinking: Option<mush_ai::types::ThinkingLevel>,
     accounts: mush_ai::types::SessionAccounts,
 }
@@ -18,6 +19,7 @@ impl ModelSelection {
         Self(Arc::new(Mutex::new(Selection {
             current,
             subagent,
+            default_subagent: None,
             thinking: None,
             accounts: mush_ai::types::SessionAccounts::default(),
         })))
@@ -50,6 +52,15 @@ impl ModelSelection {
         self.0.lock().subagent.clone()
     }
 
+    pub fn set_default_subagent(&self, id: Option<String>) {
+        self.0.lock().default_subagent = id;
+    }
+
+    #[must_use]
+    pub fn default_subagent(&self) -> Option<String> {
+        self.0.lock().default_subagent.clone()
+    }
+
     pub fn set_accounts(&self, accounts: mush_ai::types::SessionAccounts) {
         self.0.lock().accounts = accounts;
     }
@@ -65,6 +76,7 @@ impl ModelSelection {
         requested
             .map(str::to_string)
             .or_else(|| selection.subagent.clone())
+            .or_else(|| selection.default_subagent.clone())
     }
 }
 
@@ -978,6 +990,11 @@ mod tests {
 
         models.set_subagent(None);
         assert!(models.for_child(None).is_none());
+
+        models.set_default_subagent(Some("settings-default".into()));
+        assert_eq!(models.for_child(None).as_deref(), Some("settings-default"));
+        models.set_subagent(Some("cheap".into()));
+        assert_eq!(models.for_child(None).as_deref(), Some("cheap"));
     }
 
     #[test]

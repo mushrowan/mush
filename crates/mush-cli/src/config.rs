@@ -640,6 +640,9 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
         if let Some(providers) = persisted.preferred_providers {
             config.preferred_providers = providers;
         }
+        if let Some(model) = persisted.subagent_model {
+            config.subagent_model = mush_tui::settings::chosen_subagent_model(&model);
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
         let repo = cwd.join(".mush").join("settings.toml");
@@ -650,6 +653,9 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
             }
             if let Some(providers) = persisted.preferred_providers {
                 config.preferred_providers = providers;
+            }
+            if let Some(model) = persisted.subagent_model {
+                config.subagent_model = mush_tui::settings::chosen_subagent_model(&model);
             }
         }
     }

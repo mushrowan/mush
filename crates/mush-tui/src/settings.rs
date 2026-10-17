@@ -59,6 +59,7 @@ pub struct ScopedSettings {
     pub auto_compact: bool,
     pub price_cliff_pin: mush_session::compact::PriceCliffPin,
     pub preferred_providers: Vec<String>,
+    pub subagent_model: Option<String>,
 }
 
 impl Default for ScopedSettings {
@@ -69,6 +70,7 @@ impl Default for ScopedSettings {
             auto_compact: true,
             price_cliff_pin: mush_session::compact::PriceCliffPin::default(),
             preferred_providers: Vec::new(),
+            subagent_model: None,
         }
     }
 }
@@ -76,6 +78,7 @@ impl Default for ScopedSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItemKind {
     Scope,
+    SubagentModel,
     AutoCompact,
     PriceCliffPin,
     ContextOneM,
@@ -93,6 +96,7 @@ impl MenuItemKind {
     pub fn all() -> &'static [MenuItemKind] {
         &[
             Self::Scope,
+            Self::SubagentModel,
             Self::AutoCompact,
             Self::PriceCliffPin,
             Self::ContextOneM,
@@ -110,6 +114,7 @@ impl MenuItemKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Scope => "scope",
+            Self::SubagentModel => "subagent_model",
             Self::AutoCompact => "auto_compact",
             Self::PriceCliffPin => "compact_below_price_cliff",
             Self::ContextOneM => "context_1m",
@@ -133,6 +138,7 @@ impl MenuItemKind {
             Self::PriceCliffPin => {
                 "compact before a model's price cliff: off, for children, or for every session"
             }
+            Self::SubagentModel => "the model new subagents run when a spawn names none",
             Self::ContextOneM => "context-1m-2025-08-07: 1M context on claude models",
             Self::Effort => "effort-2025-11-24: send output_config.effort",
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
@@ -152,6 +158,7 @@ impl MenuItemKind {
         match self {
             Self::AutoCompact => settings.auto_compact = !settings.auto_compact,
             Self::PriceCliffPin => settings.price_cliff_pin = settings.price_cliff_pin.cycle_next(),
+            Self::SubagentModel => {}
             _ => match self.beta_mut(&mut settings.anthropic_betas) {
                 Some(flag) => *flag = !*flag,
                 None => settings.scope = settings.scope.cycle_next(),
@@ -168,6 +175,12 @@ impl MenuItemKind {
         if self == Self::PriceCliffPin {
             return settings.price_cliff_pin.as_str().to_string();
         }
+        if self == Self::SubagentModel {
+            return settings
+                .subagent_model
+                .clone()
+                .unwrap_or_else(|| "the parent's model".to_string());
+        }
         let mut betas = settings.anthropic_betas.clone();
         match self.beta_mut(&mut betas) {
             Some(flag) => bool_str(*flag).to_string(),
@@ -182,7 +195,9 @@ impl MenuItemKind {
 
     pub(crate) fn beta_mut(self, betas: &mut AnthropicBetas) -> Option<&mut bool> {
         Some(match self {
-            Self::Scope | Self::AutoCompact | Self::PriceCliffPin => return None,
+            Self::Scope | Self::SubagentModel | Self::AutoCompact | Self::PriceCliffPin => {
+                return None;
+            }
             Self::ContextOneM => &mut betas.context_1m,
             Self::Effort => &mut betas.effort,
             Self::ContextManagement => &mut betas.context_management,
@@ -240,6 +255,13 @@ pub struct PersistedSettings {
     pub compact_below_price_cliff: Option<mush_session::compact::PriceCliffPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_providers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_model: Option<String>,
+}
+
+#[must_use]
+pub fn chosen_subagent_model(saved: &str) -> Option<String> {
+    (!saved.is_empty()).then(|| saved.to_string())
 }
 
 impl From<&ScopedSettings> for PersistedSettings {
@@ -249,6 +271,7 @@ impl From<&ScopedSettings> for PersistedSettings {
             rlm_max_depth: None,
             compact_below_price_cliff: Some(s.price_cliff_pin),
             preferred_providers: Some(s.preferred_providers.clone()),
+            subagent_model: Some(s.subagent_model.clone().unwrap_or_default()),
         }
     }
 }
@@ -373,6 +396,45 @@ mod tests {
         assert_eq!(
             loaded.preferred_providers,
             Some(vec!["anthropic".to_string(), "openrouter".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_subagent_model_row_names_the_default_and_saves_the_parent_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut settings = ScopedSettings {
+            scope: SettingsScope::Repo,
+            ..Default::default()
+        };
+        assert_eq!(
+            MenuItemKind::SubagentModel.value(&settings),
+            "the parent's model"
+        );
+        assert_eq!(
+            MenuItemKind::SubagentModel.activate(&mut settings),
+            "the parent's model"
+        );
+        assert_eq!(
+            settings.scope,
+            SettingsScope::Repo,
+            "the row opens a picker instead"
+        );
+
+        let saved = |settings: &ScopedSettings| {
+            let path = persist(settings, tmp.path()).unwrap().unwrap();
+            toml::from_str::<PersistedSettings>(&std::fs::read_to_string(&path).unwrap())
+                .unwrap()
+                .subagent_model
+                .unwrap()
+        };
+        assert_eq!(saved(&settings), "");
+        assert_eq!(chosen_subagent_model(""), None);
+
+        settings.subagent_model = Some("haiku".into());
+        assert_eq!(MenuItemKind::SubagentModel.value(&settings), "haiku");
+        assert_eq!(
+            chosen_subagent_model(&saved(&settings)),
+            Some("haiku".into())
         );
     }
 

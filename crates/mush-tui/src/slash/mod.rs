@@ -100,6 +100,9 @@ pub enum SlashAction {
     Providers {
         names: Vec<String>,
     },
+    SubagentDefault {
+        model_id: Option<String>,
+    },
     Pause {
         reason: Option<String>,
     },

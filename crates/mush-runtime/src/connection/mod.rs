@@ -75,6 +75,7 @@ pub enum ClientCommand {
     SetAutoCompact(bool),
     SetPriceCliffPin(mush_session::compact::PriceCliffPin),
     SetPreferredProviders(Vec<String>),
+    SetDefaultSubagentModel(Option<String>),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
     SummariseAndNavigate {
@@ -1665,6 +1666,7 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::SetAutoCompact(_)
         | ClientCommand::SetPriceCliffPin(_)
         | ClientCommand::SetPreferredProviders(_)
+        | ClientCommand::SetDefaultSubagentModel(_)
         | ClientCommand::SetCompactionModel(_)
         | ClientCommand::AnswerKernelBusy(_)
         | ClientCommand::SideQuestion(_)
@@ -1804,6 +1806,9 @@ impl AgentConnection for InProcessConnection {
                 if let Some(family) = self.root_family() {
                     family.set_preferred_providers(providers);
                 }
+            }
+            ClientCommand::SetDefaultSubagentModel(model) => {
+                self.runtime.models.set_default_subagent(model);
             }
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);

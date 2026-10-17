@@ -267,20 +267,25 @@ fn confirm_model_pick(app: &mut App) -> Option<AppEvent> {
     let id = app.selected_model_id()?;
     let picker = app.interaction.model_picker.as_ref();
     let show_all = picker.map(|p| p.show_all).unwrap_or(false);
-    let subagent =
-        picker.is_some_and(|p| p.purpose == crate::model_picker::ModelPickerPurpose::Subagent);
+    let purpose = picker.map(|p| p.purpose).unwrap_or_default();
     app.close_model_picker();
-    let action = if subagent {
-        let unset = id == crate::model_picker::INHERIT_ID;
-        crate::slash::SlashAction::SubagentModel {
-            model_id: (!unset).then_some(id),
-            unset,
+    let unset = id == crate::model_picker::INHERIT_ID;
+    let action = match purpose {
+        crate::model_picker::ModelPickerPurpose::Subagent => {
+            crate::slash::SlashAction::SubagentModel {
+                model_id: (!unset).then_some(id),
+                unset,
+            }
         }
-    } else {
-        crate::slash::SlashAction::Model {
+        crate::model_picker::ModelPickerPurpose::SubagentDefault => {
+            crate::slash::SlashAction::SubagentDefault {
+                model_id: (!unset).then_some(id),
+            }
+        }
+        crate::model_picker::ModelPickerPurpose::Session => crate::slash::SlashAction::Model {
             model_id: Some(id),
             show_all,
-        }
+        },
     };
     Some(AppEvent::SlashCommand { action })
 }

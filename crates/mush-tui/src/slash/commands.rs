@@ -181,6 +181,9 @@ pub async fn handle(
         SlashAction::Providers { names } => {
             set_providers(app, tui_config, connection, names).await;
         }
+        SlashAction::SubagentDefault { model_id } => {
+            set_subagent_default(app, tui_config, connection, model_id.clone()).await;
+        }
         SlashAction::Effort { level } => {
             handle_effort(app, tui_config.model.reasoning, level.as_deref());
         }
@@ -324,6 +327,29 @@ async fn set_providers(
         Err(error) => format!(" (persist failed: {error})"),
     };
     app.push_system_message(format!("preferred providers: {}{note}", names.join(", ")));
+}
+
+async fn set_subagent_default(
+    app: &mut App,
+    tui_config: &mut TuiConfig,
+    connection: &mut dyn mush_runtime::AgentConnection,
+    model_id: Option<String>,
+) {
+    tui_config.settings.subagent_model.clone_from(&model_id);
+    let _ = connection
+        .send(mush_runtime::ClientCommand::SetDefaultSubagentModel(
+            model_id.clone(),
+        ))
+        .await;
+    let note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
+        Ok(Some(path)) => format!(" (saved to {})", path.display()),
+        Ok(None) => " (this session)".to_string(),
+        Err(error) => format!(" (persist failed: {error})"),
+    };
+    app.push_system_message(match model_id {
+        Some(id) => format!("new subagents default to {id}{note}"),
+        None => format!("new subagents default to the model their parent runs{note}"),
+    });
 }
 
 async fn set_subagent_model(
@@ -841,6 +867,14 @@ fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
         out,
         "auto_compact: {} (this session)",
         if settings.auto_compact { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        out,
+        "subagent_model: {}",
+        settings
+            .subagent_model
+            .as_deref()
+            .unwrap_or("the parent's model")
     );
     let _ = writeln!(
         out,

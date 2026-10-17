@@ -1351,7 +1351,6 @@ struct ChildSeed {
     lsp_diagnostics: Option<mush_agent::DiagnosticCallback>,
     saver: Option<mush_runtime::SessionSaver>,
     rlm_max_depth: u32,
-    subagent_model: Option<String>,
     models: mush_runtime::ModelSelection,
     session_dir: std::path::PathBuf,
     prompt_overrides: setup::PromptOverrides,
@@ -1488,10 +1487,7 @@ fn child_model(
     spec: &mush_runtime::ChildSpec,
     preferred: Vec<String>,
 ) -> Result<Model, String> {
-    let chosen = seed
-        .models
-        .for_child(spec.model.as_deref())
-        .or_else(|| seed.subagent_model.clone());
+    let chosen = seed.models.for_child(spec.model.as_deref());
     let parent = parent_model_id(seed, spec);
     let Some(id) = chosen else {
         return Ok(
@@ -1620,6 +1616,7 @@ fn worker_config(
         setup.client.model.id.to_string(),
         session.meta.subagent_model.clone(),
     );
+    models.set_default_subagent(setup.client.cfg.subagent_model.clone());
     let (base_depth, base_source) = setup::rlm_max_depth(&setup.client.cfg);
     let max_depth = session.meta.rlm_max_depth.unwrap_or(base_depth);
     let prompt_overrides = setup::PromptOverrides {
@@ -1651,7 +1648,6 @@ fn worker_config(
         lsp_diagnostics: setup.lsp_diagnostics.clone(),
         saver: opened.saver.as_ref().map(|saver| saver.handle()),
         rlm_max_depth: max_depth,
-        subagent_model: setup.client.cfg.subagent_model.clone(),
         session_dir: SessionStore::default_dir(),
         prompt_overrides: prompt_overrides.clone(),
         compaction: setup.client.cfg.compaction,
@@ -1860,6 +1856,7 @@ fn client_config(
             auto_compact: client.cfg.compaction.enabled,
             price_cliff_pin: client.cfg.compaction.below_price_cliff,
             preferred_providers: client.cfg.preferred_providers.clone(),
+            subagent_model: client.cfg.subagent_model.clone(),
         },
         favourite_models,
         favourites_locked,
@@ -2181,7 +2178,6 @@ mod tests {
             lsp_diagnostics: None,
             saver: None,
             rlm_max_depth: 2,
-            subagent_model: None,
             session_dir: std::env::temp_dir(),
             prompt_overrides: Default::default(),
             compaction,

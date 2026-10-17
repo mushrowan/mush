@@ -654,6 +654,11 @@ async fn apply_settings_toggle(
     else {
         return;
     };
+    if item == crate::settings::MenuItemKind::SubagentModel {
+        session.app.settings_menu = None;
+        session.app.open_subagent_default_picker();
+        return;
+    }
     let new_value = item.activate(&mut tui_config.settings);
     if !item.persists() {
         let on = tui_config.settings.auto_compact;
@@ -1055,6 +1060,40 @@ mod tests {
         session.app.input.text = draft.into();
         session.app.input.cursor = draft.len();
         session
+    }
+
+    #[tokio::test]
+    async fn the_settings_subagent_row_opens_a_picker_for_the_default() {
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+        session.app.completion.model_completions = vec![crate::slash_menu::ModelCompletion {
+            id: "claude-haiku-5-5".into(),
+            name: "Claude Haiku 5.5".into(),
+            provider: "anthropic".into(),
+            stale: false,
+            description: None,
+            speed_tiers: Vec::new(),
+            priority: 0,
+            visibility: None,
+        }];
+        let mut tui_config = streaming_test_config();
+        let index = crate::settings::MenuItemKind::all()
+            .iter()
+            .position(|item| *item == crate::settings::MenuItemKind::SubagentModel)
+            .unwrap();
+        session.app.settings_menu = Some(crate::settings::SettingsMenuState {
+            selected: index,
+            scroll_offset: 0,
+        });
+
+        apply_settings_toggle(&mut session, &mut tui_config).await;
+
+        assert!(session.app.settings_menu.is_none());
+        let picker = session.app.interaction.model_picker.as_ref().unwrap();
+        assert_eq!(
+            picker.purpose,
+            crate::model_picker::ModelPickerPurpose::SubagentDefault
+        );
+        assert_eq!(picker.models[0].id, crate::model_picker::INHERIT_ID);
     }
 
     #[tokio::test]

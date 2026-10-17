@@ -112,9 +112,17 @@ impl App {
     }
 
     pub fn open_subagent_model_picker(&mut self) {
+        self.open_subagent_picker_for(crate::model_picker::ModelPickerPurpose::Subagent);
+    }
+
+    pub fn open_subagent_default_picker(&mut self) {
+        self.open_subagent_picker_for(crate::model_picker::ModelPickerPurpose::SubagentDefault);
+    }
+
+    fn open_subagent_picker_for(&mut self, purpose: crate::model_picker::ModelPickerPurpose) {
         self.open_model_picker_overlay_inner(false);
         if let Some(picker) = self.interaction.model_picker.as_mut() {
-            picker.purpose = crate::model_picker::ModelPickerPurpose::Subagent;
+            picker.purpose = purpose;
             picker.tab = crate::model_picker::ModelPickerTab::All;
             picker.models.insert(0, crate::model_picker::inherit_row());
             picker.selected = 0;
