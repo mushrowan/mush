@@ -72,16 +72,22 @@ pub fn child_thinking(
     model: &mush_ai::types::Model,
     requested: Option<&mush_ai::types::ThinkingLevel>,
     parent: &mush_ai::types::ThinkingLevel,
+    same_model: bool,
 ) -> Result<mush_ai::types::ThinkingLevel, String> {
     use mush_ai::types::ThinkingLevel;
     let supported = &model.supported_thinking_levels;
     match requested {
         Some(level) => {
-            if *level == ThinkingLevel::Off || supported.is_empty() || supported.contains(level) {
+            let listed = if supported.is_empty() {
+                ThinkingLevel::LADDER.contains(level)
+            } else {
+                supported.contains(level)
+            };
+            if *level == ThinkingLevel::Off || listed {
                 return Ok(level.clone());
             }
             let names: Vec<&str> = std::iter::once("off")
-                .chain(supported.iter().filter_map(ThinkingLevel::effort_name))
+                .chain(thinking_ladder(model).filter_map(ThinkingLevel::effort_name))
                 .collect();
             Err(format!(
                 "thinking level {} is not supported by {}, supported levels: {}",
@@ -90,11 +96,38 @@ pub fn child_thinking(
                 names.join(", ")
             ))
         }
+        None if !same_model => Ok(middle_thinking(model)),
         None if *parent == ThinkingLevel::Off => Ok(ThinkingLevel::Off),
         None => Ok(model.clamp_thinking(parent)),
     }
 }
 
+fn thinking_ladder(
+    model: &mush_ai::types::Model,
+) -> impl Iterator<Item = &mush_ai::types::ThinkingLevel> {
+    use mush_ai::types::ThinkingLevel;
+    let listed = &model.supported_thinking_levels;
+    let ladder: &[ThinkingLevel] = if listed.is_empty() {
+        &ThinkingLevel::LADDER
+    } else {
+        listed
+    };
+    ladder.iter().filter(|level| **level != ThinkingLevel::Off)
+}
+
+#[must_use]
+pub fn middle_thinking(model: &mush_ai::types::Model) -> mush_ai::types::ThinkingLevel {
+    use mush_ai::types::ThinkingLevel;
+    if !model.reasoning {
+        return ThinkingLevel::Off;
+    }
+    let ladder: Vec<&ThinkingLevel> = thinking_ladder(model).collect();
+    ladder
+        .get(ladder.len().saturating_sub(1) / 2)
+        .map_or(ThinkingLevel::Off, |level| (*level).clone())
+}
+
+pub const SPAWN_THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 pub const MODEL_SEARCH_LIMIT: usize = 10;
 pub const MAX_MODEL_SEARCH_LIMIT: usize = 50;
 const CLOSE_MATCHES: usize = 3;
@@ -136,15 +169,16 @@ impl ModelChoice {
 }
 
 fn spawnable_thinking(model: &mush_ai::types::Model) -> Vec<String> {
-    use mush_ai::types::ThinkingLevel;
-    let ladder = &model.supported_thinking_levels;
-    ThinkingLevel::LADDER
-        .iter()
-        .filter(|level| {
-            **level == ThinkingLevel::Off
-                || (model.reasoning && (ladder.is_empty() || ladder.contains(level)))
-        })
-        .map(|level| level.effort_name().unwrap_or("off").to_string())
+    if !model.reasoning {
+        return vec!["off".into()];
+    }
+    std::iter::once("off")
+        .chain(
+            thinking_ladder(model)
+                .filter_map(mush_ai::types::ThinkingLevel::effort_name)
+                .filter(|name| SPAWN_THINKING.contains(name)),
+        )
+        .map(str::to_string)
         .collect()
 }
 
@@ -329,7 +363,10 @@ mod tests {
             haiku.context_window,
             catalogue[0].model.context_window.get()
         );
-        assert_eq!(haiku.thinking, ["off", "low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            haiku.thinking,
+            ["off", "low", "medium", "high", "xhigh", "max"]
+        );
         assert!(haiku.cost.is_some());
 
         let old = &find_models(&catalogue, "claude-haiku-4-5", 1, anthropic_only)[0];
@@ -385,25 +422,88 @@ mod tests {
     }
 
     #[test]
-    fn a_child_follows_the_parent_thinking_clamped_to_its_model() {
+    fn a_child_on_its_parents_model_follows_the_parent_thinking_clamped_to_the_model() {
         use mush_ai::types::ThinkingLevel;
         let mut model = crate::testing::echo_model();
         model.supported_thinking_levels = vec![ThinkingLevel::Low, ThinkingLevel::Medium];
         assert_eq!(
-            child_thinking(&model, None, &ThinkingLevel::Xhigh),
+            child_thinking(&model, None, &ThinkingLevel::Xhigh, true),
             Ok(ThinkingLevel::Medium)
         );
         assert_eq!(
-            child_thinking(&model, None, &ThinkingLevel::Off),
+            child_thinking(&model, None, &ThinkingLevel::Off, true),
             Ok(ThinkingLevel::Off)
         );
         assert_eq!(
-            child_thinking(&model, Some(&ThinkingLevel::Low), &ThinkingLevel::High),
+            child_thinking(
+                &model,
+                Some(&ThinkingLevel::Low),
+                &ThinkingLevel::High,
+                true
+            ),
             Ok(ThinkingLevel::Low)
         );
-        let refused =
-            child_thinking(&model, Some(&ThinkingLevel::High), &ThinkingLevel::Off).unwrap_err();
+        let refused = child_thinking(
+            &model,
+            Some(&ThinkingLevel::High),
+            &ThinkingLevel::Off,
+            true,
+        )
+        .unwrap_err();
         assert!(refused.contains("off, low, medium"), "{refused}");
+    }
+
+    #[test]
+    fn a_child_on_another_model_starts_at_the_middle_of_its_ladder() {
+        use mush_ai::types::ThinkingLevel;
+        let max = ThinkingLevel::Other("max".into());
+        let mut model = crate::testing::echo_model();
+        let middle = |model: &mush_ai::types::Model| {
+            child_thinking(model, None, &ThinkingLevel::Off, false).unwrap()
+        };
+
+        model.supported_thinking_levels = vec![
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            max.clone(),
+        ];
+        assert_eq!(middle(&model), ThinkingLevel::High);
+
+        model.supported_thinking_levels = vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            max.clone(),
+        ];
+        assert_eq!(middle(&model), ThinkingLevel::Medium, "off is not a rung");
+
+        model.supported_thinking_levels = Vec::new();
+        assert_eq!(middle(&model), ThinkingLevel::Medium);
+
+        model.reasoning = false;
+        assert_eq!(middle(&model), ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn a_child_can_ask_for_max_only_on_a_model_that_lists_it() {
+        use mush_ai::types::ThinkingLevel;
+        let max = ThinkingLevel::Other("max".into());
+        let mut model = crate::testing::echo_model();
+        model.supported_thinking_levels = vec![ThinkingLevel::High, max.clone()];
+        assert_eq!(
+            child_thinking(&model, Some(&max), &ThinkingLevel::Off, false),
+            Ok(max.clone())
+        );
+
+        model.supported_thinking_levels = Vec::new();
+        let refused = child_thinking(&model, Some(&max), &ThinkingLevel::Off, false).unwrap_err();
+        assert!(
+            refused.contains("off, minimal, low, medium, high, xhigh"),
+            "{refused}"
+        );
     }
 
     #[test]

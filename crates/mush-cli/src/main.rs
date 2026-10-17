@@ -1471,18 +1471,21 @@ fn open_child_session(
     }
 }
 
+fn parent_model_id(seed: &ChildSeed, spec: &mush_runtime::ChildSpec) -> String {
+    spec.parent_model
+        .clone()
+        .unwrap_or_else(|| seed.models.current())
+}
+
 fn child_model(seed: &ChildSeed, spec: &mush_runtime::ChildSpec) -> Result<Model, String> {
     let chosen = seed
         .models
         .for_child(spec.model.as_deref())
         .or_else(|| seed.subagent_model.clone());
     let Some(id) = chosen else {
-        let parent = spec
-            .parent_model
-            .clone()
-            .unwrap_or_else(|| seed.models.current());
         return Ok(
-            mush_ai::discovery::resolve_model_by_id(&parent).unwrap_or_else(|| seed.model.clone())
+            mush_ai::discovery::resolve_model_by_id(&parent_model_id(seed, spec))
+                .unwrap_or_else(|| seed.model.clone()),
         );
     };
     let store = mush_ai::credentials::default_store();
@@ -1511,6 +1514,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 &model,
                 spec.thinking.as_ref(),
                 &parent_thinking,
+                model.id.as_str() == parent_model_id(&seed, &spec),
             )?);
             let (session, lease) = open_child_session(&seed, &spec, &model)?;
             let (sinks, signals) = mush_runtime::kernel_channels();

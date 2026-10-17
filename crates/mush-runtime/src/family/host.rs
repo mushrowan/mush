@@ -680,9 +680,14 @@ fn heartbeat_delivery(mode: Option<String>) -> Result<Option<Delivery>, HostErro
 
 fn requested_thinking(level: Option<String>) -> Result<Option<ThinkingLevel>, HostError> {
     match level.as_deref().map(ThinkingLevel::from_effort_str) {
-        Some(ThinkingLevel::Other(other)) => Err(HostError(format!(
-            "thinking must be off, minimal, low, medium, high or xhigh, not {other}"
-        ))),
+        Some(ThinkingLevel::Other(other))
+            if !crate::models::SPAWN_THINKING.contains(&other.as_str()) =>
+        {
+            Err(HostError(format!(
+                "thinking must be one of {}, not {other}",
+                crate::models::SPAWN_THINKING.join(", ")
+            )))
+        }
         known => Ok(known),
     }
 }

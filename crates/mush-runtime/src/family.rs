@@ -3500,7 +3500,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(refused.0.contains("not hgih"), "{}", refused.0);
+        assert!(refused.0.contains("xhigh, max"), "{}", refused.0);
         assert!(family.all().is_empty());
+
+        handler
+            .handle(
+                "rlm.spawn",
+                serde_json::json!({ "prompt": "p", "name": "n", "thinking": "max" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(family.all().len(), 1);
     }
 
     #[tokio::test]
