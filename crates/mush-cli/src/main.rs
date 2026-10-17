@@ -1831,6 +1831,7 @@ fn client_config(
         settings: mush_tui::settings::ScopedSettings {
             scope: client.cfg.settings.scope,
             anthropic_betas: client.cfg.settings.anthropic_betas.clone(),
+            auto_compact: client.cfg.compaction.enabled,
         },
         favourite_models,
         favourites_locked,

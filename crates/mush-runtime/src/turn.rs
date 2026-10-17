@@ -311,7 +311,7 @@ impl SessionRuntime {
         let reply = mush_ai::providers::effective_max_output_tokens(&model, &config.options);
         let transform = build_context_transform(
             target,
-            config.auto_compact,
+            self.auto_compact.clone(),
             config.compaction.leaving_room_for(reply),
             model.compaction_window(),
             registry.clone(),
@@ -363,7 +363,7 @@ impl SessionRuntime {
                 hooks: Box::new(mush_agent::ClosureHooks {
                     steering,
                     follow_up,
-                    transform,
+                    transform: Some(transform),
                     confirm,
                 }),
                 injections,
@@ -420,7 +420,7 @@ impl AfterCompaction {
 #[allow(clippy::too_many_arguments)]
 pub fn build_context_transform(
     target: CompactionTarget,
-    do_auto_compact: bool,
+    enabled: Arc<std::sync::atomic::AtomicBool>,
     settings: mush_session::compact::CompactionSettings,
     compaction_window: TokenCount,
     registry: ApiRegistry,
@@ -430,10 +430,7 @@ pub fn build_context_transform(
     cwd: std::path::PathBuf,
     live: Option<mush_session::compact::LiveContext>,
     after: AfterCompaction,
-) -> Option<mush_agent::TransformFn> {
-    if !do_auto_compact {
-        return None;
-    }
+) -> mush_agent::TransformFn {
     let measured_len = Arc::new(std::sync::atomic::AtomicUsize::new(measured_len));
     let overhead = live
         .as_ref()
@@ -443,8 +440,9 @@ pub fn build_context_transform(
     let registry = Arc::new(registry);
     let live = Arc::new(live);
 
-    Some(Box::new(move |messages, pressure| {
+    Box::new(move |messages, pressure| {
         let owned_messages = messages.to_vec();
+        let enabled = enabled.load(std::sync::atomic::Ordering::Relaxed);
         let target = target.clone();
         let ctx_tokens = context_tokens_shared.clone();
         let measured_len = measured_len.clone();
@@ -454,6 +452,9 @@ pub fn build_context_transform(
         let live = live.clone();
         let after = after.clone();
         Box::pin(async move {
+            if !enabled {
+                return mush_agent::ContextTransformResult::Unchanged;
+            }
             let current_tokens =
                 TokenCount::new(ctx_tokens.load(std::sync::atomic::Ordering::Relaxed));
             let measured_tokens = mush_session::compact::compaction_tokens(
@@ -512,7 +513,7 @@ pub fn build_context_transform(
             );
             mush_agent::ContextTransformResult::Compacted(compaction)
         })
-    }))
+    })
 }
 
 #[must_use]
@@ -782,7 +783,7 @@ mod tests {
         let context_tokens = Arc::new(std::sync::atomic::AtomicU64::new(6_000));
         let transform = build_context_transform(
             CompactionTarget::session_model(model, StreamOptions::default()),
-            true,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             mush_session::compact::CompactionSettings {
                 keep_recent_tokens: 2_000,
                 ..mush_session::compact::CompactionSettings::default()
@@ -795,8 +796,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             AfterCompaction::default(),
-        )
-        .expect("auto-compaction enabled should build a transform");
+        );
 
         let baseline: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         assert!(matches!(
@@ -818,6 +818,49 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_switched_off_transform_leaves_even_an_overflowing_context_alone() {
+        let model = mush_ai::models::all_models_with_user()
+            .into_iter()
+            .next()
+            .unwrap();
+        let enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let transform = build_context_transform(
+            CompactionTarget::session_model(model, StreamOptions::default()),
+            enabled.clone(),
+            mush_session::compact::CompactionSettings {
+                keep_recent_tokens: 2_000,
+                ..mush_session::compact::CompactionSettings::default()
+            },
+            TokenCount::new(10_000),
+            ApiRegistry::new(),
+            Arc::new(std::sync::atomic::AtomicU64::new(9_900)),
+            0,
+            mush_agent::LifecycleHooks::default(),
+            std::path::PathBuf::from("/tmp"),
+            None,
+            AfterCompaction::default(),
+        );
+        let mut messages: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
+        messages.push(user_msg("x".repeat(16_000)));
+
+        for pressure in [
+            mush_agent::ContextPressure::Normal,
+            mush_agent::ContextPressure::Overflowed,
+        ] {
+            assert!(matches!(
+                transform(&messages, pressure).await,
+                mush_agent::ContextTransformResult::Unchanged
+            ));
+        }
+
+        enabled.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            transform(&messages, mush_agent::ContextPressure::Normal).await,
+            mush_agent::ContextTransformResult::Compacted(_)
+        ));
+    }
+
     struct NamedKernel;
 
     #[async_trait::async_trait]
@@ -835,7 +878,7 @@ mod tests {
             .unwrap();
         let transform = build_context_transform(
             CompactionTarget::session_model(model, StreamOptions::default()),
-            true,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             mush_session::compact::CompactionSettings {
                 keep_recent_tokens: 2_000,
                 ..mush_session::compact::CompactionSettings::default()
@@ -851,8 +894,7 @@ mod tests {
                 kernel: Some(Arc::new(NamedKernel)),
                 ..AfterCompaction::default()
             },
-        )
-        .expect("auto-compaction enabled should build a transform");
+        );
         let mut grown: Vec<Message> = (0..20).map(|i| user_msg(format!("small {i}"))).collect();
         grown.push(user_msg("x".repeat(16_000)));
 
@@ -900,7 +942,7 @@ mod tests {
             .unwrap();
         build_context_transform(
             CompactionTarget::session_model(model, StreamOptions::default()),
-            true,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             mush_session::compact::CompactionSettings {
                 keep_recent_tokens: 2_000,
                 ..mush_session::compact::CompactionSettings::default()
@@ -914,7 +956,6 @@ mod tests {
             None,
             after,
         )
-        .expect("auto-compaction enabled should build a transform")
     }
 
     #[tokio::test]
@@ -1026,7 +1067,7 @@ mod tests {
             .collect();
         let transform = build_context_transform(
             CompactionTarget::session_model(model, StreamOptions::default()),
-            true,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             mush_session::compact::CompactionSettings::default(),
             TokenCount::new(10_000),
             ApiRegistry::new(),
@@ -1036,8 +1077,7 @@ mod tests {
             std::path::PathBuf::from("/tmp"),
             None,
             AfterCompaction::default(),
-        )
-        .expect("auto-compaction enabled should build a transform");
+        );
 
         match transform(&messages, mush_agent::ContextPressure::Normal).await {
             mush_agent::ContextTransformResult::Unchanged => {}

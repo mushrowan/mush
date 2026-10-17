@@ -501,7 +501,7 @@ mod tests {
                     model.clone(),
                     StreamOptions::default(),
                 ),
-                true,
+                Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 mush_session::compact::CompactionSettings {
                     keep_recent_tokens: 5_000,
                     ..mush_session::compact::CompactionSettings::default()
@@ -523,7 +523,7 @@ mod tests {
                 options: StreamOptions::default(),
                 max_turns: 2,
                 hooks: Box::new(mush_agent::ClosureHooks {
-                    transform,
+                    transform: Some(transform),
                     ..Default::default()
                 }),
                 injections: Default::default(),

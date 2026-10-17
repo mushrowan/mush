@@ -162,6 +162,7 @@ pub async fn handle(
             }
         }
         SlashAction::Settings { args } => {
+            tui_config.settings.auto_compact = connection.state().auto_compact;
             handle_settings(app, tui_config, args);
             let _ = connection
                 .send(mush_runtime::ClientCommand::SetStreamOptions(Box::new(
@@ -810,6 +811,11 @@ fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
     let b = &settings.anthropic_betas;
     let mut out = String::new();
     let _ = writeln!(out, "scope: {}", settings.scope.as_str());
+    let _ = writeln!(
+        out,
+        "auto_compact: {} (this session)",
+        if settings.auto_compact { "on" } else { "off" }
+    );
     let _ = writeln!(out, "anthropic betas:");
     let _ = writeln!(out, "  context_1m         = {}", b.context_1m);
     let _ = writeln!(out, "  effort             = {}", b.effort);

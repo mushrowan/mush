@@ -52,15 +52,27 @@ impl SettingsScope {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ScopedSettings {
     pub scope: SettingsScope,
     pub anthropic_betas: AnthropicBetas,
+    pub auto_compact: bool,
+}
+
+impl Default for ScopedSettings {
+    fn default() -> Self {
+        Self {
+            scope: SettingsScope::default(),
+            anthropic_betas: AnthropicBetas::default(),
+            auto_compact: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuItemKind {
     Scope,
+    AutoCompact,
     ContextOneM,
     Effort,
     ContextManagement,
@@ -76,6 +88,7 @@ impl MenuItemKind {
     pub fn all() -> &'static [MenuItemKind] {
         &[
             Self::Scope,
+            Self::AutoCompact,
             Self::ContextOneM,
             Self::Effort,
             Self::ContextManagement,
@@ -91,6 +104,7 @@ impl MenuItemKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Scope => "scope",
+            Self::AutoCompact => "auto_compact",
             Self::ContextOneM => "context_1m",
             Self::Effort => "effort",
             Self::ContextManagement => "context_management",
@@ -106,6 +120,9 @@ impl MenuItemKind {
     pub fn description(self) -> &'static str {
         match self {
             Self::Scope => "where /settings changes get persisted",
+            Self::AutoCompact => {
+                "compact automatically as the context fills, for this session only"
+            }
             Self::ContextOneM => "context-1m-2025-08-07: 1M context on claude models",
             Self::Effort => "effort-2025-11-24: send output_config.effort",
             Self::ContextManagement => "context-management-2025-06-27: server-side edits",
@@ -122,15 +139,22 @@ impl MenuItemKind {
     }
 
     pub fn activate(self, settings: &mut ScopedSettings) -> String {
-        match self.beta_mut(&mut settings.anthropic_betas) {
-            Some(flag) => *flag = !*flag,
-            None => settings.scope = settings.scope.cycle_next(),
+        if self == Self::AutoCompact {
+            settings.auto_compact = !settings.auto_compact;
+        } else {
+            match self.beta_mut(&mut settings.anthropic_betas) {
+                Some(flag) => *flag = !*flag,
+                None => settings.scope = settings.scope.cycle_next(),
+            }
         }
         self.value(settings)
     }
 
     #[must_use]
     pub fn value(self, settings: &ScopedSettings) -> String {
+        if self == Self::AutoCompact {
+            return bool_str(settings.auto_compact).to_string();
+        }
         let mut betas = settings.anthropic_betas.clone();
         match self.beta_mut(&mut betas) {
             Some(flag) => bool_str(*flag).to_string(),
@@ -138,9 +162,14 @@ impl MenuItemKind {
         }
     }
 
+    #[must_use]
+    pub fn persists(self) -> bool {
+        self != Self::AutoCompact
+    }
+
     pub(crate) fn beta_mut(self, betas: &mut AnthropicBetas) -> Option<&mut bool> {
         Some(match self {
-            Self::Scope => return None,
+            Self::Scope | Self::AutoCompact => return None,
             Self::ContextOneM => &mut betas.context_1m,
             Self::Effort => &mut betas.effort,
             Self::ContextManagement => &mut betas.context_management,
@@ -323,6 +352,7 @@ mod tests {
         let settings = ScopedSettings {
             scope: SettingsScope::Session,
             anthropic_betas: AnthropicBetas::default(),
+            ..Default::default()
         };
         let result = persist(&settings, tmp.path()).unwrap();
         assert_eq!(result, None);
@@ -334,6 +364,7 @@ mod tests {
         let settings = ScopedSettings {
             scope: SettingsScope::Disabled,
             anthropic_betas: AnthropicBetas::default(),
+            ..Default::default()
         };
         let err = persist(&settings, tmp.path()).unwrap_err();
         assert!(err.contains("disabled"));
@@ -348,6 +379,7 @@ mod tests {
                 context_1m: false,
                 ..Default::default()
             },
+            ..Default::default()
         };
         let path = persist(&settings, tmp.path()).unwrap().unwrap();
         assert!(path.ends_with(".mush/settings.toml"));
@@ -368,6 +400,7 @@ mod tests {
                 context_1m: false,
                 ..Default::default()
             },
+            ..Default::default()
         };
         write_settings_file(&path, &settings).unwrap();
         save_rlm_max_depth_to(&path, 1).unwrap();

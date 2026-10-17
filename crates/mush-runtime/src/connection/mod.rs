@@ -72,6 +72,7 @@ pub enum ClientCommand {
     SetSystemPrompt(Option<String>),
     ReloadSystemPrompt,
     SetStreamOptions(Box<mush_ai::types::StreamOptions>),
+    SetAutoCompact(bool),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
     Session(SessionCommand),
     SummariseAndNavigate {
@@ -182,6 +183,12 @@ pub struct ConnectionState {
     pub cwd: Option<std::path::PathBuf>,
     #[serde(default)]
     pub sync: mush_session::SyncState,
+    #[serde(default = "auto_compact_by_default")]
+    pub auto_compact: bool,
+}
+
+fn auto_compact_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
@@ -311,6 +318,9 @@ impl InProcessConnection {
         config: TurnConfig,
         injections: mush_agent::AgentInjections,
     ) -> Self {
+        runtime
+            .auto_compact
+            .store(config.auto_compact, std::sync::atomic::Ordering::Relaxed);
         Self {
             runtime,
             tools,
@@ -1617,6 +1627,7 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::Abort
         | ClientCommand::ConfirmTool { .. }
         | ClientCommand::SetStreamOptions(_)
+        | ClientCommand::SetAutoCompact(_)
         | ClientCommand::SetCompactionModel(_)
         | ClientCommand::AnswerKernelBusy(_)
         | ClientCommand::SideQuestion(_)
@@ -1742,6 +1753,10 @@ impl AgentConnection for InProcessConnection {
             ClientCommand::SetSystemPrompt(prompt) => self.runtime.system_prompt = prompt,
             ClientCommand::ReloadSystemPrompt => self.rebuild_system_prompt(),
             ClientCommand::SetStreamOptions(options) => self.config.options = *options,
+            ClientCommand::SetAutoCompact(on) => self
+                .runtime
+                .auto_compact
+                .store(on, std::sync::atomic::Ordering::Relaxed),
             ClientCommand::SetCompactionModel(model) => {
                 self.config.compaction_model = model.map(|boxed| *boxed);
             }
@@ -1837,6 +1852,10 @@ impl AgentConnection for InProcessConnection {
             last_request: mush_ai::request_snapshot::last_request(self.runtime.session_id.as_str()),
             cwd: self.injections.cwd.clone(),
             sync: self.sync_state.clone(),
+            auto_compact: self
+                .runtime
+                .auto_compact
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 

@@ -184,6 +184,7 @@ mod tests {
             last_request: None,
             cwd: None,
             sync: Default::default(),
+            auto_compact: true,
         }
     }
 

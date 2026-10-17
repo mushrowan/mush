@@ -2890,6 +2890,13 @@ impl mush_ai::registry::ApiProvider for Window {
     }
 }
 
+fn answered(connection: &InProcessConnection) -> Option<String> {
+    match connection.runtime.conversation.context().last() {
+        Some(Message::Assistant(reply)) => Some(reply.text()),
+        _ => None,
+    }
+}
+
 fn is_summary_request(request: &mush_ai::registry::LlmContext) -> bool {
     matches!(
         request.messages.last(),
@@ -3053,4 +3060,30 @@ async fn a_woken_session_trusts_the_size_its_last_reply_measured() {
         ),
         "the turn answered"
     );
+}
+
+#[tokio::test]
+async fn auto_compaction_switches_off_and_on_for_the_running_session() {
+    let (mut connection, requests) = windowed(4, long_history(20, 3_000));
+    assert!(connection.state().auto_compact);
+
+    connection
+        .send(ClientCommand::SetAutoCompact(false))
+        .await
+        .unwrap();
+    assert!(!connection.state().auto_compact);
+    prompt(&mut connection, "one short paragraph from the parent").await;
+    assert!(
+        !requests.lock().unwrap().iter().any(is_summary_request),
+        "switched off, nothing compacts"
+    );
+    assert_eq!(answered(&connection), None);
+
+    connection
+        .send(ClientCommand::SetAutoCompact(true))
+        .await
+        .unwrap();
+    prompt(&mut connection, "try again").await;
+    assert!(requests.lock().unwrap().iter().any(is_summary_request));
+    assert_eq!(answered(&connection).as_deref(), Some("ok"));
 }

@@ -26,7 +26,12 @@ impl InProcessConnection {
     }
 
     pub(super) fn fork_compaction_due(&self) -> bool {
-        if !self.config.auto_fork_compact {
+        if !self.config.auto_fork_compact
+            || !self
+                .runtime
+                .auto_compact
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return false;
         }
         let model = self.runtime.model(&self.config.default_model);

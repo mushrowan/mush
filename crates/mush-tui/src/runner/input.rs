@@ -436,6 +436,9 @@ async fn handle_streaming_key_event(
         AppEvent::SlashCommand { action } => {
             handle_slash_action(session, action, deps.slash_env()).await;
         }
+        AppEvent::SettingsToggleSelected => {
+            apply_settings_toggle(session, deps.tui_config).await;
+        }
         _ => {}
     }
 
@@ -571,7 +574,7 @@ async fn handle_idle_app_event(
             handle_slash_action(session, action, deps.slash_env()).await;
         }
         AppEvent::SettingsToggleSelected => {
-            apply_settings_toggle(session, deps.tui_config);
+            apply_settings_toggle(session, deps.tui_config).await;
         }
         AppEvent::ModelSelected { model_id } => {
             handle_slash_action(
@@ -639,16 +642,34 @@ fn cancel_signal_for_event(stream_state: &mut StreamState, event: &Event) {
     }
 }
 
-fn apply_settings_toggle(
+async fn apply_settings_toggle(
     session: &mut crate::session::Session,
     tui_config: &mut crate::runner::TuiConfig,
 ) {
-    let app = &mut session.app;
-    let Some(menu) = app.settings_menu.as_mut() else {
+    let Some(item) = session
+        .app
+        .settings_menu
+        .as_ref()
+        .map(|menu| menu.current())
+    else {
         return;
     };
-    let item = menu.current();
     let new_value = item.activate(&mut tui_config.settings);
+    if !item.persists() {
+        let on = tui_config.settings.auto_compact;
+        if super::commands::send_command(
+            session,
+            tui_config,
+            mush_runtime::ClientCommand::SetAutoCompact(on),
+        )
+        .await
+        {
+            session.app.status =
+                Some(format!("{} → {new_value} for this session", item.label()).into());
+        }
+        tui_config.settings.auto_compact = session.connection.state().auto_compact;
+        return;
+    }
     tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
 
     let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
@@ -656,7 +677,7 @@ fn apply_settings_toggle(
         Ok(None) => String::new(),
         Err(e) => format!(" (persist failed: {e})"),
     };
-    app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note).into());
+    session.app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note).into());
 }
 
 fn copy_to_clipboard(
@@ -1026,6 +1047,46 @@ mod tests {
         session.app.input.text = draft.into();
         session.app.input.cursor = draft.len();
         session
+    }
+
+    #[tokio::test]
+    async fn the_settings_menu_switches_auto_compaction_for_this_session() {
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+        let mut tui_config = streaming_test_config();
+        let index = crate::settings::MenuItemKind::all()
+            .iter()
+            .position(|item| *item == crate::settings::MenuItemKind::AutoCompact)
+            .unwrap();
+        session.app.settings_menu = Some(crate::settings::SettingsMenuState {
+            selected: index,
+            scroll_offset: 0,
+        });
+        session
+            .connection
+            .send(mush_runtime::ClientCommand::SetAutoCompact(true))
+            .await
+            .unwrap();
+        tui_config.settings.auto_compact = session.connection.state().auto_compact;
+        assert_eq!(
+            crate::settings::MenuItemKind::AutoCompact.value(&tui_config.settings),
+            "on"
+        );
+
+        apply_settings_toggle(&mut session, &mut tui_config).await;
+
+        assert!(!session.connection.state().auto_compact);
+        assert!(!tui_config.settings.auto_compact);
+        assert_eq!(
+            session
+                .app
+                .status
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("auto_compact → off for this session")
+        );
+
+        apply_settings_toggle(&mut session, &mut tui_config).await;
+        assert!(session.connection.state().auto_compact);
     }
 
     #[tokio::test]
