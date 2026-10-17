@@ -385,10 +385,15 @@ impl Widget for InputBox<'_> {
             self.app.theme.input_border_active
         };
 
+        let border_style =
+            crate::widgets::mode_indicator::mode_border(self.app).unwrap_or(border_style);
         let mut block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .padding(Padding::horizontal(1))
             .border_style(border_style);
+        if let Some(label) = crate::widgets::mode_indicator::mode_label(self.app) {
+            block = block.title_top(label);
+        }
         if let Some(prompt) = self.app.interaction.normal.keys.prompt() {
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {prompt} "),
@@ -507,6 +512,97 @@ mod tests {
     use mush_ai::types::TokenCount;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn border_row(app: &App, y: u16) -> (String, Vec<ratatui::style::Style>) {
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        InputBox::new(app).render(area, &mut buf);
+        let text = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let styles = (0..area.width).map(|x| buf[(x, y)].style()).collect();
+        (text, styles)
+    }
+
+    fn top_border(app: &App) -> String {
+        border_row(app, 0).0
+    }
+
+    fn press(
+        app: &mut App,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) {
+        let _ = crate::input::handle_key(app, crossterm::event::KeyEvent::new(code, modifiers));
+    }
+
+    #[test]
+    fn insert_mode_keeps_the_plain_border() {
+        let app = App::new("test".into(), TokenCount::new(200_000));
+        let (text, styles) = border_row(&app, 0);
+        assert_eq!(text, "─".repeat(40));
+        assert_eq!(styles[0].fg, app.theme.input_border_active.fg);
+    }
+
+    #[test]
+    fn the_composer_border_names_the_vim_mode_in_its_colour() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let none = KeyModifiers::NONE;
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.input.text = "fix the parser".into();
+        app.input.cursor = app.input.text.len();
+        let cyan = app.theme.mode_normal.bg;
+        let magenta = app.theme.mode_visual.bg;
+
+        press(&mut app, KeyCode::Esc, none);
+        let (text, styles) = border_row(&app, 0);
+        assert!(text.starts_with("─ NORMAL ─"), "{text}");
+        assert_eq!(styles[2].bg, cyan);
+        assert_eq!(styles[39].fg, cyan, "the top border takes the mode colour");
+        assert_eq!(border_row(&app, 2).1[0].fg, cyan, "and so does the bottom");
+
+        press(&mut app, KeyCode::Char('2'), none);
+        assert!(top_border(&app).starts_with("─ NORMAL  2 ─"));
+        press(&mut app, KeyCode::Char('d'), none);
+        let text = top_border(&app);
+        assert!(text.starts_with("─ NORMAL  2d ─"), "{text}");
+        press(&mut app, KeyCode::Esc, none);
+        assert!(top_border(&app).starts_with("─ NORMAL ─"));
+
+        press(&mut app, KeyCode::Char('v'), none);
+        let (text, styles) = border_row(&app, 0);
+        assert!(text.starts_with("─ VISUAL ─"), "{text}");
+        assert_eq!(styles[2].bg, magenta);
+        assert_eq!(styles[39].fg, magenta);
+        press(&mut app, KeyCode::Esc, none);
+        press(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
+        assert!(top_border(&app).starts_with("─ V-LINE ─"));
+        press(&mut app, KeyCode::Esc, none);
+
+        press(&mut app, KeyCode::Char('i'), none);
+        assert_eq!(top_border(&app), "─".repeat(40));
+    }
+
+    #[test]
+    fn the_log_tags_its_mode_and_can_show_a_block_selection() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        for line in 0..5 {
+            app.push_user_message(format!("line {line}"));
+        }
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let (text, styles) = border_row(&app, 0);
+        assert!(text.starts_with("─ NORMAL  log ─"), "{text}");
+        assert_eq!(styles[11].fg, app.theme.dim.fg);
+
+        press(&mut app, KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(top_border(&app).starts_with("─ V-BLOCK  log ─"));
+    }
+
+    #[test]
+    fn a_picker_hides_the_mode() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.interaction.mode = crate::app::AppMode::ModelPicker;
+        assert_eq!(top_border(&app), "─".repeat(40));
+    }
 
     #[test]
     fn word_wrap_no_wrap_needed() {

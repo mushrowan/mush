@@ -243,6 +243,7 @@ pub(crate) struct Keys {
     prefix: Option<Prefix>,
     register: Option<char>,
     prompt: String,
+    typed: String,
     last_find: Option<Find>,
     last_search: Option<Search>,
 }
@@ -259,7 +260,13 @@ impl Keys {
         self.prefix = None;
         self.register = None;
         self.prompt.clear();
+        self.typed.clear();
         pending
+    }
+
+    pub(crate) fn typed(&self) -> Option<&str> {
+        let searching = matches!(self.prefix, Some(Prefix::Search { .. }));
+        (!searching && !self.typed.is_empty()).then_some(self.typed.as_str())
     }
 
     pub(crate) fn prompt(&self) -> Option<String> {
@@ -283,7 +290,9 @@ impl Keys {
 
     pub(crate) fn feed(&mut self, keymap: &KeyMap, key: KeyEvent, context: Context) -> Step {
         let step = self.step(keymap, key, context);
-        if step != Step::Pending {
+        if step == Step::Pending {
+            self.typed.push_str(&key_text(key));
+        } else {
             self.clear();
         }
         step
@@ -573,6 +582,20 @@ impl Keys {
 }
 
 const MAX_COUNT: usize = 99_999;
+
+fn key_text(key: KeyEvent) -> String {
+    match key.code {
+        KeyCode::Char(c)
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            format!("^{}", c.to_ascii_uppercase())
+        }
+        KeyCode::Char(c) => c.to_string(),
+        _ => String::new(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1218,6 +1241,20 @@ mod tests {
             last("#"),
             ran(Command::Move(Motion::SearchWord { forward: false }), None)
         );
+    }
+
+    #[test]
+    fn the_pending_keys_read_back_as_typed_until_the_command_runs() {
+        let mut keys = Keys::default();
+        feed(&mut keys, "\"a2d");
+        assert_eq!(keys.typed(), Some("\"a2d"));
+
+        feed(&mut keys, "w");
+        assert_eq!(keys.typed(), None);
+
+        feed(&mut keys, "/ab");
+        assert_eq!(keys.typed(), None);
+        assert_eq!(keys.prompt().as_deref(), Some("/ab"));
     }
 
     #[test]

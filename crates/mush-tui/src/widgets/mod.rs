@@ -8,6 +8,7 @@ pub mod login_entry_popup;
 pub mod login_picker;
 pub mod message_list;
 pub mod message_picker;
+pub mod mode_indicator;
 pub mod model_picker;
 pub mod popup_layout;
 pub mod question_dialog;

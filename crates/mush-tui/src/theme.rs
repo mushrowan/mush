@@ -89,6 +89,9 @@ pub struct Theme {
 
     pub image_label: Style,
 
+    pub mode_normal: Style,
+    pub mode_visual: Style,
+
     pub shimmer: Vec<Color>,
 }
 
@@ -217,6 +220,8 @@ impl Theme {
             image_label: Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
+            mode_normal: mode_pill(Color::Cyan),
+            mode_visual: mode_pill(Color::Magenta),
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
                     Color::Rgb(95, 255, 255),
@@ -330,6 +335,8 @@ impl Theme {
             image_label: Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
+            mode_normal: mode_pill(Color::Cyan),
+            mode_visual: mode_pill(Color::Magenta),
             shimmer: crate::widgets::shimmer::interpolate_palette(
                 &[
                     Color::Rgb(0, 135, 175),
@@ -425,10 +432,19 @@ pub struct Base24Palette {
     pub base17: Option<String>,
 }
 
+fn mode_pill(colour: Color) -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(colour)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
     let c = |v: &Option<String>| v.as_deref().and_then(parse_colour);
     let fg = |col: Color| Style::default().fg(col);
     let fg_bold = |col: Color| Style::default().fg(col).add_modifier(Modifier::BOLD);
+    let pill_text = c(&p.base00).unwrap_or(Color::Black);
+    let pill = |col: Color| mode_pill(col).fg(pill_text);
 
     if let Some(col) = c(&p.base0D) {
         theme.user_label = fg_bold(col);
@@ -463,10 +479,12 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
         theme.tab_busy = fg(col);
     }
     if let Some(col) = c(&p.base0C) {
+        theme.mode_normal = pill(col);
         theme.code_block = fg(col);
         theme.inline_code = fg(col);
     }
     if let Some(col) = c(&p.base0E) {
+        theme.mode_visual = pill(col);
         theme.heading = fg_bold(col);
         theme.heading_h3 = fg_bold(col);
     }
@@ -673,6 +691,19 @@ mod tests {
         let theme = Theme::from_config(&config);
         assert_eq!(theme.user_label.fg, Some(Color::Rgb(0x7c, 0x6f, 0xaf)));
         assert_eq!(theme.tool_panel_bg.bg, Some(Color::Rgb(0x0d, 0x0d, 0x10)));
+    }
+
+    #[test]
+    fn a_palette_colours_the_mode_pills_on_its_background() {
+        let theme = Theme::from_config(&ThemeConfig {
+            preset: Some(ThemePreset::Amethyst),
+            ..Default::default()
+        });
+        assert_eq!(theme.mode_normal.bg, Some(Color::Rgb(0x8b, 0xa8, 0x88)));
+        assert_eq!(theme.mode_normal.fg, Some(Color::Rgb(0x0d, 0x0d, 0x10)));
+        assert_eq!(theme.mode_visual.bg, Some(Color::Rgb(0x8d, 0x7f, 0xc0)));
+        assert_eq!(Theme::dark().mode_normal.bg, Some(Color::Cyan));
+        assert_eq!(Theme::dark().mode_visual.fg, Some(Color::Black));
     }
 
     #[test]
