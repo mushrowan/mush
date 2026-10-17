@@ -1491,15 +1491,15 @@ mod tests {
     #[tokio::test]
     async fn name_without_a_title_reports_the_current_one() {
         let mut app = App::new("test".into(), TokenCount::new(200_000));
-        app.session_title = Some("port prime".into());
+        app.session_title = Some("port parser".into());
 
         name_session(&mut app, None).await;
 
-        assert_eq!(app.session_title.as_deref(), Some("port prime"));
+        assert_eq!(app.session_title.as_deref(), Some("port parser"));
         assert!(
             app.messages
                 .iter()
-                .any(|message| message.content.contains("port prime"))
+                .any(|message| message.content.contains("port parser"))
         );
     }
 

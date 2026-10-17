@@ -1039,7 +1039,7 @@
     },
     "ThemePreset": {
       "enum": [
-        "prime"
+        "amethyst"
       ],
       "type": "string"
     },

@@ -638,7 +638,7 @@ mod tests {
     fn the_billing_header_block_does_not_move_the_system_fingerprint() {
         let with_a = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_1"},{"type":"text","text":"You are mush"}]"#;
         let with_b = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_2"},{"type":"text","text":"You are mush"}]"#;
-        let other = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_2"},{"type":"text","text":"You are prime"}]"#;
+        let other = r#"[{"type":"text","text":"x-anthropic-billing-header: cc_prev_req=req_2"},{"type":"text","text":"You are someone else"}]"#;
 
         let a = RequestFingerprint::from_json_sections(with_a, "[]", "[]");
         let b = RequestFingerprint::from_json_sections(with_b, "[]", "[]");

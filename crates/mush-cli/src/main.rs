@@ -2316,7 +2316,7 @@ mod tests {
 
     #[test]
     fn a_fork_gets_a_fresh_id_and_keeps_the_conversation() {
-        let source = session_from_snapshot(snapshot(Some("port prime")), "/tmp");
+        let source = session_from_snapshot(snapshot(Some("port parser")), "/tmp");
         let source_id = source.meta.id.clone();
 
         let forked = fork_session(source, "/elsewhere");
@@ -2329,9 +2329,9 @@ mod tests {
 
     #[test]
     fn a_saved_session_keeps_the_generated_title() {
-        let session = session_from_snapshot(snapshot(Some("port prime")), "/tmp");
+        let session = session_from_snapshot(snapshot(Some("port parser")), "/tmp");
 
-        assert_eq!(session.meta.title.as_deref(), Some("port prime"));
+        assert_eq!(session.meta.title.as_deref(), Some("port parser"));
     }
 
     #[test]

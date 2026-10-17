@@ -1085,7 +1085,7 @@ mouse_scroll_lines = 5
     }
 
     #[test]
-    fn compaction_defaults_match_prime() {
+    fn compaction_and_refine_defaults() {
         let config: Config = toml::from_str("").unwrap();
         assert!(config.compaction.enabled);
         assert_eq!(config.compaction.reserve_tokens, 16_384);

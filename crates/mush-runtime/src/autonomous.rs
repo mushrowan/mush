@@ -470,12 +470,11 @@ fn gate_failure_prompt(failure: &GateFailure, max_retries: u32) -> String {
     text
 }
 
-const SNAPSHOT_PATHSPEC: [&str; 8] = [
+const SNAPSHOT_PATHSPEC: [&str; 7] = [
     "--",
     ".",
     ":(exclude)verification",
     ":(exclude)target",
-    ":(exclude).vf-prime-agent",
     ":(exclude)Cargo.lock",
     ":(exclude)submission.tar.gz",
     ":(exclude)runner_args.log",

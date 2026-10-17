@@ -507,14 +507,14 @@ fn apply_palette(theme: &mut Theme, p: &Base24Palette) {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum ThemePreset {
-    Prime,
+    Amethyst,
 }
 
 impl ThemePreset {
     #[must_use]
     pub fn palette(self) -> Base24Palette {
         match self {
-            Self::Prime => Base24Palette {
+            Self::Amethyst => Base24Palette {
                 base00: Some("#0d0d10".into()),
                 base01: Some("#1a1a1f".into()),
                 base02: Some("#222226".into()),
@@ -665,9 +665,9 @@ mod tests {
     }
 
     #[test]
-    fn the_prime_preset_paints_the_accent_purple() {
+    fn the_amethyst_preset_paints_the_accent_purple() {
         let config = ThemeConfig {
-            preset: Some(ThemePreset::Prime),
+            preset: Some(ThemePreset::Amethyst),
             ..Default::default()
         };
         let theme = Theme::from_config(&config);
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn a_palette_entry_overrides_the_preset() {
         let config = ThemeConfig {
-            preset: Some(ThemePreset::Prime),
+            preset: Some(ThemePreset::Amethyst),
             palette: Base24Palette {
                 base0D: Some("#0000ff".into()),
                 ..Default::default()
@@ -691,8 +691,8 @@ mod tests {
 
     #[test]
     fn the_preset_parses_from_config() {
-        let config: ThemeConfig = toml::from_str("preset = \"prime\"").unwrap();
-        assert_eq!(config.preset, Some(ThemePreset::Prime));
+        let config: ThemeConfig = toml::from_str("preset = \"amethyst\"").unwrap();
+        assert_eq!(config.preset, Some(ThemePreset::Amethyst));
     }
 
     #[test]

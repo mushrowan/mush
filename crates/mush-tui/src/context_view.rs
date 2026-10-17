@@ -278,11 +278,11 @@ mod tests {
     #[test]
     fn a_lone_session_reports_its_own_row_and_the_context_bar() {
         let stats = stats();
-        let tree = agent_tree("port prime", "claude-opus-4-7", &stats, &[]);
+        let tree = agent_tree("port parser", "claude-opus-4-7", &stats, &[]);
         let text = format_context(&tree, &stats);
 
         assert!(text.starts_with("model: claude-opus-4-7"), "{text}");
-        assert!(text.contains("● port prime"), "{text}");
+        assert!(text.contains("● port parser"), "{text}");
         assert!(text.contains("12k"), "{text}");
         assert!(text.contains("25% (50k/200k)"), "{text}");
         assert!(text.contains("▓▓▓░░░░░░░"), "{text}");
@@ -299,7 +299,7 @@ mod tests {
             child("c2", "tester", None, ChildStatus::Idle),
             child("c3", "deep", Some("c1"), ChildStatus::Failed),
         ];
-        let tree = agent_tree("port prime", "claude-opus-4-7", &stats, &children);
+        let tree = agent_tree("port parser", "claude-opus-4-7", &stats, &children);
         let text = format_context(&tree, &stats);
         let rows: Vec<&str> = text.lines().collect();
 
@@ -330,7 +330,7 @@ mod tests {
     fn a_deleted_child_is_left_out() {
         let stats = stats();
         let children = vec![child("c1", "gone", None, ChildStatus::Deleted)];
-        let tree = agent_tree("port prime", "claude-opus-4-7", &stats, &children);
+        let tree = agent_tree("port parser", "claude-opus-4-7", &stats, &children);
         assert!(tree.children.is_empty());
     }
 

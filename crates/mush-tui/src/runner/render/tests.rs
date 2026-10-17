@@ -475,9 +475,9 @@ fn the_terminal_title_names_the_cwd() {
 fn the_terminal_title_carries_the_session_title() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.cwd = "~/dev/mush".into();
-    app.session_title = Some("port\nprime".into());
+    app.session_title = Some("port\nparser".into());
 
-    assert_eq!(terminal_title(&app), "mush - port prime - mush");
+    assert_eq!(terminal_title(&app), "mush - port parser - mush");
 }
 
 #[test]

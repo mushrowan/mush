@@ -900,13 +900,13 @@ mod tests {
 
         let events = runtime
             .handle(SessionCommand::Name {
-                title: Some("port prime".into()),
+                title: Some("port parser".into()),
             })
             .await;
 
-        assert_eq!(runtime.title.as_deref(), Some("port prime"));
+        assert_eq!(runtime.title.as_deref(), Some("port parser"));
         assert!(runtime.title_generated);
-        assert_eq!(events[0], SessionEvent::Title(Some("port prime".into())));
+        assert_eq!(events[0], SessionEvent::Title(Some("port parser".into())));
     }
 
     #[tokio::test]

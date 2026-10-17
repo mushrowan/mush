@@ -1136,7 +1136,7 @@ mod tests {
         futures::executor::block_on(handle_slash_action(
             &mut session,
             SlashAction::New {
-                name: Some("port prime".into()),
+                name: Some("port parser".into()),
                 prompt: Some("fix it".into()),
             },
             SlashEnv {
@@ -1146,7 +1146,7 @@ mod tests {
         ));
 
         assert_ne!(config.session_id, old_id);
-        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+        assert_eq!(session.app.session_title.as_deref(), Some("port parser"));
         assert_eq!(pending_prompt.as_deref(), Some("fix it"));
         let last = session.app.messages.last().expect("the prompt shows");
         assert_eq!(last.role, crate::app::MessageRole::User);
@@ -1198,7 +1198,7 @@ mod tests {
             &mut session,
             &mut config,
             SlashAction::New {
-                name: Some("port prime".into()),
+                name: Some("port parser".into()),
                 prompt: Some("fix it".into()),
             },
             &mut pending_prompt,
@@ -1209,7 +1209,7 @@ mod tests {
         assert_ne!(config.session_id, old_id);
         assert_eq!(
             session.connection.state().title.as_deref(),
-            Some("port prime")
+            Some("port parser")
         );
         assert_eq!(pending_prompt.as_deref(), Some("fix it"));
         assert!(session.in_process().runtime.conversation.is_empty());
@@ -1388,10 +1388,10 @@ mod tests {
             &mut session,
             &mut config,
             SlashAction::Name {
-                title: Some("  port\tprime  ".into()),
+                title: Some("  port\tparser  ".into()),
             },
         );
-        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+        assert_eq!(session.app.session_title.as_deref(), Some("port parser"));
 
         run(
             &mut session,
@@ -1400,7 +1400,7 @@ mod tests {
                 title: Some("\x07".into()),
             },
         );
-        assert_eq!(session.app.session_title.as_deref(), Some("port prime"));
+        assert_eq!(session.app.session_title.as_deref(), Some("port parser"));
     }
 
     #[test]

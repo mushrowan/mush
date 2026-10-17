@@ -1325,8 +1325,8 @@ mod tests {
             new_action(Some("ui"), None)
         );
         assert_eq!(
-            parse("/new --name \"port prime\" -- fix it").unwrap(),
-            new_action(Some("port prime"), Some("fix it"))
+            parse("/new --name \"port parser\" -- fix it").unwrap(),
+            new_action(Some("port parser"), Some("fix it"))
         );
         assert_eq!(
             parse("/new --name 'a b'").unwrap(),

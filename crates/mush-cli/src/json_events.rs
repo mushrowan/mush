@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_turn_uses_prime_event_names_and_shapes() {
+    fn a_tool_turn_uses_the_json_event_names_and_shapes() {
         let call = ToolCall {
             id: "call".into(),
             name: "read".into(),
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn retries_and_failures_close_the_turn_like_prime() {
+    fn retries_and_failures_close_the_turn() {
         let mut events = JsonEvents::new(model(), None);
         let done = assistant(
             vec![AssistantContentPart::Text(TextContent {
