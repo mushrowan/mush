@@ -46,6 +46,7 @@ pub struct SessionStore {
 struct Logged {
     entries: usize,
     bytes: u64,
+    damaged: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -201,6 +202,12 @@ impl SessionStore {
             appended.push(b'\n');
         }
         let bytes = match known {
+            Some(logged) if logged.damaged => {
+                let mut repaired = repaired_history(&std::fs::read(&path)?);
+                repaired.extend_from_slice(&appended);
+                mush_ai::private_io::write_private(&path, &repaired)?;
+                repaired.len() as u64
+            }
             Some(logged) => {
                 if !appended.is_empty() {
                     use std::io::Write;
@@ -219,6 +226,7 @@ impl SessionStore {
             Logged {
                 entries: entries.len(),
                 bytes,
+                damaged: false,
             },
         );
         Ok(())
@@ -244,18 +252,17 @@ impl SessionStore {
         let Ok(bytes) = std::fs::read(&history) else {
             return Ok(session);
         };
-        let mut entries = Vec::new();
-        for line in bytes.split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            let mut entry: crate::tree::SessionEntry = serde_json::from_slice(line)?;
-            cap_entry(&mut entry);
-            entries.push(entry);
+        let History {
+            mut entries,
+            damaged,
+        } = History::parse(&bytes);
+        for entry in &mut entries {
+            cap_entry(entry);
         }
         let logged = Logged {
             entries: entries.len(),
             bytes: bytes.len() as u64,
+            damaged,
         };
         let tree =
             crate::tree::SessionTree::rebuild(entries, session.conversation.leaf_id().cloned())
@@ -281,12 +288,15 @@ impl SessionStore {
             if line.is_empty() {
                 continue;
             }
-            let mut entry: crate::tree::SessionEntry = serde_json::from_slice(line)?;
-            if cap_entry(&mut entry) {
-                capped += 1;
-                serde_json::to_writer(&mut slimmed, &entry)?;
-            } else {
-                slimmed.extend_from_slice(line);
+            let capped_entry = serde_json::from_slice::<crate::tree::SessionEntry>(line)
+                .ok()
+                .and_then(|mut entry| cap_entry(&mut entry).then_some(entry));
+            match capped_entry {
+                Some(entry) => {
+                    capped += 1;
+                    serde_json::to_writer(&mut slimmed, &entry)?;
+                }
+                None => slimmed.extend_from_slice(line),
             }
             slimmed.push(b'\n');
         }
@@ -401,6 +411,93 @@ pub struct SlimReport {
     pub before: u64,
     pub after: u64,
     pub capped: usize,
+}
+
+struct History {
+    entries: Vec<crate::tree::SessionEntry>,
+    damaged: bool,
+}
+
+impl History {
+    fn parse(bytes: &[u8]) -> Self {
+        let mut history = Self {
+            entries: Vec::new(),
+            damaged: false,
+        };
+        for line in history_lines(bytes) {
+            history.damaged |= line.damaged;
+            let Some(content) = line.content else {
+                continue;
+            };
+            match serde_json::from_slice(content) {
+                Ok(entry) => history.entries.push(entry),
+                Err(_) => match serde_json::from_slice::<serde_json::Value>(content) {
+                    Ok(value) => history.entries.extend(unknown_entry(value)),
+                    Err(_) => history.damaged = true,
+                },
+            }
+        }
+        history
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EntryFrame {
+    id: crate::tree::EntryId,
+    parent_id: Option<crate::tree::EntryId>,
+    timestamp: mush_ai::types::Timestamp,
+}
+
+fn unknown_entry(mut value: serde_json::Value) -> Option<crate::tree::SessionEntry> {
+    let kind = value.get_mut("kind")?.take();
+    let frame: EntryFrame = serde_json::from_value(value).ok()?;
+    Some(crate::tree::SessionEntry {
+        id: frame.id,
+        parent_id: frame.parent_id,
+        timestamp: frame.timestamp,
+        kind: crate::tree::EntryKind::Unknown(kind),
+    })
+}
+
+struct HistoryLine<'a> {
+    content: Option<&'a [u8]>,
+    damaged: bool,
+}
+
+fn history_lines(bytes: &[u8]) -> impl Iterator<Item = HistoryLine<'_>> {
+    let terminated = bytes.last().is_none_or(|byte| *byte == b'\n');
+    let body = if terminated && !bytes.is_empty() {
+        &bytes[..bytes.len() - 1]
+    } else {
+        bytes
+    };
+    let count = body.split(|byte| *byte == b'\n').count();
+    body.split(|byte| *byte == b'\n')
+        .enumerate()
+        .map(move |(index, raw)| {
+            let content = &raw[raw.iter().take_while(|byte| **byte == 0).count()..];
+            let torn = !terminated && index + 1 == count;
+            let zeroed = content.len() != raw.len();
+            HistoryLine {
+                content: (!content.is_empty()).then_some(content),
+                damaged: torn || zeroed,
+            }
+        })
+        .filter(|line| line.content.is_some() || line.damaged)
+}
+
+fn repaired_history(bytes: &[u8]) -> Vec<u8> {
+    let mut repaired = Vec::with_capacity(bytes.len());
+    for line in history_lines(bytes) {
+        let Some(content) = line.content else {
+            continue;
+        };
+        if serde_json::from_slice::<serde::de::IgnoredAny>(content).is_ok() {
+            repaired.extend_from_slice(content);
+            repaired.push(b'\n');
+        }
+    }
+    repaired
 }
 
 fn cap_entry(entry: &mut crate::tree::SessionEntry) -> bool {
@@ -601,6 +698,142 @@ mod tests {
         let json = std::fs::read_to_string(store.session_path(&session.meta.id)).unwrap();
         assert!(!json.contains("from the old format"));
         assert_eq!(store.load(&session.meta.id).unwrap().context().len(), 1);
+    }
+
+    fn append_raw(store: &SessionStore, id: &SessionId, bytes: &[u8]) {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.history_path(id))
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    fn every_line_parses(store: &SessionStore, id: &SessionId) -> usize {
+        let history = std::fs::read(store.history_path(id)).unwrap();
+        assert_eq!(history.last(), Some(&b'\n'));
+        assert!(!history.contains(&0));
+        let lines: Vec<serde_json::Value> = history
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        lines.len()
+    }
+
+    #[test]
+    fn a_torn_tail_is_dropped_on_load_and_repaired_before_the_next_append() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        append_raw(
+            &store,
+            &session.meta.id,
+            b"{\"id\":\"torn\",\"parent_id\":nu",
+        );
+
+        let reopened = SessionStore::new(store.base_dir.clone());
+        let mut loaded = reopened.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 2);
+        loaded.push_message(user("three"));
+        reopened.save(&loaded).unwrap();
+        assert_eq!(every_line_parses(&reopened, &session.meta.id), 3);
+        assert_eq!(reopened.load(&session.meta.id).unwrap().context().len(), 3);
+    }
+
+    #[test]
+    fn a_whole_entry_missing_its_newline_or_a_zeroed_tail_survive_the_repair() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        session.push_message(user("two"));
+        store.save(&session).unwrap();
+        let path = store.history_path(&session.meta.id);
+        let history = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &history[..history.len() - 1]).unwrap();
+
+        let reopened = SessionStore::new(store.base_dir.clone());
+        let mut loaded = reopened.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 2);
+        loaded.push_message(user("three"));
+        reopened.save(&loaded).unwrap();
+        assert_eq!(every_line_parses(&reopened, &session.meta.id), 3);
+
+        append_raw(&reopened, &session.meta.id, b"\0\0\0\0\0\0");
+        let zeroed = SessionStore::new(store.base_dir.clone());
+        let mut loaded = zeroed.load(&session.meta.id).unwrap();
+        assert_eq!(loaded.context().len(), 3);
+        loaded.push_message(user("four"));
+        zeroed.save(&loaded).unwrap();
+        assert_eq!(every_line_parses(&zeroed, &session.meta.id), 4);
+        assert_eq!(zeroed.load(&session.meta.id).unwrap().context().len(), 4);
+    }
+
+    #[test]
+    fn an_unknown_entry_kind_is_kept_in_the_tree_and_on_disk() {
+        let (_dir, store) = temp_store();
+        let mut session = Session::new("test-model", "/tmp");
+        session.push_message(user("one"));
+        store.save(&session).unwrap();
+        let parent = session.conversation.leaf_id().unwrap().to_string();
+        let future = format!(
+            "{{\"id\":\"future01\",\"parent_id\":\"{parent}\",\"timestamp\":5,\"kind\":{{\"type\":\"hologram\",\"depth\":3}}}}"
+        );
+        let alien = "{\"id\":\"alien001\",\"parent_id\":\"future01\",\"timestamp\":6,\"kind\":{\"type\":\"message\",\"message\":{\"role\":\"martian\"}}}";
+        let mut child = user("after the future");
+        if let Message::User(user) = &mut child {
+            user.timestamp_ms = Timestamp::from_ms(7);
+        }
+        let child = serde_json::json!({
+            "id": "child001",
+            "parent_id": "alien001",
+            "timestamp": 7,
+            "kind": {"type": "message", "message": child},
+        });
+        append_raw(
+            &store,
+            &session.meta.id,
+            format!("{future}\n{alien}\n{child}\n").as_bytes(),
+        );
+        let mut stored: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(store.session_path(&session.meta.id)).unwrap(),
+        )
+        .unwrap();
+        stored["tree"]["leaf_id"] = "child001".into();
+        std::fs::write(store.session_path(&session.meta.id), stored.to_string()).unwrap();
+
+        let reopened = SessionStore::new(store.base_dir.clone());
+        let mut loaded = reopened.load(&session.meta.id).unwrap();
+        let texts: Vec<String> = loaded
+            .context()
+            .iter()
+            .filter_map(|message| match message {
+                Message::User(user) => Some(user.text()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["one", "after the future"]);
+        assert!(matches!(
+            loaded.conversation.tree().entries()[1].kind,
+            crate::tree::EntryKind::Unknown(_)
+        ));
+
+        loaded.push_message(user("two"));
+        reopened.save(&loaded).unwrap();
+        let history = std::fs::read_to_string(reopened.history_path(&session.meta.id)).unwrap();
+        assert!(history.contains(&future), "{history}");
+        assert!(history.contains(alien), "{history}");
+
+        reopened.logged.lock().unwrap().remove(&session.meta.id);
+        loaded.push_message(user("three"));
+        reopened.save(&loaded).unwrap();
+        let rewritten = std::fs::read_to_string(reopened.history_path(&session.meta.id)).unwrap();
+        assert!(rewritten.contains("\"type\":\"hologram\""), "{rewritten}");
+        assert!(rewritten.contains("\"role\":\"martian\""), "{rewritten}");
+        assert_eq!(reopened.load(&session.meta.id).unwrap().context().len(), 4);
     }
 
     #[test]

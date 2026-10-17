@@ -72,6 +72,8 @@ pub enum EntryKind {
     ThinkingLevelChange {
         thinking_level: ThinkingLevel,
     },
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -222,7 +224,8 @@ impl SessionTree {
                 }
                 EntryKind::Message { .. }
                 | EntryKind::Refinement { .. }
-                | EntryKind::ThinkingLevelChange { .. } => unreachable!(),
+                | EntryKind::ThinkingLevelChange { .. }
+                | EntryKind::Unknown(_) => unreachable!(),
             }
         }
         Ok(tree)
@@ -297,7 +300,8 @@ fn entry_receipts(entry: &SessionEntry) -> &[EventReceipt] {
         | EntryKind::Compaction { event_receipts, .. } => event_receipts,
         EntryKind::Message { .. }
         | EntryKind::Refinement { .. }
-        | EntryKind::ThinkingLevelChange { .. } => &[],
+        | EntryKind::ThinkingLevelChange { .. }
+        | EntryKind::Unknown(_) => &[],
     }
 }
 
@@ -345,7 +349,7 @@ fn entry_to_message(entry: &SessionEntry) -> Option<Message> {
         EntryKind::Refinement { source, result } => {
             user_text(result.notice_message(*source), entry.timestamp)
         }
-        EntryKind::ThinkingLevelChange { .. } => return None,
+        EntryKind::ThinkingLevelChange { .. } | EntryKind::Unknown(_) => return None,
     })
 }
 
@@ -649,7 +653,8 @@ impl SessionTree {
                     }
                     EntryKind::Message { .. }
                     | EntryKind::Refinement { .. }
-                    | EntryKind::ThinkingLevelChange { .. } => return None,
+                    | EntryKind::ThinkingLevelChange { .. }
+                    | EntryKind::Unknown(_) => return None,
                 };
                 Some(TreeSummaryRow {
                     id: row.entry.id.clone(),
@@ -752,7 +757,12 @@ impl SessionTree {
         }
         let omitted = branch[..start]
             .iter()
-            .filter(|entry| !matches!(entry.kind, EntryKind::ThinkingLevelChange { .. }))
+            .filter(|entry| {
+                !matches!(
+                    entry.kind,
+                    EntryKind::ThinkingLevelChange { .. } | EntryKind::Unknown(_)
+                )
+            })
             .count();
         RecentHistory {
             messages: branch[start..]
