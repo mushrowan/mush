@@ -369,7 +369,7 @@ impl Widget for InputBox<'_> {
 
         let content_width = area.width.saturating_sub(2) as usize;
 
-        let border_style = if self.app.navigation.has_unread && !streaming_idle {
+        let border_style = if self.app.viewport.has_unread() && !streaming_idle {
             if self.app.input.text.is_empty() {
                 if self.app.unread_flash_on() {
                     self.app.theme.scroll_indicator

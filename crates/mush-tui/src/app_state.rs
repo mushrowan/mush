@@ -230,11 +230,6 @@ impl<T: Into<String>> From<T> for Status {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct NavigationState {
-    pub has_unread: bool,
-}
-
 pub type CachedToolBoxLines = (u64, u16, Vec<Line<'static>>);
 
 #[derive(Debug, Clone)]

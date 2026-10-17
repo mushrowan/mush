@@ -46,17 +46,51 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+const FOLLOW_HINTS: [&str; 4] = [
+    "new output below \u{b7} scroll down to follow",
+    "new output below \u{b7} G to follow",
+    "scroll down to follow",
+    "G to follow",
+];
+
 fn window_rows(app: &App) -> Vec<String> {
     rows(app, 80, SCREEN)[..20]
         .iter()
         .map(|row| {
-            row.chars()
-                .take(79)
-                .collect::<String>()
-                .trim_end()
-                .to_string()
+            let mut row: String = row.chars().take(79).collect();
+            if let Some((at, hint)) = FOLLOW_HINTS
+                .iter()
+                .find_map(|hint| row.find(hint).map(|at| (at, hint)))
+            {
+                row.replace_range(at..at + hint.len(), &" ".repeat(hint.chars().count()));
+            }
+            row.trim_end().to_string()
         })
         .collect()
+}
+
+#[test]
+fn a_paused_view_says_how_to_follow_and_when_output_arrives() {
+    let mut app = conversation(20);
+    start_reading(&mut app);
+    press_with(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    let hint_row = |app: &App| rows(app, 80, SCREEN)[19].clone();
+    assert!(
+        hint_row(&app).ends_with(" G to follow"),
+        "{}",
+        hint_row(&app)
+    );
+
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, "brand new"));
+    assert!(
+        hint_row(&app).ends_with(" new output below \u{b7} G to follow"),
+        "{}",
+        hint_row(&app)
+    );
+
+    press(&mut app, KeyCode::Char('G'));
+    assert!(!rows(&app, 80, SCREEN).join("\n").contains("to follow"));
 }
 
 fn press(app: &mut App, code: KeyCode) {

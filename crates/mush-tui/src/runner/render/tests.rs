@@ -520,3 +520,40 @@ fn resizing_a_long_scrolled_log_keeps_the_same_message() {
 
     assert_eq!(after, before);
 }
+
+#[test]
+fn a_view_paused_off_the_tail_shows_how_to_follow_again() {
+    let mut app = synthetic_app(false);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut screen = Screen::new();
+    draw(&mut terminal, &mut screen, &mut app);
+    let text = buffer_to_string(terminal.backend().buffer());
+    assert!(!text.contains("to follow"), "{text}");
+
+    switch_focus(&mut app);
+    key(&mut app, KeyCode::Char('g'));
+    key(&mut app, KeyCode::Char('g'));
+    draw(&mut terminal, &mut screen, &mut app);
+    let text = buffer_to_string(terminal.backend().buffer());
+    let hint_row = app.viewport.area().bottom() - 1;
+    let row: String = text.lines().nth(usize::from(hint_row)).unwrap().to_string();
+    assert!(row.contains(" G to follow "), "{text}");
+    assert!(!app.viewport.has_unread());
+
+    app.push_user_message("brand new line");
+    draw(&mut terminal, &mut screen, &mut app);
+    draw(&mut terminal, &mut screen, &mut app);
+    let text = buffer_to_string(terminal.backend().buffer());
+    assert!(
+        text.contains(" new output below \u{b7} G to follow "),
+        "{text}"
+    );
+    assert!(app.viewport.has_unread());
+    assert!(app.has_visible_animation());
+
+    key(&mut app, KeyCode::Char('G'));
+    draw(&mut terminal, &mut screen, &mut app);
+    let text = buffer_to_string(terminal.backend().buffer());
+    assert!(!text.contains("to follow"), "{text}");
+    assert!(!app.viewport.has_unread());
+}

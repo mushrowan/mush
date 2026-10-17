@@ -35,6 +35,7 @@ pub struct Cursor {
 pub struct Viewport {
     scroll_top: Cell<usize>,
     following: Cell<bool>,
+    unread: Cell<bool>,
     total: Cell<usize>,
     height: Cell<usize>,
     moved: Cell<Option<Instant>>,
@@ -51,6 +52,7 @@ impl Default for Viewport {
         Self {
             scroll_top: Cell::new(0),
             following: Cell::new(true),
+            unread: Cell::new(false),
             total: Cell::new(0),
             height: Cell::new(0),
             moved: Cell::new(None),
@@ -89,6 +91,12 @@ impl Viewport {
         if previous.is_empty() || self.following.get() {
             return;
         }
+        if chunks
+            .iter()
+            .any(|chunk| previous.iter().all(|seen| seen.id != chunk.id))
+        {
+            self.unread.set(true);
+        }
         let map = |line| remap_line(line, &previous, chunks);
         self.scroll_top.set(map(self.scroll_top.get()));
         let mut cursor = self.cursor.get();
@@ -108,7 +116,20 @@ impl Viewport {
             self.scroll_top.get().min(self.max_scroll())
         };
         self.scroll_top.set(top);
+        if self.following.get() {
+            self.unread.set(false);
+        }
         top..total.min(top + height)
+    }
+
+    #[must_use]
+    pub fn has_unread(&self) -> bool {
+        self.unread.get() && !self.following.get()
+    }
+
+    #[must_use]
+    pub fn shows_the_tail(&self) -> bool {
+        self.following.get() || self.window_end() >= self.total.get()
     }
 
     pub fn pause(&self) {
@@ -368,6 +389,35 @@ fn chunk_at(chunks: &[TranscriptChunk], line: usize) -> Option<TranscriptChunk> 
         .filter(|chunk| line < chunk.end)
 }
 
+fn render_follow_hint(app: &App, area: Rect, buf: &mut Buffer) {
+    if app.viewport.shows_the_tail() || area.height == 0 {
+        return;
+    }
+    let follow = if app.interaction.focus.is_log() {
+        "G to follow"
+    } else {
+        "scroll down to follow"
+    };
+    let label = if app.viewport.has_unread() {
+        format!(" new output below \u{b7} {follow} ")
+    } else {
+        format!(" {follow} ")
+    };
+    let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+    if width > area.width {
+        return;
+    }
+    let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+    let x = row.x + (row.width - width) / 2;
+    buf.set_string(
+        x,
+        row.y,
+        &label,
+        ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+    );
+    redraw_stitched_row(row, buf);
+}
+
 fn redraw_stitched_row(row: Rect, buf: &mut Buffer) {
     let stitched = row
         .columns()
@@ -422,6 +472,7 @@ impl Screen {
         }
         self.paint_selection(app, regions.messages, window, buf);
         self.render_scrollbar(app, regions.messages, buf);
+        render_follow_hint(app, regions.messages, buf);
 
         TopBar::new(app).render(regions.top, buf);
         crate::widgets::hint_line::render(app, regions.hint, buf);
@@ -491,6 +542,29 @@ mod tests {
             },
             area,
         )
+    }
+
+    #[test]
+    fn a_new_message_below_a_paused_view_is_unread_until_it_follows_again() {
+        let viewport = Viewport::default();
+        viewport.window(40, 10);
+        viewport.remap_chunks(&[chunk(0, 0, 20), chunk(1, 20, 40)]);
+        viewport.pause();
+        viewport.scroll_by(-5);
+        assert!(!viewport.is_following());
+
+        viewport.remap_chunks(&[chunk(0, 0, 30), chunk(1, 30, 60)]);
+        assert!(!viewport.has_unread(), "a rewrap is not new output");
+
+        viewport.remap_chunks(&[chunk(0, 0, 30), chunk(1, 30, 60), chunk(2, 60, 70)]);
+        viewport.window(70, 10);
+        assert!(viewport.has_unread());
+        assert!(!viewport.shows_the_tail());
+
+        viewport.follow();
+        viewport.window(70, 10);
+        assert!(!viewport.has_unread());
+        assert!(viewport.shows_the_tail());
     }
 
     #[test]

@@ -4,7 +4,7 @@ use mush_session::SessionMeta;
 pub use crate::app_event::{AppEvent, AppMode, Caret};
 pub use crate::app_state::{
     CachedStatusBar, CompactionRecoveryAction, CompactionRecoveryState, CompletionState,
-    InteractionState, NavigationState, RenderState, SearchState,
+    InteractionState, RenderState, SearchState,
 };
 pub use crate::batch_output::{
     BatchSection, parse_batch_output, truncate_output, truncate_output_large,
@@ -112,7 +112,6 @@ pub struct App {
     pub thinking_display: ThinkingDisplay,
     pub interaction: InteractionState,
     pub completion: CompletionState,
-    pub navigation: NavigationState,
     pub render_state: RenderState,
     pub cwd: String,
     pub pane_info: Option<(u16, u16)>,
@@ -184,7 +183,6 @@ impl App {
             paused: None,
             sync: mush_session::SyncState::default(),
             completion: CompletionState::default(),
-            navigation: NavigationState::default(),
             render_state: RenderState::new(),
             cwd: {
                 let path = std::env::current_dir().unwrap_or_default();
@@ -405,7 +403,7 @@ impl App {
     pub fn has_visible_animation(&self) -> bool {
         self.compacting
             || self.stream.active
-            || self.navigation.has_unread
+            || self.viewport.has_unread()
             || self.has_running_tool()
     }
 

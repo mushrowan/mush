@@ -1427,7 +1427,6 @@ fn activity_label_prefers_tool_over_streaming() {
 #[test]
 fn unread_flash_cycle_works() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    app.navigation.has_unread = true;
     assert!(app.unread_flash_on());
     for _ in 0..UNREAD_FLASH_ON {
         app.tick();
