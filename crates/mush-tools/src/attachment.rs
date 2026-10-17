@@ -8,10 +8,147 @@ const MAX_SOURCE_PIXELS: u64 = 36_000_000;
 const TRANSPARENCY_BACKGROUND: u8 = 0x88;
 const JPEG_QUALITIES: [u8; 5] = [82, 72, 60, 48, 36];
 
+const USER_IMAGE_BASE64_CHARS: usize = 5 * 1024 * 1024;
+const MANY_IMAGE_MAX_SIDE: u32 = 2000;
+const CLAUDE_PATCH: u32 = 28;
+const CLAUDE_STANDARD_SIDE: u32 = 1568;
+const CLAUDE_STANDARD_PATCHES: u32 = 1568;
+const CLAUDE_HIGH_RESOLUTION_PATCHES: u32 = 4784;
+const CLAUDE_HIGH_RESOLUTION_SINCE: (u32, u32) = (4, 7);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageBudget {
+    pub max_side: u32,
+    pub max_base64_chars: usize,
+    pub patches: Option<Patches>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patches {
+    pub side: u32,
+    pub max: u32,
+}
+
+const ATTACHMENT_BUDGET: ImageBudget = ImageBudget {
+    max_side: MAX_ATTACHMENT_DIMENSION,
+    max_base64_chars: MAX_ATTACHMENT_DATA_CHARS,
+    patches: None,
+};
+
+impl ImageBudget {
+    #[must_use]
+    pub fn for_user_image(model: &mush_ai::types::Model) -> Self {
+        let (max_side, patches) = match claude_version(&model.id) {
+            Some(version) if version >= CLAUDE_HIGH_RESOLUTION_SINCE => (
+                MANY_IMAGE_MAX_SIDE,
+                Some(Patches {
+                    side: CLAUDE_PATCH,
+                    max: CLAUDE_HIGH_RESOLUTION_PATCHES,
+                }),
+            ),
+            Some(_) => (
+                CLAUDE_STANDARD_SIDE,
+                Some(Patches {
+                    side: CLAUDE_PATCH,
+                    max: CLAUDE_STANDARD_PATCHES,
+                }),
+            ),
+            None => (MANY_IMAGE_MAX_SIDE, None),
+        };
+        Self {
+            max_side,
+            max_base64_chars: USER_IMAGE_BASE64_CHARS,
+            patches,
+        }
+    }
+
+    fn fits(&self, width: u32, height: u32) -> bool {
+        width.max(height) <= self.max_side
+            && self.patches.is_none_or(|patches| {
+                width.div_ceil(patches.side) * height.div_ceil(patches.side) <= patches.max
+            })
+    }
+
+    fn size_for(&self, width: u32, height: u32) -> (u32, u32) {
+        if self.fits(width, height) {
+            return (width, height);
+        }
+        if self.patches.is_none() {
+            let scale = (f64::from(self.max_side) / f64::from(width.max(height))).min(1.0);
+            let scaled = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
+            return (scaled(width), scaled(height));
+        }
+        if height > width {
+            let (long, short) = self.size_for(height, width);
+            return (short, long);
+        }
+        let aspect = f64::from(width) / f64::from(height);
+        let short = |long: u32| ((f64::from(long) / aspect).round_ties_even() as u32).max(1);
+        let (mut fitting, mut over) = (1, width);
+        while fitting + 1 < over {
+            let middle = (fitting + over) / 2;
+            if self.fits(middle, short(middle)) {
+                fitting = middle;
+            } else {
+                over = middle;
+            }
+        }
+        (fitting, short(fitting))
+    }
+}
+
+fn claude_version(id: &str) -> Option<(u32, u32)> {
+    let rest = &id[id.find("claude")? + "claude".len()..];
+    let mut numbers = rest
+        .split(['-', '.', '@', ':', '_'])
+        .skip_while(|token| token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()));
+    let major = numbers
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .filter(|major| *major < 100)?;
+    let minor = numbers
+        .next()
+        .and_then(|token| token.parse::<u32>().ok())
+        .filter(|minor| *minor < 100)
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Shrunk {
     Unchanged,
     Jpeg { bytes: Vec<u8>, note: String },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Fitted {
+    Unchanged { size: (u32, u32) },
+    Resized(Resized),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Resized {
+    pub bytes: Vec<u8>,
+    pub original: (u32, u32),
+    pub size: (u32, u32),
+    pub quality: u8,
+    pub conversions: Vec<String>,
+}
+
+impl Resized {
+    fn note(&self) -> String {
+        let ((width, height), (target_width, target_height)) = (self.original, self.size);
+        let mut note = format!(
+            "original {width}x{height}; attached {target_width}x{target_height} JPEG at quality {}",
+            self.quality
+        );
+        for conversion in &self.conversions {
+            note.push_str("; ");
+            note.push_str(conversion);
+        }
+        note
+    }
 }
 
 fn base64_chars(len: usize) -> usize {
@@ -81,13 +218,23 @@ pub(crate) fn jpeg(image: &image::RgbImage, quality: u8) -> Result<Vec<u8>, Stri
 }
 
 pub fn shrink(data: &[u8]) -> Result<Shrunk, String> {
+    Ok(match fit(data, &ATTACHMENT_BUDGET)? {
+        Fitted::Unchanged { .. } => Shrunk::Unchanged,
+        Fitted::Resized(resized) => Shrunk::Jpeg {
+            note: resized.note(),
+            bytes: resized.bytes,
+        },
+    })
+}
+
+pub fn fit(data: &[u8], budget: &ImageBudget) -> Result<Fitted, String> {
     let (image, format) = decode(data)?;
-    let (width, height) = (image.width(), image.height());
-    if data.len() <= MAX_ATTACHMENT_DATA_CHARS * 3 / 4
-        && width.max(height) <= MAX_ATTACHMENT_DIMENSION
-        && base64_chars(data.len()) <= MAX_ATTACHMENT_DATA_CHARS
+    let original = (image.width(), image.height());
+    let (target_width, target_height) = budget.size_for(original.0, original.1);
+    if (target_width, target_height) == original
+        && base64_chars(data.len()) <= budget.max_base64_chars
     {
-        return Ok(Shrunk::Unchanged);
+        return Ok(Fitted::Unchanged { size: original });
     }
 
     let mut conversions = Vec::new();
@@ -109,45 +256,35 @@ pub fn shrink(data: &[u8]) -> Result<Shrunk, String> {
     };
     let image = DynamicImage::ImageRgb8(image);
 
-    let scale = (f64::from(MAX_ATTACHMENT_DIMENSION) / f64::from(width.max(height))).min(1.0);
-    let scaled = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
-    let (mut target_width, mut target_height) = (scaled(width), scaled(height));
-    let mut smallest = (0, target_width, target_height);
+    let mut size = (target_width, target_height);
+    let mut smallest = (0, size);
     loop {
         let resized = image
-            .resize_exact(
-                target_width,
-                target_height,
-                image::imageops::FilterType::Lanczos3,
-            )
+            .resize_exact(size.0, size.1, image::imageops::FilterType::Lanczos3)
             .into_rgb8();
         for quality in JPEG_QUALITIES {
             let bytes = jpeg(&resized, quality)?;
-            smallest = (bytes.len(), target_width, target_height);
-            if base64_chars(bytes.len()) <= MAX_ATTACHMENT_DATA_CHARS {
-                let mut note = format!(
-                    "original {width}x{height}; attached {target_width}x{target_height} JPEG at quality {quality}"
-                );
-                for conversion in &conversions {
-                    note.push_str("; ");
-                    note.push_str(conversion);
-                }
-                return Ok(Shrunk::Jpeg { bytes, note });
+            smallest = (bytes.len(), size);
+            if base64_chars(bytes.len()) <= budget.max_base64_chars {
+                return Ok(Fitted::Resized(Resized {
+                    bytes,
+                    original,
+                    size,
+                    quality,
+                    conversions,
+                }));
             }
         }
-        let next = (
-            (target_width * 3 / 4).max(1),
-            (target_height * 3 / 4).max(1),
-        );
-        if next == (target_width, target_height) {
+        let next = ((size.0 * 3 / 4).max(1), (size.1 * 3 / 4).max(1));
+        if next == size {
             break;
         }
-        (target_width, target_height) = next;
+        size = next;
     }
-    let (len, smallest_width, smallest_height) = smallest;
+    let (len, (smallest_width, smallest_height)) = smallest;
     Err(format!(
         "could not be compressed below {}KB of base64 (smallest was {}KB at {smallest_width}x{smallest_height})",
-        MAX_ATTACHMENT_DATA_CHARS / 1000,
+        budget.max_base64_chars / 1000,
         base64_chars(len) / 1000
     ))
 }
@@ -301,5 +438,152 @@ mod tests {
     #[test]
     fn something_that_is_not_an_image_is_refused() {
         assert!(shrink(b"plain text, not pixels").is_err());
+    }
+
+    fn model(id: &str, api: mush_ai::types::Api) -> mush_ai::types::Model {
+        mush_ai::types::Model::builder()
+            .id(id.into())
+            .name(id.into())
+            .api(api)
+            .provider(mush_ai::types::Provider::Anthropic)
+            .base_url("https://example.invalid".into())
+            .input(vec![mush_ai::types::InputModality::Text])
+            .cost(mush_ai::types::ModelCost::default())
+            .context_window(mush_ai::types::TokenCount::new(200_000))
+            .max_output_tokens(mush_ai::types::TokenCount::new(8192))
+            .build()
+    }
+
+    #[test]
+    fn claude_versions_are_read_from_every_id_style() {
+        let cases = [
+            ("claude-opus-5-5", Some((5, 5))),
+            ("claude-sonnet-5", Some((5, 0))),
+            ("claude-opus-4-7", Some((4, 7))),
+            ("claude-sonnet-4-20250514", Some((4, 0))),
+            ("claude-3-5-sonnet-20241022", Some((3, 5))),
+            ("anthropic/claude-opus-4", Some((4, 0))),
+            ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", Some((4, 5))),
+            ("claude-haiku-4-5@20251001", Some((4, 5))),
+            ("gpt-5.6-sol", None),
+            ("claude", None),
+        ];
+
+        for (id, version) in cases {
+            assert_eq!(claude_version(id), version, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_claude_model_gets_its_resolution_tier_and_everything_else_the_shared_caps() {
+        use mush_ai::types::Api;
+        let high = ImageBudget::for_user_image(&model("claude-opus-5-5", Api::AnthropicMessages));
+        let standard =
+            ImageBudget::for_user_image(&model("claude-haiku-4-5", Api::AnthropicMessages));
+        let routed = ImageBudget::for_user_image(&model(
+            "anthropic/claude-sonnet-4",
+            Api::OpenaiCompletions,
+        ));
+        let other = ImageBudget::for_user_image(&model("gpt-5.6-sol", Api::OpenaiResponses));
+
+        assert_eq!(
+            (high.max_side, high.patches.map(|p| p.max)),
+            (2000, Some(4784))
+        );
+        assert_eq!(
+            (standard.max_side, standard.patches.map(|p| p.max)),
+            (1568, Some(1568))
+        );
+        assert_eq!(routed, standard);
+        assert_eq!((other.max_side, other.patches), (2000, None));
+        for budget in [high, standard, other] {
+            assert_eq!(budget.max_base64_chars, 5 * 1024 * 1024);
+        }
+    }
+
+    #[test]
+    fn the_standard_tier_matches_the_published_resize_examples() {
+        let standard = ImageBudget::for_user_image(&model(
+            "claude-sonnet-4-6",
+            mush_ai::types::Api::AnthropicMessages,
+        ));
+
+        assert_eq!(standard.size_for(1920, 1080), (1456, 819));
+        assert_eq!(standard.size_for(3840, 2160), (1456, 819));
+        assert_eq!(standard.size_for(1075, 1520), (924, 1307));
+        assert_eq!(standard.size_for(1000, 1000), (1000, 1000));
+    }
+
+    #[test]
+    fn the_high_resolution_tier_stops_at_the_many_image_side_limit() {
+        let high = ImageBudget::for_user_image(&model(
+            "claude-opus-5-5",
+            mush_ai::types::Api::AnthropicMessages,
+        ));
+
+        assert_eq!(high.size_for(3840, 2160), (2000, 1125));
+        assert_eq!(high.size_for(1920, 1080), (1920, 1080));
+        assert_eq!(high.size_for(3000, 3000), (1932, 1932));
+        assert_eq!(high.size_for(1000, 6000), (333, 2000));
+    }
+
+    #[test]
+    fn a_screenshot_too_big_for_the_model_is_downscaled_to_its_budget() {
+        let budget = ImageBudget::for_user_image(&model(
+            "claude-sonnet-4-6",
+            mush_ai::types::Api::AnthropicMessages,
+        ));
+        let screenshot = DynamicImage::ImageRgb8(image::RgbImage::from_fn(1920, 1080, |x, y| {
+            image::Rgb([
+                (x % 256) as u8,
+                (y % 256) as u8,
+                ((x / 8 + y / 8) % 2 * 255) as u8,
+            ])
+        }));
+
+        let Fitted::Resized(resized) = fit(&png(&screenshot), &budget).unwrap() else {
+            panic!("a 1920x1080 screenshot is over the standard tier");
+        };
+
+        let sent = image::load_from_memory(&resized.bytes).unwrap();
+        assert_eq!((sent.width(), sent.height()), (1456, 819));
+        assert_eq!(
+            (resized.original, resized.size),
+            ((1920, 1080), (1456, 819))
+        );
+        assert!(base64_chars(resized.bytes.len()) <= budget.max_base64_chars);
+    }
+
+    #[test]
+    fn an_image_inside_the_budget_is_sent_as_it_is() {
+        let budget = ImageBudget::for_user_image(&model(
+            "claude-opus-5-5",
+            mush_ai::types::Api::AnthropicMessages,
+        ));
+
+        assert_eq!(
+            fit(&png(&noise(640, 360)), &budget),
+            Ok(Fitted::Unchanged { size: (640, 360) })
+        );
+    }
+
+    #[test]
+    fn an_image_over_the_byte_cap_is_reencoded_even_when_its_size_fits() {
+        let pixels = noise(400, 400);
+        let lowest_quality = jpeg(&pixels.to_rgb8(), 36).unwrap().len();
+        let budget = ImageBudget {
+            max_side: 2000,
+            max_base64_chars: base64_chars(lowest_quality),
+            patches: None,
+        };
+        let data = png(&pixels);
+        assert!(base64_chars(data.len()) > budget.max_base64_chars);
+
+        let Fitted::Resized(resized) = fit(&data, &budget).unwrap() else {
+            panic!("a noisy png over the cap must be re-encoded");
+        };
+
+        assert_eq!(resized.size, (400, 400));
+        assert!(base64_chars(resized.bytes.len()) <= budget.max_base64_chars);
     }
 }

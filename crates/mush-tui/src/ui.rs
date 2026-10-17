@@ -112,6 +112,7 @@ mod tests {
             data: vec![],
             mime_type: ImageMimeType::Png,
             dimensions: Some((100, 200)),
+            note: None,
         };
         let input = format!("hi{IMAGE_PLACEHOLDER}");
         assert_eq!(input_height_for(&input, 80, vec![img]), 3);

@@ -183,6 +183,7 @@ mod tests {
             data: vec![7],
             mime_type: mush_ai::types::ImageMimeType::Png,
             dimensions: None,
+            note: None,
         });
         input.insert_char(super::super::IMAGE_PLACEHOLDER);
         input.checkpoint();

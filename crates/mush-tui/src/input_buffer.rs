@@ -255,13 +255,19 @@ impl InputBuffer {
         let dimensions = image::load_from_memory(&image.bytes)
             .ok()
             .map(|img| (img.width(), img.height()));
-        self.images.push(PendingImage {
+        self.attach_image(PendingImage {
             data: image.bytes,
             mime_type: image.mime_type,
             dimensions,
+            note: None,
         });
-        self.text.insert(self.cursor, IMAGE_PLACEHOLDER);
-        self.cursor += IMAGE_PLACEHOLDER.len_utf8();
+    }
+
+    pub fn attach_image(&mut self, image: PendingImage) {
+        let mut buffer = [0; 4];
+        let placeholder = IMAGE_PLACEHOLDER.encode_utf8(&mut buffer);
+        self.insert_with_images(self.cursor, placeholder, vec![image]);
+        self.cursor += placeholder.len();
         self.ensure_cursor_visible();
     }
 

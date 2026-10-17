@@ -15,6 +15,7 @@ fn input_buffer_module_exposes_extracted_types() {
         data: vec![],
         mime_type: ImageMimeType::Png,
         dimensions: Some((1, 2)),
+        note: None,
     };
     assert_eq!(image.dimensions, Some((1, 2)));
 }

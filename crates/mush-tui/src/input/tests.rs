@@ -697,6 +697,46 @@ fn typing_allowed_while_streaming() {
 }
 
 #[test]
+fn a_resized_image_puts_its_note_in_the_sent_text() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.input.insert_str("look ");
+    app.input.attach_image(crate::app::PendingImage {
+        data: vec![1, 2, 3],
+        mime_type: mush_ai::types::ImageMimeType::Jpeg,
+        dimensions: Some((2000, 1125)),
+        note: Some("3840x2160 PNG 10.2 MB → 2000x1125 JPEG 412 KB, original at /o.png".into()),
+    });
+
+    match handle_key(&mut app, key(KeyCode::Enter)) {
+        Some(AppEvent::UserSubmit { text, images }) => {
+            assert_eq!(
+                text,
+                "look [image 1]\n\n[image 1: 3840x2160 PNG 10.2 MB → 2000x1125 JPEG 412 KB, original at /o.png]"
+            );
+            assert_eq!(images.len(), 1);
+        }
+        other => panic!("expected UserSubmit, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_image_attached_before_another_takes_the_earlier_slot() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let image = |byte: u8| crate::app::PendingImage {
+        data: vec![byte],
+        mime_type: mush_ai::types::ImageMimeType::Png,
+        dimensions: None,
+        note: None,
+    };
+    app.input.attach_image(image(2));
+    app.input.cursor = 0;
+    app.input.attach_image(image(1));
+
+    let order: Vec<u8> = app.input.images.iter().map(|image| image.data[0]).collect();
+    assert_eq!(order, [1, 2]);
+}
+
+#[test]
 fn submit_allowed_while_streaming() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = true;
@@ -2705,6 +2745,7 @@ fn composer_normal_with_an_image() -> App {
         data: vec![1, 2, 3],
         mime_type: mush_ai::types::ImageMimeType::Png,
         dimensions: None,
+        note: None,
     });
     app.input.cursor = 1;
     app.interaction.mode = AppMode::Normal;

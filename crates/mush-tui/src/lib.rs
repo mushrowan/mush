@@ -24,6 +24,7 @@ pub mod model_picker;
 mod motion;
 mod normal;
 pub mod notify;
+pub mod pasted_image;
 pub mod path_utils;
 pub mod prompt_cache;
 pub mod question;

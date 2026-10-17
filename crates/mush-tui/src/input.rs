@@ -186,10 +186,7 @@ fn handle_streaming_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
             }
             Submission::Refused => return None,
         }
-        return Some(AppEvent::UserSubmit {
-            text,
-            images: app.input.take_images(),
-        });
+        return Some(submission(app, text));
     }
 
     handle_editing(app, key)
@@ -220,6 +217,14 @@ fn classify_submission(app: &mut App, text: &str) -> Submission {
             app.push_system_message(error.to_string());
             Submission::Refused
         }
+    }
+}
+
+fn submission(app: &mut App, text: String) -> AppEvent {
+    let images = app.input.take_images();
+    AppEvent::UserSubmit {
+        text: crate::pasted_image::annotate(text, &images),
+        images,
     }
 }
 
@@ -283,10 +288,7 @@ fn handle_idle_keys(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
                 Submission::Command(action) => return Some(AppEvent::SlashCommand { action }),
                 Submission::Refused => return None,
             }
-            Some(AppEvent::UserSubmit {
-                text,
-                images: app.input.take_images(),
-            })
+            Some(submission(app, text))
         }
 
         _ if app.keymap.matches(Action::DeleteChar, key) => {

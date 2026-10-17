@@ -289,6 +289,7 @@ fn input_fixture() -> (String, Vec<PendingImage>) {
         data: vec![],
         mime_type: ImageMimeType::Png,
         dimensions: Some((1920, 1080)),
+        note: None,
     };
     let input = format!(
         "summarise the current refactor state {IMAGE_PLACEHOLDER}\nthen explain the likely performance tradeoffs in the tui layout path and provider streaming path while keeping the answer concise and readable"

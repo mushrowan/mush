@@ -153,6 +153,8 @@ pub struct PendingImage {
     pub data: Vec<u8>,
     pub mime_type: ImageMimeType,
     pub dimensions: Option<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]

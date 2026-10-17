@@ -46,6 +46,7 @@ fn default_and_remapped_keys_preserve_draft_selection_attachments_and_modal() {
             data: vec![1, 2, 3],
             mime_type: ImageMimeType::Png,
             dimensions: None,
+            note: None,
         });
         app.interaction.mode = mode.clone();
         app.start_streaming();

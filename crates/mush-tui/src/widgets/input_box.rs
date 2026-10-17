@@ -681,6 +681,7 @@ mod tests {
             data: vec![],
             mime_type: ImageMimeType::Png,
             dimensions: Some((100, 200)),
+            note: None,
         };
         let input = format!("hi{IMAGE_PLACEHOLDER}world");
         let cursor = 2 + IMAGE_PLACEHOLDER.len_utf8();

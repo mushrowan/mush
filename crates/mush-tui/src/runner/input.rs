@@ -193,7 +193,7 @@ async fn handle_common_app_event(
         AppEvent::Quit => Some(LoopAction::Quit),
         AppEvent::CycleThinkingLevel => Some(LoopAction::Redraw),
         AppEvent::PasteImage => {
-            paste_clipboard_image(&mut session.app).await;
+            paste_clipboard_image(session, deps.tui_config).await;
             Some(LoopAction::Redraw)
         }
         AppEvent::ExternalEditor => {
@@ -711,24 +711,39 @@ async fn put_clipboard_text(app: &mut App, before: bool, count: Option<usize>) {
     }
 }
 
-async fn paste_clipboard_image(app: &mut App) {
-    app.status = Some("reading clipboard…".into());
-    match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_image).await {
-        Ok(Some(image)) => {
-            let mime = image.mime_type.as_str();
-            let size = image.bytes.len();
-            app.input.add_image(image);
-            let n = app.input.images.len();
-            let kb = size / 1024;
-            app.status = Some(format!("{n} image(s) attached ({mime}, {kb}kb)").into());
-        }
+async fn paste_clipboard_image(session: &mut Session, tui_config: &TuiConfig) {
+    session.app.status = Some("reading clipboard…".into());
+    let image = match tokio::task::spawn_blocking(crate::clipboard::read_clipboard_image).await {
+        Ok(Some(image)) => image,
         Ok(None) => {
-            app.status = Some("no image in clipboard".into());
+            session.app.status = Some("no image in clipboard".into());
+            return;
         }
         Err(_) => {
-            app.status = Some("failed to read clipboard".into());
+            session.app.status = Some("failed to read clipboard".into());
+            return;
         }
-    }
+    };
+    let state = session.connection.state();
+    let model = mush_ai::discovery::resolve_model_by_id(&state.model_id)
+        .unwrap_or_else(|| tui_config.model.clone());
+    let originals =
+        mush_session::SessionStore::default_artifact_dir(&state.session_id).join("images");
+    let prepared = tokio::task::spawn_blocking(move || {
+        crate::pasted_image::prepare(image, &model, &originals)
+    })
+    .await;
+    session.app.status = Some(
+        match prepared {
+            Ok(Ok(pasted)) => {
+                session.app.input.attach_image(pasted.image);
+                pasted.status
+            }
+            Ok(Err(error)) => error,
+            Err(_) => "failed to read the image".into(),
+        }
+        .into(),
+    );
 }
 
 #[cfg(test)]

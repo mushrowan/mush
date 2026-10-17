@@ -835,6 +835,7 @@ mod tests {
                 data: vec![1, 2, 3, 4],
                 mime_type: ImageMimeType::Png,
                 dimensions: Some((10, 10)),
+                note: None,
             }],
         )
         .await;
