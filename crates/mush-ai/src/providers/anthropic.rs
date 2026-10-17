@@ -558,13 +558,7 @@ fn build_request_body(
     options: &StreamOptions,
     is_oauth: bool,
 ) -> RequestBody {
-    let max_tokens = TokenCount::new(if is_oauth {
-        options
-            .max_tokens
-            .map_or(CLAUDE_CODE_MAX_OUTPUT_TOKENS, TokenCount::get)
-    } else {
-        super::effective_max_output_tokens(model, options)
-    });
+    let max_tokens = TokenCount::new(request_max_tokens(model, options, is_oauth));
     let cache_control =
         anthropic_cache_control(model.base_url.as_str(), options.cache_retention, is_oauth);
 
@@ -632,10 +626,10 @@ fn build_request_body(
         }
         _ => (None, max_tokens.get()),
     };
-    let output_config = if model.reasoning {
+    let output_config = if accepts_effort(model) {
         super::requested_effort(options)
             .as_ref()
-            .and_then(|effort| anthropic_effort(effort, &model.supported_thinking_levels))
+            .and_then(|effort| anthropic_effort(effort, model))
             .map(|effort| OutputConfig { effort })
     } else {
         None
@@ -974,9 +968,33 @@ fn anthropic_cache_control(
     })
 }
 
-fn anthropic_effort(effort: &EffortLevel, supported: &[ThinkingLevel]) -> Option<String> {
-    let name = effort.name();
-    if supported.is_empty() {
+fn request_max_tokens(model: &Model, options: &StreamOptions, is_oauth: bool) -> u64 {
+    let requested = if is_oauth {
+        options
+            .max_tokens
+            .map_or(CLAUDE_CODE_MAX_OUTPUT_TOKENS, TokenCount::get)
+    } else {
+        super::effective_max_output_tokens(model, options)
+    };
+    match model.max_output_tokens.get() {
+        0 => requested,
+        limit => requested.min(limit),
+    }
+}
+
+fn effort_ladder(model: &Model) -> impl Iterator<Item = &ThinkingLevel> {
+    model
+        .supported_thinking_levels
+        .iter()
+        .filter(|level| level.effort_name().is_some())
+}
+
+fn accepts_effort(model: &Model) -> bool {
+    model.reasoning && (model.supports_adaptive_thinking || effort_ladder(model).next().is_some())
+}
+
+fn anthropic_effort(effort: &EffortLevel, model: &Model) -> Option<String> {
+    if effort_ladder(model).next().is_none() {
         let clamped = match effort {
             EffortLevel::Minimal | EffortLevel::Low => "low",
             EffortLevel::Medium => "medium",
@@ -984,7 +1002,23 @@ fn anthropic_effort(effort: &EffortLevel, supported: &[ThinkingLevel]) -> Option
         };
         return Some(clamped.to_string());
     }
-    Some(name.to_string())
+    let requested = ThinkingLevel::from_effort_str(effort.name());
+    let rank = |level: &ThinkingLevel| {
+        ThinkingLevel::LADDER
+            .iter()
+            .position(|rung| rung == level)
+            .unwrap_or(ThinkingLevel::LADDER.len())
+    };
+    effort_ladder(model)
+        .find(|level| **level == requested)
+        .or_else(|| {
+            effort_ladder(model)
+                .filter(|level| rank(level) <= rank(&requested))
+                .max_by_key(|level| rank(level))
+        })
+        .or_else(|| effort_ladder(model).min_by_key(|level| rank(level)))
+        .and_then(ThinkingLevel::effort_name)
+        .map(str::to_string)
 }
 
 const MIN_THINKING_TOKENS: u64 = 1024;
@@ -2887,10 +2921,10 @@ mod tests {
     #[test]
     fn effort_clamps_to_high_without_a_discovered_ladder() {
         let model = Model {
-            id: "claude-opus-4-5".into(),
-            name: "Claude Opus 4.5".into(),
+            id: "claude-opus-4-7".into(),
+            name: "Claude Opus 4.7".into(),
             reasoning: true,
-            supports_adaptive_thinking: false,
+            supports_adaptive_thinking: true,
             supported_thinking_levels: Vec::new(),
             default_thinking_level: None,
             ..test_model()
@@ -2969,13 +3003,42 @@ mod tests {
     }
 
     #[test]
-    fn legacy_claude_keeps_budget_thinking_with_effort_output_config() {
+    fn a_budget_only_model_keeps_budget_thinking_and_sends_no_effort() {
         let model = Model {
             reasoning: true,
             ..test_model()
         };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::High),
+            effort: Some(EffortLevel::Low),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, false);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Enabled { .. })
+        ));
+        assert!(body.output_config.is_none());
+    }
+
+    #[test]
+    fn opus_4_5_keeps_budget_thinking_with_effort_from_its_ladder() {
+        let model = Model {
+            id: "claude-opus-4-5-20251101".into(),
+            name: "Claude Opus 4.5".into(),
+            reasoning: true,
+            supports_adaptive_thinking: false,
+            supported_thinking_levels: vec![
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+            ],
+            ..test_model()
+        };
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Medium),
             ..Default::default()
         };
 
@@ -2987,8 +3050,151 @@ mod tests {
         ));
         assert_eq!(
             body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
-            Some("high")
+            Some("medium")
         );
+    }
+
+    fn catalogue_model(id: &str) -> Model {
+        crate::models::anthropic_models()
+            .into_iter()
+            .find(|model| model.id.as_str() == id)
+            .unwrap_or_else(|| panic!("{id} is in the anthropic catalogue"))
+    }
+
+    #[test]
+    fn haiku_4_5_gets_budget_thinking_without_effort_inside_its_output_limit() {
+        let model = catalogue_model("claude-haiku-4-5");
+        for thinking in [ThinkingLevel::High, ThinkingLevel::Off] {
+            let options = StreamOptions {
+                thinking: Some(thinking.clone()),
+                ..Default::default()
+            };
+            for is_oauth in [true, false] {
+                let body = build_request_body(&model, &None, &[], &[], &options, is_oauth);
+                assert!(
+                    body.output_config.is_none(),
+                    "{thinking:?} oauth={is_oauth}"
+                );
+                assert!(body.max_tokens <= 64_000, "{thinking:?} oauth={is_oauth}");
+                assert_eq!(
+                    matches!(body.thinking, Some(ThinkingConfig::Enabled { .. })),
+                    thinking == ThinkingLevel::High
+                );
+            }
+        }
+        let oauth_off = build_request_body(
+            &model,
+            &None,
+            &[],
+            &[],
+            &StreamOptions {
+                thinking: Some(ThinkingLevel::Off),
+                ..Default::default()
+            },
+            true,
+        );
+        assert_eq!(oauth_off.max_tokens, 64_000);
+    }
+
+    #[test]
+    fn haiku_5_5_takes_adaptive_thinking_with_effort_and_its_full_output() {
+        let model = catalogue_model("claude-haiku-5-5");
+        let options = StreamOptions {
+            thinking: Some(ThinkingLevel::Medium),
+            ..Default::default()
+        };
+
+        let body = build_request_body(&model, &None, &[], &[], &options, true);
+
+        assert!(matches!(
+            body.thinking,
+            Some(ThinkingConfig::Adaptive { .. })
+        ));
+        assert_eq!(
+            body.output_config.as_ref().map(|cfg| cfg.effort.as_str()),
+            Some("medium")
+        );
+        assert_eq!(body.max_tokens, 128_000);
+    }
+
+    #[test]
+    fn an_explicit_max_tokens_is_clamped_to_the_model_output_limit() {
+        let model = Model {
+            max_output_tokens: TokenCount::new(64_000),
+            ..test_model()
+        };
+        let options = StreamOptions {
+            max_tokens: Some(TokenCount::new(200_000)),
+            ..Default::default()
+        };
+        for is_oauth in [true, false] {
+            let body = build_request_body(&model, &None, &[], &[], &options, is_oauth);
+            assert_eq!(body.max_tokens, 64_000, "oauth={is_oauth}");
+        }
+        let small = StreamOptions {
+            max_tokens: Some(TokenCount::new(1_000)),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &None, &[], &[], &small, true);
+        assert_eq!(body.max_tokens, 1_000);
+    }
+
+    #[test]
+    fn effort_outside_the_ladder_falls_to_the_nearest_level_the_model_takes() {
+        let max = ThinkingLevel::Other("max".into());
+        let model = |ladder: Vec<ThinkingLevel>| Model {
+            reasoning: true,
+            supports_adaptive_thinking: true,
+            supported_thinking_levels: ladder,
+            ..test_model()
+        };
+        let without_xhigh = model(vec![
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            max.clone(),
+        ]);
+        let without_max = model(vec![
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ]);
+        let effort = |level: &str, model: &Model| {
+            anthropic_effort(&EffortLevel::from_effort_str(level).unwrap(), model)
+        };
+
+        assert_eq!(effort("xhigh", &without_xhigh).as_deref(), Some("high"));
+        assert_eq!(effort("max", &without_xhigh).as_deref(), Some("max"));
+        assert_eq!(effort("max", &without_max).as_deref(), Some("xhigh"));
+        assert_eq!(effort("minimal", &without_max).as_deref(), Some("low"));
+        assert_eq!(effort("medium", &without_max).as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn the_catalogue_sends_effort_only_to_models_anthropic_lists_for_it() {
+        let takes_effort = [
+            "claude-opus-5-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+        ];
+        let no_effort = [
+            "claude-haiku-4-5",
+            "claude-sonnet-4-20250514",
+            "claude-opus-4-20250514",
+        ];
+        for id in takes_effort {
+            assert!(accepts_effort(&catalogue_model(id)), "{id} takes effort");
+        }
+        for id in no_effort {
+            assert!(!accepts_effort(&catalogue_model(id)), "{id} rejects effort");
+        }
+        let listed = takes_effort.len() + no_effort.len();
+        assert_eq!(crate::models::anthropic_models().len(), listed);
     }
 
     #[test]

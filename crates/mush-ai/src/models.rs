@@ -171,7 +171,12 @@ pub fn anthropic_models() -> Vec<Model> {
             effective_context_window: None,
             max_output_tokens: TokenCount::new(64_000),
             supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
+            supported_thinking_levels: vec![
+                crate::types::ThinkingLevel::Off,
+                crate::types::ThinkingLevel::Low,
+                crate::types::ThinkingLevel::Medium,
+                crate::types::ThinkingLevel::High,
+            ],
             default_thinking_level: None,
         },
         Model {
