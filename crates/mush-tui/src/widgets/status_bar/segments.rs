@@ -22,6 +22,7 @@ pub(super) enum SegmentId {
     Ready,
     Activity,
     Agents,
+    Decisions,
     Goal,
     Auto,
     Jobs,
@@ -118,6 +119,7 @@ fn text_width(text: &str) -> usize {
 pub(super) fn build(app: &App) -> Segments {
     let mut activity: Vec<Segment> = [
         agents(app),
+        decisions(app),
         goal(app),
         autonomous(app),
         jobs(app),
@@ -381,6 +383,36 @@ fn agents(app: &App) -> Option<Segment> {
             Form::new(short),
             Form::new(tiny),
         ],
+    ))
+}
+
+fn decisions(app: &App) -> Option<Segment> {
+    let (open, blocking) = crate::decisions::waiting(app);
+    if open == 0 {
+        return None;
+    }
+    let theme = &app.theme;
+    let count = theme.context_warn.add_modifier(Modifier::BOLD);
+    let urgent = theme.context_danger.add_modifier(Modifier::BOLD);
+    let noun = if open == 1 { "decision" } else { "decisions" };
+    let mut long = vec![
+        Span::styled("? ", count),
+        Span::styled(format!("{open} {noun}"), count),
+    ];
+    let mut medium = vec![Span::styled(format!("? {open}"), count)];
+    let mut short = vec![Span::styled(format!("?{open}"), count)];
+    if blocking > 0 {
+        long.push(sep(app));
+        long.push(Span::styled(format!("{blocking} blocking"), urgent));
+        medium.push(sep(app));
+        medium.push(Span::styled(format!("{blocking} blocking"), urgent));
+        short.push(Span::styled(format!(" !{blocking}"), urgent));
+    }
+    Some(Segment::new(
+        SegmentId::Decisions,
+        Side::Left,
+        true,
+        vec![Form::new(long), Form::new(medium), Form::new(short)],
     ))
 }
 

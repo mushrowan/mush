@@ -51,6 +51,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
     if app.subagents.handle_key(&app.keymap, key) {
         return None;
     }
+    if let Some(event) = crate::decisions::handle_key(app, key) {
+        return event;
+    }
     tracing::trace!(
         code = ?key.code,
         modifiers = ?key.modifiers,
@@ -136,7 +139,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent) -> Option<AppEvent> {
 }
 
 pub fn handle_mouse(app: &mut App, event: MouseEvent) -> Option<AppEvent> {
-    if app.subagents.open {
+    if app.subagents.open || app.decisions_panel.open {
         return None;
     }
     if !app.interaction.mode.scrolls_the_log() {

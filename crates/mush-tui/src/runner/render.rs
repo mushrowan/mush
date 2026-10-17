@@ -124,6 +124,18 @@ fn draw_frame(
         return;
     }
 
+    if app.decisions_panel.open {
+        let regions = crate::ui::app_layout(app, area);
+        let panel = ratatui::layout::Rect {
+            height: regions.messages.height + regions.hint.height,
+            ..regions.messages
+        };
+        if let Some(cell) = widgets::decisions::render(app, panel, frame.buffer_mut()) {
+            frame.set_cursor_position(cell);
+        }
+        return;
+    }
+
     let busy_empty_input = app.is_busy() && app.input.text.is_empty();
     let cursor = match app.interaction.mode {
         AppMode::Normal | AppMode::Visual if app.interaction.focus.is_log() => {

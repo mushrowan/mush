@@ -98,6 +98,8 @@ pub fn next_thinking_level(current: &ThinkingLevel, supported: &[ThinkingLevel])
 
 pub struct App {
     pub subagents: crate::subagents::SubagentPanel,
+    pub decisions: Vec<mush_runtime::Decision>,
+    pub decisions_panel: crate::decisions::DecisionsPanel,
     pub messages: Messages,
     pub stream: StreamingState,
     pub input: InputBuffer,
@@ -165,6 +167,8 @@ impl App {
         Self {
             messages: Messages::default(),
             subagents: crate::subagents::SubagentPanel::default(),
+            decisions: Vec::new(),
+            decisions_panel: crate::decisions::DecisionsPanel::default(),
             stream: StreamingState::new(),
             input: InputBuffer::new(),
             model_id,
@@ -953,7 +957,7 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, text: &str) {
-        if self.subagents.open {
+        if self.subagents.open || crate::decisions::paste(self, text) {
             return;
         }
         if let Some(prompt) = self

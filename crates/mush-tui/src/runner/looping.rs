@@ -367,7 +367,7 @@ fn apply_command_event(
             crate::slash::side_question::show_side_answer(&mut session.app, &question, answer);
         }
         ClientEvent::ChildUpdated(child) => session.app.note_child(*child),
-        ClientEvent::DecisionsChanged(_) => {}
+        ClientEvent::DecisionsChanged(decisions) => session.app.note_decisions(decisions),
         ClientEvent::GoalChanged(goal) => session.app.note_goal(goal.map(|goal| *goal)),
         ClientEvent::ScheduleChanged(jobs) => session.app.jobs = jobs,
         ClientEvent::ProgressNote(note) => session.app.status = Some(note.into()),

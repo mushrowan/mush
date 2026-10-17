@@ -139,6 +139,7 @@ async fn run_tui_with(
     for command in std::mem::take(&mut tui_config.startup_commands) {
         commands::send_command(&mut runtime.session, &mut tui_config, command).await;
     }
+    commands::refresh_decisions(&mut runtime.session, &mut tui_config).await;
 
     draw_panes(
         &mut terminal,

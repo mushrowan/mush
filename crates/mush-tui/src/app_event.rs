@@ -36,6 +36,12 @@ pub enum AppEvent {
     CompactionRecoverySelected {
         action: crate::app_state::CompactionRecoveryAction,
     },
+    DecisionDrafts(Vec<(mush_runtime::DecisionKey, Option<mush_runtime::Answer>)>),
+    DecisionsSend {
+        keys: Vec<mush_runtime::DecisionKey>,
+        confirms: Vec<(String, bool)>,
+    },
+    DecisionsRefresh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

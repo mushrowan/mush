@@ -1,6 +1,7 @@
 pub mod ansi;
 pub mod at_picker;
 pub mod compaction_recovery;
+pub mod decisions;
 pub mod diff;
 pub mod hint_line;
 pub mod input_box;

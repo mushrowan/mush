@@ -221,6 +221,49 @@ async fn handle_common_app_event(
             handle_compaction_recovery_action(session, deps, *action).await;
             Some(LoopAction::Redraw)
         }
+        AppEvent::DecisionDrafts(drafts) => {
+            for (key, answer) in drafts {
+                let command = mush_runtime::DecisionsCommand::Draft {
+                    key: key.clone(),
+                    answer: answer.clone(),
+                };
+                super::commands::send_command(
+                    session,
+                    deps.tui_config,
+                    mush_runtime::ClientCommand::Decisions(command),
+                )
+                .await;
+            }
+            Some(LoopAction::Redraw)
+        }
+        AppEvent::DecisionsSend { keys, confirms } => {
+            for (child, allow) in confirms {
+                super::commands::send_command(
+                    session,
+                    deps.tui_config,
+                    mush_runtime::ClientCommand::ConfirmChildTool {
+                        child: child.clone(),
+                        allow: *allow,
+                    },
+                )
+                .await;
+            }
+            if !keys.is_empty() {
+                super::commands::send_command(
+                    session,
+                    deps.tui_config,
+                    mush_runtime::ClientCommand::Decisions(mush_runtime::DecisionsCommand::Send {
+                        keys: keys.clone(),
+                    }),
+                )
+                .await;
+            }
+            Some(LoopAction::Redraw)
+        }
+        AppEvent::DecisionsRefresh => {
+            super::commands::refresh_decisions(session, deps.tui_config).await;
+            Some(LoopAction::Redraw)
+        }
         _ => None,
     }
 }

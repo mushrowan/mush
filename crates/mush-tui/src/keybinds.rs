@@ -105,6 +105,7 @@ pub fn has_alt(key: KeyEvent) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     ToggleSubagents,
+    ToggleDecisions,
     CycleDetail,
     CycleFavourite,
     CycleFavouriteBackward,
@@ -215,6 +216,7 @@ impl Action {
     pub const fn config_key(self) -> &'static str {
         match self {
             Self::ToggleSubagents => "toggle_subagents",
+            Self::ToggleDecisions => "toggle_decisions",
             Self::CycleDetail => "cycle_detail",
             Self::CycleFavourite => "cycle_favourite",
             Self::CycleFavouriteBackward => "cycle_favourite_backward",
@@ -324,6 +326,7 @@ impl Action {
 
     pub const ALL: &'static [Self] = &[
         Self::ToggleSubagents,
+        Self::ToggleDecisions,
         Self::CycleDetail,
         Self::CycleFavourite,
         Self::CycleFavouriteBackward,
@@ -552,6 +555,7 @@ impl KeyMap {
 const fn default_scope_for_action(action: Action) -> KeyScope {
     match action {
         Action::ToggleSubagents
+        | Action::ToggleDecisions
         | Action::CycleDetail
         | Action::Cancel
         | Action::Confirm
@@ -667,6 +671,11 @@ const DEFAULT_BINDINGS: &[DefaultBinding] = &[
         KeyScope::Shared,
         Action::ToggleSubagents,
         &[(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+    ),
+    (
+        KeyScope::Shared,
+        Action::ToggleDecisions,
+        &[(KeyCode::Char('q'), KeyModifiers::CONTROL)],
     ),
     (
         KeyScope::Subagents,

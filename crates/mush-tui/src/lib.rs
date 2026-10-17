@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod config_watcher;
 pub mod context_view;
 mod conversation_display;
+pub mod decisions;
 pub mod display_types;
 pub mod event_handler;
 pub mod feature_hints;

@@ -91,6 +91,13 @@ pub(super) async fn send_command(
     }
 }
 
+pub(crate) async fn refresh_decisions(session: &mut Session, tui_config: &mut TuiConfig) {
+    let refresh = mush_runtime::ClientCommand::Decisions(mush_runtime::DecisionsCommand::Refresh);
+    if let Ok(events) = session.connection.send(refresh).await {
+        super::looping::apply_command_events(session, tui_config, events);
+    }
+}
+
 pub(crate) fn format_autonomous(status: Option<&mush_runtime::AutonomousStatus>) -> String {
     let Some(status) = status else {
         return "autonomous mode off. /autonomous on [--gate \"cmd\"] [--max-turns N] ...".into();

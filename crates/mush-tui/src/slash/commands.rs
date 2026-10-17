@@ -127,6 +127,18 @@ pub async fn handle(
         SlashAction::Agents => {
             app.push_system_message(format_agents(&app.children));
         }
+        SlashAction::Decisions => {
+            crate::decisions::open(app);
+            let refresh =
+                mush_runtime::ClientCommand::Decisions(mush_runtime::DecisionsCommand::Refresh);
+            if let Ok(events) = connection.send(refresh).await {
+                for event in events {
+                    if let mush_runtime::ClientEvent::DecisionsChanged(decisions) = event {
+                        app.note_decisions(decisions);
+                    }
+                }
+            }
+        }
         SlashAction::Skills => {
             app.push_system_message(format_skill_catalogue(&tui_config.skills));
         }
@@ -598,20 +610,24 @@ const KEYS_TEXT: &str = concat!(
 );
 
 fn keys_text(app: &App) -> String {
-    let panel_keys = app
-        .keymap
-        .binding(crate::keybinds::Action::ToggleSubagents)
-        .map(|binding| {
-            binding
-                .0
-                .iter()
-                .map(|key| key.to_string())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        })
-        .unwrap_or_else(|| "unbound".into());
+    let keys_for = |action| {
+        app.keymap
+            .binding(action)
+            .map(|binding| {
+                binding
+                    .0
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            })
+            .unwrap_or_else(|| "unbound".into())
+    };
+    let panel_keys = keys_for(crate::keybinds::Action::ToggleSubagents);
+    let decision_keys = keys_for(crate::keybinds::Action::ToggleDecisions);
     format!(
-        "keyboard shortcuts:\n\ngeneral:\n  {panel_keys} - toggle subagent status panel\n{KEYS_TEXT}"
+        "keyboard shortcuts:\n\ngeneral:\n  {panel_keys} - toggle subagent status panel\n  \
+         {decision_keys} - open the decisions agents are waiting on\n{KEYS_TEXT}"
     )
 }
 
@@ -620,6 +636,7 @@ const HELP_TEXT: &str = concat!(
     "  /help          - show this message\n",
     "  /keys          - show keyboard shortcuts\n",
     "  /subagents     - show or register session supervisors\n",
+    "  /decisions     - answer the decisions agents are waiting on (or ctrl+q)\n",
     "  /skill:<name> [args] - send a skill's instructions as your prompt\n",
     "  /new           - save session, start fresh\n",
     "  /model [id]    - show or switch model (--all to reveal hidden codex entries)\n",

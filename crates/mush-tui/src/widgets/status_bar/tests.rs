@@ -1187,3 +1187,60 @@ fn a_passed_tier_falls_back_to_the_cache_lifetime() {
     let text = status(&app, 120);
     assert!(text.contains("cache 0:50"), "{text}");
 }
+
+fn open_decision(id: &str, blocking: bool) -> mush_runtime::Decision {
+    let asker = mush_runtime::Asker {
+        session: "child-s".into(),
+        child: Some("sub-child".into()),
+        name: "child".into(),
+        depth: 1,
+        path: Vec::new(),
+        ancestors: vec!["root-s".into()],
+    };
+    mush_runtime::Decision {
+        key: mush_runtime::DecisionKey {
+            session: asker.session.clone(),
+            id: id.into(),
+        },
+        asker,
+        question: format!("{id}?"),
+        options: Vec::new(),
+        lean: None,
+        context: None,
+        refs: Vec::new(),
+        blocking,
+        assume_at: None,
+        status: mush_runtime::DecisionStatus::Open,
+        asked_at: mush_ai::types::Timestamp::now(),
+        updated_at: mush_ai::types::Timestamp::now(),
+        revision: 1,
+        draft: None,
+        delivered: false,
+        clarified: None,
+    }
+}
+
+#[test]
+fn decisions_waiting_on_the_user_are_counted_and_never_drop() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    assert!(!status(&app, 200).contains("decision"));
+    app.decisions = vec![
+        open_decision("push", true),
+        open_decision("layout", false),
+        open_decision("meters", false),
+    ];
+    let wide = status(&app, 200);
+    assert!(wide.contains("? 3 decisions \u{b7} 1 blocking"), "{wide}");
+    let narrow = status(&app, 24);
+    assert!(narrow.contains("? 3 \u{b7} 1 blocking"), "{narrow}");
+    app.active_tools.push(running_tool("bash"));
+    let crowded = status(&app, 24);
+    assert!(crowded.contains("?3 !1"), "{crowded}");
+    for width in 24..=240 {
+        let text = status(&app, width);
+        assert!(text.contains('?'), "at {width}: {text}");
+    }
+    app.decisions.truncate(1);
+    app.decisions[0].blocking = false;
+    assert!(status(&app, 200).contains("? 1 decision"));
+}

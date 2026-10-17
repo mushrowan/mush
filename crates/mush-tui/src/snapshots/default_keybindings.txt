@@ -111,6 +111,7 @@ shared::next_item = Tab | Down | j | Ctrl-j | Ctrl-n
 shared::previous_item = BackTab | BackTab | Shift-Tab | Up | k | Ctrl-k | Ctrl-p
 shared::quit_or_abort = Ctrl-c
 shared::select_or_space = Enter | Space
+shared::toggle_decisions = Ctrl-q
 shared::toggle_subagents = Ctrl-s
 subagents::page_down = PageDown
 subagents::page_up = PageUp
