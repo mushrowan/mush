@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "id": "replay0000000001",
+    "title": "synthetic replay fixture",
+    "model_id": "claude-opus-4-1",
+    "created_at": 1792280736410,
+    "updated_at": 1792280736410,
+    "message_count": 30,
+    "cwd": "/tmp/replay-fixture"
+  },
+  "tree": {
+    "leaf_id": "d024c048",
+    "history_entries": 30
+  }
+}
