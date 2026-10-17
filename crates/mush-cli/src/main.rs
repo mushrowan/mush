@@ -1442,8 +1442,20 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 .for_child(spec.model.as_deref())
                 .or_else(|| seed.subagent_model.clone());
             let model = match chosen {
-                Some(id) => mush_ai::discovery::resolve_model_by_id(&id)
-                    .ok_or_else(|| format!("unknown model {id}"))?,
+                Some(id) => {
+                    let store = mush_ai::credentials::default_store();
+                    mush_runtime::models::resolve_child_model(
+                        &mush_ai::discovery::shared_catalogue(),
+                        &id,
+                        |provider| {
+                            mush_ai::auth::has_credentials(
+                                provider,
+                                &seed.provider_api_keys,
+                                store.as_ref(),
+                            )
+                        },
+                    )?
+                }
                 None => mush_ai::discovery::resolve_model_by_id(&seed.models.current())
                     .unwrap_or_else(|| seed.model.clone()),
             };
@@ -2171,6 +2183,38 @@ mod tests {
 
         assert!(!turn.auto_compact);
         assert!(turn.compaction_model.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_child_on_an_unknown_model_is_refused_before_it_starts() {
+        let seed = child_seed(config::CompactionConfig::default(), None);
+        let root = mush_runtime::Identity::root("root");
+        let family = mush_runtime::Family::new(root.clone(), "root-session".into(), 2, None, None);
+        let spec = mush_runtime::ChildSpec {
+            id: "sub-1".into(),
+            name: "worker".into(),
+            prompt: "count the tests".into(),
+            model: Some("claude-haiku-4.5".into()),
+            thinking: None,
+            depth: 1,
+            parent: root,
+            parent_session_id: "root-session".into(),
+            parent_thinking: None,
+            resume_session: None,
+        };
+
+        let Err(refused) = child_factory(seed)(spec, family).await else {
+            panic!("an unknown model must not start a child");
+        };
+
+        assert!(
+            refused.starts_with("unknown model claude-haiku-4.5."),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("await rlm.find_models(query)"),
+            "{refused}"
+        );
     }
 
     #[test]

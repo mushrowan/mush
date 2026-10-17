@@ -669,6 +669,9 @@ working or napping and returns `{receipts: [...], skipped_hibernating: N}`, with
 entry for any member it could not reach. A child hibernates after 30 minutes idle or once it \
 failed, was cancelled or was interrupted; message it by name to wake it.\n\
 - Give a child one clear task with the context it needs; it starts from an empty conversation.\n\
+- `await rlm.find_models(query='', limit=10)` searches the models a child can run here, with \
+each one's context window, output limit, `thinking` levels and cost. Pass its `id` as `model=`; \
+spawn refuses an unknown id or one without credentials.\n\
 - `await rlm.create_session(prompt, name=...)` starts a separate top-level session in its own \
 worker for work that should outlive this conversation; it runs on its own and reports \
 nothing back. `mush send <id> ...` from bash reaches it.";
@@ -1361,6 +1364,7 @@ mod tests {
 
         assert!(prompt.contains("the `ipython` tool is your only tool"));
         assert!(prompt.contains("await rlm.spawn(prompt, name=...)"));
+        assert!(prompt.contains("await rlm.find_models(query='', limit=10)"));
         assert!(!prompt.contains("You are a child agent"));
         assert!(prompt.contains("Pre-installed Python packages: requests, numpy."));
         assert!(prompt.contains("`bash(command, timeout=None)` starts a command"));

@@ -168,6 +168,15 @@ impl HostRequestHandler for Echo {
                 "output": format!("ran {}", payload["job_id"]),
                 "running": false
             })),
+            "rlm.find_models" => Ok(json!([{
+                "id": format!("{}-{}", payload["query"].as_str().unwrap_or(""), payload["limit"]),
+                "name": "Claude Haiku 5.5",
+                "provider": "anthropic",
+                "context_window": 1_000_000,
+                "max_output_tokens": 128_000,
+                "thinking": ["off", "low"],
+                "cost": {"input": 0.1, "output": 0.5}
+            }])),
             other => Err(HostError(format!("unknown request {other}"))),
         }
     }
@@ -183,6 +192,22 @@ async fn a_host_request_round_trips_through_the_handler() {
         .unwrap();
 
     assert_eq!(output.result.as_deref(), Some("1"));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn find_models_turns_host_rows_into_model_infos() {
+    let kernel = kernel_with(Arc::new(Echo)).await;
+
+    let output = kernel
+        .execute("[m] = await rlm.find_models('haiku', limit=2)\n(m.id, m.provider, m.context_window, m.max_output_tokens, m.thinking, m.cost['output'], repr(m).startswith('ModelInfo('))")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.result.as_deref(),
+        Some("('haiku-2', 'anthropic', 1000000, 128000, ['off', 'low'], 0.5, True)")
+    );
     kernel.shutdown().await.unwrap();
 }
 

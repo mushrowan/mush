@@ -10,7 +10,7 @@ pub mod zai;
 pub use cache::{DiscoveredEntry, DiscoveryCache, ProviderCache, cache_path};
 pub use merge::{
     MergedModel, ModelSource, find_merged_model_by_id, merge, merged_catalogue, merged_models,
-    resolve_model_by_id,
+    resolve_model_by_id, shared_catalogue,
 };
 pub use orchestrate::{
     DiscoveryOutcome, DiscoveryRunResult, DiscoveryRunSummary, refresh_and_save,

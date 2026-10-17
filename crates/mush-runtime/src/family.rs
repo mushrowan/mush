@@ -3408,6 +3408,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_models_returns_rows_and_refuses_a_limit_out_of_range() {
+        use mush_kernel::HostRequestHandler;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let handler = RlmHandler::new(family(requests, 2, None), Identity::root("root"));
+        for limit in [
+            serde_json::json!(0),
+            serde_json::json!(51),
+            serde_json::json!("3"),
+        ] {
+            let refused = handler
+                .handle(
+                    "rlm.find_models",
+                    serde_json::json!({ "query": "claude", "limit": limit }),
+                )
+                .await
+                .unwrap_err();
+            assert!(refused.0.contains("from 1 to 50"), "{}", refused.0);
+        }
+        let rows = handler
+            .handle(
+                "rlm.find_models",
+                serde_json::json!({ "query": "claude", "limit": 2 }),
+            )
+            .await
+            .unwrap();
+        let rows = rows.as_array().unwrap();
+        assert!(rows.len() <= 2);
+        for row in rows {
+            assert!(row["id"].as_str().unwrap().contains("claude"), "{row}");
+            assert!(row["thinking"].is_array(), "{row}");
+        }
+    }
+
+    #[tokio::test]
     async fn goal_replies_carry_time_used_and_the_completion_report() {
         use mush_kernel::HostRequestHandler;
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));

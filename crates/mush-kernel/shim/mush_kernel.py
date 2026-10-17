@@ -564,6 +564,24 @@ class ChildSummary:
         return f"ChildSummary(name={self.name!r}, status={self.status!r}, state={self.state!r}, turns={self.turns}{note}{paused})"
 
 
+class ModelInfo:
+    def __init__(self, reply: dict):
+        self.id = str(reply.get("id", ""))
+        self.name = str(reply.get("name", ""))
+        self.provider = str(reply.get("provider", ""))
+        self.context_window = int(reply.get("context_window", 0))
+        self.max_output_tokens = int(reply.get("max_output_tokens", 0))
+        self.thinking = [str(level) for level in reply.get("thinking") or []]
+        self.cost = reply.get("cost")
+
+    def __repr__(self) -> str:
+        cost = f", cost={self.cost!r}" if self.cost else ""
+        return (
+            f"ModelInfo(id={self.id!r}, provider={self.provider!r}, context_window={self.context_window}, "
+            f"max_output_tokens={self.max_output_tokens}, thinking={self.thinking!r}{cost})"
+        )
+
+
 def _child_target(target) -> str:
     if isinstance(target, (ChildHandle, ChildSummary)):
         return target.rlm_child_id
@@ -585,6 +603,10 @@ class _Rlm:
 
     async def list_subagents(self) -> list:
         return [ChildSummary(entry) for entry in await host_request("rlm.list_subagents", {})]
+
+    async def find_models(self, query: str = "", limit: int = 10) -> list:
+        reply = await host_request("rlm.find_models", {"query": str(query), "limit": int(limit)})
+        return [ModelInfo(entry) for entry in reply]
 
     async def collect(self, targets=None, *, timeout_ms: int = 0) -> list:
         payload = {"targets": _child_targets(targets), "timeout_ms": int(timeout_ms)}

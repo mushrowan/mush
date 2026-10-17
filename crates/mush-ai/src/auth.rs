@@ -56,6 +56,24 @@ async fn oauth_auth(oauth_id: &str, account: Option<&AccountLabel>) -> ResolvedA
     }
 }
 
+#[must_use]
+pub fn has_credentials(
+    provider: &Provider,
+    config_api_keys: &HashMap<String, ApiKey>,
+    credential_store: &dyn CredentialStore,
+) -> bool {
+    env_api_key(provider).is_some()
+        || config_api_keys.contains_key(config_key(provider))
+        || credential_store
+            .get(config_key(provider))
+            .ok()
+            .flatten()
+            .is_some()
+        || oauth_provider_id(provider).is_some_and(|oauth_id| {
+            crate::oauth::load_credentials().is_ok_and(|store| store.has_provider(oauth_id))
+        })
+}
+
 pub async fn resolve_auth_from_default_sources(provider: &Provider) -> ResolvedAuth {
     let config_api_keys = load_config_api_keys();
     let credential_store = default_store();
@@ -135,6 +153,29 @@ mod tests {
 
     use super::*;
     use crate::credentials::FileCredentialStore;
+
+    #[test]
+    fn credentials_count_from_config_or_the_store_but_not_from_another_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileCredentialStore::at(dir.path().join("api-keys.json"));
+        let provider = Provider::Custom("mush-credential-probe".into());
+        let other = Provider::Custom("mush-credential-other".into());
+        let mut config_api_keys = HashMap::new();
+
+        assert!(!has_credentials(&provider, &config_api_keys, &store));
+
+        config_api_keys.insert(
+            "mush-credential-probe".into(),
+            ApiKey::new("sk-probe-config").unwrap(),
+        );
+        assert!(has_credentials(&provider, &config_api_keys, &store));
+        assert!(!has_credentials(&other, &config_api_keys, &store));
+
+        store
+            .set("mush-credential-other", "sk-other-stored")
+            .unwrap();
+        assert!(has_credentials(&other, &HashMap::new(), &store));
+    }
 
     #[tokio::test]
     async fn resolve_auth_uses_config_key_for_openai() {

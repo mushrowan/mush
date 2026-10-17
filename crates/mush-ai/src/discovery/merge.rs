@@ -136,6 +136,11 @@ pub fn merged_catalogue() -> Vec<MergedModel> {
 }
 
 #[must_use]
+pub fn shared_catalogue() -> Arc<[MergedModel]> {
+    catalogue()
+}
+
+#[must_use]
 pub fn merged_models() -> Vec<Model> {
     catalogue().iter().map(|m| m.model.clone()).collect()
 }

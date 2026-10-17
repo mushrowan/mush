@@ -195,6 +195,30 @@ impl RlmHandler {
         Ok(to_json(handle))
     }
 
+    fn find_models(payload: Payload<'_>) -> Result<Value, HostError> {
+        use crate::models::{MAX_MODEL_SEARCH_LIMIT, MODEL_SEARCH_LIMIT};
+        let limit = match payload.0.get("limit") {
+            None | Some(Value::Null) => MODEL_SEARCH_LIMIT,
+            Some(limit) => limit
+                .as_u64()
+                .and_then(|limit| usize::try_from(limit).ok())
+                .filter(|limit| (1..=MAX_MODEL_SEARCH_LIMIT).contains(limit))
+                .ok_or_else(|| {
+                    HostError(format!(
+                        "limit must be a whole number from 1 to {MAX_MODEL_SEARCH_LIMIT}"
+                    ))
+                })?,
+        };
+        let config_api_keys = mush_ai::auth::load_config_api_keys();
+        let store = mush_ai::credentials::default_store();
+        Ok(to_json(crate::models::find_models(
+            &mush_ai::discovery::shared_catalogue(),
+            &payload.text("query").unwrap_or_default(),
+            limit,
+            |provider| mush_ai::auth::has_credentials(provider, &config_api_keys, store.as_ref()),
+        )))
+    }
+
     async fn collect(&self, payload: Payload<'_>) -> Result<Value, HostError> {
         let timeout = Duration::from_millis(payload.number("timeout_ms").unwrap_or(0));
         let children = self
@@ -680,6 +704,7 @@ impl mush_kernel::HostRequestHandler for RlmHandler {
         let payload = Payload(&payload);
         match kind {
             "rlm.spawn" => self.spawn(payload).await,
+            "rlm.find_models" => Self::find_models(payload),
             "rlm.list_subagents" => Ok(summaries(
                 &self.family,
                 &self.family.children_of(&self.identity),
