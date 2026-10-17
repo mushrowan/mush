@@ -174,13 +174,27 @@ pub async fn handle(
             }
         }
         SlashAction::Settings { args } => {
-            tui_config.settings.auto_compact = connection.state().auto_compact;
-            handle_settings(app, tui_config, args);
-            let _ = connection
-                .send(mush_runtime::ClientCommand::SetStreamOptions(Box::new(
-                    tui_config.options.clone(),
-                )))
-                .await;
+            tui_config.settings.auto_compact = state.auto_compact;
+            if let Some(betas) = &state.anthropic_betas {
+                tui_config.settings.anthropic_betas = betas.clone();
+                tui_config.options.anthropic_betas = Some(betas.clone());
+            }
+            if let Some(changed) = handle_settings(app, tui_config, args) {
+                let betas = tui_config.settings.anthropic_betas.clone();
+                let live = match connection
+                    .send(mush_runtime::ClientCommand::SetAnthropicBetas(betas))
+                    .await
+                {
+                    Ok(_) => crate::settings::LIVE_FROM_NEXT_TURN.to_string(),
+                    Err(error) => crate::settings::not_live(&error.to_string(), &changed.persisted),
+                };
+                let persist_note = match changed.persisted {
+                    Ok(Some(path)) => format!(" (saved to {})", path.display()),
+                    Ok(None) => " (session scope, not persisted)".to_string(),
+                    Err(e) => format!(" (persist failed: {e})"),
+                };
+                app.push_system_message(format!("{}{live}{persist_note}", changed.head));
+            }
         }
         SlashAction::SubagentModel {
             model_id: None,
@@ -800,35 +814,35 @@ pub(crate) fn format_agents(children: &[mush_runtime::ChildSummary]) -> String {
     lines.join("\n")
 }
 
-fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) {
+struct BetasChanged {
+    head: String,
+    persisted: Result<Option<std::path::PathBuf>, String>,
+}
+
+fn handle_settings(app: &mut App, tui_config: &mut TuiConfig, args: &str) -> Option<BetasChanged> {
     let args = args.trim();
     if args.is_empty() {
         app.settings_menu = Some(crate::settings::SettingsMenuState::default());
         app.interaction.mode = crate::app::AppMode::Settings;
-        return;
+        return None;
     }
 
     let mut parts = args.splitn(3, char::is_whitespace);
     let sub = parts.next().unwrap_or("");
-    match sub {
-        "show" => {
-            app.push_system_message(format_settings_view(&tui_config.settings));
-        }
-        "scope" => {
-            app.push_system_message(set_settings_scope(tui_config, parts.next()));
-        }
-        "betas" => {
-            app.push_system_message(set_settings_beta(tui_config, parts.next(), parts.next()));
-        }
-        "reset" => {
-            tui_config.settings.anthropic_betas = mush_ai::types::AnthropicBetas::default();
-            tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
-            app.push_system_message("anthropic betas reset to defaults");
-        }
-        _ => {
-            app.push_system_message(format!(
-                "unknown /settings subcommand {sub:?}. try: /settings, /settings scope <s>, /settings betas <field> <bool>, /settings reset"
-            ));
+    let changed = match sub {
+        "show" => Err(format_settings_view(&tui_config.settings)),
+        "scope" => Err(set_settings_scope(tui_config, parts.next())),
+        "betas" => set_settings_beta(tui_config, parts.next(), parts.next()),
+        "reset" => reset_settings_betas(tui_config),
+        _ => Err(format!(
+            "unknown /settings subcommand {sub:?}. try: /settings, /settings scope <s>, /settings betas <field> <bool>, /settings reset"
+        )),
+    };
+    match changed {
+        Ok(changed) => Some(changed),
+        Err(message) => {
+            app.push_system_message(message);
+            None
         }
     }
 }
@@ -846,34 +860,46 @@ fn set_settings_scope(tui_config: &mut TuiConfig, value: Option<&str>) -> String
     format!("settings scope → {}", scope.as_str())
 }
 
+const BETAS_DISABLED: &str =
+    "settings scope is disabled; edit config.toml to change anthropic betas";
+
 fn set_settings_beta(
     tui_config: &mut TuiConfig,
     field: Option<&str>,
     value: Option<&str>,
-) -> String {
+) -> Result<BetasChanged, String> {
     if tui_config.settings.scope == crate::settings::SettingsScope::Disabled {
-        return "settings scope is disabled; edit config.toml to change anthropic betas".into();
+        return Err(BETAS_DISABLED.into());
     }
     let Some(field) = field else {
-        return "usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, thinking_updates, advisor, advanced_tool_use, fallback_credit)".into();
+        return Err("usage: /settings betas <field> <true|false>  (fields: context_1m, effort, context_management, thinking_token_count, thinking_updates, advisor, advanced_tool_use, fallback_credit)".into());
     };
     let Some(value) = value else {
-        return "usage: /settings betas <field> <true|false>".into();
+        return Err("usage: /settings betas <field> <true|false>".into());
     };
     let Some(parsed) = parse_bool(value) else {
-        return format!("expected true or false, got {value:?}");
+        return Err(format!("expected true or false, got {value:?}"));
     };
     if !apply_beta_toggle(&mut tui_config.settings.anthropic_betas, field, parsed) {
-        return format!("unknown beta field {field:?}");
+        return Err(format!("unknown beta field {field:?}"));
     }
     tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+    Ok(BetasChanged {
+        head: format!("betas.{field} → {parsed}"),
+        persisted: crate::settings::persist(&tui_config.settings, &tui_config.cwd),
+    })
+}
 
-    let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
-        Ok(Some(path)) => format!(" (saved to {})", path.display()),
-        Ok(None) => " (session scope, not persisted)".to_string(),
-        Err(e) => format!(" (persist failed: {e})"),
-    };
-    format!("betas.{field} → {parsed}{persist_note}")
+fn reset_settings_betas(tui_config: &mut TuiConfig) -> Result<BetasChanged, String> {
+    if tui_config.settings.scope == crate::settings::SettingsScope::Disabled {
+        return Err(BETAS_DISABLED.into());
+    }
+    tui_config.settings.anthropic_betas = mush_ai::types::AnthropicBetas::default();
+    tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
+    Ok(BetasChanged {
+        head: "anthropic betas reset to defaults".into(),
+        persisted: crate::settings::persist(&tui_config.settings, &tui_config.cwd),
+    })
 }
 
 fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
@@ -907,7 +933,10 @@ fn format_settings_view(settings: &crate::settings::ScopedSettings) -> String {
             settings.preferred_providers.join(", ")
         }
     );
-    let _ = writeln!(out, "anthropic betas:");
+    let _ = writeln!(
+        out,
+        "anthropic betas (a change applies from the next turn):"
+    );
     let _ = writeln!(out, "  context_1m         = {}", b.context_1m);
     let _ = writeln!(out, "  effort             = {}", b.effort);
     let _ = writeln!(out, "  context_management = {}", b.context_management);
@@ -1315,6 +1344,7 @@ pub(crate) fn format_skill_catalogue(catalogue: &crate::runner::SkillCatalogue) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mush_runtime::AgentConnection as _;
 
     #[test]
     fn effort_sets_a_known_level_and_names_the_choices_otherwise() {
@@ -1566,6 +1596,98 @@ mod tests {
                 .normalize_visible()
         );
         assert_ne!(app.thinking_level, ThinkingLevel::Off);
+    }
+
+    async fn settings(
+        app: &mut App,
+        config: &mut TuiConfig,
+        connection: &mut dyn mush_runtime::AgentConnection,
+        args: &str,
+    ) {
+        handle(
+            app,
+            connection,
+            config,
+            &SlashAction::Settings { args: args.into() },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn settings_betas_reach_the_agent_and_say_when_they_apply() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut config = test_tui_config(None);
+        let mut connection =
+            mush_runtime::InProcessConnection::detached(mush_runtime::SessionRuntime::default());
+
+        settings(&mut app, &mut config, &mut connection, "betas effort false").await;
+
+        let live = connection
+            .state()
+            .anthropic_betas
+            .expect("the agent took the betas");
+        assert!(!live.effort);
+        assert_eq!(live, config.settings.anthropic_betas);
+        let said = &app.messages.last().unwrap().content;
+        assert_eq!(
+            said,
+            "betas.effort → false from the next turn, subagents included (session scope, not persisted)"
+        );
+
+        settings(&mut app, &mut config, &mut connection, "reset").await;
+        assert_eq!(
+            connection.state().anthropic_betas,
+            Some(mush_ai::types::AnthropicBetas::default())
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_show_what_the_agent_runs_with() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut config = test_tui_config(None);
+        let mut connection =
+            mush_runtime::InProcessConnection::detached(mush_runtime::SessionRuntime::default());
+        let betas = mush_ai::types::AnthropicBetas {
+            context_1m: false,
+            ..Default::default()
+        };
+        connection
+            .send(mush_runtime::ClientCommand::SetAnthropicBetas(
+                betas.clone(),
+            ))
+            .await
+            .unwrap();
+        assert!(config.settings.anthropic_betas.context_1m);
+
+        settings(&mut app, &mut config, &mut connection, "show").await;
+
+        assert_eq!(config.settings.anthropic_betas, betas);
+        let said = &app.messages.last().unwrap().content;
+        assert!(said.contains("context_1m         = false"), "{said}");
+        assert!(
+            said.contains("a change applies from the next turn"),
+            "{said}"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_refuse_betas_while_the_scope_is_disabled() {
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        let mut config = test_tui_config(None);
+        config.settings.scope = crate::settings::SettingsScope::Disabled;
+        let mut connection =
+            mush_runtime::InProcessConnection::detached(mush_runtime::SessionRuntime::default());
+
+        settings(&mut app, &mut config, &mut connection, "reset").await;
+
+        assert_eq!(connection.state().anthropic_betas, None);
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .content
+                .contains("scope is disabled")
+        );
     }
 
     async fn name_session(app: &mut App, title: Option<&str>) {

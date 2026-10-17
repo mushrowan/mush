@@ -193,6 +193,11 @@ impl MenuItemKind {
         self != Self::AutoCompact
     }
 
+    #[must_use]
+    pub fn is_beta(self) -> bool {
+        self.beta_mut(&mut AnthropicBetas::default()).is_some()
+    }
+
     pub(crate) fn beta_mut(self, betas: &mut AnthropicBetas) -> Option<&mut bool> {
         Some(match self {
             Self::Scope | Self::SubagentModel | Self::AutoCompact | Self::PriceCliffPin => {
@@ -273,6 +278,18 @@ impl From<&ScopedSettings> for PersistedSettings {
             preferred_providers: Some(s.preferred_providers.clone()),
             subagent_model: Some(s.subagent_model.clone().unwrap_or_default()),
         }
+    }
+}
+
+pub const LIVE_FROM_NEXT_TURN: &str = " from the next turn, subagents included";
+
+#[must_use]
+pub fn not_live(error: &str, persisted: &Result<Option<std::path::PathBuf>, String>) -> String {
+    match persisted {
+        Ok(Some(_)) => format!(
+            ", not live: the agent refused it ({error}); a daemon restart picks up the saved value"
+        ),
+        _ => format!(", not live: the agent refused it ({error})"),
     }
 }
 

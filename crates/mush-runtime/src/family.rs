@@ -609,6 +609,7 @@ pub struct Family {
     max_depth: std::sync::atomic::AtomicU32,
     price_cliff_pin: std::sync::atomic::AtomicU8,
     preferred_providers: Mutex<Vec<String>>,
+    anthropic_betas: Mutex<Option<mush_ai::types::AnthropicBetas>>,
     idle_release_ms: std::sync::atomic::AtomicU64,
     waking: tokio::sync::Mutex<()>,
     decisions: Arc<crate::decisions::Decisions>,
@@ -704,6 +705,7 @@ impl Family {
                 mush_session::compact::PriceCliffPin::default(),
             )),
             preferred_providers: Mutex::new(Vec::new()),
+            anthropic_betas: Mutex::new(None),
             idle_release_ms: std::sync::atomic::AtomicU64::new(0),
             waking: tokio::sync::Mutex::new(()),
             decisions,
@@ -723,6 +725,7 @@ impl Family {
     pub fn set_price_cliff_pin(&self, pin: mush_session::compact::PriceCliffPin) {
         self.price_cliff_pin
             .store(pin_code(pin), std::sync::atomic::Ordering::Relaxed);
+        self.tell_running_children(&ClientCommand::SetPriceCliffPin(pin));
     }
 
     #[must_use]
@@ -750,6 +753,33 @@ impl Family {
             .lock()
             .map(|preferred| preferred.clone())
             .unwrap_or_default()
+    }
+
+    pub fn set_anthropic_betas(&self, betas: mush_ai::types::AnthropicBetas) {
+        if let Ok(mut current) = self.anthropic_betas.lock() {
+            *current = Some(betas.clone());
+        }
+        self.tell_running_children(&ClientCommand::SetAnthropicBetas(betas));
+    }
+
+    #[must_use]
+    pub fn anthropic_betas(&self) -> Option<mush_ai::types::AnthropicBetas> {
+        self.anthropic_betas
+            .lock()
+            .ok()
+            .and_then(|betas| betas.clone())
+    }
+
+    fn tell_running_children(&self, command: &ClientCommand) {
+        let controls: Vec<_> = self
+            .lock()
+            .children
+            .values()
+            .filter_map(|node| node.control.clone())
+            .collect();
+        for control in controls {
+            let _ = control.send(command.clone());
+        }
     }
 
     #[must_use]
@@ -1256,7 +1286,15 @@ impl Family {
         })
     }
 
-    fn launch(this: &Arc<Self>, id: &str, parts: ChildParts, first_prompt: Option<String>) -> Live {
+    fn launch(
+        this: &Arc<Self>,
+        id: &str,
+        mut parts: ChildParts,
+        first_prompt: Option<String>,
+    ) -> Live {
+        if let Some(betas) = this.anthropic_betas() {
+            parts.config.turn.set_anthropic_betas(&betas);
+        }
         let compaction = if parts.config.turn.auto_compact {
             Compaction::On
         } else {
@@ -6063,5 +6101,78 @@ mod tests {
         family.confirm_child(&id, false).unwrap();
         assert!(family.all()[0].awaiting_confirmation.is_none());
         assert!(family.confirm_child("sub-nobody", true).is_err());
+    }
+
+    fn betas_factory(seen: crate::testing::SeenBetas) -> ChildFactory {
+        Arc::new(move |spec: ChildSpec, _family: Arc<Family>| {
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                let mut registry = ApiRegistry::new();
+                registry.register(Box::new(crate::testing::RecordsBetas { seen }));
+                let mut config = WorkerConfig::new(echo_config(echo_model()));
+                config.title = Some(spec.name.clone());
+                config.rlm_depth = spec.depth;
+                Ok(ChildParts {
+                    config,
+                    tools: ToolRegistry::new(),
+                    registry,
+                })
+            })
+        })
+    }
+
+    async fn requests_seen(seen: &crate::testing::SeenBetas, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while seen.lock().unwrap().len() < count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the children made their requests");
+    }
+
+    #[tokio::test]
+    async fn betas_set_on_the_family_reach_running_children_and_the_ones_spawned_later() {
+        let seen: crate::testing::SeenBetas = Arc::default();
+        let family = Family::new(
+            Identity::root("root"),
+            "root-session".into(),
+            2,
+            Some(betas_factory(Arc::clone(&seen))),
+            None,
+        );
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        requests_seen(&seen, 1).await;
+        settle(&family, &root).await;
+        assert_eq!(family.anthropic_betas(), None);
+
+        let betas = mush_ai::types::AnthropicBetas {
+            effort: false,
+            ..Default::default()
+        };
+        family.set_anthropic_betas(betas.clone());
+        assert_eq!(family.anthropic_betas(), Some(betas.clone()));
+        for (text, count) in [("again", 2), ("and again", 3)] {
+            family
+                .send_message(&root, "child", Some("alpha"), text, &family)
+                .await
+                .unwrap();
+            requests_seen(&seen, count).await;
+            settle(&family, &root).await;
+        }
+        assert_eq!(seen.lock().unwrap().last(), Some(&Some(betas.clone())));
+
+        family
+            .spawn(&root, "two".into(), "beta".into(), None, None, &family)
+            .await
+            .unwrap();
+        requests_seen(&seen, 4).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen[0], None);
+        assert_eq!(seen[3], Some(betas));
     }
 }

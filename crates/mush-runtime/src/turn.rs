@@ -33,6 +33,15 @@ pub struct TurnConfig {
     pub generate_title: bool,
 }
 
+impl TurnConfig {
+    pub fn set_anthropic_betas(&mut self, betas: &mush_ai::types::AnthropicBetas) {
+        self.options.anthropic_betas = Some(betas.clone());
+        if let Some((_, options)) = &mut self.compaction_model {
+            options.anthropic_betas = Some(betas.clone());
+        }
+    }
+}
+
 pub struct TurnDeps<'a> {
     pub config: TurnConfig,
     pub injections: AgentInjections,

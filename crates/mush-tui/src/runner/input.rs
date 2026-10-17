@@ -724,21 +724,32 @@ async fn apply_settings_toggle(
         return;
     }
     tui_config.options.anthropic_betas = Some(tui_config.settings.anthropic_betas.clone());
-    if item == crate::settings::MenuItemKind::PriceCliffPin {
-        super::commands::send_command(
-            session,
-            tui_config,
+    let command = match item {
+        crate::settings::MenuItemKind::PriceCliffPin => Some(
             mush_runtime::ClientCommand::SetPriceCliffPin(tui_config.settings.price_cliff_pin),
-        )
-        .await;
-    }
-
-    let persist_note = match crate::settings::persist(&tui_config.settings, &tui_config.cwd) {
+        ),
+        _ if item.is_beta() => Some(mush_runtime::ClientCommand::SetAnthropicBetas(
+            tui_config.settings.anthropic_betas.clone(),
+        )),
+        _ => None,
+    };
+    let persisted = crate::settings::persist(&tui_config.settings, &tui_config.cwd);
+    let live = match command {
+        None => String::new(),
+        Some(command) => match session.connection.send(command).await {
+            Ok(events) => {
+                super::looping::apply_command_events(session, tui_config, events);
+                crate::settings::LIVE_FROM_NEXT_TURN.to_string()
+            }
+            Err(error) => crate::settings::not_live(&error.to_string(), &persisted),
+        },
+    };
+    let persist_note = match persisted {
         Ok(Some(path)) => format!(" (saved to {})", path.display()),
         Ok(None) => String::new(),
         Err(e) => format!(" (persist failed: {e})"),
     };
-    session.app.status = Some(format!("{} → {}{}", item.label(), new_value, persist_note).into());
+    session.app.status = Some(format!("{} → {new_value}{live}{persist_note}", item.label()).into());
 }
 
 fn copy_to_clipboard(
@@ -1157,6 +1168,39 @@ mod tests {
             crate::model_picker::ModelPickerPurpose::SubagentDefault
         );
         assert_eq!(picker.models[0].id, crate::model_picker::INHERIT_ID);
+    }
+
+    #[tokio::test]
+    async fn a_beta_toggle_in_the_settings_menu_reaches_the_agent() {
+        let mut session = Session::new(App::new("test".into(), TokenCount::new(200_000)));
+        let mut tui_config = streaming_test_config();
+        let index = crate::settings::MenuItemKind::all()
+            .iter()
+            .position(|item| *item == crate::settings::MenuItemKind::Effort)
+            .unwrap();
+        session.app.settings_menu = Some(crate::settings::SettingsMenuState {
+            selected: index,
+            scroll_offset: 0,
+        });
+        assert!(tui_config.settings.anthropic_betas.effort);
+
+        apply_settings_toggle(&mut session, &mut tui_config).await;
+
+        let live = session
+            .connection
+            .state()
+            .anthropic_betas
+            .expect("the agent took the betas");
+        assert!(!live.effort);
+        assert_eq!(live, tui_config.settings.anthropic_betas);
+        assert_eq!(
+            session
+                .app
+                .status
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("effort → off from the next turn, subagents included")
+        );
     }
 
     #[tokio::test]

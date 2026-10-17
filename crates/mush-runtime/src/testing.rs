@@ -58,6 +58,36 @@ impl mush_ai::registry::ApiProvider for Echo {
     }
 }
 
+pub type SeenBetas = Arc<Mutex<Vec<Option<mush_ai::types::AnthropicBetas>>>>;
+
+pub struct RecordsBetas {
+    pub seen: SeenBetas,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for RecordsBetas {
+    fn api(&self) -> Api {
+        Api::AnthropicMessages
+    }
+
+    async fn stream(
+        &self,
+        model: &Model,
+        context: &mush_ai::registry::LlmContext,
+        options: &StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.push(options.anthropic_betas.clone());
+        }
+        Echo {
+            requests: Arc::default(),
+            reply: "ok".into(),
+        }
+        .stream(model, context, options)
+        .await
+    }
+}
+
 #[must_use]
 pub fn echo_model() -> Model {
     mush_ai::models::all_models()

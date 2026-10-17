@@ -187,6 +187,7 @@ mod tests {
             auto_compact: true,
             price_cliff: None,
             below_price_cliff: Default::default(),
+            anthropic_betas: None,
         }
     }
 

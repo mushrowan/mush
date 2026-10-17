@@ -74,6 +74,7 @@ pub enum ClientCommand {
     SetStreamOptions(Box<mush_ai::types::StreamOptions>),
     SetAutoCompact(bool),
     SetPriceCliffPin(mush_session::compact::PriceCliffPin),
+    SetAnthropicBetas(mush_ai::types::AnthropicBetas),
     SetPreferredProviders(Vec<String>),
     SetDefaultSubagentModel(Option<String>),
     SetCompactionModel(Option<Box<(mush_ai::types::Model, mush_ai::types::StreamOptions)>>),
@@ -200,6 +201,8 @@ pub struct ConnectionState {
     pub price_cliff: Option<crate::price_cliff::PriceCliff>,
     #[serde(default)]
     pub below_price_cliff: mush_session::compact::PriceCliffPin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_betas: Option<mush_ai::types::AnthropicBetas>,
 }
 
 fn auto_compact_by_default() -> bool {
@@ -1808,6 +1811,7 @@ fn changes_the_session(command: &ClientCommand) -> bool {
         | ClientCommand::SetStreamOptions(_)
         | ClientCommand::SetAutoCompact(_)
         | ClientCommand::SetPriceCliffPin(_)
+        | ClientCommand::SetAnthropicBetas(_)
         | ClientCommand::SetPreferredProviders(_)
         | ClientCommand::SetDefaultSubagentModel(_)
         | ClientCommand::SetCompactionModel(_)
@@ -1946,6 +1950,12 @@ impl AgentConnection for InProcessConnection {
                     family.set_price_cliff_pin(pin);
                 }
             }
+            ClientCommand::SetAnthropicBetas(betas) => {
+                self.config.set_anthropic_betas(&betas);
+                if let Some(family) = self.root_family() {
+                    family.set_anthropic_betas(betas);
+                }
+            }
             ClientCommand::SetPreferredProviders(providers) => {
                 if let Some(family) = self.root_family() {
                     family.set_preferred_providers(providers);
@@ -2064,6 +2074,7 @@ impl AgentConnection for InProcessConnection {
                 .load(std::sync::atomic::Ordering::Relaxed),
             price_cliff: self.runtime.price_cliff.clone(),
             below_price_cliff: self.config.compaction.below_price_cliff,
+            anthropic_betas: self.config.options.anthropic_betas.clone(),
         }
     }
 

@@ -3748,3 +3748,41 @@ async fn a_child_decision_is_news_at_the_parents_next_turn() {
     assert_eq!(texts[1], "carry on");
     assert_eq!(family.decisions().take_news("root-s"), None);
 }
+
+#[tokio::test]
+async fn betas_from_the_client_reach_the_next_request_the_summariser_and_the_state() {
+    let seen: crate::testing::SeenBetas = Arc::default();
+    let mut registry = ApiRegistry::new();
+    registry.register(Box::new(crate::testing::RecordsBetas {
+        seen: Arc::clone(&seen),
+    }));
+    let model = crate::testing::echo_model();
+    let mut runtime = SessionRuntime::new(ConversationState::new());
+    runtime.model_id = model.id.to_string();
+    let mut config = crate::testing::echo_config(model.clone());
+    config.compaction_model = Some((model, mush_ai::types::StreamOptions::default()));
+    let mut connection = InProcessConnection::new(
+        runtime,
+        ToolRegistry::new(),
+        registry,
+        config,
+        mush_agent::AgentInjections::default(),
+    );
+    prompt(&mut connection, "before").await;
+    assert_eq!(connection.state().anthropic_betas, None);
+
+    let betas = mush_ai::types::AnthropicBetas {
+        effort: false,
+        ..Default::default()
+    };
+    connection
+        .send(ClientCommand::SetAnthropicBetas(betas.clone()))
+        .await
+        .unwrap();
+    assert_eq!(connection.state().anthropic_betas, Some(betas.clone()));
+    let summariser = connection.config.compaction_model.as_ref().unwrap();
+    assert_eq!(summariser.1.anthropic_betas, Some(betas.clone()));
+
+    prompt(&mut connection, "after").await;
+    assert_eq!(*seen.lock().unwrap(), vec![None, Some(betas)]);
+}
