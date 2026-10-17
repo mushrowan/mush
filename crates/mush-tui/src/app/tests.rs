@@ -108,18 +108,39 @@ fn typewriter_advances_with_ticks() {
 }
 
 #[test]
-fn typewriter_does_not_reveal_large_bursts_in_one_tick() {
+fn a_burst_eases_in_but_is_all_on_screen_within_the_reveal_window() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let start = std::time::Instant::now();
     app.start_streaming();
-    app.push_text_delta(&"x".repeat(200));
+    app.stream.push_text_at(&"x".repeat(200), start);
 
-    app.tick();
+    app.stream.advance_typewriter_at(start);
+    let first = app.visible_streaming_text_len();
+    assert!(0 < first && first < 200, "visible chars={first}");
 
-    assert!(
-        app.visible_streaming_text_len() <= 12,
-        "large provider bursts should reveal smoothly, visible chars={}",
-        app.visible_streaming_text_len()
-    );
+    app.stream
+        .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
+    assert_eq!(app.visible_streaming_text_len(), 200);
+    assert!(!app.stream.reveal_pending());
+}
+
+#[test]
+fn a_slow_trickle_never_falls_behind_the_reveal_window() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let start = std::time::Instant::now();
+    app.start_streaming();
+    let frame = std::time::Duration::from_millis(16);
+    for step in 0..60u32 {
+        let now = start + frame * step;
+        app.stream.push_text_at("sixteen chars ok", now);
+        app.stream.advance_typewriter_at(now);
+        let due = (step as usize).saturating_sub(1) * 16;
+        assert!(
+            app.visible_streaming_text_len() >= due,
+            "step {step}: visible {} behind due {due}",
+            app.visible_streaming_text_len()
+        );
+    }
 }
 
 #[test]

@@ -1,4 +1,9 @@
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
 use crate::turn_activity::StreamPart;
+
+pub const REVEAL_WINDOW: Duration = Duration::from_millis(32);
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamingState {
@@ -17,31 +22,41 @@ struct TypewriterState {
     total_chars: usize,
     visible_chars: usize,
     visible_byte_offset: usize,
+    arrivals: VecDeque<(Instant, usize)>,
 }
 
 impl TypewriterState {
-    const MIN_CHARS_PER_TICK: usize = 1;
-    const MAX_CHARS_PER_TICK: usize = 12;
-
     fn reset(&mut self) {
-        self.total_chars = 0;
-        self.visible_chars = 0;
-        self.visible_byte_offset = 0;
+        *self = Self::default();
     }
 
-    fn record_push(&mut self, delta_chars: usize) {
+    fn record_push(&mut self, delta_chars: usize, now: Instant) {
+        if delta_chars == 0 {
+            return;
+        }
         self.total_chars += delta_chars;
+        self.arrivals.push_back((now, self.total_chars));
     }
 
-    fn advance(&mut self, buf: &str) {
+    fn due(&mut self, now: Instant) -> usize {
+        let mut due = self.visible_chars;
+        while let Some(&(at, total)) = self.arrivals.front() {
+            if now.saturating_duration_since(at) < REVEAL_WINDOW {
+                break;
+            }
+            due = total;
+            self.arrivals.pop_front();
+        }
+        due
+    }
+
+    fn advance(&mut self, buf: &str, now: Instant) {
+        let due = self.due(now);
         if self.visible_chars >= self.total_chars {
             return;
         }
-        let remaining = self.total_chars - self.visible_chars;
-        let step = remaining
-            .div_ceil(4)
-            .clamp(Self::MIN_CHARS_PER_TICK, Self::MAX_CHARS_PER_TICK);
-        let new_visible = (self.visible_chars + step).min(self.total_chars);
+        let half = (self.total_chars - self.visible_chars).div_ceil(2);
+        let new_visible = (self.visible_chars + half).max(due).min(self.total_chars);
 
         let chars_to_skip = new_visible - self.visible_chars;
         let tail = &buf[self.visible_byte_offset..];
@@ -51,6 +66,10 @@ impl TypewriterState {
             self.visible_byte_offset = buf.len();
         }
         self.visible_chars = new_visible;
+    }
+
+    fn pending(&self) -> bool {
+        self.visible_chars < self.total_chars
     }
 
     fn visible<'a>(&self, buf: &'a str) -> &'a str {
@@ -76,20 +95,28 @@ impl StreamingState {
     }
 
     pub fn push_text(&mut self, delta: &str) {
+        self.push_text_at(delta, Instant::now());
+    }
+
+    pub fn push_text_at(&mut self, delta: &str, now: Instant) {
         let delta = if self.text.is_empty() {
             delta.trim_start_matches('\n')
         } else {
             delta
         };
         let chars = delta.chars().count();
-        self.text_tw.record_push(chars);
+        self.text_tw.record_push(chars, now);
         self.text.push_str(delta);
         self.streamed(StreamPart::Text, chars);
     }
 
     pub fn push_thinking(&mut self, delta: &str) {
+        self.push_thinking_at(delta, Instant::now());
+    }
+
+    pub fn push_thinking_at(&mut self, delta: &str, now: Instant) {
         let chars = delta.chars().count();
-        self.think_tw.record_push(chars);
+        self.think_tw.record_push(chars, now);
         self.thinking.push_str(delta);
         self.streamed(StreamPart::Thinking, chars);
     }
@@ -116,12 +143,21 @@ impl StreamingState {
 
     #[must_use]
     pub fn visible_text_len(&self) -> usize {
-        self.visible_text().chars().count()
+        self.text_tw.visible_chars
+    }
+
+    #[must_use]
+    pub fn reveal_pending(&self) -> bool {
+        self.text_tw.pending() || self.think_tw.pending()
     }
 
     pub fn advance_typewriter(&mut self) {
-        self.text_tw.advance(&self.text);
-        self.think_tw.advance(&self.thinking);
+        self.advance_typewriter_at(Instant::now());
+    }
+
+    pub fn advance_typewriter_at(&mut self, now: Instant) {
+        self.text_tw.advance(&self.text, now);
+        self.think_tw.advance(&self.thinking, now);
     }
 
     pub fn take(&mut self) -> (String, Option<String>) {
