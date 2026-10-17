@@ -686,11 +686,13 @@ const DECISIONS_PROMPT: &str = "\
 Decisions for the user:\n\
 - When you need the user to choose, add a decision instead of asking in chat: `await \
 rlm.decisions.add(id, question, options=[...], lean=0, context=None, refs=None, \
-blocking=False)`. `id` is your short name for it (letters, digits, `-`, `_`), `options` are \
-strings or `{label, detail}`, `lean` is the option you would pick (an index or a label) and \
-`refs` are paths or URLs worth a look. Leave `options` out for a free-text question. It returns \
-at once: carry on with your lean, and set `blocking=True` only when you cannot go on without the \
-answer. Adding the same id again updates it.\n\
+blocking=False)`. `id` is your short name for it (letters, digits, `-`, `_`). Give each option \
+as `{label, pros, cons}` with a few short pros and cons, so the user can weigh the options at a \
+glance; `detail` can say what an option means, and `context` holds what applies to all of them. \
+`lean` is the option you would pick (an index or a label) and `refs` are paths or URLs worth a \
+look. Leave `options` out for a free-text question. It returns at once: carry on with your lean, \
+and set `blocking=True` only when you cannot go on without the answer. Adding the same id again \
+updates it.\n\
 - The user sees every open decision from the whole family in one menu and answers them in a \
 batch. Answers reach you as a message from the user: an option, their own words, or a request \
 to clarify. To clarify, update the decision with what they asked for and it goes back on their \
@@ -1520,6 +1522,7 @@ mod tests {
             ] {
                 assert!(prompt.contains(call), "{call} missing for {role:?}");
             }
+            assert!(prompt.contains("`{label, pros, cons}`"), "{role:?}");
         }
     }
 

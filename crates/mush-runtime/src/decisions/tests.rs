@@ -38,7 +38,7 @@ fn options(labels: &[&str]) -> Vec<DecisionOption> {
         .iter()
         .map(|label| DecisionOption {
             label: (*label).into(),
-            detail: None,
+            ..Default::default()
         })
         .collect()
 }
@@ -617,4 +617,49 @@ fn the_digest_caps_what_it_lists_from_below() {
     let digest = store.digest("root-s").unwrap();
     assert_eq!(digest.matches("\n- c").count(), DIGEST_BELOW, "{digest}");
     assert!(digest.contains("- and 3 more"), "{digest}");
+}
+
+#[test]
+fn options_take_pros_and_cons_as_lists_or_single_strings() {
+    let payload = serde_json::json!({
+        "id": "push",
+        "question": "Push main now?",
+        "options": [
+            {"label": "push now", "pros": ["unblocks the review", " "], "cons": "skips the soak test"},
+            "hold",
+        ],
+    });
+    let ask = Ask::from_payload(&payload).unwrap();
+    assert_eq!(ask.options[0].pros, ["unblocks the review"]);
+    assert_eq!(ask.options[0].cons, ["skips the soak test"]);
+    assert!(ask.options[1].pros.is_empty());
+
+    let saved = serde_json::to_value(&ask.options[1]).unwrap();
+    assert_eq!(saved, serde_json::json!({"label": "hold"}));
+    let read: DecisionOption =
+        serde_json::from_value(serde_json::json!({"label": "hold"})).unwrap();
+    assert!(read.cons.is_empty());
+}
+
+#[test]
+fn pros_and_cons_are_capped() {
+    let store = Decisions::new(None);
+    let mut many = ask("push", "Push main now?", &["push now", "hold"], None);
+    many.options[0].pros = (0..=MAX_POINTS)
+        .map(|point| format!("pro {point}"))
+        .collect();
+    let error = store.ask(child("c"), many).unwrap_err();
+    assert!(error.contains("at most"), "{error}");
+
+    let mut long = ask("push", "Push main now?", &["push now", "hold"], None);
+    long.options[1].cons = vec!["x".repeat(MAX_POINT_CHARS + 1)];
+    let error = store.ask(child("c"), long).unwrap_err();
+    assert!(error.contains("longer than"), "{error}");
+
+    let bad = serde_json::json!({
+        "id": "push",
+        "question": "Push main now?",
+        "options": [{"label": "push now", "pros": 3}],
+    });
+    assert!(Ask::from_payload(&bad).is_err());
 }

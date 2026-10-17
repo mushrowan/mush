@@ -340,6 +340,27 @@ fn detail_lines(app: &App, item: &Item<'_>, width: usize, indent: usize, full: b
                 ]));
             }
         }
+        if let Some(option) = decision.and_then(|decision| decision.options.get(index)) {
+            let sides = [
+                ("+", &option.pros, theme.context_ok),
+                ("\u{2212}", &option.cons, theme.context_danger),
+            ];
+            for (marker, points, style) in sides {
+                for point in points {
+                    for (row, line) in wrap(point, text_width.saturating_sub(7))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let marker = if row == 0 { marker } else { " " };
+                        lines.push(Line::from(vec![
+                            Span::raw(format!("{pad}     ")),
+                            Span::styled(format!("{marker} "), style),
+                            Span::styled(line, theme.status_muted),
+                        ]));
+                    }
+                }
+            }
+        }
     }
     let mut cursor = None;
     match (&app.decisions_panel.editor, decision) {

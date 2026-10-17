@@ -14,6 +14,8 @@ pub const MAX_CONTEXT_CHARS: usize = 4_000;
 pub const MAX_OPTIONS: usize = 9;
 pub const MAX_OPTION_CHARS: usize = 200;
 pub const MAX_DETAIL_CHARS: usize = 500;
+pub const MAX_POINTS: usize = 6;
+pub const MAX_POINT_CHARS: usize = 200;
 pub const MAX_REFS: usize = 8;
 pub const MAX_REF_CHARS: usize = 400;
 pub const MAX_ANSWER_CHARS: usize = 4_000;
@@ -62,11 +64,15 @@ impl Asker {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionOption {
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pros: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,11 +315,30 @@ fn text(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn parse_points(fields: &serde_json::Map<String, Value>, key: &str) -> Result<Vec<String>, String> {
+    let invalid = || format!("an option's {key} are a string or a list of strings");
+    let points = match fields.get(key) {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::String(point)) => vec![point.as_str()],
+        Some(Value::Array(points)) => points
+            .iter()
+            .map(|point| point.as_str().ok_or_else(invalid))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(invalid()),
+    };
+    Ok(points
+        .into_iter()
+        .map(str::trim)
+        .filter(|point| !point.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 fn parse_option(value: &Value) -> Result<DecisionOption, String> {
     match value {
         Value::String(label) => Ok(DecisionOption {
             label: label.trim().to_owned(),
-            detail: None,
+            ..DecisionOption::default()
         }),
         Value::Object(fields) => Ok(DecisionOption {
             label: fields
@@ -327,8 +352,10 @@ fn parse_option(value: &Value) -> Result<DecisionOption, String> {
                 .map(str::trim)
                 .filter(|detail| !detail.is_empty())
                 .map(str::to_owned),
+            pros: parse_points(fields, "pros")?,
+            cons: parse_points(fields, "cons")?,
         }),
-        _ => Err("each option is a string or {label, detail}".into()),
+        _ => Err("each option is a string or {label, detail, pros, cons}".into()),
     }
 }
 
@@ -386,6 +413,18 @@ fn check_options(options: &[DecisionOption]) -> Result<(), String> {
         check_len("an option label", &option.label, MAX_OPTION_CHARS)?;
         if let Some(detail) = &option.detail {
             check_len("an option detail", detail, MAX_DETAIL_CHARS)?;
+        }
+        for (side, points) in [("pros", &option.pros), ("cons", &option.cons)] {
+            if points.len() > MAX_POINTS {
+                return Err(format!("an option takes at most {MAX_POINTS} {side}"));
+            }
+            for point in points {
+                check_len(
+                    &format!("one of an option's {side}"),
+                    point,
+                    MAX_POINT_CHARS,
+                )?;
+            }
         }
         if options[..index]
             .iter()

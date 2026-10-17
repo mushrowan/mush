@@ -661,7 +661,7 @@ def _decision_options(options):
     if options is None:
         return None
     if isinstance(options, (str, dict)):
-        raise TypeError("options must be a list of strings or {label, detail} dicts")
+        raise TypeError("options must be a list of strings or {label, detail, pros, cons} dicts")
     shaped = []
     for option in options:
         if isinstance(option, str):
@@ -671,7 +671,7 @@ def _decision_options(options):
         elif isinstance(option, (tuple, list)) and len(option) == 2:
             shaped.append({"label": str(option[0]), "detail": str(option[1])})
         else:
-            raise TypeError("each option is a string, a {label, detail} dict or a (label, detail) pair")
+            raise TypeError("each option is a string, a {label, detail, pros, cons} dict or a (label, detail) pair")
     return shaped
 
 

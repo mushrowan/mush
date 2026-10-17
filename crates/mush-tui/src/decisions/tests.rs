@@ -40,7 +40,7 @@ fn decision(
             .iter()
             .map(|label| DecisionOption {
                 label: (*label).into(),
-                detail: None,
+                ..Default::default()
             })
             .collect(),
         lean,
@@ -708,4 +708,42 @@ fn ctrl_q_in_the_review_closes_the_panel_and_keeps_the_drafts() {
     ctrl(&mut app, 'q');
     assert!(app.decisions_panel.open);
     assert!(!app.decisions_panel.review, "it reopens on the list");
+}
+
+#[test]
+fn each_option_shows_its_pros_and_cons_under_it() {
+    let mut app = app();
+    let push = app
+        .decisions
+        .iter_mut()
+        .find(|decision| decision.key.id == "push")
+        .unwrap();
+    push.options[0].pros = vec!["unblocks the review".into()];
+    push.options[0].cons = vec![
+        "skips the soak test".into(),
+        "main moves under the others".into(),
+    ];
+    push.options[1].pros = vec!["the soak test finishes".into()];
+    ctrl(&mut app, 'q');
+    select(&mut app, "push");
+    for width in [80, 130] {
+        let (text, _) = render(&app, width, 30);
+        let rows: Vec<&str> = text.lines().collect();
+        let row_of = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} at {width}\n{text}"))
+        };
+        let a = row_of("a) push now");
+        let b = row_of("b) hold");
+        assert_eq!(row_of("+ unblocks the review"), a + 1, "{text}");
+        assert_eq!(row_of("\u{2212} skips the soak test"), a + 2, "{text}");
+        assert_eq!(
+            row_of("\u{2212} main moves under the others"),
+            a + 3,
+            "{text}"
+        );
+        assert_eq!(b, a + 4, "{text}");
+        assert_eq!(row_of("+ the soak test finishes"), b + 1, "{text}");
+    }
 }

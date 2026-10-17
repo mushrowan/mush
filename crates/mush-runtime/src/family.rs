@@ -5941,7 +5941,7 @@ mod tests {
                 .into_iter()
                 .map(|label| crate::decisions::DecisionOption {
                     label: label.into(),
-                    detail: None,
+                    ..Default::default()
                 })
                 .collect(),
             lean: Some(crate::decisions::Lean::Index(1)),

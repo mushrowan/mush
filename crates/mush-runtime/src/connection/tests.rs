@@ -3611,7 +3611,7 @@ fn root_decision(family: &crate::family::Family, id: &str) -> crate::decisions::
                     .into_iter()
                     .map(|label| crate::decisions::DecisionOption {
                         label: label.into(),
-                        detail: None,
+                        ..Default::default()
                     })
                     .collect(),
                 lean: Some(crate::decisions::Lean::Index(0)),
