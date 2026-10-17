@@ -162,6 +162,7 @@ fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             app.shimmer_phase(),
             dim,
         ));
+        spans.push(Span::styled(" ctrl+c cancels", dim));
         lines.push(Line::from(spans));
     }
 

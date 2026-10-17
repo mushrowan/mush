@@ -552,6 +552,14 @@ async fn handle_idle_app_event(
         };
     }
     match app_event {
+        AppEvent::Abort if session.connection.state().compacting => {
+            super::commands::send_command(
+                session,
+                deps.tui_config,
+                mush_runtime::ClientCommand::Abort,
+            )
+            .await;
+        }
         AppEvent::UserSubmit { text, images } => {
             if session.connection.state().compacting {
                 session.queue_input_during_compaction(text, images).await;
@@ -1018,6 +1026,58 @@ mod tests {
         session.app.input.text = draft.into();
         session.app.input.cursor = draft.len();
         session
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_cancels_a_running_compaction_and_the_view_stops_compacting() {
+        let (connection, _release) = mush_runtime::testing::stalled_connection();
+        let mut session = Session::with_connection(
+            App::new("test".into(), TokenCount::new(200_000)),
+            Box::new(connection),
+        );
+        session.in_process().runtime.conversation = mush_session::ConversationState::from_messages(
+            (0..12)
+                .map(|i| crate::test_support::user_message(&format!("turn {i}")))
+                .collect(),
+        );
+        let mut tui_config = streaming_test_config();
+        super::super::commands::send_command(
+            &mut session,
+            &mut tui_config,
+            mush_runtime::ClientCommand::Compact {
+                focus: mush_session::compact::CompactionFocus::default(),
+                auto: false,
+            },
+        )
+        .await;
+        assert!(session.app.compacting);
+        let mut pending_prompt = None;
+        let image_picker = None;
+        let mut resize = ResizeState::default();
+        let mut deps = InputDeps {
+            tui_config: &mut tui_config,
+            pending_prompt: &mut pending_prompt,
+            image_picker: &image_picker,
+            resize: &mut resize,
+        };
+
+        let ctrl_c = KeyEvent {
+            modifiers: KeyModifiers::CONTROL,
+            ..key(KeyCode::Char('c'))
+        };
+        handle_idle_key(&mut session, &mut deps, ctrl_c).await;
+
+        assert!(!session.app.compacting);
+        assert!(!session.connection.state().compacting);
+        assert_eq!(
+            session
+                .app
+                .status
+                .as_ref()
+                .map(|status| status.text.as_str()),
+            Some("compaction cancelled")
+        );
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 12);
     }
 
     #[tokio::test]

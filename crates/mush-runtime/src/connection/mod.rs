@@ -111,6 +111,7 @@ pub enum ClientEvent {
     },
     Compacting,
     Compacted(AppliedCompaction),
+    CompactionCancelled,
     CompactionFailed {
         failure: mush_session::compact::CompactionFailureReport,
         tokens_before: usize,
@@ -1268,6 +1269,11 @@ impl InProcessConnection {
         }
         if was_active {
             events.push(ClientEvent::TurnEnded { cancelled: true });
+        }
+        if let Some(compaction) = self.compaction.take() {
+            compaction.abort();
+            self.compaction_auto = false;
+            events.push(ClientEvent::CompactionCancelled);
         }
         events
     }

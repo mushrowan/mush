@@ -286,6 +286,11 @@ fn apply_command_event(
             crate::slash::show_applied_compaction(&mut session.app, &applied, after_count);
             super::runtime::promote_queued_inputs(session);
         }
+        ClientEvent::CompactionCancelled => {
+            session.app.compacting = false;
+            session.app.status = Some("compaction cancelled".into());
+            super::runtime::promote_queued_inputs(session);
+        }
         ClientEvent::CompactionFailed {
             failure,
             tokens_before,

@@ -87,7 +87,7 @@ fn compacting_renders_inline_busy_row_with_label() {
     let buf = render_app(&app, 40, 10);
     let content = buffer_to_string(&buf);
     assert!(
-        content.contains("compacting"),
+        content.contains("compacting… ctrl+c cancels"),
         "expected 'compacting' label in chat, got:\n{content}"
     );
 }

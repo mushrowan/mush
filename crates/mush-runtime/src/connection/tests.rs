@@ -986,6 +986,61 @@ async fn a_steer_sent_during_a_tool_call_reaches_the_next_request() {
 }
 
 #[tokio::test]
+async fn abort_cancels_a_running_compaction_and_the_queued_prompt_goes_out() {
+    let (mut connection, release) = crate::testing::stalled_connection();
+    connection.runtime.conversation = ConversationState::from_messages(
+        (0..30)
+            .map(|i| user(&format!("turn {i}: {}", "x".repeat(400))))
+            .collect(),
+    );
+    connection
+        .send(ClientCommand::Compact {
+            focus: CompactionFocus::default(),
+            auto: false,
+        })
+        .await
+        .unwrap();
+    assert!(connection.state().compacting);
+    connection
+        .send(ClientCommand::QueuePrompt {
+            text: "after the compaction".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let events = connection.send(ClientCommand::Abort).await.unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::CompactionCancelled)),
+        "{events:?}"
+    );
+    assert!(!connection.state().compacting);
+    assert_eq!(connection.runtime.conversation.context().len(), 30);
+    pump_until(&mut connection, |event| {
+        matches!(event, ClientEvent::TurnStarted)
+    })
+    .await;
+    release.notify_waiters();
+    assert!(
+        connection.runtime.conversation.context().iter().any(
+            |message| matches!(message, Message::User(u) if u.text() == "after the compaction")
+        )
+    );
+    assert!(
+        !connection
+            .send(ClientCommand::Abort)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, ClientEvent::CompactionCancelled)),
+        "a second abort has no compaction to cancel"
+    );
+}
+
+#[tokio::test]
 async fn a_compaction_request_shares_the_prefix_of_the_live_turn() {
     let (mut connection, requests) = connection();
     connection.runtime.system_prompt = Some("you are terse".into());
