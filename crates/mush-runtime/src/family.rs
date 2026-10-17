@@ -2548,6 +2548,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_root_agent_has_no_parent_and_no_siblings() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let family = family(Arc::clone(&requests), 3, None);
+        let root = Identity::root("root");
+        let first = family
+            .spawn(&root, "one".into(), "alpha".into(), None, None, &family)
+            .await
+            .unwrap();
+        family
+            .spawn(&root, "two".into(), "beta".into(), None, None, &family)
+            .await
+            .unwrap();
+        settle(&family, &root).await;
+
+        assert_eq!(
+            family
+                .send_message(&root, "sibling", Some("alpha"), "hi", &family)
+                .await
+                .unwrap_err(),
+            "the root agent has no siblings"
+        );
+        assert_eq!(
+            family
+                .send_message(&root, "parent", None, "hi", &family)
+                .await
+                .unwrap_err(),
+            "the root agent has no parent"
+        );
+        assert!(
+            family
+                .roster(&root)
+                .iter()
+                .all(|view| matches!(view.relationship.as_str(), "self" | "child"))
+        );
+
+        let alpha = Identity {
+            id: Some(first.rlm_child_id.clone()),
+            name: "alpha".into(),
+            depth: 1,
+        };
+        assert!(
+            family
+                .send_message(&alpha, "sibling", Some("beta"), "hi", &family)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn the_roster_names_self_parent_siblings_and_children() {
         let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
         let family = family(Arc::clone(&requests), 3, None);

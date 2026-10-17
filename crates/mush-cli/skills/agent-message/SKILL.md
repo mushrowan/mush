@@ -6,7 +6,8 @@ description: Message an agent's parent, siblings, or direct children through the
 # Agent Message
 
 Send direct messages within the current agent's nuclear family through the
-local daemon: parent, siblings, and direct children only. Roots are siblings.
+local daemon: parent, siblings, and direct children only. The root agent has
+no parent and no siblings, so it only reaches its own children.
 The daemon derives your sender identity from the current session; do not try
 to include a `from` field.
 
