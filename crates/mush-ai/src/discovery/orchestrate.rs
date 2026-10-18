@@ -84,7 +84,15 @@ impl DiscoveryRunSummary {
     pub fn one_line(&self) -> String {
         let ok: Vec<_> = self.succeeded().map(Provider::to_string).collect();
         let skipped: Vec<_> = self.skipped().map(Provider::to_string).collect();
-        let failed: Vec<_> = self.failed().map(|(p, _)| p.to_string()).collect();
+        let failed: Vec<_> = self
+            .failed()
+            .map(|(provider, error)| match error {
+                DiscoveryError::TimedOut(limit) => {
+                    format!("{provider} gave no answer within {}s", limit.as_secs())
+                }
+                _ => provider.to_string(),
+            })
+            .collect();
 
         let mut parts = vec![format!("{} models", self.total_models())];
         if !ok.is_empty() {
@@ -100,69 +108,93 @@ impl DiscoveryRunSummary {
     }
 }
 
-pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunSummary {
-    let mut results = Vec::new();
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(20);
 
-    let anthropic_key = resolve_auth_from_default_sources(&Provider::Anthropic)
-        .await
-        .api_key;
-    results.push(
-        run_one(Provider::Anthropic, anthropic_key, |key| {
+pub async fn run_all_available(client: crate::http::HttpClient) -> DiscoveryRunSummary {
+    let anthropic = async {
+        let key = resolve_auth_from_default_sources(&Provider::Anthropic)
+            .await
+            .api_key;
+        run_one(Provider::Anthropic, key, |key| {
             let d = AnthropicDiscovery::new(client.clone(), "", key);
             async move { d.fetch().await }
         })
-        .await,
-    );
+        .await
+    };
 
-    let openrouter_key = env::env_api_key(&Provider::OpenRouter);
-    let openrouter_present = openrouter_key.is_some();
-    let d = OpenRouterDiscovery::new(client.clone(), "", openrouter_key);
-    results.push(DiscoveryRunResult {
-        provider: Provider::OpenRouter,
-        outcome: classify_outcome(d.fetch().await, openrouter_present),
-    });
+    let openrouter = async {
+        let key = env::env_api_key(&Provider::OpenRouter);
+        let present = key.is_some();
+        let d = OpenRouterDiscovery::new(client.clone(), "", key);
+        DiscoveryRunResult {
+            provider: Provider::OpenRouter,
+            outcome: classify_outcome(d.fetch().await, present),
+        }
+    };
 
     let openai_provider = Provider::Custom("openai".into());
-    let openai_key = resolve_auth_from_default_sources(&openai_provider)
-        .await
-        .api_key;
-    results.push(
-        run_one(openai_provider, openai_key, |key| {
+    let openai = async {
+        let key = resolve_auth_from_default_sources(&openai_provider)
+            .await
+            .api_key;
+        run_one(openai_provider.clone(), key, |key| {
             let d = OpenAiDiscovery::new(client.clone(), "", key);
             async move { d.fetch().await }
         })
-        .await,
-    );
+        .await
+    };
 
     let codex_provider = Provider::Custom("openai-codex".into());
-    let codex_auth = resolve_auth_from_default_sources(&codex_provider).await;
-    results.push(
-        run_one(codex_provider, codex_auth.api_key, |key| {
+    let codex = async {
+        let auth = resolve_auth_from_default_sources(&codex_provider).await;
+        run_one(codex_provider.clone(), auth.api_key, |key| {
             let d = CodexDiscovery::new(
                 client.clone(),
                 "",
                 key,
-                codex_auth.account_id,
+                auth.account_id,
                 env!("CARGO_PKG_VERSION"),
             );
             async move { d.fetch().await }
         })
-        .await,
-    );
+        .await
+    };
 
     let zai_provider = Provider::Custom("zai".into());
-    let zai_key = resolve_auth_from_default_sources(&zai_provider)
-        .await
-        .api_key;
-    results.push(
-        run_one(zai_provider, zai_key, |_| {
+    let zai = async {
+        let key = resolve_auth_from_default_sources(&zai_provider)
+            .await
+            .api_key;
+        run_one(zai_provider.clone(), key, |_| {
             let d = ZaiDiscovery::new(client.clone(), "");
             async move { d.fetch().await }
         })
-        .await,
-    );
+        .await
+    };
 
-    DiscoveryRunSummary { results }
+    let results = tokio::join!(
+        within(Provider::Anthropic, PROVIDER_TIMEOUT, anthropic),
+        within(Provider::OpenRouter, PROVIDER_TIMEOUT, openrouter),
+        within(openai_provider.clone(), PROVIDER_TIMEOUT, openai),
+        within(codex_provider.clone(), PROVIDER_TIMEOUT, codex),
+        within(zai_provider.clone(), PROVIDER_TIMEOUT, zai),
+    );
+    DiscoveryRunSummary {
+        results: vec![results.0, results.1, results.2, results.3, results.4],
+    }
+}
+
+async fn within(
+    provider: Provider,
+    limit: Duration,
+    run: impl std::future::Future<Output = DiscoveryRunResult>,
+) -> DiscoveryRunResult {
+    tokio::time::timeout(limit, run)
+        .await
+        .unwrap_or_else(|_| DiscoveryRunResult {
+            provider,
+            outcome: DiscoveryOutcome::Failed(DiscoveryError::TimedOut(limit)),
+        })
 }
 
 async fn run_one<F, Fut>(
@@ -196,9 +228,7 @@ fn classify_outcome(
 }
 
 pub async fn refresh_and_save(client: crate::http::HttpClient) -> DiscoveryRunSummary {
-    let summary = tokio::time::timeout(Duration::from_secs(30), run_all_available(client))
-        .await
-        .unwrap_or_default();
+    let summary = run_all_available(client).await;
 
     if let Err(e) = summary.apply_to_cache_and_save(&cache_path()) {
         tracing::warn!(error = %e, "failed to persist discovery cache");
@@ -212,6 +242,43 @@ mod tests {
 
     use super::*;
     use crate::types::Model;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_provider_that_never_answers_fails_as_timed_out_while_the_others_land() {
+        let (stalled, answered) = tokio::join!(
+            within(
+                Provider::Custom("slow".into()),
+                PROVIDER_TIMEOUT,
+                std::future::pending()
+            ),
+            within(Provider::Anthropic, PROVIDER_TIMEOUT, async {
+                DiscoveryRunResult {
+                    provider: Provider::Anthropic,
+                    outcome: classify_outcome(
+                        Ok(DiscoveryReport {
+                            provider: Provider::Anthropic,
+                            fetched_at: SystemTime::UNIX_EPOCH,
+                            models: vec![sample_model("claude-x").into()],
+                        }),
+                        true,
+                    ),
+                }
+            }),
+        );
+
+        assert!(matches!(
+            stalled.outcome,
+            DiscoveryOutcome::Failed(DiscoveryError::TimedOut(limit)) if limit == PROVIDER_TIMEOUT
+        ));
+        let summary = DiscoveryRunSummary {
+            results: vec![answered, stalled],
+        };
+        assert_eq!(summary.total_models(), 1);
+        assert_eq!(
+            summary.one_line(),
+            "1 models from anthropic (errors: slow gave no answer within 20s)"
+        );
+    }
 
     #[test]
     fn one_line_with_no_results_is_zero_models() {

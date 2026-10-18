@@ -59,6 +59,9 @@ pub enum DiscoveryError {
 
     #[error("invalid header value: {0}")]
     InvalidHeader(#[from] reqwest::header::InvalidHeaderValue),
+
+    #[error("no answer within {}s", .0.as_secs())]
+    TimedOut(std::time::Duration),
 }
 
 impl From<reqwest_middleware::Error> for DiscoveryError {
