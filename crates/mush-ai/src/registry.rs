@@ -103,12 +103,60 @@ impl ProviderError {
     }
 
     #[must_use]
+    pub fn is_unreachable(&self) -> bool {
+        match self {
+            Self::Request(error) => error.is_request() || route_lost(error),
+            _ => false,
+        }
+    }
+
+    #[must_use]
+    pub fn cause(&self) -> String {
+        match self {
+            Self::Request(error) => innermost(error).to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    #[must_use]
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
             Self::ApiError { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
+}
+
+fn innermost<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> &'a (dyn std::error::Error + 'static) {
+    let mut error = error;
+    while let Some(source) = error.source() {
+        error = source;
+    }
+    error
+}
+
+// a reset mid-reply can come from a proxy that cuts long streams, so only a lost route is
+// waited out without limit
+const ROUTE_LOST: &[std::io::ErrorKind] = &[
+    std::io::ErrorKind::NetworkUnreachable,
+    std::io::ErrorKind::HostUnreachable,
+    std::io::ErrorKind::NetworkDown,
+    std::io::ErrorKind::TimedOut,
+    std::io::ErrorKind::ConnectionAborted,
+    std::io::ErrorKind::AddrNotAvailable,
+];
+
+pub(crate) fn route_lost(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |error| error.source()).any(|error| {
+        error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| ROUTE_LOST.contains(&error.kind()))
+    })
 }
 
 pub const RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -138,14 +186,20 @@ fn seconds_or_forever(seconds: f64) -> std::time::Duration {
     std::time::Duration::try_from_secs_f64(seconds).unwrap_or(std::time::Duration::MAX)
 }
 
+fn random_unit() -> f64 {
+    (u64::from_le_bytes(crate::ids::random_bytes::<8>()) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn jitter(backoff: std::time::Duration, unit: f64) -> std::time::Duration {
+    backoff.mul_f64(0.75 + 0.5 * unit.clamp(0.0, 1.0))
+}
+
 #[must_use]
 pub fn retry_delay(
     backoff: std::time::Duration,
     retry_after: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
-    let unit =
-        (u64::from_le_bytes(crate::ids::random_bytes::<8>()) >> 11) as f64 / (1u64 << 53) as f64;
-    jittered_retry_delay(backoff, retry_after, unit)
+    jittered_retry_delay(backoff, retry_after, random_unit())
 }
 
 fn jittered_retry_delay(
@@ -161,8 +215,20 @@ fn jittered_retry_delay(
     {
         return Some(wait);
     }
-    let jittered = backoff.mul_f64(0.75 + 0.5 * unit.clamp(0.0, 1.0));
+    let jittered = jitter(backoff, unit);
     Some(jittered.max(retry_after.unwrap_or_default()))
+}
+
+pub const NETWORK_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[must_use]
+pub fn network_retry_delay(tries: u32) -> std::time::Duration {
+    jittered_network_delay(tries, random_unit())
+}
+
+fn jittered_network_delay(tries: u32, unit: f64) -> std::time::Duration {
+    let backoff = std::time::Duration::from_secs(1 << tries.saturating_sub(1).min(6));
+    jitter(backoff.min(NETWORK_RETRY_CAP), unit).min(NETWORK_RETRY_CAP)
 }
 
 pub const MAX_RETRIES: u32 = 5;
@@ -174,8 +240,11 @@ pub fn retry_backoff(attempt: u32) -> std::time::Duration {
 
 pub const STREAM_ENDED_EARLY: &str = "stream ended without a final message";
 
+pub const NETWORK_LOST: &str = "lost the network mid-reply";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamErrorKind {
+    Unreachable,
     Transient,
     Refusal,
     Permanent,
@@ -185,7 +254,7 @@ impl StreamErrorKind {
     #[must_use]
     pub fn is_retryable(self) -> bool {
         match self {
-            Self::Transient | Self::Refusal => true,
+            Self::Unreachable | Self::Transient | Self::Refusal => true,
             Self::Permanent => false,
         }
     }
@@ -195,7 +264,9 @@ impl StreamErrorKind {
 pub fn classify_stream_error_message(message: &str) -> StreamErrorKind {
     let lower = message.to_ascii_lowercase();
     let matches = |patterns: &[&str]| patterns.iter().any(|pat| lower.contains(pat));
-    if matches(&[
+    if lower.contains(NETWORK_LOST) {
+        StreamErrorKind::Unreachable
+    } else if matches(&[
         "claude declined to respond",
         "cyber_policy",
         "flagged as potentially violating",
@@ -286,6 +357,10 @@ pub fn is_unsendable_media_message(message: &str) -> bool {
 
 pub fn retry_stream_error(error: &str, attempt: u32) -> bool {
     match classify_stream_error_message(error) {
+        StreamErrorKind::Unreachable => {
+            tracing::warn!(%error, attempt, "the network went away mid-reply, retrying");
+            true
+        }
         StreamErrorKind::Refusal => {
             tracing::warn!(reason = %error, attempt, "the provider refused the request, retrying");
             true
@@ -604,8 +679,146 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.is_body() || error.is_decode());
-        assert!(ProviderError::Request(error).is_retryable());
+        let error = ProviderError::Request(error);
+        assert!(error.is_retryable());
+        assert!(!error.is_unreachable());
         server.await.unwrap();
+    }
+
+    fn plain_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cannot_connect_is_unreachable() {
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let error = plain_client()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.is_connect());
+        let error = ProviderError::Request(error);
+        assert!(error.is_unreachable());
+        assert!(error.is_retryable());
+        assert!(
+            error.cause().to_ascii_lowercase().contains("refused"),
+            "{}",
+            error.cause()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_dropped_before_the_headers_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let error = plain_client()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(!error.is_connect());
+        assert!(ProviderError::Request(error).is_unreachable());
+    }
+
+    #[test]
+    fn errors_that_got_a_reply_are_not_unreachable() {
+        let unavailable = ProviderError::ApiError {
+            api: "test",
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            content_type: "text/plain".into(),
+            body: "upstream connect error or disconnect/reset before headers".into(),
+            retry_after: None,
+        };
+        assert!(unavailable.is_retryable());
+        assert!(!unavailable.is_unreachable());
+        let billing = ProviderError::Billing {
+            provider: "z.ai",
+            code: "1113".into(),
+            message: "Insufficient balance or no resource package. Please recharge.".into(),
+            remedy: None,
+        };
+        assert!(!billing.is_unreachable());
+        assert!(!ProviderError::Other("error sending request".into()).is_unreachable());
+    }
+
+    #[derive(Debug)]
+    struct BodyError(std::io::Error);
+
+    impl std::fmt::Display for BodyError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("error reading a body from connection")
+        }
+    }
+
+    impl std::error::Error for BodyError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn only_a_lost_route_counts_as_losing_the_network() {
+        use std::io::ErrorKind;
+        for kind in [
+            ErrorKind::NetworkUnreachable,
+            ErrorKind::HostUnreachable,
+            ErrorKind::NetworkDown,
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::AddrNotAvailable,
+        ] {
+            assert!(route_lost(&BodyError(kind.into())), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::BrokenPipe,
+            ErrorKind::UnexpectedEof,
+            ErrorKind::Other,
+        ] {
+            assert!(!route_lost(&BodyError(kind.into())), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_reply_cut_off_by_a_lost_network_is_unreachable() {
+        let lost = format!(
+            "{NETWORK_LOST}: error decoding response body: error reading a body from \
+             connection: Network is unreachable (os error 101)"
+        );
+        assert_eq!(
+            classify_stream_error_message(&lost),
+            StreamErrorKind::Unreachable
+        );
+        assert_eq!(
+            classify_stream_error_message(&format!("stream error: {lost}")),
+            StreamErrorKind::Unreachable
+        );
+        assert!(is_retryable_stream_error_message(&lost));
+        assert!(!is_unsendable_media_message(&lost));
+        assert!(!is_context_overflow_message(&lost));
+    }
+
+    #[test]
+    fn network_waits_double_up_to_a_minute_and_stay_there() {
+        use std::time::Duration;
+        let secs: Vec<u64> = (1..=9)
+            .map(|tries| jittered_network_delay(tries, 0.5).as_secs())
+            .collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(jittered_network_delay(0, 0.5), Duration::from_secs(1));
+        assert_eq!(jittered_network_delay(40, 0.0), Duration::from_secs(45));
+        assert_eq!(jittered_network_delay(u32::MAX, 1.0), NETWORK_RETRY_CAP);
+        let delay = network_retry_delay(3);
+        assert!(delay >= Duration::from_secs(3) && delay <= Duration::from_secs(5));
     }
 
     #[test]

@@ -242,7 +242,12 @@ pub fn run_sse_stream(
                     );
                     processor.finish(&mut output);
                     output.stop_reason = StopReason::Error;
-                    output.error_message = Some(super::format_error_chain(&e));
+                    let error = super::format_error_chain(&e);
+                    output.error_message = Some(if crate::registry::route_lost(&e) {
+                        format!("{}: {error}", crate::registry::NETWORK_LOST)
+                    } else {
+                        error
+                    });
                     crate::wire_log::log_assembled(call_id, &output);
                     yield StreamEvent::Error {
                         reason: StopReason::Error,
@@ -392,6 +397,58 @@ mod tests {
         assert_eq!(whole.len(), 3);
         assert_eq!(whole[0].data, "h\u{e9}llo");
         assert_eq!(parser.buffered_bytes(), b"data: open");
+    }
+
+    struct Quiet;
+
+    impl SseProcessor for Quiet {
+        fn process(&mut self, _raw: &SseRawEvent, _output: &mut AssistantMessage) -> ProcessResult {
+            ProcessResult::Skip
+        }
+
+        fn finish(&mut self, _output: &mut AssistantMessage) {}
+
+        fn label(&self) -> &'static str {
+            "test"
+        }
+    }
+
+    async fn body_failure(failure: std::io::Error) -> String {
+        use futures::StreamExt;
+        let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = vec![Err(failure)];
+        let response = http::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(reqwest::Body::wrap_stream(futures::stream::iter(chunks)))
+            .unwrap();
+        let model = crate::models::all_models().swap_remove(0);
+        let events: Vec<StreamEvent> =
+            run_sse_stream(reqwest::Response::from(response), &model, 0, Quiet)
+                .collect()
+                .await;
+        match events.last() {
+            Some(StreamEvent::Error { message, .. }) => {
+                message.error_message.clone().unwrap_or_default()
+            }
+            other => panic!("expected a stream error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_loses_its_route_says_the_network_went_away() {
+        use crate::registry::{NETWORK_LOST, StreamErrorKind, classify_stream_error_message};
+        let lost = body_failure(std::io::ErrorKind::NetworkUnreachable.into()).await;
+        assert!(lost.starts_with(NETWORK_LOST), "{lost}");
+        assert_eq!(
+            classify_stream_error_message(&lost),
+            StreamErrorKind::Unreachable
+        );
+        let reset = body_failure(std::io::ErrorKind::ConnectionReset.into()).await;
+        assert!(!reset.contains(NETWORK_LOST), "{reset}");
+        assert_eq!(
+            classify_stream_error_message(&reset),
+            StreamErrorKind::Transient
+        );
     }
 
     #[test]

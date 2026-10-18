@@ -746,6 +746,7 @@ mod tests {
             "{error:?}"
         );
         assert!(error.is_retryable());
+        assert!(error.is_unreachable());
     }
 
     #[tokio::test]
