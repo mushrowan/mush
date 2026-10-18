@@ -595,8 +595,9 @@ impl InProcessConnection {
             return;
         }
         while let Some(event) = self.deferred_events.pop_front() {
-            self.runtime.queue_event(event.clone());
-            if event.kind != mush_ai::types::EventKind::BashDone {
+            if self.runtime.queue_event(event.clone())
+                && event.kind != mush_ai::types::EventKind::BashDone
+            {
                 self.queued.push_back(ClientEvent::MessageInjected(event));
             }
         }
@@ -915,9 +916,10 @@ impl InProcessConnection {
                 delivery.ack(Receipt::Queued);
                 held.push_back(delivery);
             } else {
-                self.runtime.accept_event(delivery.event.clone());
-                self.queued
-                    .push_back(ClientEvent::MessageInjected(delivery.event.clone()));
+                if self.runtime.accept_event(delivery.event.clone()) {
+                    self.queued
+                        .push_back(ClientEvent::MessageInjected(delivery.event.clone()));
+                }
                 delivery.ack(Receipt::Delivered);
             }
         }
@@ -1130,8 +1132,9 @@ impl InProcessConnection {
         let Message::Event(event) = message else {
             return;
         };
-        self.runtime.accept_event(event.clone());
-        self.queued.push_back(ClientEvent::MessageInjected(event));
+        if self.runtime.accept_event(event.clone()) {
+            self.queued.push_back(ClientEvent::MessageInjected(event));
+        }
     }
 
     fn poll_background(&mut self) -> Option<ClientEvent> {
@@ -1394,11 +1397,15 @@ impl InProcessConnection {
                 Message::User(_) | Message::Assistant(_) | Message::ToolResult(_) => None,
             })
             .collect();
-        for event in &kept {
-            self.runtime
-                .conversation
-                .append_message(Message::Event(event.clone()));
-        }
+        let kept: Vec<mush_ai::types::EventMessage> = kept
+            .into_iter()
+            .filter(|event| {
+                self.runtime
+                    .conversation
+                    .append_delivery(Message::Event(event.clone()))
+                    .is_some()
+            })
+            .collect();
         self.runtime.save_debounced();
         let mut events = Vec::new();
         if !cancelled.is_empty() {
@@ -1455,7 +1462,7 @@ impl InProcessConnection {
             return;
         }
         for steer in steers {
-            self.runtime.conversation.append_message(steer);
+            self.runtime.conversation.append_delivery(steer);
         }
         if self.runtime.pending_prompt.is_none() {
             self.runtime.pending_prompt = Some(PendingPrompt::persisted(""));
@@ -1567,7 +1574,7 @@ impl InProcessConnection {
         let waiting = self.take_waiting_messages().await;
         self.abort().await;
         for message in waiting {
-            self.runtime.conversation.append_message(message);
+            self.runtime.conversation.append_delivery(message);
         }
         self.runtime.snapshot_kernel(&self.runtime.session_id).await;
         self.runtime.save_now_and_settle();

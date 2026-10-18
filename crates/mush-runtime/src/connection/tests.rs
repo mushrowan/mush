@@ -1076,6 +1076,63 @@ fn steered_child_message() -> mush_ai::types::EventMessage {
 }
 
 #[tokio::test]
+async fn a_message_steered_while_the_last_reply_streams_is_recorded_once() {
+    let (mut connection, release) = crate::testing::stalled_connection();
+    connection
+        .send(ClientCommand::Prompt {
+            text: "start".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let event = steered_child_message();
+    connection.steer_event(event.clone()).await;
+    connection
+        .send(ClientCommand::Steer {
+            text: "typed while it finished".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    release.notify_one();
+    drain_turn(&mut connection).await;
+
+    let transcript = connection.transcript().await;
+    let events = transcript
+        .iter()
+        .filter(|message| matches!(message, Message::Event(kept) if *kept == event))
+        .count();
+    let steers = transcript
+        .iter()
+        .filter(|message| matches!(message, Message::User(user) if user.text() == "typed while it finished"))
+        .count();
+    assert_eq!((events, steers), (1, 1), "{transcript:?}");
+}
+
+#[tokio::test]
+async fn an_event_the_conversation_already_holds_is_not_accepted_again() {
+    let (mut connection, _requests) = connection();
+    let event = steered_child_message();
+    assert!(connection.runtime.accept_event(event.clone()));
+    connection.runtime.pending_prompt = None;
+
+    assert!(!connection.runtime.accept_event(event.clone()));
+    assert!(!connection.runtime.queue_event(event.clone()));
+
+    assert!(connection.runtime.pending_prompt.is_none());
+    let held = connection
+        .transcript()
+        .await
+        .iter()
+        .filter(|message| matches!(message, Message::Event(kept) if *kept == event))
+        .count();
+    assert_eq!(held, 1);
+}
+
+#[tokio::test]
 async fn an_agent_message_steered_into_an_aborted_turn_is_kept_without_starting_another() {
     let (mut connection, _release) = crate::testing::stalled_connection();
     connection

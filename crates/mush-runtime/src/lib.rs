@@ -93,7 +93,7 @@ pub fn apply_agent_event(conversation: &mut ConversationState, event: &AgentEven
         }
         AgentEvent::SteeringInjected { messages } | AgentEvent::FollowUpInjected { messages } => {
             for message in messages {
-                conversation.append_message(message.clone());
+                conversation.append_delivery(message.clone());
             }
             Applied::Appended
         }

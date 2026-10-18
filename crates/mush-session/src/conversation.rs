@@ -49,6 +49,13 @@ impl ConversationState {
         self.tree.append_message(message)
     }
 
+    pub fn append_delivery(&mut self, message: Message) -> Option<EntryId> {
+        if self.tree.delivered_on_branch(&message) {
+            return None;
+        }
+        Some(self.tree.append_message(message))
+    }
+
     pub fn append_refinement(
         &mut self,
         source: crate::harness::RefinementSource,
@@ -278,6 +285,77 @@ mod tests {
         assert_eq!(child.task_brief().as_deref(), Some(task));
         assert_eq!(root.task_brief(), None);
         assert_eq!(ConversationState::new().task_brief(), None);
+    }
+
+    fn delivered(receipt: &str) -> Message {
+        use mush_ai::types::{EventKind, EventMessage, EventOrigin, EventReceipt};
+        Message::Event(EventMessage {
+            content: "[child-exited: no-reply child:auth]\n\nLast assistant text: done".into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Message,
+            receipts: vec![EventReceipt {
+                id: receipt.into(),
+                timestamp_ms: Timestamp::zero(),
+                kind: EventKind::Message,
+                origin: EventOrigin::Agent {
+                    session_id: "child".into(),
+                    name: "auth".into(),
+                    relationship: "child".into(),
+                },
+            }],
+        })
+    }
+
+    #[test]
+    fn a_receipt_already_on_the_branch_is_never_delivered_twice() {
+        let mut conversation = ConversationState::new();
+        conversation.append_message(user_message("hi"));
+        let before = conversation.leaf_id().cloned();
+
+        assert!(
+            conversation
+                .append_delivery(delivered("child-exit-1"))
+                .is_some()
+        );
+        assert!(
+            conversation
+                .append_delivery(delivered("child-exit-1"))
+                .is_none()
+        );
+        let Message::Event(event) = delivered("child-exit-1") else {
+            unreachable!()
+        };
+        assert!(
+            conversation
+                .append_delivery(user_message(&event.text()))
+                .is_none(),
+            "the old steered text form carries the same receipt"
+        );
+        assert!(
+            conversation
+                .append_delivery(user_message("again"))
+                .is_some()
+        );
+        assert!(
+            conversation
+                .append_delivery(user_message("again"))
+                .is_some()
+        );
+        let mut steer = user_message("typed once");
+        if let Message::User(user) = &mut steer {
+            user.prompt_id = Some("prompt-1".into());
+        }
+        assert!(conversation.append_delivery(steer.clone()).is_some());
+        assert!(conversation.append_delivery(steer).is_none());
+        assert_eq!(conversation.context().len(), 5);
+
+        conversation.branch(before.as_ref().unwrap());
+        assert!(
+            conversation
+                .append_delivery(delivered("child-exit-1"))
+                .is_some(),
+            "another branch has not seen it"
+        );
     }
 
     #[test]

@@ -632,7 +632,7 @@ pub fn agent_loop(
 
             let follow_up = config.hooks.get_follow_up().await;
             if !follow_up.is_empty() {
-                pending = follow_up.clone();
+                messages.extend(follow_up.iter().cloned());
                 yield AgentEvent::FollowUpInjected { messages: follow_up };
                 continue 'outer;
             }
@@ -1123,6 +1123,7 @@ mod tests {
 
         struct ScriptedProvider {
             calls: Arc<AtomicUsize>,
+            seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
         }
 
         #[async_trait::async_trait]
@@ -1134,10 +1135,11 @@ mod tests {
             async fn stream(
                 &self,
                 model: &Model,
-                _context: &mush_ai::registry::LlmContext,
+                context: &mush_ai::registry::LlmContext,
                 _options: &StreamOptions,
             ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError>
             {
+                self.seen.lock().unwrap().push(context.messages.clone());
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 let msg = AssistantMessage::builder()
                     .content(if call == 0 {
@@ -1175,9 +1177,11 @@ mod tests {
             }
         }
 
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut registry = ApiRegistry::new();
         registry.register(Box::new(ScriptedProvider {
             calls: Arc::new(AtomicUsize::new(0)),
+            seen: seen.clone(),
         }));
 
         let model = test_model();
@@ -1237,6 +1241,18 @@ mod tests {
             })
             .count();
         assert_eq!(follow_up_count, 1);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SteeringInjected { .. })),
+            "a follow-up is announced once, so its consumers record it once"
+        );
+        let second = seen.lock().unwrap()[1].clone();
+        let carried = second
+            .iter()
+            .filter(|m| matches!(m, Message::User(u) if u.text() == "queued follow-up"))
+            .count();
+        assert_eq!(carried, 1, "{second:?}");
         assert!(
             events.iter().any(|e| match e {
                 AgentEvent::FollowUpInjected { messages } => messages.iter().any(|m| match m {

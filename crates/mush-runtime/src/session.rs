@@ -389,16 +389,32 @@ impl SessionRuntime {
         Ok(message)
     }
 
-    pub fn queue_event(&mut self, event: mush_ai::types::EventMessage) {
-        if self.pending_prompt.is_none() {
-            self.pending_prompt = Some(PendingPrompt::persisted(event.text()));
+    pub fn queue_event(&mut self, event: mush_ai::types::EventMessage) -> bool {
+        let text = event.text();
+        if self
+            .conversation
+            .append_delivery(Message::Event(event))
+            .is_none()
+        {
+            return false;
         }
-        self.conversation.append_message(Message::Event(event));
+        if self.pending_prompt.is_none() {
+            self.pending_prompt = Some(PendingPrompt::persisted(text));
+        }
+        true
     }
 
-    pub fn accept_event(&mut self, event: mush_ai::types::EventMessage) {
-        self.pending_prompt = Some(PendingPrompt::persisted(event.text()));
-        self.conversation.append_message(Message::Event(event));
+    pub fn accept_event(&mut self, event: mush_ai::types::EventMessage) -> bool {
+        let text = event.text();
+        if self
+            .conversation
+            .append_delivery(Message::Event(event))
+            .is_none()
+        {
+            return false;
+        }
+        self.pending_prompt = Some(PendingPrompt::persisted(text));
+        true
     }
 
     pub fn apply_event(&mut self, event: &AgentEvent) -> crate::Applied {

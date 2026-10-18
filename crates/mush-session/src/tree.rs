@@ -338,6 +338,10 @@ fn delivered_receipts(entries: &[&SessionEntry]) -> Vec<PromptId> {
         .collect()
 }
 
+fn receipt_ids(receipts: &[EventReceipt]) -> Vec<PromptId> {
+    receipts.iter().map(|receipt| receipt.id.clone()).collect()
+}
+
 fn fresh(event: &EventMessage, seen: &mut Vec<PromptId>) -> bool {
     if event
         .receipts
@@ -675,6 +679,41 @@ impl SessionTree {
             self.append(kind);
         }
         Some(lifted)
+    }
+
+    #[must_use]
+    pub fn delivered_on_branch(&self, message: &Message) -> bool {
+        let ids = match message {
+            Message::Event(event) => receipt_ids(&event.receipts),
+            Message::User(user) => match EventMessage::from_text(&user.text()) {
+                Some(event) => receipt_ids(&event.receipts),
+                None => {
+                    return user.prompt_id.as_ref().is_some_and(|prompt| {
+                        self.current_branch().into_iter().any(|entry| {
+                            matches!(
+                                &entry.kind,
+                                EntryKind::Message {
+                                    message: Message::User(held),
+                                } if held.prompt_id.as_ref() == Some(prompt)
+                            )
+                        })
+                    });
+                }
+            },
+            Message::Assistant(_) | Message::ToolResult(_) => return false,
+        };
+        !ids.is_empty()
+            && self.current_branch().into_iter().any(|entry| {
+                let held = match &entry.kind {
+                    EntryKind::Message {
+                        message: Message::User(user),
+                    } => EventMessage::from_text(&user.text())
+                        .map(|event| receipt_ids(&event.receipts))
+                        .unwrap_or_default(),
+                    _ => receipt_ids(entry_receipts(entry)),
+                };
+                held.iter().any(|id| ids.contains(id))
+            })
     }
 
     #[must_use]
