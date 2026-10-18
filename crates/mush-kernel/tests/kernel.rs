@@ -682,6 +682,57 @@ async fn a_snapshot_that_stalls_times_out() {
     kernel.kill().await;
 }
 
+async fn appears(path: &std::path::Path) {
+    while !path.exists() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn slow_to_pickle(marker: &std::path::Path) -> String {
+    format!(
+        "import pathlib, time\nclass Slow:\n    def __reduce__(self):\n        pathlib.Path({:?}).touch()\n        time.sleep(30)\n        return (Slow, ())\nkeep = 41\nslow = Slow()",
+        marker.to_string_lossy()
+    )
+}
+
+#[tokio::test]
+async fn a_cell_sent_while_an_abandoned_snapshot_still_pickles_stops_it_and_runs_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pickling");
+    let path = dir.path().join("state.pickle");
+    let first = kernel().await;
+    first.execute(&slow_to_pickle(&marker)).await.unwrap();
+
+    tokio::select! {
+        outcome = first.snapshot(&path, None) => panic!("the stalled snapshot ended: {outcome:?}"),
+        () = appears(&marker) => {}
+    }
+    let started = std::time::Instant::now();
+    let output = tokio::time::timeout(Duration::from_secs(10), first.execute("keep + 1"))
+        .await
+        .expect("the cell does not wait for the snapshot")
+        .unwrap();
+
+    assert_eq!(output.result.as_deref(), Some("42"));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!path.exists());
+    first.execute("del slow").await.unwrap();
+    let report = first.snapshot(&path, None).await.unwrap();
+    assert!(report.saved.contains(&"keep".to_string()), "{report:?}");
+    first.shutdown().await.unwrap();
+    let fresh = kernel().await;
+    fresh.restore(&path).await.unwrap();
+    assert_eq!(
+        fresh.execute("keep").await.unwrap().result.as_deref(),
+        Some("41")
+    );
+    fresh.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn restoring_a_missing_snapshot_is_not_an_error() {
     let kernel = kernel().await;

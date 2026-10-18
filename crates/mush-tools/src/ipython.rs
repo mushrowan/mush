@@ -382,6 +382,7 @@ pub struct IpythonTool {
     busy_prompt: Option<BusyKernelPrompt>,
     repair_notice: Mutex<Option<String>>,
     snapshot_generation: Arc<AtomicU64>,
+    snapshot_preempt: Arc<tokio::sync::Notify>,
     snapshot_debounce: Duration,
     model: Mutex<Option<(String, bool)>>,
     live_pid: Mutex<Option<u32>>,
@@ -429,6 +430,7 @@ impl IpythonTool {
             busy_prompt: None,
             repair_notice: Mutex::new(None),
             snapshot_generation: Arc::new(AtomicU64::new(0)),
+            snapshot_preempt: Arc::new(tokio::sync::Notify::new()),
             snapshot_debounce: SNAPSHOT_DEBOUNCE,
             model: Mutex::new(None),
             live_pid: Mutex::new(None),
@@ -453,11 +455,15 @@ impl IpythonTool {
         };
         let generation = self.snapshot_generation.fetch_add(1, Ordering::SeqCst) + 1;
         let current = self.snapshot_generation.clone();
+        let preempt = self.snapshot_preempt.clone();
         let kernel = self.kernel.clone();
         let debounce = self.snapshot_debounce;
         tokio::spawn(async move {
             tokio::time::sleep(debounce).await;
             let still_latest = || current.load(Ordering::SeqCst) == generation;
+            let preempted = preempt.notified();
+            tokio::pin!(preempted);
+            preempted.as_mut().enable();
             if !still_latest() {
                 return;
             }
@@ -472,15 +478,26 @@ impl IpythonTool {
                 tracing::warn!(%error, "kernel state directory unavailable");
                 return;
             }
-            match kernel.snapshot(&path, None).await {
-                Ok(report) => tracing::debug!(
-                    saved = report.saved.len(),
-                    skipped = report.skipped.len(),
-                    "kernel state auto-saved"
-                ),
-                Err(error) => tracing::warn!(%error, "kernel state auto-save failed"),
+            tokio::select! {
+                biased;
+                () = &mut preempted => {
+                    tracing::debug!("a cell started, so the kernel state auto-save stopped");
+                }
+                outcome = kernel.snapshot(&path, None) => match outcome {
+                    Ok(report) => tracing::debug!(
+                        saved = report.saved.len(),
+                        skipped = report.skipped.len(),
+                        "kernel state auto-saved"
+                    ),
+                    Err(error) => tracing::warn!(%error, "kernel state auto-save failed"),
+                },
             }
         });
+    }
+
+    fn preempt_snapshot(&self) {
+        self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
+        self.snapshot_preempt.notify_waiters();
     }
 
     #[must_use]
@@ -601,6 +618,7 @@ impl IpythonTool {
     }
 
     async fn run_once(&self, code: &str) -> Result<CellOutput, KernelError> {
+        self.preempt_snapshot();
         let mut slot = self.kernel.lock().await;
         let sink = self.output_sink.clone();
         let exec_id = mush_agent::exec_context::current_exec_id();
@@ -1948,6 +1966,39 @@ mod tests {
             max_depth: 1,
         });
         tool
+    }
+
+    #[tokio::test]
+    async fn a_cell_does_not_wait_for_the_auto_save_of_the_cell_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("pickling");
+        let tool = attached_tool(dir.path()).with_snapshot_debounce(Duration::from_millis(10));
+        let first = tool
+            .execute(json!({ "code": format!(
+                "import pathlib, time\nclass Slow:\n    def __reduce__(self):\n        pathlib.Path({:?}).touch()\n        time.sleep(30)\n        return (Slow, ())\nkeep = 41\nslow = Slow()",
+                marker.to_string_lossy()
+            ) }))
+            .await;
+        assert!(first.outcome.is_success(), "{}", extract_text(&first));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the auto-save never started"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let started = std::time::Instant::now();
+        let next = tool.execute(json!({ "code": "del slow\nkeep + 1" })).await;
+
+        assert_eq!(extract_text(&next), "42");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the cell waited {:?} for the auto-save",
+            started.elapsed()
+        );
+        tool.shutdown().await;
     }
 
     #[tokio::test]

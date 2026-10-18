@@ -33,6 +33,8 @@ _parked_interrupts: set = set()
 _inflight: set = set()
 _interrupt_next = False
 _interrupt_lock = threading.Lock()
+_snapshotting = False
+_snapshot_preempted = False
 _main_thread = threading.main_thread().ident
 _namespace: dict = {}
 _cell_count = 0
@@ -1247,6 +1249,13 @@ class _SnapshotSizeLimitExceeded(Exception):
     pass
 
 
+class _SnapshotPreempted(BaseException):
+    pass
+
+
+_SNAPSHOT_PREEMPTED = "a cell arrived, so the state was not saved"
+
+
 class _CappedWriter:
     def __init__(self, sink, limit: int):
         self._sink = sink
@@ -1254,6 +1263,8 @@ class _CappedWriter:
         self.written = 0
 
     def write(self, chunk) -> int:
+        if _snapshot_preempted:
+            raise _SnapshotPreempted()
         size = len(chunk)
         if self.written + size > self._limit:
             raise _SnapshotSizeLimitExceeded()
@@ -1286,13 +1297,47 @@ def _dump(value, sink, serializer) -> None:
 
 
 def _snapshot(request: dict) -> None:
-    cell_id = request["id"]
+    global _snapshotting
+    try:
+        reply = _take_snapshot(request)
+    except _SnapshotPreempted:
+        _snapshotting = False
+        reply = {"ok": False, "reason": _SNAPSHOT_PREEMPTED}
+    emit({"type": "done", "id": request["id"], **reply})
+
+
+def _take_snapshot(request: dict) -> dict:
+    global _snapshotting, _snapshot_preempted
+    with _interrupt_lock:
+        if _inflight:
+            return {"ok": False, "reason": _SNAPSHOT_PREEMPTED}
+        _snapshotting = True
+        _snapshot_preempted = False
+    try:
+        saved, skipped, payload = _pickle_namespace(request)
+    finally:
+        _snapshotting = False
+    if skipped:
+        payload[_SKIPPED_ENTRY] = skipped
+    try:
+        with open(request["path"], "wb") as handle:
+            pickle.dump(payload, handle)
+    except OSError as exc:
+        return {"ok": False, "reason": str(exc)}
+    current = asyncio.current_task()
+    tasks = sum(1 for task in asyncio.all_tasks() if task is not current and not task.done())
+    return {"ok": True, "saved": saved, "skipped": skipped, "tasks": tasks}
+
+
+def _pickle_namespace(request: dict) -> tuple:
     max_bytes = int(request.get("max_variable_bytes") or 16 * 1024 * 1024)
     serializer = _serializer()
     saved, skipped = [], []
     payload = {}
     total = 0
     for name, value in list(_namespace.items()):
+        if _snapshot_preempted:
+            raise _SnapshotPreempted()
         if not _is_user_name(name):
             continue
         budget = _SNAPSHOT_MAX_BYTES - total
@@ -1306,17 +1351,7 @@ def _snapshot(request: dict) -> None:
         total += len(blob)
         payload[name] = blob
         saved.append(name)
-    if skipped:
-        payload[_SKIPPED_ENTRY] = skipped
-    try:
-        with open(request["path"], "wb") as handle:
-            pickle.dump(payload, handle)
-    except OSError as exc:
-        emit({"type": "done", "id": cell_id, "ok": False, "reason": str(exc)})
-        return
-    current = asyncio.current_task()
-    tasks = sum(1 for task in asyncio.all_tasks() if task is not current and not task.done())
-    emit({"type": "done", "id": cell_id, "ok": True, "saved": saved, "skipped": skipped, "tasks": tasks})
+    return saved, skipped, payload
 
 
 def _restore(request: dict) -> None:
@@ -1357,6 +1392,16 @@ def _on_sigint(signum, frame) -> None:
     task = _running["task"]
     if task is not None and asyncio.current_task(_loop) is task:
         raise KeyboardInterrupt
+    if _snapshotting:
+        raise _SnapshotPreempted()
+
+
+def _claim_snapshot_preemption_locked() -> bool:
+    global _snapshot_preempted
+    if not _snapshotting or _snapshot_preempted:
+        return False
+    _snapshot_preempted = True
+    return True
 
 
 def _interrupt(cell_id) -> None:
@@ -1415,6 +1460,9 @@ def _reader(queue: asyncio.Queue) -> None:
         if kind == "execute" and request.get("id") is not None:
             with _interrupt_lock:
                 _inflight.add(request["id"])
+                preempt = _claim_snapshot_preemption_locked()
+            if preempt:
+                signal.pthread_kill(_main_thread, signal.SIGINT)
         if kind == "interrupt":
             _interrupt(request.get("id"))
             continue

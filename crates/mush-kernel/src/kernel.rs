@@ -506,11 +506,12 @@ impl Kernel {
     ) -> Result<serde_json::Map<String, Value>, KernelError> {
         let _guard = self.exec_lock.lock().await;
         let mut rx = self.shared.register(id);
-        if let Err(error) = self.send(request).await {
-            self.shared.unregister(id);
-            return Err(error);
-        }
-        let outcome = tokio::time::timeout(limit, async {
+        let _registered = Registered {
+            shared: &self.shared,
+            id,
+        };
+        self.send(request).await?;
+        tokio::time::timeout(limit, async {
             loop {
                 match rx.recv().await {
                     Some(Event::Done { ok, extra, .. }) => {
@@ -531,9 +532,7 @@ impl Kernel {
             }
         })
         .await
-        .unwrap_or(Err(KernelError::RequestTimeout(limit)));
-        self.shared.unregister(id);
-        outcome
+        .unwrap_or(Err(KernelError::RequestTimeout(limit)))
     }
 
     fn fresh_id(&self, prefix: &str) -> String {
@@ -566,6 +565,17 @@ impl Drop for Kernel {
     fn drop(&mut self) {
         self.shared.take_child();
         self.reader.abort();
+    }
+}
+
+struct Registered<'a> {
+    shared: &'a Shared,
+    id: &'a str,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.shared.unregister(self.id);
     }
 }
 
