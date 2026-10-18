@@ -291,6 +291,65 @@ fn open_tool_calls_after(
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LeftBehind {
+    pub entries: usize,
+    pub last: Option<EntryId>,
+    pub events: Vec<EventMessage>,
+}
+
+fn carried_event(entry: &SessionEntry) -> Option<EventMessage> {
+    let event = match &entry.kind {
+        EntryKind::Message {
+            message: Message::Event(event),
+        } => event.clone(),
+        EntryKind::Message {
+            message: Message::User(user),
+        } => EventMessage::from_text(&user.text())?,
+        EntryKind::Message { .. }
+        | EntryKind::BranchSummary { .. }
+        | EntryKind::Compaction { .. }
+        | EntryKind::Refinement { .. }
+        | EntryKind::ThinkingLevelChange { .. }
+        | EntryKind::Unknown(_) => return None,
+    };
+    (event.kind.is_carried() && !event.receipts.is_empty()).then_some(event)
+}
+
+fn delivered_receipts(entries: &[&SessionEntry]) -> Vec<PromptId> {
+    entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Message {
+                message: Message::Event(event),
+            } if !event.kind.is_summary() => Some(event.receipts.clone()),
+            EntryKind::Message {
+                message: Message::User(user),
+            } => EventMessage::from_text(&user.text()).map(|event| event.receipts),
+            EntryKind::Message { .. }
+            | EntryKind::BranchSummary { .. }
+            | EntryKind::Compaction { .. }
+            | EntryKind::Refinement { .. }
+            | EntryKind::ThinkingLevelChange { .. }
+            | EntryKind::Unknown(_) => None,
+        })
+        .flatten()
+        .map(|receipt| receipt.id)
+        .collect()
+}
+
+fn fresh(event: &EventMessage, seen: &mut Vec<PromptId>) -> bool {
+    if event
+        .receipts
+        .iter()
+        .any(|receipt| seen.contains(&receipt.id))
+    {
+        return false;
+    }
+    seen.extend(event.receipts.iter().map(|receipt| receipt.id.clone()));
+    true
+}
+
 fn entry_receipts(entry: &SessionEntry) -> &[EventReceipt] {
     match &entry.kind {
         EntryKind::Message {
@@ -584,8 +643,17 @@ impl SessionTree {
     pub fn lift_out(&mut self, id: &EntryId) -> Option<SessionEntry> {
         let branch = self.current_branch();
         let at = branch.iter().position(|entry| entry.id == *id)?;
+        let mut seen = delivered_receipts(&branch[..at]);
         let mut carried = Vec::new();
         for entry in &branch[at + 1..] {
+            if let Some(event) = carried_event(entry) {
+                if fresh(&event, &mut seen) {
+                    carried.push(EntryKind::Message {
+                        message: Message::Event(event),
+                    });
+                }
+                continue;
+            }
             match &entry.kind {
                 EntryKind::Message {
                     message: Message::User(_) | Message::Event(_),
@@ -607,6 +675,36 @@ impl SessionTree {
             self.append(kind);
         }
         Some(lifted)
+    }
+
+    #[must_use]
+    pub fn left_behind(&self, from: Option<&EntryId>, to: Option<&EntryId>) -> LeftBehind {
+        let target = self.branch_ending_at(to);
+        let staying: std::collections::HashSet<&str> =
+            target.iter().map(|entry| &*entry.id).collect();
+        let mut seen = delivered_receipts(&target);
+        let mut left = LeftBehind::default();
+        for entry in self.branch_ending_at(from) {
+            if staying.contains(&*entry.id) {
+                continue;
+            }
+            left.entries += 1;
+            left.last = Some(entry.id.clone());
+            if let Some(event) = carried_event(entry)
+                && fresh(&event, &mut seen)
+            {
+                left.events.push(event);
+            }
+        }
+        left
+    }
+
+    pub fn carry(&mut self, notice: EventMessage, events: Vec<EventMessage>) -> EntryId {
+        let mut leaf = self.append_message(Message::Event(notice));
+        for event in events {
+            leaf = self.append_message(Message::Event(event));
+        }
+        leaf
     }
 
     pub fn leaf_id(&self) -> Option<&EntryId> {
@@ -1235,6 +1333,56 @@ mod tests {
             tree.by_id(&rejected).is_some(),
             "the rejected message stays in the tree"
         );
+    }
+
+    #[test]
+    fn what_is_left_behind_counts_every_entry_but_carries_only_new_events() {
+        let mut tree = SessionTree::new();
+        let fork = tree.append_message(user_msg("q0"));
+        tree.append_message(event_with(
+            "[agent-message from child:auth]\n\nold news",
+            "r1",
+        ));
+        tree.append_message(user_msg("q1"));
+        tree.append_message(event_with("[agent-message from child:auth]\n\nfresh", "r2"));
+        let mut summary = assistant_msg("summarised");
+        if let Message::Assistant(reply) = &mut summary {
+            reply.stop_reason = StopReason::Stop;
+        }
+        let from = tree.append_message(summary);
+        let target = tree.entries()[1].id.clone();
+        assert!(tree.branch(&target));
+        let to = tree.leaf_id().cloned();
+        assert_ne!(to.as_ref(), Some(&fork));
+
+        let left = tree.left_behind(Some(&from), to.as_ref());
+
+        assert_eq!(left.entries, 3);
+        assert_eq!(left.last, Some(from));
+        let carried: Vec<&str> = left
+            .events
+            .iter()
+            .map(|event| event.content.as_str())
+            .collect();
+        assert_eq!(carried, ["[agent-message from child:auth]\n\nfresh"]);
+    }
+
+    fn event_with(text: &str, receipt: &str) -> Message {
+        Message::Event(EventMessage {
+            content: text.into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: EventKind::Message,
+            receipts: vec![EventReceipt {
+                id: receipt.into(),
+                timestamp_ms: Timestamp::zero(),
+                kind: EventKind::Message,
+                origin: EventOrigin::Agent {
+                    session_id: "s".into(),
+                    name: "auth".into(),
+                    relationship: "child".into(),
+                },
+            }],
+        })
     }
 
     #[test]

@@ -706,9 +706,12 @@ async fn summarise_and_navigate_puts_the_model_summary_on_the_new_branch() {
         unreachable!()
     };
     assert_eq!(editor_text.as_deref(), Some("bananas"));
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert!(matches!(&messages[0], Message::User(u) if u.text() == "apples"));
     assert!(matches!(&messages[1], Message::User(u) if u.text().contains("hi back")));
+    assert!(
+        matches!(&messages[2], Message::Event(event) if event.kind == mush_ai::types::EventKind::Moved)
+    );
     let asked = requests.lock().unwrap();
     assert_eq!(asked.len(), 1);
     let Message::User(request) = &asked[0].messages[0] else {

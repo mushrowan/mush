@@ -64,6 +64,7 @@ impl Injected {
                 &event.content,
                 Body::Folded,
             ),
+            EventKind::Moved => moved(event),
         };
         if !event.kind.is_summary() {
             injected.details = event.receipts.iter().map(receipt_line).collect();
@@ -183,6 +184,24 @@ fn message(event: &EventMessage) -> Injected {
         content,
         Body::Clipped,
     )
+}
+
+fn moved(event: &EventMessage) -> Injected {
+    let body = event
+        .content
+        .strip_prefix(mush_runtime::commands::MOVED_TAG)
+        .unwrap_or(&event.content);
+    let mut header = vec![HeaderPart::Text(
+        "moved in the tree, only the conversation moved".into(),
+    )];
+    match event.receipts.len() {
+        0 => {}
+        1 => header.push(HeaderPart::Text(" \u{b7} 1 event carried over".into())),
+        carried => header.push(HeaderPart::Text(format!(
+            " \u{b7} {carried} events carried over"
+        ))),
+    }
+    Injected::new(header, body, Body::Folded)
 }
 
 fn unattributed(label: &str, receipts: &[EventReceipt]) -> Vec<HeaderPart> {
@@ -464,6 +483,32 @@ mod tests {
         let row = Injected::from_event(&via_control);
         assert_eq!(header(&row), "worker w4 finished · control, claimed ci");
         assert_eq!(row.body, "done");
+    }
+
+    #[test]
+    fn a_move_in_the_tree_says_only_the_conversation_moved_and_how_much_follows() {
+        let mut moved = event(
+            EventKind::Moved,
+            "[branch-moved]\n\nThe user moved this conversation to entry abc.",
+            Some(EventOrigin::Agent {
+                session_id: "s".into(),
+                name: "auth".into(),
+                relationship: "child".into(),
+            }),
+        );
+        let row = Injected::from_event(&moved);
+        assert_eq!(
+            header(&row),
+            "moved in the tree, only the conversation moved \u{b7} 1 event carried over"
+        );
+        assert_eq!(row.body, "The user moved this conversation to entry abc.");
+        assert_eq!(row.shown, Body::Folded);
+
+        moved.receipts.clear();
+        assert_eq!(
+            header(&Injected::from_event(&moved)),
+            "moved in the tree, only the conversation moved"
+        );
     }
 
     #[test]

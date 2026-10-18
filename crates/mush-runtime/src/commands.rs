@@ -214,10 +214,12 @@ impl SessionRuntime {
                         "invalid: use 1-{count} (try /tree to see messages)"
                     ))];
                 };
+                let from = self.conversation.leaf_id().cloned();
                 self.move_leaf_to(parent);
+                let carried = self.settle_move(from, Some(&preview));
                 vec![
                     self.transcript_replaced(Replaced::Branched, None),
-                    SessionEvent::Status(format!("branched before: {preview}")),
+                    SessionEvent::Status(format!("branched before: {preview}{carried}")),
                 ]
             }
             SessionCommand::NavigateTree { entry_id, summary } => {
@@ -227,20 +229,26 @@ impl SessionRuntime {
                 let branch = self.conversation.tree().current_branch();
                 let undone = branch.iter().rev().find_map(|entry| match &entry.kind {
                     mush_session::EntryKind::Compaction { .. } => {
-                        Some((entry.parent_id.clone(), "undid compaction"))
+                        Some((entry.parent_id.clone(), "undid compaction", None))
                     }
                     mush_session::EntryKind::Message {
                         message: Message::User(_),
-                    } => Some((entry.parent_id.clone(), "undid last turn")),
+                    } => Some((
+                        entry.parent_id.clone(),
+                        "undid last turn",
+                        Some(entry_preview(entry)),
+                    )),
                     _ => None,
                 });
                 match undone {
                     None => vec![SessionEvent::Failed("nothing to undo".into())],
-                    Some((parent, status)) => {
+                    Some((parent, status, preview)) => {
+                        let from = self.conversation.leaf_id().cloned();
                         self.move_leaf_to(parent);
+                        let carried = self.settle_move(from, preview.as_deref());
                         vec![
                             self.transcript_replaced(Replaced::Undone, None),
-                            SessionEvent::Status(status.into()),
+                            SessionEvent::Status(format!("{status}{carried}")),
                         ]
                     }
                 }
@@ -425,6 +433,29 @@ impl SessionRuntime {
         }
     }
 
+    fn settle_move(
+        &mut self,
+        from: Option<mush_session::tree::EntryId>,
+        before: Option<&str>,
+    ) -> String {
+        let to = self.conversation.leaf_id().cloned();
+        if from == to {
+            return String::new();
+        }
+        let left = self
+            .conversation
+            .tree()
+            .left_behind(from.as_ref(), to.as_ref());
+        let notice = moved_notice(self.conversation.tree(), &left, before);
+        let carried = left.events.len();
+        self.conversation.carry(notice, left.events);
+        match carried {
+            0 => String::new(),
+            1 => " \u{b7} 1 event from the branch you left carried over".into(),
+            carried => format!(" \u{b7} {carried} events from the branch you left carried over"),
+        }
+    }
+
     fn move_leaf_to(&mut self, parent: Option<mush_session::tree::EntryId>) {
         match parent {
             Some(parent) => {
@@ -461,6 +492,8 @@ impl SessionRuntime {
             _ => None,
         };
         let new_leaf = navigation_leaf(tree, target);
+        let before = editor_text.is_some().then(|| preview.clone());
+        let from = self.conversation.leaf_id().cloned();
         self.harness_digest_pending = true;
         let status = match summary {
             Some(summary) => {
@@ -479,6 +512,7 @@ impl SessionRuntime {
                 format!("branched before: {preview}")
             }
         };
+        let status = status + &self.settle_move(from, before.as_deref());
         self.adopt_branch_thinking_level()
             .into_iter()
             .chain([
@@ -500,6 +534,81 @@ pub fn navigation_leaf(
         } => target.parent_id.clone(),
         _ if tree.unanswered_tool_calls(&target.id).is_empty() => Some(target.id.clone()),
         _ => tree.nearest_branchable_ancestor(&target.id).cloned(),
+    }
+}
+
+fn moved_notice(
+    tree: &mush_session::tree::SessionTree,
+    left: &mush_session::tree::LeftBehind,
+    before: Option<&str>,
+) -> mush_ai::types::EventMessage {
+    let at = |stamp: mush_ai::types::Timestamp| {
+        i64::try_from(stamp.as_ms())
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map_or_else(String::new, |at| {
+                format!(", {}", at.format("%Y-%m-%d %H:%M UTC"))
+            })
+    };
+    let place = match (before, tree.leaf_id().and_then(|id| tree.by_id(id))) {
+        (Some(preview), _) => format!("to just before their message \"{preview}\""),
+        (None, Some(entry)) => format!(
+            "to entry {} ({}{})",
+            entry.id,
+            entry_kind(entry),
+            at(entry.timestamp)
+        ),
+        (None, None) => "to the start of the session".to_string(),
+    };
+    let stays = match (left.entries, &left.last) {
+        (0, _) | (_, None) => String::new(),
+        (1, Some(last)) => format!(
+            " The entry after that point, {last}, stays in the session tree but is no longer in your context."
+        ),
+        (entries, Some(last)) => format!(
+            " The {entries} entries after that point, up to {last}, stay in the session tree but are no longer in your context."
+        ),
+    };
+    let carried = match left.events.len() {
+        0 => String::new(),
+        1 => "\n\nThe event below arrived after that point and is carried over.".to_string(),
+        events => format!(
+            "\n\nThe {events} events below arrived after that point and are carried over, in the order they arrived."
+        ),
+    };
+    let now = mush_ai::types::Timestamp::now();
+    mush_ai::types::EventMessage {
+        content: format!(
+            "{MOVED_TAG}\n\nThe user moved this conversation {place} and is continuing from there.{stays}\n\n\
+             Only the conversation moved. Files, the python kernel and its variables, child agents, \
+             background jobs, notes, the goal, scheduled jobs and harness memory are as they were just \
+             before the move, so anything done after that point may still be in effect.{carried}"
+        ),
+        timestamp_ms: now,
+        kind: mush_ai::types::EventKind::Moved,
+        receipts: left
+            .events
+            .iter()
+            .filter_map(|event| event.receipts.first().cloned())
+            .collect(),
+    }
+}
+
+pub const MOVED_TAG: &str = "[branch-moved]";
+
+fn entry_kind(entry: &mush_session::tree::SessionEntry) -> &'static str {
+    match &entry.kind {
+        mush_session::tree::EntryKind::Message { message } => match message {
+            Message::User(_) => "a user message",
+            Message::Assistant(_) => "your reply",
+            Message::ToolResult(_) => "a tool result",
+            Message::Event(_) => "an event",
+        },
+        mush_session::tree::EntryKind::BranchSummary { .. } => "a branch summary",
+        mush_session::tree::EntryKind::Compaction { .. } => "a compaction summary",
+        mush_session::tree::EntryKind::Refinement { .. } => "a harness refinement",
+        mush_session::tree::EntryKind::ThinkingLevelChange { .. }
+        | mush_session::tree::EntryKind::Unknown(_) => "a setting change",
     }
 }
 
@@ -736,7 +845,7 @@ mod tests {
         let mut runtime = runtime(vec![user("a"), user("b"), user("c")]);
 
         let undone = runtime.handle(SessionCommand::Undo).await;
-        assert_eq!(runtime.conversation.context_len(), 2);
+        assert_eq!(without_notices(&runtime), vec![user("a"), user("b")]);
         assert!(matches!(
             replaced(&undone),
             Some((Replaced::Undone, _, None))
@@ -745,7 +854,7 @@ mod tests {
         let branched = runtime
             .handle(SessionCommand::Branch { user_message: 1 })
             .await;
-        assert_eq!(runtime.conversation.context_len(), 0);
+        assert!(without_notices(&runtime).is_empty());
         assert!(matches!(
             replaced(&branched),
             Some((Replaced::Branched, _, None))
@@ -767,7 +876,7 @@ mod tests {
             .unwrap();
 
         let undone = runtime.handle(SessionCommand::Undo).await;
-        assert_eq!(runtime.conversation.context(), before);
+        assert_eq!(without_notices(&runtime), before);
         assert!(
             undone
                 .iter()
@@ -775,7 +884,7 @@ mod tests {
         );
 
         runtime.handle(SessionCommand::Undo).await;
-        assert_eq!(runtime.conversation.context(), before[..4]);
+        assert_eq!(without_notices(&runtime), before[..4]);
     }
 
     #[tokio::test]
@@ -790,7 +899,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(runtime.conversation.context(), vec![user("a")]);
+        assert_eq!(without_notices(&runtime), vec![user("a")]);
         assert!(matches!(
             replaced(&events),
             Some((Replaced::Branched, _, Some(text))) if text == "b"
@@ -809,7 +918,10 @@ mod tests {
             })
             .await;
 
-        assert_eq!(runtime.conversation.context_len(), 2);
+        assert_eq!(
+            without_notices(&runtime),
+            vec![user("a"), assistant("reply")]
+        );
         assert!(matches!(
             replaced(&events),
             Some((Replaced::Branched, _, None))
@@ -829,8 +941,206 @@ mod tests {
             .await;
 
         let context = runtime.conversation.context();
-        assert_eq!(context.len(), 1);
+        assert_eq!(context.len(), 2);
         assert!(matches!(&context[0], Message::User(user) if user.text().contains("we tried b")));
+        assert!(is_notice(&context[1]));
+    }
+
+    fn is_notice(message: &Message) -> bool {
+        matches!(message, Message::Event(event) if event.kind == mush_ai::types::EventKind::Moved)
+    }
+
+    fn without_notices(runtime: &SessionRuntime) -> Vec<Message> {
+        runtime
+            .conversation
+            .context()
+            .into_iter()
+            .filter(|message| !is_notice(message))
+            .collect()
+    }
+
+    fn child_message(text: &str, receipt: &str) -> Message {
+        Message::Event(mush_ai::types::EventMessage {
+            content: format!("[agent-message from child:auth]\n\n{text}"),
+            timestamp_ms: Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Message,
+            receipts: vec![mush_ai::types::EventReceipt {
+                id: receipt.into(),
+                timestamp_ms: Timestamp::zero(),
+                kind: mush_ai::types::EventKind::Message,
+                origin: mush_ai::types::EventOrigin::Agent {
+                    session_id: "child".into(),
+                    name: "auth".into(),
+                    relationship: "child".into(),
+                },
+            }],
+        })
+    }
+
+    fn status(events: &[SessionEvent]) -> String {
+        events
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::Status(status) => Some(status.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn moving_back_tells_the_agent_and_carries_what_arrived_after_the_point_it_left() {
+        let mut runtime = runtime(vec![
+            user("a"),
+            assistant("reply"),
+            user("b"),
+            child_message("found the race", "agentmsg_1"),
+            assistant("noted"),
+        ]);
+        let target = runtime.conversation.tree().entries()[2].id.clone();
+
+        let events = runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: target,
+                summary: None,
+            })
+            .await;
+
+        let context = runtime.conversation.context();
+        assert_eq!(context[..2], [user("a"), assistant("reply")]);
+        let Message::Event(notice) = &context[2] else {
+            panic!("{context:?}");
+        };
+        assert_eq!(notice.kind, mush_ai::types::EventKind::Moved);
+        assert!(
+            notice.content.starts_with(
+                "[branch-moved]\n\nThe user moved this conversation to just before their message \"b\""
+            ),
+            "{}",
+            notice.content
+        );
+        assert!(
+            notice.content.contains("The 3 entries after that point"),
+            "{}",
+            notice.content
+        );
+        assert!(notice.content.contains("Only the conversation moved."));
+        assert!(
+            notice
+                .content
+                .ends_with("The event below arrived after that point and is carried over.")
+        );
+        assert_eq!(notice.text(), notice.content);
+        assert_eq!(context[3], child_message("found the race", "agentmsg_1"));
+        assert_eq!(context.len(), 4);
+        assert_eq!(
+            status(&events),
+            "branched before: b \u{b7} 1 event from the branch you left carried over"
+        );
+    }
+
+    #[tokio::test]
+    async fn moving_back_and_forth_carries_each_event_once() {
+        let mut runtime = runtime(vec![
+            user("a"),
+            user("b"),
+            child_message("found the race", "agentmsg_1"),
+        ]);
+        let left = runtime.conversation.leaf_id().cloned().unwrap();
+        let b = runtime.conversation.tree().entries()[1].id.clone();
+
+        runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: b,
+                summary: None,
+            })
+            .await;
+        let events = runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: left,
+                summary: None,
+            })
+            .await;
+
+        let context = runtime.conversation.context();
+        let copies = context
+            .iter()
+            .filter(|message| **message == child_message("found the race", "agentmsg_1"))
+            .count();
+        assert_eq!(copies, 1, "{context:?}");
+        assert!(is_notice(context.last().unwrap()));
+        assert!(
+            !status(&events).contains("carried over"),
+            "{}",
+            status(&events)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_message_steered_as_text_by_an_older_build_is_carried_as_an_event() {
+        let Message::Event(event) = child_message("found the race", "agentmsg_1") else {
+            unreachable!()
+        };
+        let mut runtime = runtime(vec![user("a"), user("b"), user(&event.text())]);
+        let b = runtime.conversation.tree().entries()[1].id.clone();
+
+        runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: b,
+                summary: None,
+            })
+            .await;
+
+        let context = runtime.conversation.context();
+        assert_eq!(context.last(), Some(&Message::Event(event)));
+    }
+
+    #[tokio::test]
+    async fn a_summary_of_the_branch_left_does_not_stand_in_for_its_events() {
+        let mut runtime = runtime(vec![
+            user("a"),
+            user("b"),
+            child_message("found the race", "agentmsg_1"),
+        ]);
+        let b = runtime.conversation.tree().entries()[1].id.clone();
+
+        runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: b,
+                summary: Some("we asked b and auth answered".into()),
+            })
+            .await;
+
+        let context = runtime.conversation.context();
+        assert_eq!(
+            context.last(),
+            Some(&child_message("found the race", "agentmsg_1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_also_leaves_the_notice_and_staying_put_leaves_nothing() {
+        let mut runtime = runtime(vec![user("a"), assistant("reply")]);
+        let leaf = runtime.conversation.leaf_id().cloned().unwrap();
+
+        runtime
+            .handle(SessionCommand::NavigateTree {
+                entry_id: leaf,
+                summary: None,
+            })
+            .await;
+        assert_eq!(
+            runtime.conversation.context_len(),
+            2,
+            "staying put is not a move"
+        );
+
+        let events = runtime.handle(SessionCommand::Undo).await;
+        let context = runtime.conversation.context();
+        assert!(
+            matches!(&context[..], [notice] if is_notice(notice)),
+            "{context:?}"
+        );
+        assert_eq!(status(&events), "undid last turn");
     }
 
     #[tokio::test]

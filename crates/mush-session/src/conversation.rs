@@ -146,6 +146,14 @@ impl ConversationState {
         self.tree.lift_out(id)
     }
 
+    pub fn carry(
+        &mut self,
+        notice: mush_ai::types::EventMessage,
+        events: Vec<mush_ai::types::EventMessage>,
+    ) -> EntryId {
+        self.tree.carry(notice, events)
+    }
+
     pub fn leaf_id(&self) -> Option<&EntryId> {
         self.tree.leaf_id()
     }

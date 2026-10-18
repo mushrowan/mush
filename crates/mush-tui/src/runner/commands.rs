@@ -1075,9 +1075,10 @@ mod tests {
         );
 
         assert_eq!(session.app.interaction.mode, crate::app::AppMode::Insert);
-        assert_eq!(
-            session.in_process().runtime.conversation.context(),
-            vec![user("first")]
+        let context = session.in_process().runtime.conversation.context();
+        assert_eq!(context[0], user("first"));
+        assert!(
+            matches!(&context[1..], [Message::Event(event)] if event.kind == mush_ai::types::EventKind::Moved)
         );
         assert_eq!(session.app.input.text, "second");
     }
@@ -1416,15 +1417,18 @@ mod tests {
         let mut config = TuiConfig::for_test();
 
         run(&mut session, &mut config, SlashAction::Undo);
-        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 3);
 
         run(
             &mut session,
             &mut config,
             SlashAction::Branch { index: Some(1) },
         );
-        assert_eq!(session.in_process().runtime.conversation.context_len(), 0);
-        assert!(session.app.messages.is_empty());
+        let context = session.in_process().runtime.conversation.context();
+        assert!(
+            matches!(&context[..], [Message::Event(event)] if event.kind == mush_ai::types::EventKind::Moved)
+        );
+        assert_eq!(session.app.messages.len(), 1);
     }
 
     #[test]

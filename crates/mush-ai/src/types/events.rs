@@ -15,6 +15,7 @@ pub enum EventKind {
     Recovery,
     Schedule,
     BashDone,
+    Moved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,8 +105,21 @@ impl EventKind {
     }
 
     #[must_use]
-    pub fn is_own_delivery(self) -> bool {
-        matches!(self, Self::Schedule | Self::BashDone)
+    pub fn is_verbatim(self) -> bool {
+        matches!(self, Self::Schedule | Self::BashDone | Self::Moved)
+    }
+
+    #[must_use]
+    pub fn is_carried(self) -> bool {
+        matches!(
+            self,
+            Self::Message
+                | Self::WorkerCompletion
+                | Self::Wake
+                | Self::Legacy
+                | Self::Schedule
+                | Self::BashDone
+        )
     }
 }
 
@@ -130,7 +144,7 @@ impl EventMessage {
         if self.kind.is_summary() {
             return self.summary_text();
         }
-        if self.kind.is_own_delivery() {
+        if self.kind.is_verbatim() {
             return self.content.clone();
         }
         let value = match self.receipt_reference() {

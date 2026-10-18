@@ -1068,7 +1068,7 @@ mod tests {
 
         assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
         assert!(session.app.interaction.branch_summary_ask.is_none());
-        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
         assert_eq!(session.app.input.text, "second");
     }
 
@@ -1340,7 +1340,7 @@ mod tests {
         handle_idle_key(&mut session, &mut deps, key(KeyCode::Char('n'))).await;
 
         assert_eq!(session.app.interaction.mode, app::AppMode::Insert);
-        assert_eq!(session.in_process().runtime.conversation.context_len(), 1);
+        assert_eq!(session.in_process().runtime.conversation.context_len(), 2);
     }
 
     #[tokio::test]
