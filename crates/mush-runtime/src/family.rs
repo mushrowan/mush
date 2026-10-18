@@ -2271,7 +2271,7 @@ fn non_blank(text: Option<&str>) -> Option<&str> {
 impl Family {
     fn post_exit_notice(&self, id: &str, notice: ExitNotice) {
         let timestamp_ms = Timestamp::now();
-        let (parent_inbox, content, child_session) = {
+        let (parent_inbox, content, child_session, child_name) = {
             let mut inner = self.lock();
             let Some(node) = inner.children.get_mut(id) else {
                 return;
@@ -2286,6 +2286,7 @@ impl Family {
             }
             let parent = node.summary.parent.clone();
             let session = node.summary.session_id.clone();
+            let name = node.summary.name.clone();
             let inbox = match &parent {
                 Some(parent) => inner
                     .children
@@ -2293,7 +2294,7 @@ impl Family {
                     .and_then(|node| node.inbox.clone()),
                 None => inner.root_inbox.clone(),
             };
-            (inbox, content, session)
+            (inbox, content, session, name)
         };
         let Some(inbox) = parent_inbox else {
             return;
@@ -2304,12 +2305,12 @@ impl Family {
                 timestamp_ms,
                 kind: EventKind::Message,
                 receipts: vec![EventReceipt {
-                    id: format!("child-exit-{}", mush_ai::types::SessionId::new()).into(),
+                    id: format!("child-exit-{id}-{}", mush_ai::types::SessionId::new()).into(),
                     timestamp_ms,
                     kind: EventKind::Message,
                     origin: EventOrigin::Agent {
                         session_id: child_session,
-                        name: id.to_string(),
+                        name: child_name,
                         relationship: "child".into(),
                     },
                 }],
@@ -2956,16 +2957,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
             while let Some(event) = root_connection.try_next_event() {
                 if let ClientEvent::MessageInjected(event) = event {
-                    injected.push(event.content);
+                    injected.push(event);
                 }
             }
         }
+        let contents: Vec<&str> = injected
+            .iter()
+            .map(|event| event.content.as_str())
+            .collect();
         assert_eq!(
-            injected,
-            vec![
-                "[child-exited: no-reply child:auth]\n\nLast assistant text: child says hi"
-                    .to_string()
-            ]
+            contents,
+            ["[child-exited: no-reply child:auth]\n\nLast assistant text: child says hi"]
+        );
+        let child_id = family.children_of(&root)[0].id.clone();
+        let receipt = &injected[0].receipts[0];
+        assert!(
+            matches!(
+                &receipt.origin,
+                EventOrigin::Agent { name, relationship, .. } if name == "auth" && relationship == "child"
+            ),
+            "{receipt:?}"
+        );
+        assert!(
+            receipt
+                .id
+                .as_str()
+                .starts_with(&format!("child-exit-{child_id}-")),
+            "{receipt:?}"
         );
     }
 
