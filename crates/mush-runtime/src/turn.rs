@@ -215,13 +215,13 @@ impl SessionRuntime {
         let pane_model = self.model(&config.default_model);
         let window = pane_model.compaction_window();
         let (model, options) =
-            summariser.unwrap_or_else(|| (pane_model.clone(), config.options.clone()));
+            summariser.unwrap_or_else(|| (pane_model.clone(), self.call_options(config)));
         let options = self.resolved_options(&model, options, config).await;
         let session = if model.id == pane_model.id {
             None
         } else {
             let options = self
-                .resolved_options(&pane_model, config.options.clone(), config)
+                .resolved_options(&pane_model, self.call_options(config), config)
                 .await;
             Some((pane_model, options))
         };

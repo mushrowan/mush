@@ -4106,6 +4106,7 @@ struct Idle {
     model_id: &'static str,
     fail_summaries: bool,
     before_cache_expiry: mush_session::compact::BeforeCacheExpiry,
+    thinking: ThinkingLevel,
 }
 
 impl Default for Idle {
@@ -4116,6 +4117,7 @@ impl Default for Idle {
             model_id: "gpt-5.2",
             fail_summaries: false,
             before_cache_expiry: mush_session::compact::BeforeCacheExpiry::default(),
+            thinking: ThinkingLevel::Off,
         }
     }
 }
@@ -4143,6 +4145,7 @@ impl Idle {
             SessionRuntime::new(ConversationState::from_messages(long_history(12, 2_000)));
         runtime.model_id = model.id.to_string();
         runtime.rlm_depth = self.depth;
+        runtime.thinking_level = self.thinking;
         let mut connection = InProcessConnection::new(
             runtime,
             ToolRegistry::new(),
@@ -4211,7 +4214,33 @@ async fn an_idle_child_compacts_just_before_its_prompt_cache_expires() {
     assert_eq!(summary.system_prompt, turn.system_prompt);
     assert_eq!(summary.messages[..turn.messages.len()], turn.messages[..]);
     assert_eq!(summary_options.api_key, turn_options.api_key);
+    assert_eq!(summary_options.thinking, turn_options.thinking);
     assert!(connection.runtime.conversation.context_len() < before);
+}
+
+#[tokio::test]
+async fn a_compaction_on_the_session_model_asks_for_the_thinking_level_the_turns_used() {
+    let (mut connection, sent, _) = Idle {
+        thinking: ThinkingLevel::High,
+        ..Idle::default()
+    }
+    .after_a_turn()
+    .await;
+    assert_eq!(connection.config.options.thinking, None);
+
+    connection
+        .send(ClientCommand::Compact {
+            focus: CompactionFocus::default(),
+            auto: false,
+        })
+        .await
+        .unwrap();
+    compaction_outcome(&mut connection).await;
+
+    let sent = sent.lock().unwrap();
+    assert!(is_summary_request(&sent[1].0));
+    assert_eq!(sent[0].1.thinking, Some(ThinkingLevel::High));
+    assert_eq!(sent[1].1.thinking, sent[0].1.thinking);
 }
 
 #[tokio::test]
