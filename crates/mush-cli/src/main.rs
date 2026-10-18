@@ -2292,6 +2292,8 @@ mod tests {
                 keep_recent_tokens: 12_000,
                 threshold_percent: 90,
                 below_price_cliff: mush_session::compact::PriceCliffPin::All,
+                before_cache_expiry: mush_session::compact::BeforeCacheExpiry::All,
+                before_cache_expiry_min_tokens: 300_000,
                 agent_callable: true,
             },
             Some((summariser.clone(), StreamOptions::default())),
@@ -2308,6 +2310,8 @@ mod tests {
                 keep_recent_tokens: 12_000,
                 threshold_percent: 90,
                 below_price_cliff: mush_session::compact::PriceCliffPin::All,
+                before_cache_expiry: mush_session::compact::BeforeCacheExpiry::All,
+                before_cache_expiry_min_tokens: 300_000,
                 ..Default::default()
             }
         );

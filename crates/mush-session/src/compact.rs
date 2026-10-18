@@ -590,6 +590,38 @@ impl PriceCliffPin {
     }
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum BeforeCacheExpiry {
+    Off,
+    #[default]
+    Children,
+    All,
+}
+
+impl BeforeCacheExpiry {
+    #[must_use]
+    pub fn applies(self, child: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Children => child,
+            Self::All => true,
+        }
+    }
+}
+
+pub const DEFAULT_BEFORE_CACHE_EXPIRY_MIN_TOKENS: u64 = 200_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CompactionSettings {
@@ -597,6 +629,8 @@ pub struct CompactionSettings {
     pub keep_recent_tokens: u64,
     pub threshold_percent: u8,
     pub below_price_cliff: PriceCliffPin,
+    pub before_cache_expiry: BeforeCacheExpiry,
+    pub before_cache_expiry_min_tokens: u64,
     #[serde(skip)]
     pub price_cliff: Option<u64>,
 }
@@ -608,6 +642,8 @@ impl Default for CompactionSettings {
             keep_recent_tokens: 20_000,
             threshold_percent: DEFAULT_THRESHOLD_PERCENT,
             below_price_cliff: PriceCliffPin::default(),
+            before_cache_expiry: BeforeCacheExpiry::default(),
+            before_cache_expiry_min_tokens: DEFAULT_BEFORE_CACHE_EXPIRY_MIN_TOKENS,
             price_cliff: None,
         }
     }

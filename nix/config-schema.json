@@ -350,6 +350,14 @@
       },
       "type": "object"
     },
+    "BeforeCacheExpiry": {
+      "enum": [
+        "off",
+        "children",
+        "all"
+      ],
+      "type": "string"
+    },
     "BindingSource": {
       "anyOf": [
         {
@@ -398,6 +406,16 @@
         "agent_callable": {
           "default": true,
           "type": "boolean"
+        },
+        "before_cache_expiry": {
+          "$ref": "#/$defs/BeforeCacheExpiry",
+          "default": "children"
+        },
+        "before_cache_expiry_min_tokens": {
+          "default": 200000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "below_price_cliff": {
           "$ref": "#/$defs/PriceCliffPin",
@@ -1197,6 +1215,8 @@
       "$ref": "#/$defs/CompactionConfig",
       "default": {
         "agent_callable": true,
+        "before_cache_expiry": "children",
+        "before_cache_expiry_min_tokens": 200000,
         "below_price_cliff": "children",
         "enabled": true,
         "keep_recent_tokens": 20000,

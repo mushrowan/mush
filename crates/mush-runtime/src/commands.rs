@@ -80,6 +80,7 @@ impl SessionRuntime {
             .iter()
             .any(|event| matches!(event, SessionEvent::TranscriptReplaced { .. }))
         {
+            self.prompt_cache.forget();
             self.refresh_context_tokens();
             if let Some(event) = self.adopt_branch_thinking_level() {
                 events.insert(0, event);
@@ -495,6 +496,7 @@ impl SessionRuntime {
         let before = editor_text.is_some().then(|| preview.clone());
         let from = self.conversation.leaf_id().cloned();
         self.harness_digest_pending = true;
+        self.prompt_cache.forget();
         let status = match summary {
             Some(summary) => {
                 match new_leaf {

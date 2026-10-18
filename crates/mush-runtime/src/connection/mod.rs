@@ -257,6 +257,7 @@ pub struct InProcessConnection {
     queued: VecDeque<ClientEvent>,
     compaction: Option<tokio::task::JoinHandle<CompactionTaskResult>>,
     compaction_auto: bool,
+    compaction_quiet: bool,
     fork_compaction_due: bool,
     kernel_compaction_notice_due: bool,
     failed_compaction: Option<FailedCompaction>,
@@ -350,6 +351,7 @@ impl InProcessConnection {
             queued: VecDeque::new(),
             compaction: None,
             compaction_auto: false,
+            compaction_quiet: false,
             fork_compaction_due: false,
             kernel_compaction_notice_due: false,
             failed_compaction: None,
@@ -1082,6 +1084,7 @@ impl InProcessConnection {
                 .start_compaction(CompactionFocus::default(), true)
                 .await;
         }
+        self.compact_before_cache_expiry(Timestamp::now()).await;
         self.deliver_kernel_compaction_notice().await;
         let started = self.start_pending_prompt().await;
         self.runtime.save_if_dirty();
@@ -1888,6 +1891,20 @@ fn changes_the_session(command: &ClientCommand) -> bool {
     }
 }
 
+fn changes_the_next_request(command: &ClientCommand) -> bool {
+    matches!(
+        command,
+        ClientCommand::SetModel(_)
+            | ClientCommand::SetAccount(_)
+            | ClientCommand::SetThinking(_)
+            | ClientCommand::SetSystemPrompt(_)
+            | ClientCommand::ReloadSystemPrompt
+            | ClientCommand::SetStreamOptions(_)
+            | ClientCommand::SetAnthropicBetas(_)
+            | ClientCommand::SetPreferredProviders(_)
+    )
+}
+
 #[async_trait::async_trait]
 impl AgentConnection for InProcessConnection {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -1905,6 +1922,9 @@ impl AgentConnection for InProcessConnection {
                 "this session is open on {holder} now, so it is read-only here. close this window and carry on there, or run `mush sync take {}` to bring it back",
                 self.runtime.session_id
             )));
+        }
+        if changes_the_next_request(&command) {
+            self.runtime.prompt_cache.forget();
         }
         let before = self.queued.len();
         match command {

@@ -4049,3 +4049,310 @@ async fn betas_from_the_client_reach_the_next_request_the_summariser_and_the_sta
     prompt(&mut connection, "after").await;
     assert_eq!(*seen.lock().unwrap(), vec![None, Some(betas)]);
 }
+
+struct Measured {
+    sent: Sent,
+    prompt_tokens: u64,
+    fail_summaries: bool,
+}
+
+#[async_trait::async_trait]
+impl mush_ai::registry::ApiProvider for Measured {
+    fn api(&self) -> Api {
+        Api::OpenaiResponses
+    }
+
+    async fn stream(
+        &self,
+        model: &mush_ai::types::Model,
+        context: &mush_ai::registry::LlmContext,
+        options: &mush_ai::types::StreamOptions,
+    ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((context.clone(), options.clone()));
+        if self.fail_summaries && is_summary_request(context) {
+            return Err(mush_ai::registry::ProviderError::Other(
+                "the summariser is down".into(),
+            ));
+        }
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::Text(TextContent {
+                text: "ok".into(),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .usage(mush_ai::types::Usage {
+                input_tokens: TokenCount::new(self.prompt_tokens),
+                ..Default::default()
+            })
+            .stop_reason(StopReason::Stop)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        Ok(Box::pin(futures::stream::iter([
+            mush_ai::stream::StreamEvent::Done {
+                reason: StopReason::Stop,
+                message,
+            },
+        ])))
+    }
+}
+
+struct Idle {
+    depth: u32,
+    prompt_tokens: u64,
+    model_id: &'static str,
+    fail_summaries: bool,
+    before_cache_expiry: mush_session::compact::BeforeCacheExpiry,
+}
+
+impl Default for Idle {
+    fn default() -> Self {
+        Self {
+            depth: 1,
+            prompt_tokens: 300_000,
+            model_id: "gpt-5.2",
+            fail_summaries: false,
+            before_cache_expiry: mush_session::compact::BeforeCacheExpiry::default(),
+        }
+    }
+}
+
+impl Idle {
+    async fn after_a_turn(self) -> (InProcessConnection, Sent, Timestamp) {
+        let sent: Sent = Arc::default();
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(Measured {
+            sent: sent.clone(),
+            prompt_tokens: self.prompt_tokens,
+            fail_summaries: self.fail_summaries,
+        }));
+        let mut model = mush_ai::models::openai_models()
+            .into_iter()
+            .chain(mush_ai::models::openai_codex_models())
+            .find(|model| model.id.as_str() == self.model_id)
+            .unwrap();
+        model.context_window = TokenCount::new(1_000_000);
+        let mut config = crate::testing::echo_config(model.clone());
+        config.auto_compact = true;
+        config.compaction.keep_recent_tokens = 2_000;
+        config.compaction.before_cache_expiry = self.before_cache_expiry;
+        let mut runtime =
+            SessionRuntime::new(ConversationState::from_messages(long_history(12, 2_000)));
+        runtime.model_id = model.id.to_string();
+        runtime.rlm_depth = self.depth;
+        let mut connection = InProcessConnection::new(
+            runtime,
+            ToolRegistry::new(),
+            registry,
+            config,
+            mush_agent::AgentInjections::default(),
+        );
+        prompt(&mut connection, "carry on").await;
+        let answered = Timestamp::now();
+        (connection, sent, answered)
+    }
+}
+
+fn after(answered: Timestamp, minutes: u64, seconds: u64) -> Timestamp {
+    Timestamp::from_ms(answered.as_ms() + (minutes * 60 + seconds) * 1_000)
+}
+
+async fn compaction_outcome(connection: &mut InProcessConnection) -> Vec<ClientEvent> {
+    let mut events = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while connection.compaction.is_some() || !connection.queued.is_empty() {
+        assert!(std::time::Instant::now() < deadline, "{events:?}");
+        if let Some(event) = connection.try_next_event() {
+            events.push(event);
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+    events
+}
+
+fn summary_requests(sent: &Sent) -> usize {
+    sent.lock()
+        .unwrap()
+        .iter()
+        .filter(|(context, _)| is_summary_request(context))
+        .count()
+}
+
+#[tokio::test]
+async fn an_idle_child_compacts_just_before_its_prompt_cache_expires() {
+    let (mut connection, sent, answered) = Idle::default().after_a_turn().await;
+    let before = connection.runtime.conversation.context_len();
+
+    connection
+        .compact_before_cache_expiry(after(answered, 3, 50))
+        .await;
+    assert!(connection.compaction.is_none(), "the cache is not due yet");
+
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    let events = compaction_outcome(&mut connection).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Compacted(_))),
+        "{events:?}"
+    );
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 2);
+    let (turn, turn_options) = &sent[0];
+    let (summary, summary_options) = &sent[1];
+    assert!(is_summary_request(summary));
+    assert_eq!(summary.system_prompt, turn.system_prompt);
+    assert_eq!(summary.messages[..turn.messages.len()], turn.messages[..]);
+    assert_eq!(summary_options.api_key, turn_options.api_key);
+    assert!(connection.runtime.conversation.context_len() < before);
+}
+
+#[tokio::test]
+async fn a_wake_at_the_deadline_goes_out_on_the_whole_warm_context() {
+    let (mut connection, sent, answered) = Idle::default().after_a_turn().await;
+    let context = connection.runtime.conversation.context_len();
+    connection
+        .send(ClientCommand::Prompt {
+            text: "one more thing".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    drain_turn(&mut connection).await;
+
+    assert_eq!(summary_requests(&sent), 0);
+    assert!(connection.runtime.conversation.context_len() > context);
+}
+
+#[tokio::test]
+async fn an_idle_child_below_the_floor_or_on_a_provider_without_a_promise_keeps_its_context() {
+    for idle in [
+        Idle {
+            prompt_tokens: 150_000,
+            ..Idle::default()
+        },
+        Idle {
+            model_id: "gpt-5.5",
+            ..Idle::default()
+        },
+    ] {
+        let (mut connection, sent, answered) = idle.after_a_turn().await;
+
+        connection
+            .compact_before_cache_expiry(after(answered, 4, 10))
+            .await;
+
+        assert!(connection.compaction.is_none());
+        assert_eq!(summary_requests(&sent), 0);
+    }
+}
+
+#[tokio::test]
+async fn an_idle_root_keeps_its_context_unless_every_session_compacts_before_expiry() {
+    let (mut root, sent, answered) = Idle {
+        depth: 0,
+        ..Idle::default()
+    }
+    .after_a_turn()
+    .await;
+    root.compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    assert!(root.compaction.is_none());
+    assert_eq!(summary_requests(&sent), 0);
+
+    let (mut root, sent, answered) = Idle {
+        depth: 0,
+        before_cache_expiry: mush_session::compact::BeforeCacheExpiry::All,
+        ..Idle::default()
+    }
+    .after_a_turn()
+    .await;
+    root.compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    compaction_outcome(&mut root).await;
+    assert_eq!(summary_requests(&sent), 1);
+}
+
+#[tokio::test]
+async fn a_cache_that_already_expired_or_auto_compaction_off_leaves_the_child_whole() {
+    let (mut connection, sent, answered) = Idle::default().after_a_turn().await;
+    connection
+        .compact_before_cache_expiry(after(answered, 5, 10))
+        .await;
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    assert!(connection.compaction.is_none());
+    assert_eq!(summary_requests(&sent), 0);
+
+    let (mut connection, sent, answered) = Idle::default().after_a_turn().await;
+    connection
+        .send(ClientCommand::SetAutoCompact(false))
+        .await
+        .unwrap();
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    assert!(connection.compaction.is_none());
+    assert_eq!(summary_requests(&sent), 0);
+}
+
+#[tokio::test]
+async fn a_failed_compaction_before_expiry_is_dropped_quietly_and_not_retried() {
+    let (mut connection, sent, answered) = Idle {
+        fail_summaries: true,
+        ..Idle::default()
+    }
+    .after_a_turn()
+    .await;
+    let before = connection.runtime.conversation.context_len();
+
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+    let events = compaction_outcome(&mut connection).await;
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 20))
+        .await;
+
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            ClientEvent::CompactionFailed { .. } | ClientEvent::Compacted(_)
+        )),
+        "{events:?}"
+    );
+    assert!(matches!(
+        connection.send(ClientCommand::CompactionRetry).await,
+        Err(ConnectionError::NothingToRecover)
+    ));
+    assert_eq!(summary_requests(&sent), 1);
+    assert_eq!(connection.runtime.conversation.context_len(), before);
+}
+
+#[tokio::test]
+async fn a_new_thinking_level_forgets_the_warm_prompt_cache() {
+    let (mut connection, sent, answered) = Idle::default().after_a_turn().await;
+    connection
+        .send(ClientCommand::SetThinking(ThinkingLevel::High))
+        .await
+        .unwrap();
+
+    connection
+        .compact_before_cache_expiry(after(answered, 4, 10))
+        .await;
+
+    assert!(connection.compaction.is_none());
+    assert_eq!(summary_requests(&sent), 0);
+}

@@ -241,6 +241,7 @@ pub struct SessionRuntime {
     pub(crate) kernel_release: Option<tokio::task::JoinHandle<mush_kernel::Release>>,
     pub(crate) kernel_released: bool,
     pub(crate) harness_digest_pending: bool,
+    pub prompt_cache: crate::prompt_cache::PromptCache,
     streaming: Option<mush_ai::stream::PartialMessage>,
     last_save: std::time::Instant,
     dirty: bool,
@@ -321,6 +322,7 @@ impl SessionRuntime {
             kernel_release: None,
             kernel_released: false,
             harness_digest_pending: true,
+            prompt_cache: crate::prompt_cache::PromptCache::default(),
             streaming: None,
             last_save: std::time::Instant::now() - SESSION_SAVE_DEBOUNCE,
             dirty: false,
@@ -431,15 +433,23 @@ impl SessionRuntime {
             AgentEvent::PartialDiscarded { .. }
             | AgentEvent::Error { .. }
             | AgentEvent::AgentEnd => self.streaming = None,
+            AgentEvent::TurnStart { .. } => {
+                self.prompt_cache
+                    .request_sent(mush_ai::types::Timestamp::now());
+            }
             AgentEvent::MessageEnd { message } => {
                 self.streaming = None;
                 self.context_tokens = message.usage.total_input_tokens();
+                if message.is_replayable() {
+                    self.prompt_cache.request_answered();
+                }
             }
             AgentEvent::ContextCompacted { compaction, .. } => {
                 if matches!(applied, crate::Applied::Compacted { .. }) {
                     let estimate = mush_session::compact::estimate_tokens(&compaction.messages);
                     self.context_tokens = mush_ai::types::TokenCount::new(estimate as u64);
                 }
+                self.prompt_cache.forget();
                 self.harness_digest_pending = true;
             }
             _ => {}

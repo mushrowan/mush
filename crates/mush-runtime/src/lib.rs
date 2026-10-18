@@ -16,6 +16,7 @@ pub mod models;
 pub mod notes;
 mod persist;
 pub mod price_cliff;
+pub mod prompt_cache;
 pub mod refine;
 pub mod returned;
 pub mod schedule;

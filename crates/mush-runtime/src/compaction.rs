@@ -236,6 +236,7 @@ impl SessionRuntime {
         self.conversation
             .apply_compaction(summary, summarised_count, messages)
             .ok()?;
+        self.prompt_cache.forget();
         self.harness_digest_pending = true;
         self.refresh_context_tokens();
         Some(self.conversation.context_len())

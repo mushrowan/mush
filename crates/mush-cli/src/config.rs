@@ -54,6 +54,8 @@ pub struct CompactionConfig {
     pub keep_recent_tokens: u64,
     pub threshold_percent: u8,
     pub below_price_cliff: mush_session::compact::PriceCliffPin,
+    pub before_cache_expiry: mush_session::compact::BeforeCacheExpiry,
+    pub before_cache_expiry_min_tokens: u64,
     pub agent_callable: bool,
 }
 
@@ -66,6 +68,8 @@ impl Default for CompactionConfig {
             keep_recent_tokens: defaults.keep_recent_tokens,
             threshold_percent: defaults.threshold_percent,
             below_price_cliff: defaults.below_price_cliff,
+            before_cache_expiry: defaults.before_cache_expiry,
+            before_cache_expiry_min_tokens: defaults.before_cache_expiry_min_tokens,
             agent_callable: true,
         }
     }
@@ -79,6 +83,8 @@ impl CompactionConfig {
             keep_recent_tokens: self.keep_recent_tokens,
             threshold_percent: self.threshold_percent,
             below_price_cliff: self.below_price_cliff,
+            before_cache_expiry: self.before_cache_expiry,
+            before_cache_expiry_min_tokens: self.before_cache_expiry_min_tokens,
             ..Default::default()
         }
     }
@@ -1152,6 +1158,29 @@ mouse_scroll_lines = 5
         assert!(!config.compaction.agent_callable);
         assert_eq!(config.branch_summary.settings().reserve_tokens, 4_096);
         assert!(config.branch_summary.skip_prompt);
+    }
+
+    #[test]
+    fn idle_children_compact_before_their_cache_expires_from_200k_tokens_unless_told_otherwise() {
+        let defaults = Config::default().compaction.settings();
+        assert_eq!(
+            defaults.before_cache_expiry,
+            mush_session::compact::BeforeCacheExpiry::Children
+        );
+        assert_eq!(defaults.before_cache_expiry_min_tokens, 200_000);
+
+        let config: Config = toml::from_str(
+            "[compaction]\nbefore_cache_expiry = \"all\"\nbefore_cache_expiry_min_tokens = 350000\n",
+        )
+        .unwrap();
+        let settings = config.compaction.settings();
+        assert_eq!(
+            settings.before_cache_expiry,
+            mush_session::compact::BeforeCacheExpiry::All
+        );
+        assert_eq!(settings.before_cache_expiry_min_tokens, 350_000);
+        let off: Config = toml::from_str("[compaction]\nbefore_cache_expiry = \"off\"\n").unwrap();
+        assert!(!off.compaction.settings().before_cache_expiry.applies(true));
     }
 
     #[test]

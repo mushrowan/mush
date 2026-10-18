@@ -199,12 +199,23 @@ impl SessionRuntime {
     }
 
     pub async fn compaction_target(&self, config: &TurnConfig) -> CompactionTarget {
+        self.target_for(config, config.compaction_model.clone())
+            .await
+    }
+
+    pub async fn session_compaction_target(&self, config: &TurnConfig) -> CompactionTarget {
+        self.target_for(config, None).await
+    }
+
+    async fn target_for(
+        &self,
+        config: &TurnConfig,
+        summariser: Option<(Model, StreamOptions)>,
+    ) -> CompactionTarget {
         let pane_model = self.model(&config.default_model);
         let window = pane_model.compaction_window();
-        let (model, options) = config
-            .compaction_model
-            .clone()
-            .unwrap_or_else(|| (pane_model.clone(), config.options.clone()));
+        let (model, options) =
+            summariser.unwrap_or_else(|| (pane_model.clone(), config.options.clone()));
         let options = self.resolved_options(&model, options, config).await;
         let session = if model.id == pane_model.id {
             None
@@ -328,6 +339,11 @@ impl SessionRuntime {
         call_options.api_key = api_key;
         call_options.account_id = account_id;
         call_options.oauth_account = oauth_account;
+        self.prompt_cache
+            .turn_started(mush_ai::prompt_cache::guaranteed_lifetime(
+                &model,
+                &call_options,
+            ));
         let next_prompt = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let transform = build_context_transform(
             target,
