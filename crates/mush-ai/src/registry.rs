@@ -46,8 +46,22 @@ pub enum ProviderError {
         retry_after: Option<std::time::Duration>,
     },
 
+    #[error("{provider} error {code}: {message}{}", remedy_suffix(*.remedy))]
+    Billing {
+        provider: &'static str,
+        code: String,
+        message: String,
+        remedy: Option<&'static str>,
+    },
+
     #[error("{0}")]
     Other(String),
+}
+
+fn remedy_suffix(remedy: Option<&str>) -> String {
+    remedy
+        .map(|remedy| format!(" {remedy}"))
+        .unwrap_or_default()
 }
 
 impl From<reqwest_middleware::Error> for ProviderError {

@@ -50,7 +50,9 @@ impl ApiProvider for OpenaiCompletionsProvider {
         let response = super::post_json(&self.client, &url, headers, &body, call_id).await?;
 
         let response =
-            super::check_response(response, "openai completions", model.id.as_str(), &url).await?;
+            super::check_response(response, "openai completions", model.id.as_str(), &url)
+                .await
+                .map_err(|error| zai_billing_refusal(model, error))?;
 
         Ok(super::sse::run_sse_stream(
             response,
@@ -205,6 +207,53 @@ fn is_zai(model: &Model) -> bool {
         || ["api.z.ai", "open.bigmodel.cn"]
             .iter()
             .any(|host| model.base_url.as_str().contains(host))
+}
+
+const ZAI_UNBILLED_CODES: &[&str] = &[
+    "1113", "1308", "1309", "1310", "1311", "1313", "1314", "1315", "1316", "1317", "1318", "1319",
+    "1320", "1321",
+];
+
+const ZAI_STANDARD_KEY_REMEDY: &str = "A GLM Coding Plan only pays for API keys made on the \
+Personal Coding Plan tab of the z.ai API keys page, and a key from the Standard tab bills the pay \
+as you go balance instead. Make a key on that tab and run /login zai with it.";
+
+fn zai_billing_refusal(model: &Model, error: ProviderError) -> ProviderError {
+    let ProviderError::ApiError { body, .. } = &error else {
+        return error;
+    };
+    let Some((code, message)) = is_zai(model).then(|| zai_error(body)).flatten() else {
+        return error;
+    };
+    if !ZAI_UNBILLED_CODES.contains(&code.as_str()) {
+        return error;
+    }
+    ProviderError::Billing {
+        provider: "z.ai",
+        remedy: (code == "1113").then_some(ZAI_STANDARD_KEY_REMEDY),
+        code,
+        message,
+    }
+}
+
+fn zai_error(body: &str) -> Option<(String, String)> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: Detail,
+    }
+    #[derive(Deserialize)]
+    struct Detail {
+        code: serde_json::Value,
+        #[serde(default)]
+        message: String,
+    }
+    let Envelope { error } = serde_json::from_str(body).ok()?;
+    let code = match error.code {
+        serde_json::Value::String(code) => code,
+        serde_json::Value::Number(code) => code.to_string(),
+        _ => return None,
+    };
+    Some((code, error.message))
 }
 
 fn zai_request_body(
@@ -1272,6 +1321,68 @@ mod tests {
             assert_eq!(stop, StopReason::Error, "{reason}");
             assert!(message.is_some(), "{reason}");
         }
+    }
+
+    fn zai_429(code: &str, message: &str) -> ProviderError {
+        ProviderError::ApiError {
+            api: "openai completions",
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            content_type: "<missing>".into(),
+            body: serde_json::json!({ "error": { "code": code, "message": message } }).to_string(),
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn a_zai_key_that_draws_on_no_plan_fails_at_once_and_says_which_key_to_make() {
+        let error = zai_billing_refusal(
+            &zai_model("glm-5.3"),
+            zai_429(
+                "1113",
+                "Insufficient balance or no resource package. Please recharge.",
+            ),
+        );
+
+        assert!(!error.is_retryable());
+        let text = error.to_string();
+        assert!(
+            text.starts_with(
+                "z.ai error 1113: Insufficient balance or no resource package. Please recharge."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Personal Coding Plan tab") && text.contains("/login zai"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn zai_plan_limits_are_not_retried_but_its_rate_limits_still_are() {
+        let expired = zai_billing_refusal(
+            &zai_model("glm-5.3"),
+            zai_429("1309", "Your GLM Coding Plan package has expired"),
+        );
+        assert!(!expired.is_retryable());
+        assert_eq!(
+            expired.to_string(),
+            "z.ai error 1309: Your GLM Coding Plan package has expired"
+        );
+
+        let busy = zai_billing_refusal(
+            &zai_model("glm-5.3"),
+            zai_429("1302", "Rate limit reached for requests"),
+        );
+        assert!(busy.is_retryable());
+
+        let elsewhere = zai_billing_refusal(
+            &test_model(),
+            zai_429(
+                "1113",
+                "Insufficient balance or no resource package. Please recharge.",
+            ),
+        );
+        assert!(matches!(elsewhere, ProviderError::ApiError { .. }));
     }
 
     #[test]
