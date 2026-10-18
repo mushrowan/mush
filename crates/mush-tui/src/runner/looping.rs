@@ -341,6 +341,7 @@ fn apply_command_event(
             session.app.push_event_message(&event);
             session.app.start_streaming();
         }
+        ClientEvent::MessageKept(event) => session.app.push_event_message(&event),
         ClientEvent::PriceCliff(cliff) => {
             if let Some(injected) = crate::injected::Injected::from_text(&cliff.notice()) {
                 session
@@ -595,6 +596,40 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, ["not sent: request failed: invalid_image"]);
+    }
+
+    #[test]
+    fn a_message_kept_from_an_aborted_turn_shows_without_starting_a_stream() {
+        let mut config = super::super::TuiConfig::for_test();
+        let mut session = crate::session::Session::new(crate::app::App::new(
+            config.model.id.clone(),
+            config.model.context_window,
+        ));
+        let kept = mush_ai::types::EventMessage {
+            content: "[agent-message from child:auth]\n\nfound it".into(),
+            timestamp_ms: mush_ai::types::Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Message,
+            receipts: vec![mush_ai::types::EventReceipt {
+                id: "r1".into(),
+                timestamp_ms: mush_ai::types::Timestamp::zero(),
+                kind: mush_ai::types::EventKind::Message,
+                origin: mush_ai::types::EventOrigin::Agent {
+                    session_id: "s".into(),
+                    name: "auth".into(),
+                    relationship: "child".into(),
+                },
+            }],
+        };
+
+        apply_command_events(
+            &mut session,
+            &mut config,
+            vec![ClientEvent::MessageKept(kept)],
+        );
+
+        assert_eq!(session.app.messages.len(), 1);
+        assert_eq!(session.app.messages[0].content, "found it");
+        assert!(!session.app.stream.active);
     }
 
     #[tokio::test]

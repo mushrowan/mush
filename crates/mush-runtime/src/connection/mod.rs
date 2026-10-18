@@ -132,6 +132,7 @@ pub enum ClientEvent {
     },
     ToolsCancelled(Vec<ToolCallId>),
     MessageInjected(mush_ai::types::EventMessage),
+    MessageKept(mush_ai::types::EventMessage),
     UserInput {
         text: String,
         images: Vec<PendingImage>,
@@ -1382,12 +1383,32 @@ impl InProcessConnection {
         let cancelled = self.runtime.record_cancelled_tools();
         self.runtime.record_aborted_partial();
         self.runtime.turns.abort(PRIMARY_PANE);
-        self.runtime.steering_queue.lock().await.clear();
+        let kept: Vec<mush_ai::types::EventMessage> = self
+            .runtime
+            .steering_queue
+            .lock()
+            .await
+            .drain(..)
+            .filter_map(|message| match message {
+                Message::Event(event) => Some(event),
+                Message::User(_) | Message::Assistant(_) | Message::ToolResult(_) => None,
+            })
+            .collect();
+        for event in &kept {
+            self.runtime
+                .conversation
+                .append_message(Message::Event(event.clone()));
+        }
         self.runtime.save_debounced();
         let mut events = Vec::new();
         if !cancelled.is_empty() {
             events.push(ClientEvent::ToolsCancelled(cancelled));
         }
+        events.extend(
+            kept.into_iter()
+                .filter(|event| event.kind != mush_ai::types::EventKind::BashDone)
+                .map(ClientEvent::MessageKept),
+        );
         if was_active {
             events.push(ClientEvent::TurnEnded { cancelled: true });
         }
@@ -1421,13 +1442,12 @@ impl InProcessConnection {
     }
 
     async fn take_user_steers(&mut self) -> Vec<Message> {
-        self.runtime
-            .steering_queue
-            .lock()
-            .await
-            .drain(..)
-            .filter(|message| matches!(message, Message::User(_)))
-            .collect()
+        let mut queue = self.runtime.steering_queue.lock().await;
+        let (steers, rest) = std::mem::take(&mut *queue)
+            .into_iter()
+            .partition(|message| matches!(message, Message::User(_)));
+        *queue = rest;
+        steers
     }
 
     async fn send_steers(&mut self, steers: Vec<Message>) {

@@ -1057,6 +1057,96 @@ async fn an_agent_message_steered_during_a_tool_call_enters_the_session_as_an_ev
     );
 }
 
+fn steered_child_message() -> mush_ai::types::EventMessage {
+    mush_ai::types::EventMessage {
+        content: "[agent-message from child:auth]\n\nfound it".into(),
+        timestamp_ms: Timestamp::zero(),
+        kind: mush_ai::types::EventKind::Message,
+        receipts: vec![mush_ai::types::EventReceipt {
+            id: "agentmsg_abort".into(),
+            timestamp_ms: Timestamp::zero(),
+            kind: mush_ai::types::EventKind::Message,
+            origin: mush_ai::types::EventOrigin::Agent {
+                session_id: "child".into(),
+                name: "auth".into(),
+                relationship: "child".into(),
+            },
+        }],
+    }
+}
+
+#[tokio::test]
+async fn an_agent_message_steered_into_an_aborted_turn_is_kept_without_starting_another() {
+    let (mut connection, _release) = crate::testing::stalled_connection();
+    connection
+        .send(ClientCommand::Prompt {
+            text: "start".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(connection.state().turn_active);
+    let event = steered_child_message();
+    connection.steer_event(event.clone()).await;
+
+    let events = connection.send(ClientCommand::Abort).await.unwrap();
+
+    assert!(
+        events
+            .iter()
+            .any(|sent| matches!(sent, ClientEvent::MessageKept(kept) if *kept == event)),
+        "{events:?}"
+    );
+    let transcript = connection.transcript().await;
+    assert!(
+        matches!(transcript.last(), Some(Message::Event(kept)) if *kept == event),
+        "{transcript:?}"
+    );
+    connection.start_pending().await;
+    assert!(!connection.state().turn_active, "keeping it starts no turn");
+    assert!(connection.runtime.pending_prompt.is_none());
+}
+
+#[tokio::test]
+async fn abort_and_send_keeps_a_steered_agent_message_ahead_of_the_queued_steers() {
+    let (mut connection, _release) = crate::testing::stalled_connection();
+    connection
+        .send(ClientCommand::Prompt {
+            text: "start".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let event = steered_child_message();
+    connection.steer_event(event.clone()).await;
+    connection
+        .send(ClientCommand::Steer {
+            text: "do y instead".into(),
+            images: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    connection
+        .send(ClientCommand::AbortAndSendQueued)
+        .await
+        .unwrap();
+
+    let transcript = connection.transcript().await;
+    let kept = transcript
+        .iter()
+        .position(|message| matches!(message, Message::Event(kept) if *kept == event))
+        .expect("the agent message is kept");
+    let steer = transcript
+        .iter()
+        .position(|message| matches!(message, Message::User(user) if user.text() == "do y instead"))
+        .expect("the steer is sent");
+    assert!(kept < steer, "{transcript:?}");
+    assert!(connection.state().turn_active);
+}
+
 #[tokio::test]
 async fn abort_cancels_a_running_compaction_and_the_queued_prompt_goes_out() {
     let (mut connection, release) = crate::testing::stalled_connection();
