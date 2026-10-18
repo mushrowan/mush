@@ -961,6 +961,18 @@ fn is_hex_len(value: &str, len: usize) -> bool {
     value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+pub(crate) fn is_direct_api(base_url: &str) -> bool {
+    base_url.contains(ANTHROPIC_DIRECT_API)
+}
+
+pub(crate) fn caches_for_an_hour(
+    base_url: &str,
+    retention: CacheRetention,
+    is_oauth: bool,
+) -> bool {
+    is_direct_api(base_url) && (is_oauth || retention == CacheRetention::Long)
+}
+
 fn anthropic_cache_control(
     base_url: &str,
     retention: Option<CacheRetention>,
@@ -971,12 +983,7 @@ fn anthropic_cache_control(
         return None;
     }
 
-    let is_direct = base_url.contains(ANTHROPIC_DIRECT_API);
-    let ttl = if is_direct && (is_oauth || retention == CacheRetention::Long) {
-        Some("1h".to_string())
-    } else {
-        None
-    };
+    let ttl = caches_for_an_hour(base_url, retention, is_oauth).then(|| "1h".to_string());
 
     Some(CacheControl {
         control_type: "ephemeral".into(),

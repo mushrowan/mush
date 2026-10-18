@@ -14,6 +14,7 @@ pub mod openrouter_credits;
 pub mod openrouter_endpoints;
 pub mod openrouter_generation;
 pub mod private_io;
+pub mod prompt_cache;
 pub mod providers;
 pub mod registry;
 pub mod request_snapshot;
