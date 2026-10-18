@@ -911,6 +911,7 @@ fn process_sse_event(
                         output_tokens: TokenCount::new(usage.output_tokens),
                         cache_read_tokens: TokenCount::new(cache_read),
                         cache_write_tokens: TokenCount::ZERO,
+                        ..Default::default()
                     };
                 }
                 output.stop_reason =

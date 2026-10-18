@@ -1647,6 +1647,7 @@ impl Family {
             child.usage.output_tokens += usage.output_tokens;
             child.usage.cache_read_tokens += usage.cache_read_tokens;
             child.usage.cache_write_tokens += usage.cache_write_tokens;
+            child.usage.cache_write_1h_tokens += usage.cache_write_1h_tokens;
             if let Some(cost) = cost {
                 child.cost.input += cost.input;
                 child.cost.output += cost.output;
@@ -5056,6 +5057,60 @@ mod tests {
                 .timestamp_ms(Timestamp::zero())
                 .build(),
         })
+    }
+
+    #[tokio::test]
+    async fn a_child_spend_prices_its_hour_long_cache_writes_at_twice_the_input_price() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", release)),
+            None,
+        );
+        let root = Identity::root("root");
+        let slow = family
+            .spawn(&root, "task".into(), "slow".into(), None, None, &family)
+            .await
+            .unwrap();
+        wait_for(&family, &slow.rlm_child_id, ChildStatus::Running).await;
+        let model = echo_model();
+        let written = |one_hour: u64| {
+            agent_event(AgentEvent::MessageEnd {
+                message: mush_ai::types::AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .usage(Usage {
+                        cache_write_tokens: mush_ai::types::TokenCount::new(1_000_000),
+                        cache_write_1h_tokens: mush_ai::types::TokenCount::new(one_hour),
+                        ..Usage::default()
+                    })
+                    .timestamp_ms(Timestamp::zero())
+                    .build(),
+            })
+        };
+
+        family.record(&slow.rlm_child_id, &written(1_000_000), Some(&model));
+        family.record(&slow.rlm_child_id, &written(0), Some(&model));
+
+        let child = family.children_of(&root).remove(0);
+        let input = model.cost.input;
+        let listed = model.cost.cache_write;
+        assert_eq!(
+            child.usage.cache_write_tokens,
+            mush_ai::types::TokenCount::new(2_000_000)
+        );
+        assert_eq!(
+            child.usage.cache_write_1h_tokens,
+            mush_ai::types::TokenCount::new(1_000_000)
+        );
+        assert!(
+            (child.cost.cache_write.get() - (2.0 * input + listed)).abs() < 1e-9,
+            "{:?}",
+            child.cost
+        );
     }
 
     #[tokio::test]

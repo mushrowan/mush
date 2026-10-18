@@ -264,6 +264,7 @@ fn cost_accumulates() {
             output_tokens: TokenCount::new(50),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         }),
         Some(Dollars::new(0.005)),
     );
@@ -276,6 +277,7 @@ fn cost_accumulates() {
             output_tokens: TokenCount::new(100),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         }),
         Some(Dollars::new(0.01)),
     );
@@ -1572,12 +1574,14 @@ fn detect_context_decrease() {
         output_tokens: TokenCount::new(5_000),
         cache_read_tokens: TokenCount::new(90_000),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     };
     let curr = Usage {
         input_tokens: TokenCount::new(8_000),
         output_tokens: TokenCount::new(6_000),
         cache_read_tokens: TokenCount::new(70_000),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     };
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
     assert!(
@@ -1595,12 +1599,14 @@ fn detect_cache_bust() {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::new(95_000),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     };
     let curr = Usage {
         input_tokens: TokenCount::new(5_000),
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::ZERO,
         cache_write_tokens: TokenCount::new(100_000),
+        ..Default::default()
     };
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
     assert!(
@@ -1618,12 +1624,14 @@ fn no_anomaly_on_normal_growth() {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::new(90_000),
         cache_write_tokens: TokenCount::new(5_000),
+        ..Default::default()
     };
     let curr = Usage {
         input_tokens: TokenCount::new(5_000),
         output_tokens: TokenCount::new(4_000),
         cache_read_tokens: TokenCount::new(95_000),
         cache_write_tokens: TokenCount::new(5_000),
+        ..Default::default()
     };
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
     assert!(
@@ -1639,6 +1647,7 @@ fn no_anomaly_on_first_call() {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::ZERO,
         cache_write_tokens: TokenCount::new(95_000),
+        ..Default::default()
     };
     let anomalies = detect_cache_anomalies(None, &curr, None, None);
     assert!(
@@ -1656,6 +1665,7 @@ fn no_anomaly_after_reset() {
             output_tokens: TokenCount::new(5_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         },
         None,
     );
@@ -1668,6 +1678,7 @@ fn no_anomaly_after_reset() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(95_000),
+            ..Default::default()
         },
         None,
     );
@@ -1686,6 +1697,7 @@ fn stats_update_returns_anomalies() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::new(5_000),
+            ..Default::default()
         },
         None,
     );
@@ -1697,6 +1709,7 @@ fn stats_update_returns_anomalies() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(100_000),
+            ..Default::default()
         },
         None,
     );
@@ -1719,6 +1732,7 @@ fn finish_streaming_shows_system_message_on_cache_bust() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::new(5_000),
+            ..Default::default()
         }),
         None,
     );
@@ -1733,6 +1747,7 @@ fn finish_streaming_shows_system_message_on_cache_bust() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(100_000),
+            ..Default::default()
         }),
         None,
     );
@@ -1774,12 +1789,14 @@ fn cache_bust_diagnostic_writes_json_file() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::new(5_000),
+            ..Default::default()
         }),
         curr_usage: Usage {
             input_tokens: TokenCount::new(5_000),
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::new(100_000),
+            ..Default::default()
         },
         prev_context_tokens: 100_000,
         curr_context_tokens: 105_000,
@@ -1851,6 +1868,7 @@ fn finish_streaming_shows_system_message_on_context_decrease() {
             output_tokens: TokenCount::new(5_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         }),
         None,
     );
@@ -1865,6 +1883,7 @@ fn finish_streaming_shows_system_message_on_context_decrease() {
             output_tokens: TokenCount::new(6_000),
             cache_read_tokens: TokenCount::new(70_000),
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         }),
         None,
     );
@@ -1893,6 +1912,7 @@ fn finish_streaming_no_system_message_on_normal_growth() {
             output_tokens: TokenCount::new(3_000),
             cache_read_tokens: TokenCount::new(90_000),
             cache_write_tokens: TokenCount::new(5_000),
+            ..Default::default()
         }),
         None,
     );
@@ -1907,6 +1927,7 @@ fn finish_streaming_no_system_message_on_normal_growth() {
             output_tokens: TokenCount::new(4_000),
             cache_read_tokens: TokenCount::new(95_000),
             cache_write_tokens: TokenCount::new(5_000),
+            ..Default::default()
         }),
         None,
     );

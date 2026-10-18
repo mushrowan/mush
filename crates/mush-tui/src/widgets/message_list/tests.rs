@@ -233,6 +233,7 @@ fn usage_line_shows_reuse_and_write_ratios() {
             output_tokens: TokenCount::new(20),
             cache_read_tokens: TokenCount::new(150),
             cache_write_tokens: TokenCount::new(50),
+            ..Default::default()
         }),
         cost: Some(Dollars::new(0.0012)),
         ..DisplayMessage::new(MessageRole::Assistant, "done")
@@ -256,6 +257,7 @@ fn usage_line_reuse_reflects_cache_bust() {
             output_tokens: TokenCount::new(500),
             cache_read_tokens: TokenCount::new(5_000),
             cache_write_tokens: TokenCount::new(105_000),
+            ..Default::default()
         }),
         ..DisplayMessage::new(MessageRole::Assistant, "done")
     });
@@ -277,6 +279,7 @@ fn usage_line_hidden_by_default_shown_when_enabled() {
             output_tokens: TokenCount::new(20),
             cache_read_tokens: TokenCount::new(150),
             cache_write_tokens: TokenCount::new(50),
+            ..Default::default()
         }),
         cost: Some(Dollars::new(0.0012)),
         ..DisplayMessage::new(MessageRole::Assistant, "done")
@@ -321,6 +324,7 @@ fn usage_line_deferred_while_tool_running() {
             output_tokens: TokenCount::new(20),
             cache_read_tokens: TokenCount::new(150),
             cache_write_tokens: TokenCount::new(50),
+            ..Default::default()
         }),
         cost: Some(Dollars::new(0.0012)),
         ..DisplayMessage::new(MessageRole::Assistant, "running now")

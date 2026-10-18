@@ -576,6 +576,7 @@ mod tests {
                     output_tokens: TokenCount::new(5),
                     cache_read_tokens: TokenCount::ZERO,
                     cache_write_tokens: TokenCount::ZERO,
+                    ..Default::default()
                 })
                 .timestamp_ms(Timestamp::zero())
                 .build(),

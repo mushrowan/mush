@@ -224,6 +224,11 @@ impl TokenCount {
         self.0
     }
 
+    #[must_use]
+    pub const fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
     pub fn percent_of(self, window: Self) -> f64 {
         if window.0 == 0 {
             return 0.0;

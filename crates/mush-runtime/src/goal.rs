@@ -483,6 +483,7 @@ mod tests {
             output_tokens: 20u64.into(),
             cache_read_tokens: 90_000u64.into(),
             cache_write_tokens: 5_000u64.into(),
+            ..Default::default()
         };
         assert_eq!(usage_tokens(&usage), 120);
     }

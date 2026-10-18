@@ -398,6 +398,7 @@ mod tests {
                     output_tokens: TokenCount::new(5),
                     cache_read_tokens: TokenCount::ZERO,
                     cache_write_tokens: TokenCount::ZERO,
+                    ..Default::default()
                 })
                 .stop_reason(StopReason::ToolUse)
                 .timestamp_ms(Timestamp::zero())
@@ -666,6 +667,7 @@ mod tests {
             output_tokens: mush_ai::types::TokenCount::new(50),
             cache_read_tokens: mush_ai::types::TokenCount::ZERO,
             cache_write_tokens: mush_ai::types::TokenCount::ZERO,
+            ..Default::default()
         };
         app.stats.update(&live_usage, None);
         let totals_before = app.stats.total_tokens;
@@ -731,6 +733,7 @@ mod tests {
                     output_tokens: TokenCount::new(5),
                     cache_read_tokens: TokenCount::ZERO,
                     cache_write_tokens: TokenCount::ZERO,
+                    ..Default::default()
                 })
                 .timestamp_ms(Timestamp::zero())
                 .build(),
@@ -880,6 +883,7 @@ mod tests {
                     output_tokens: TokenCount::new(5),
                     cache_read_tokens: TokenCount::ZERO,
                     cache_write_tokens: TokenCount::ZERO,
+                    ..Default::default()
                 })
                 .stop_reason(StopReason::ToolUse)
                 .timestamp_ms(Timestamp::zero())
@@ -932,6 +936,7 @@ mod tests {
                     output_tokens: TokenCount::new(5),
                     cache_read_tokens: TokenCount::ZERO,
                     cache_write_tokens: TokenCount::ZERO,
+                    ..Default::default()
                 })
                 .stop_reason(StopReason::ToolUse)
                 .timestamp_ms(Timestamp::zero())

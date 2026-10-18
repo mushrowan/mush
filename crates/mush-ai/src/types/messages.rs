@@ -10,6 +10,8 @@ pub struct Usage {
     pub output_tokens: TokenCount,
     pub cache_read_tokens: TokenCount,
     pub cache_write_tokens: TokenCount,
+    #[serde(default, skip_serializing_if = "TokenCount::is_zero")]
+    pub cache_write_1h_tokens: TokenCount,
 }
 
 impl Usage {
@@ -340,6 +342,7 @@ mod tests {
             output_tokens: TokenCount::new(50),
             cache_read_tokens: TokenCount::new(25),
             cache_write_tokens: TokenCount::new(10),
+            ..Default::default()
         };
         assert_eq!(usage.total_tokens(), TokenCount::new(185));
     }
@@ -351,8 +354,32 @@ mod tests {
             output_tokens: TokenCount::new(50),
             cache_read_tokens: TokenCount::new(25),
             cache_write_tokens: TokenCount::new(10),
+            ..Default::default()
         };
         assert_eq!(usage.total_input_tokens(), TokenCount::new(135));
+    }
+
+    #[test]
+    fn usage_without_hour_long_writes_reads_and_writes_as_before() {
+        let saved = serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read_tokens": 3,
+            "cache_write_tokens": 4
+        });
+
+        let usage: Usage = serde_json::from_value(saved.clone()).unwrap();
+
+        assert_eq!(usage.cache_write_1h_tokens, TokenCount::ZERO);
+        assert_eq!(serde_json::to_value(usage).unwrap(), saved);
+        let hourly = Usage {
+            cache_write_1h_tokens: TokenCount::new(4),
+            ..usage
+        };
+        assert_eq!(
+            serde_json::to_value(hourly).unwrap()["cache_write_1h_tokens"],
+            4
+        );
     }
 
     #[test]

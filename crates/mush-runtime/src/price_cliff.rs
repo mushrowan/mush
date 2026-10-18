@@ -97,6 +97,7 @@ mod tests {
             output_tokens: TokenCount::new(500),
             cache_read_tokens: TokenCount::new(cache_read),
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         }
     }
 

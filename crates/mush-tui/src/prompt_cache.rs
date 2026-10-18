@@ -676,12 +676,14 @@ mod tests {
             output_tokens: TokenCount::new(100_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
         let curr = Usage {
             input_tokens: TokenCount::new(126_000),
             output_tokens: TokenCount::new(100_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
         let prev_cfg = CallConfig {
             model_id: "gpt-5.4".into(),
@@ -711,12 +713,14 @@ mod tests {
             output_tokens: TokenCount::new(100_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
         let curr = Usage {
             input_tokens: TokenCount::new(126_000),
             output_tokens: TokenCount::new(100_000),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
         let prev_cfg = CallConfig {
             model_id: "gpt-5.3-codex".into(),

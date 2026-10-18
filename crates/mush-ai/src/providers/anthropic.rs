@@ -1508,6 +1508,14 @@ struct UsageData {
     cache_read_input_tokens: u64,
     #[serde(default)]
     cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_creation: Option<CacheCreationData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheCreationData {
+    #[serde(default)]
+    ephemeral_1h_input_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1697,6 +1705,11 @@ fn process_sse_event(
                 output.usage.cache_read_tokens = TokenCount::new(usage.cache_read_input_tokens);
                 output.usage.cache_write_tokens =
                     TokenCount::new(usage.cache_creation_input_tokens);
+                output.usage.cache_write_1h_tokens = TokenCount::new(
+                    usage
+                        .cache_creation
+                        .map_or(0, |created| created.ephemeral_1h_input_tokens),
+                );
             }
             events.push(StreamEvent::Start {
                 partial: output.clone(),
@@ -3401,6 +3414,7 @@ mod tests {
                     output_tokens: 0,
                     cache_read_input_tokens: 50,
                     cache_creation_input_tokens: 25,
+                    cache_creation: None,
                 }),
             },
         };
@@ -3413,6 +3427,33 @@ mod tests {
         assert!(matches!(events[0], StreamEvent::Start { .. }));
         assert_eq!(output.usage.input_tokens, TokenCount::new(100));
         assert_eq!(output.usage.cache_read_tokens, TokenCount::new(50));
+    }
+
+    #[test]
+    fn a_message_start_reports_how_many_cache_writes_last_an_hour() {
+        let event: SseEvent = serde_json::from_value(serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_01",
+                "usage": {
+                    "input_tokens": 4,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 7_710,
+                    "cache_creation_input_tokens": 463_511,
+                    "cache_creation": {
+                        "ephemeral_5m_input_tokens": 1_511,
+                        "ephemeral_1h_input_tokens": 462_000
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let mut output = test_output();
+        process_sse_event(event, &mut output, &mut Vec::new(), true, &[]);
+
+        assert_eq!(output.usage.cache_write_tokens, TokenCount::new(463_511));
+        assert_eq!(output.usage.cache_write_1h_tokens, TokenCount::new(462_000));
     }
 
     #[test]

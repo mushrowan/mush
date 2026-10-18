@@ -795,6 +795,7 @@ impl OpenAiCompletionsProcessor {
                 output_tokens: TokenCount::new(usage.completion_tokens),
                 cache_read_tokens: TokenCount::new(cached),
                 cache_write_tokens: TokenCount::ZERO,
+                ..Default::default()
             };
         }
 

@@ -362,6 +362,7 @@ mod tests {
             output_tokens: TokenCount::new(100),
             cache_read_tokens: TokenCount::ZERO,
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
         app.stats.update(&prev_usage, None);
 

@@ -3379,6 +3379,7 @@ impl mush_ai::registry::ApiProvider for PromptOf {
                 output_tokens: TokenCount::new(10),
                 cache_read_tokens: TokenCount::new(prompt - 1_000),
                 cache_write_tokens: TokenCount::ZERO,
+                ..Default::default()
             })
             .timestamp_ms(Timestamp::zero())
             .build();

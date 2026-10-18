@@ -622,16 +622,20 @@ fn clear_user_models_cache() {
     }
 }
 
+pub const ONE_HOUR_CACHE_WRITE_MULTIPLIER: f64 = 2.0;
+
 pub fn calculate_cost(model: &Model, usage: &Usage) -> Cost {
     let per_token = |rate: f64, tokens: TokenCount| -> Dollars {
         Dollars::new((rate / 1_000_000.0) * tokens.get() as f64)
     };
     let prices = model.cost.prices_for(prompt_tokens(usage));
+    let one_hour = usage.cache_write_1h_tokens.min(usage.cache_write_tokens);
     Cost {
         input: per_token(prices.input, usage.input_tokens),
         output: per_token(prices.output, usage.output_tokens),
         cache_read: per_token(prices.cache_read, usage.cache_read_tokens),
-        cache_write: per_token(prices.cache_write, usage.cache_write_tokens),
+        cache_write: per_token(prices.cache_write, usage.cache_write_tokens - one_hour)
+            + per_token(prices.input * ONE_HOUR_CACHE_WRITE_MULTIPLIER, one_hour),
     }
 }
 
@@ -664,6 +668,7 @@ pub fn conversation_spend<'a>(
         usage.output_tokens += assistant.usage.output_tokens;
         usage.cache_read_tokens += assistant.usage.cache_read_tokens;
         usage.cache_write_tokens += assistant.usage.cache_write_tokens;
+        usage.cache_write_1h_tokens += assistant.usage.cache_write_1h_tokens;
         let model = models
             .entry((assistant.provider.clone(), assistant.model.clone()))
             .or_insert_with(|| find_model(&assistant.provider, assistant.model.as_str()));
@@ -985,6 +990,7 @@ mod tests {
             output_tokens: TokenCount::new(1_000_000),
             cache_read_tokens: TokenCount::new(cache_read),
             cache_write_tokens: TokenCount::ZERO,
+            ..Default::default()
         };
 
         let under = calculate_cost(&haiku, &usage(50_000, 50_000));
@@ -1024,6 +1030,81 @@ mod tests {
     }
 
     #[test]
+    fn an_hour_long_cache_write_costs_twice_the_input_price_and_a_five_minute_one_the_listed_price()
+    {
+        let opus = anthropic_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == "claude-opus-5-5")
+            .unwrap();
+        let writes = |total: u64, one_hour: u64| Usage {
+            cache_write_tokens: TokenCount::new(total),
+            cache_write_1h_tokens: TokenCount::new(one_hour),
+            ..Default::default()
+        };
+
+        let five_minutes = calculate_cost(&opus, &writes(1_000_000, 0));
+        let one_hour = calculate_cost(&opus, &writes(1_000_000, 1_000_000));
+        let mixed = calculate_cost(&opus, &writes(1_000_000, 250_000));
+        let claimed_too_much = calculate_cost(&opus, &writes(1_000_000, 2_000_000));
+
+        assert!(
+            (five_minutes.cache_write.get() - 5.0).abs() < 1e-9,
+            "{five_minutes:?}"
+        );
+        assert!(
+            (one_hour.cache_write.get() - 8.0).abs() < 1e-9,
+            "{one_hour:?}"
+        );
+        assert!((mixed.cache_write.get() - (0.75 * 5.0 + 0.25 * 8.0)).abs() < 1e-9);
+        assert!((claimed_too_much.cache_write.get() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_hour_long_cache_write_over_the_price_cliff_doubles_the_tier_input_price() {
+        let haiku = anthropic_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == "claude-haiku-5-5")
+            .unwrap();
+        let usage = Usage {
+            cache_write_tokens: TokenCount::new(200_000),
+            cache_write_1h_tokens: TokenCount::new(200_000),
+            ..Default::default()
+        };
+
+        let cost = calculate_cost(&haiku, &usage);
+
+        assert!((cost.cache_write.get() - 0.2).abs() < 1e-9, "{cost:?}");
+    }
+
+    #[test]
+    fn the_spend_of_a_conversation_keeps_the_hour_long_writes() {
+        let opus = anthropic_models()
+            .into_iter()
+            .find(|m| m.id.as_str() == "claude-opus-5-5")
+            .unwrap();
+        let reply = |one_hour: u64| {
+            crate::types::AssistantMessage::builder()
+                .model(opus.id.clone())
+                .provider(opus.provider.clone())
+                .api(opus.api)
+                .usage(Usage {
+                    cache_write_tokens: TokenCount::new(500_000),
+                    cache_write_1h_tokens: TokenCount::new(one_hour),
+                    ..Default::default()
+                })
+                .timestamp_ms(crate::types::Timestamp::zero())
+                .build()
+        };
+        let replies = [reply(500_000), reply(0)];
+
+        let (usage, cost) = conversation_spend(replies.iter());
+
+        assert_eq!(usage.cache_write_tokens, TokenCount::new(1_000_000));
+        assert_eq!(usage.cache_write_1h_tokens, TokenCount::new(500_000));
+        assert!((cost.get() - (4.0 + 2.5)).abs() < 1e-9, "{cost:?}");
+    }
+
+    #[test]
     fn calculate_cost_works() {
         let model = anthropic_models().into_iter().next().unwrap();
         let usage = Usage {
@@ -1031,6 +1112,7 @@ mod tests {
             output_tokens: TokenCount::new(500_000),
             cache_read_tokens: TokenCount::new(100_000),
             cache_write_tokens: TokenCount::new(50_000),
+            ..Default::default()
         };
         let cost = calculate_cost(&model, &usage);
         assert!((cost.input.get() - 4.0).abs() < f64::EPSILON);

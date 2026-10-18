@@ -52,6 +52,7 @@ fn prev_usage() -> Usage {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::new(95_000),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     }
 }
 
@@ -61,6 +62,7 @@ fn curr_usage() -> Usage {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::ZERO,
         cache_write_tokens: TokenCount::new(100_000),
+        ..Default::default()
     }
 }
 
@@ -89,12 +91,14 @@ fn cache_module_exposes_timer_and_stats() {
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::new(95_000),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     };
     let curr = Usage {
         input_tokens: TokenCount::new(5_000),
         output_tokens: TokenCount::new(3_000),
         cache_read_tokens: TokenCount::ZERO,
         cache_write_tokens: TokenCount::new(100_000),
+        ..Default::default()
     };
 
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
@@ -173,12 +177,14 @@ fn provider_managed_context_shrink_does_not_alarm_as_cache_bust() {
         output_tokens: TokenCount::new(250),
         cache_read_tokens: TokenCount::new(47_751),
         cache_write_tokens: TokenCount::ZERO,
+        ..Default::default()
     };
     let curr = Usage {
         input_tokens: TokenCount::new(3_274),
         output_tokens: TokenCount::new(309),
         cache_read_tokens: TokenCount::new(10_880),
         cache_write_tokens: TokenCount::new(11_063),
+        ..Default::default()
     };
     let cfg = CallConfig {
         model_id: "claude-opus-4-8".into(),
