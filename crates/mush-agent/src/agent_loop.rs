@@ -28,6 +28,11 @@ pub enum AgentEvent {
     PartialDiscarded {
         error: String,
     },
+    NetworkWait {
+        error: String,
+        retry_in_ms: u64,
+    },
+    NetworkRestored,
     ToolExecStart {
         tool_call_id: ToolCallId,
         tool_name: ToolName,
@@ -306,18 +311,14 @@ pub fn agent_loop(
 
                 let mut final_message: Option<AssistantMessage> = None;
                 let mut last_error: Option<String> = None;
-                let mut retry_after: Option<std::time::Duration> = None;
-                let mut partial: Option<PartialMessage> = None;
+                let mut partial: Option<PartialMessage>;
                 let mut aborted = false;
+                let mut retries = Retries::default();
+                let mut wait: Option<std::time::Duration> = None;
 
-                'attempt: for attempt in 0..=MAX_RETRIES {
+                'attempt: loop {
                     partial = None;
-                    if attempt > 0 {
-                        let Some(delay) = mush_ai::registry::retry_delay(retry_backoff(attempt), retry_after.take()) else {
-                            tracing::warn!(attempt, "the provider asked to wait past the retry cap, giving up");
-                            break 'attempt;
-                        };
-                        tracing::warn!(attempt, ?delay, "retrying after transient error");
+                    if let Some(delay) = wait.take() {
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {},
                             _ = cancel.cancelled() => {
@@ -334,12 +335,29 @@ pub fn agent_loop(
                             break 'attempt;
                         }
                     };
+                    let response = match response {
+                        Err(e) if e.is_unreachable() => {
+                            last_error = Some(format!("request failed: {e}"));
+                            let (event, delay) = retries.offline(e.cause());
+                            yield event;
+                            wait = Some(delay);
+                            continue 'attempt;
+                        }
+                        response => response,
+                    };
+                    if retries.back_online() {
+                        yield AgentEvent::NetworkRestored;
+                    }
                     let mut event_stream = match response {
                         Ok(stream) => stream,
-                        Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
+                        Err(e) if e.is_retryable() && retries.can_retry() => {
                             tracing::warn!(error = %e, "retryable request error");
-                            retry_after = e.retry_after();
                             last_error = Some(format!("request failed: {e}"));
+                            let Some(delay) = retries.failed(e.retry_after()) else {
+                                tracing::warn!(attempt = retries.failures, "the provider asked to wait past the retry cap, giving up");
+                                break 'attempt;
+                            };
+                            wait = Some(delay);
                             continue 'attempt;
                         }
                         Err(e) => {
@@ -380,11 +398,22 @@ pub fn agent_loop(
                                     last_error = Some(format!("stream error: {error_msg}"));
                                     break 'attempt;
                                 }
-                                if attempt < MAX_RETRIES && retry_stream_error(&error_msg, attempt) {
+                                if lost_network(&error_msg) {
                                     if streamed {
                                         yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
                                     }
                                     last_error = Some(format!("stream error: {error_msg}"));
+                                    let (event, delay) = retries.offline(error_msg);
+                                    yield event;
+                                    wait = Some(delay);
+                                    continue 'attempt;
+                                }
+                                if retries.can_retry() && retry_stream_error(&error_msg, retries.failures) {
+                                    if streamed {
+                                        yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
+                                    }
+                                    last_error = Some(format!("stream error: {error_msg}"));
+                                    wait = retries.failed(None);
                                     continue 'attempt;
                                 }
                                 tracing::error!(
@@ -426,17 +455,26 @@ pub fn agent_loop(
                     if let Some(error_msg) = failure {
                         let overflowed = !overflow_retried
                             && mush_ai::registry::is_context_overflow_message(&error_msg);
+                        let offline = !overflowed && lost_network(&error_msg);
                         let retrying = !overflowed
-                            && attempt < MAX_RETRIES
-                            && retry_stream_error(&error_msg, attempt);
-                        if (retrying || overflowed) && streamed {
+                            && !offline
+                            && retries.can_retry()
+                            && retry_stream_error(&error_msg, retries.failures);
+                        if (retrying || overflowed || offline) && streamed {
                             yield AgentEvent::PartialDiscarded { error: error_msg.clone() };
                         }
                         last_error = Some(match local_final {
                             None => error_msg.clone(),
                             Some(_) => format!("stream error: {error_msg}"),
                         });
+                        if offline {
+                            let (event, delay) = retries.offline(error_msg);
+                            yield event;
+                            wait = Some(delay);
+                            continue 'attempt;
+                        }
                         if retrying {
+                            wait = retries.failed(None);
                             continue 'attempt;
                         }
                         if overflowed {
@@ -644,6 +682,48 @@ pub fn agent_loop(
     };
 
     Box::pin(stream)
+}
+
+#[derive(Default)]
+struct Retries {
+    failures: u32,
+    network_waits: u32,
+    waiting_for_network: bool,
+}
+
+impl Retries {
+    fn can_retry(&self) -> bool {
+        self.failures < MAX_RETRIES
+    }
+
+    fn failed(&mut self, retry_after: Option<std::time::Duration>) -> Option<std::time::Duration> {
+        self.failures += 1;
+        let delay = mush_ai::registry::retry_delay(retry_backoff(self.failures), retry_after)?;
+        tracing::warn!(
+            attempt = self.failures,
+            ?delay,
+            "retrying after transient error"
+        );
+        Some(delay)
+    }
+
+    fn offline(&mut self, error: String) -> (AgentEvent, std::time::Duration) {
+        self.network_waits += 1;
+        self.waiting_for_network = true;
+        let delay = mush_ai::registry::network_retry_delay(self.network_waits);
+        tracing::warn!(%error, tries = self.network_waits, ?delay, "the provider is out of reach, waiting for the network");
+        let retry_in_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        (AgentEvent::NetworkWait { error, retry_in_ms }, delay)
+    }
+
+    fn back_online(&mut self) -> bool {
+        std::mem::take(&mut self.waiting_for_network)
+    }
+}
+
+fn lost_network(error: &str) -> bool {
+    mush_ai::registry::classify_stream_error_message(error)
+        == mush_ai::registry::StreamErrorKind::Unreachable
 }
 
 fn exec_end(call: &ToolCall, result: ToolResult) -> AgentEvent {
@@ -2579,5 +2659,346 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, AgentEvent::Error { error } if error == STREAM_ENDED_EARLY)
         ));
+    }
+
+    type Reply = Result<Vec<StreamEvent>, mush_ai::registry::ProviderError>;
+
+    struct Outage {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        replies: std::sync::Mutex<std::collections::VecDeque<Reply>>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for Outage {
+        fn api(&self) -> Api {
+            Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            _model: &Model,
+            _context: &mush_ai::registry::LlmContext,
+            _options: &StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("every request has a scripted reply");
+            reply.map(|events| {
+                Box::pin(futures::stream::iter(events)) as mush_ai::registry::EventStream
+            })
+        }
+    }
+
+    async fn unreachable() -> mush_ai::registry::ProviderError {
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap_err();
+        mush_ai::registry::ProviderError::Request(error)
+    }
+
+    async fn offline_for(tries: usize) -> Vec<Reply> {
+        let mut replies = Vec::with_capacity(tries);
+        for _ in 0..tries {
+            replies.push(Err(unreachable().await));
+        }
+        replies
+    }
+
+    fn unavailable() -> Reply {
+        Err(mush_ai::registry::ProviderError::ApiError {
+            api: "anthropic",
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            content_type: "text/plain".into(),
+            body: "service unavailable".into(),
+            retry_after: None,
+        })
+    }
+
+    struct Run {
+        calls: usize,
+        events: Vec<AgentEvent>,
+        took: std::time::Duration,
+    }
+
+    async fn run_outage(replies: Vec<Reply>) -> Run {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(Outage {
+            calls: calls.clone(),
+            replies: std::sync::Mutex::new(replies.into()),
+        }));
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let events: Vec<AgentEvent> = agent_loop(
+            cancellable_config(&registry, tokio_util::sync::CancellationToken::new()),
+            user_prompt("hi"),
+        )
+        .collect()
+        .await;
+        Run {
+            calls: calls.load(std::sync::atomic::Ordering::SeqCst),
+            events,
+            took: started.elapsed(),
+        }
+    }
+
+    fn network_waits(events: &[AgentEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::NetworkWait { retry_in_ms, .. } => Some(*retry_in_ms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position(events: &[AgentEvent], wanted: impl Fn(&AgentEvent) -> bool) -> Vec<usize> {
+        events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| wanted(event))
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    fn failed(events: &[AgentEvent]) -> Option<&str> {
+        events.iter().find_map(|event| match event {
+            AgentEvent::Error { error } => Some(error.as_str()),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_lost_network_is_waited_out_and_the_turn_carries_on() {
+        let mut replies = offline_for(8).await;
+        replies.push(Ok(answered(&test_model())));
+
+        let run = run_outage(replies).await;
+
+        assert_eq!(run.calls, 9);
+        assert_eq!(failed(&run.events), None);
+        let waits = network_waits(&run.events);
+        assert_eq!(waits.len(), 8);
+        assert!(waits.iter().all(|&wait| wait <= 60_000), "{waits:?}");
+        assert!(waits[6..].iter().all(|&wait| wait >= 45_000), "{waits:?}");
+        let waited: u64 = waits.iter().sum();
+        let rounding = 2 * waits.len() as u64;
+        assert!(
+            run.took >= std::time::Duration::from_millis(waited)
+                && run.took <= std::time::Duration::from_millis(waited + rounding),
+            "{:?} against {waited}ms of waits",
+            run.took
+        );
+        let restored = position(&run.events, |event| {
+            matches!(event, AgentEvent::NetworkRestored)
+        });
+        let last_wait = position(&run.events, |event| {
+            matches!(event, AgentEvent::NetworkWait { .. })
+        });
+        let ends = position(&run.events, |event| {
+            matches!(event, AgentEvent::MessageEnd { .. })
+        });
+        assert_eq!(restored.len(), 1);
+        assert!(last_wait.iter().all(|&wait| wait < restored[0]));
+        assert!(restored[0] < ends[0]);
+        assert_eq!(message_ends(&run.events)[0].text(), "whole answer");
+        assert!(
+            run.events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnEnd { .. }))
+        );
+        assert!(matches!(run.events.last(), Some(AgentEvent::AgentEnd)));
+    }
+
+    fn lost_mid_reply(model: &Model) -> (String, Reply) {
+        let lost = format!(
+            "{}: error decoding response body: error reading a body from connection: \
+             Network is unreachable (os error 101)",
+            mush_ai::registry::NETWORK_LOST
+        );
+        let partial = reply(model, vec![text("half an ans")], Some(&lost));
+        let events = vec![
+            StreamEvent::Start {
+                partial: partial.clone(),
+            },
+            StreamEvent::TextDelta {
+                content_index: 0,
+                delta: "half an ans".into(),
+            },
+            StreamEvent::Error {
+                reason: StopReason::Error,
+                message: partial,
+            },
+        ];
+        (lost, Ok(events))
+    }
+
+    fn calls_the_counter(model: &Model) -> Reply {
+        let message = AssistantMessage::builder()
+            .content(vec![AssistantContentPart::ToolCall(ToolCall {
+                id: "tc_1".into(),
+                name: "counter".into(),
+                arguments: serde_json::json!({}),
+            })])
+            .model(model.id.clone())
+            .provider(model.provider.clone())
+            .api(model.api)
+            .stop_reason(StopReason::ToolUse)
+            .timestamp_ms(Timestamp::zero())
+            .build();
+        Ok(vec![
+            StreamEvent::Start {
+                partial: message.clone(),
+            },
+            StreamEvent::Done {
+                reason: StopReason::ToolUse,
+                message,
+            },
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_by_a_lost_network_is_asked_again_once_it_is_back() {
+        let model = test_model();
+        let (lost, cut) = lost_mid_reply(&model);
+        let mut replies = vec![cut];
+        replies.extend(offline_for(6).await);
+        replies.push(Ok(answered(&model)));
+
+        let run = run_outage(replies).await;
+
+        assert_eq!(run.calls, 8);
+        assert_eq!(failed(&run.events), None);
+        assert_eq!(discarded(&run.events), [lost.as_str()]);
+        assert_eq!(network_waits(&run.events).len(), 7);
+        let ends = message_ends(&run.events);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].text(), "whole answer");
+    }
+
+    #[tokio::test]
+    async fn the_wait_for_the_network_keeps_growing_until_a_reply_completes() {
+        let model = test_model();
+        let mut replies = offline_for(3).await;
+        let (lost, cut) = lost_mid_reply(&model);
+        replies.push(cut);
+        replies.extend(offline_for(1).await);
+        replies.push(calls_the_counter(&model));
+        replies.extend(offline_for(1).await);
+        replies.push(Ok(answered(&model)));
+
+        let run = run_outage(replies).await;
+
+        assert_eq!(run.calls, 8);
+        assert_eq!(failed(&run.events), None);
+        assert_eq!(discarded(&run.events), [lost.as_str()]);
+        let restored = position(&run.events, |event| {
+            matches!(event, AgentEvent::NetworkRestored)
+        });
+        assert_eq!(restored.len(), 3);
+        let waits = network_waits(&run.events);
+        assert_eq!(waits.len(), 6, "{waits:?}");
+        assert!(
+            waits[..5].windows(2).all(|pair| pair[0] < pair[1]),
+            "{waits:?}"
+        );
+        assert!(waits[3] >= 6_000, "{waits:?}");
+        assert!(waits[5] <= 1_250, "{waits:?}");
+        let ends = message_ends(&run.events);
+        assert_eq!(ends.len(), 2);
+        assert_eq!(ends[1].text(), "whole answer");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_ends_the_wait_for_the_network_at_once() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = ApiRegistry::new();
+        registry.register(Box::new(Outage {
+            calls: calls.clone(),
+            replies: std::sync::Mutex::new(offline_for(3).await.into()),
+        }));
+        tokio::time::pause();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut stream = agent_loop(
+            cancellable_config(&registry, cancel.clone()),
+            user_prompt("hi"),
+        );
+        let mut events = Vec::new();
+        let mut cancelled_at = None;
+        while let Some(event) = stream.next().await {
+            if network_waits(std::slice::from_ref(&event)).len() == 1
+                && network_waits(&events).len() == 1
+            {
+                cancel.cancel();
+                cancelled_at = Some(tokio::time::Instant::now());
+            }
+            events.push(event);
+        }
+
+        let cancelled_at = cancelled_at.expect("the loop waited for the network twice");
+        assert_eq!(tokio::time::Instant::now(), cancelled_at);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(failed(&events), None);
+        assert!(matches!(events.last(), Some(AgentEvent::AgentEnd)));
+    }
+
+    #[tokio::test]
+    async fn errors_with_a_reply_keep_the_retry_limit() {
+        let run = run_outage(std::iter::repeat_with(unavailable).take(6).collect()).await;
+
+        assert_eq!(run.calls, MAX_RETRIES as usize + 1);
+        assert!(network_waits(&run.events).is_empty());
+        assert!(failed(&run.events).is_some_and(|error| error.contains("503")));
+        assert!(
+            run.took >= std::time::Duration::from_millis(23_250)
+                && run.took <= std::time::Duration::from_millis(38_760),
+            "{:?}",
+            run.took
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_network_spends_none_of_the_retry_limit() {
+        let mut replies = vec![unavailable()];
+        replies.extend(offline_for(7).await);
+        replies.extend(std::iter::repeat_with(unavailable).take(5));
+
+        let run = run_outage(replies).await;
+
+        assert_eq!(run.calls, 13);
+        assert_eq!(network_waits(&run.events).len(), 7);
+        let restored = position(&run.events, |event| {
+            matches!(event, AgentEvent::NetworkRestored)
+        });
+        assert_eq!(restored.len(), 1);
+        assert!(failed(&run.events).is_some_and(|error| error.contains("503")));
+    }
+
+    #[tokio::test]
+    async fn a_billing_refusal_still_fails_at_once() {
+        let run = run_outage(vec![Err(mush_ai::registry::ProviderError::Billing {
+            provider: "z.ai",
+            code: "1113".into(),
+            message: "Insufficient balance or no resource package. Please recharge.".into(),
+            remedy: None,
+        })])
+        .await;
+
+        assert_eq!(run.calls, 1);
+        assert!(network_waits(&run.events).is_empty());
+        assert!(failed(&run.events).is_some_and(|error| error.contains("1113")));
     }
 }

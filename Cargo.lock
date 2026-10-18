@@ -2929,6 +2929,7 @@ dependencies = [
  "futures",
  "mush-ai",
  "regex",
+ "reqwest 0.13.5",
  "rustix 1.1.5",
  "serde",
  "serde_json",
