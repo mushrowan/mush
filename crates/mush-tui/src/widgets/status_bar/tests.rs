@@ -72,6 +72,7 @@ fn child(
         streaming: false,
         tool_running: None,
         awaiting_confirmation: None,
+        waiting_for_network: None,
     }
 }
 

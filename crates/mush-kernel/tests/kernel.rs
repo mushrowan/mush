@@ -966,3 +966,27 @@ async fn child_summaries_answer_to_session_name_and_active_session_id() {
     assert_eq!(output.result.as_deref(), Some("('auth', 's1')"));
     kernel.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_child_waiting_for_the_network_says_so() {
+    let kernel = kernel().await;
+
+    let output = kernel
+        .execute(
+            "waiting = ChildSummary({'name': 'scout', 'status': 'running', 'state': 'working', 'turns': 2, \
+             'waiting_for_network': {'since': 1792324474269, 'error': 'dns error'}})\n\
+             online = ChildSummary({'name': 'scout', 'status': 'running', 'state': 'working', 'turns': 2})\n\
+             (repr(waiting), repr(online), waiting.settled)",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        output.result.as_deref(),
+        Some(
+            "(\"ChildSummary(name='scout', status='running', state='working', turns=2, waiting for the network)\", \
+             \"ChildSummary(name='scout', status='running', state='working', turns=2)\", False)"
+        )
+    );
+    kernel.shutdown().await.unwrap();
+}

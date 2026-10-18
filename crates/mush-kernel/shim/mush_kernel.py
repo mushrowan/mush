@@ -553,6 +553,7 @@ class ChildSummary:
         self.usage = reply.get("usage") or {}
         self.cost = reply.get("cost") or {}
         self.paused = reply.get("paused")
+        self.waiting_for_network = reply.get("waiting_for_network")
         self.session_name = self.name
         self.active_session_id = self.session_id or None
 
@@ -563,7 +564,8 @@ class ChildSummary:
     def __repr__(self) -> str:
         note = f", note={self.progress_note!r}" if self.progress_note else ""
         paused = ", paused" if self.paused else ""
-        return f"ChildSummary(name={self.name!r}, status={self.status!r}, state={self.state!r}, turns={self.turns}{note}{paused})"
+        offline = ", waiting for the network" if self.waiting_for_network else ""
+        return f"ChildSummary(name={self.name!r}, status={self.status!r}, state={self.state!r}, turns={self.turns}{note}{paused}{offline})"
 
 
 class ModelInfo:

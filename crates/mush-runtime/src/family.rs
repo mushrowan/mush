@@ -163,6 +163,8 @@ pub struct ChildSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_confirmation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_network: Option<NetworkWait>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<mush_session::Pause>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ChildContext>,
@@ -173,6 +175,12 @@ pub struct ChildContext {
     pub tokens: u64,
     pub window: u64,
     pub compactions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkWait {
+    pub since: Timestamp,
+    pub error: String,
 }
 
 impl ChildSummary {
@@ -428,6 +436,8 @@ pub struct AgentView {
     pub tool_running: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaiting_confirmation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for_network: Option<NetworkWait>,
     #[serde(default)]
     pub children_running: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -648,6 +658,7 @@ fn load_registry(path: Option<&std::path::Path>) -> BTreeMap<ChildId, Node> {
             if !summary.status.settled() {
                 summary.status = ChildStatus::Interrupted;
             }
+            summary.waiting_for_network = None;
             let node = Node {
                 summary,
                 inbox: None,
@@ -1250,6 +1261,7 @@ impl Family {
             streaming: false,
             tool_running: None,
             awaiting_confirmation: None,
+            waiting_for_network: None,
             paused: None,
             context: None,
         };
@@ -1521,6 +1533,23 @@ impl Family {
                 ..
             } => self.record_update(id, |child| child.streaming = true),
             ClientEvent::Agent {
+                event: AgentEvent::NetworkWait { error, .. },
+                ..
+            } => self.record_update(id, |child| {
+                let since = child
+                    .waiting_for_network
+                    .as_ref()
+                    .map_or_else(Timestamp::now, |wait| wait.since);
+                child.waiting_for_network = Some(NetworkWait {
+                    since,
+                    error: error.clone(),
+                });
+            }),
+            ClientEvent::Agent {
+                event: AgentEvent::NetworkRestored,
+                ..
+            } => self.record_update(id, |child| child.waiting_for_network = None),
+            ClientEvent::Agent {
                 event:
                     AgentEvent::ToolExecStart {
                         tool_name, args, ..
@@ -1575,6 +1604,7 @@ impl Family {
                 self.record_update(id, |child| {
                     child.status = ChildStatus::Failed;
                     child.error = Some(error.clone());
+                    child.waiting_for_network = None;
                 });
                 let notice = if mush_ai::registry::is_context_overflow_message(error) {
                     ExitNotice::Overflowed
@@ -1590,6 +1620,7 @@ impl Family {
                     child.streaming = false;
                     child.tool_running = None;
                     child.awaiting_confirmation = None;
+                    child.waiting_for_network = None;
                     if child.status == ChildStatus::Running {
                         ended = Some(if *cancelled {
                             ChildStatus::Cancelled
@@ -2345,6 +2376,7 @@ fn root_view(inner: &Inner, relationship: &str, observable: bool) -> AgentView {
         streaming: false,
         tool_running: None,
         awaiting_confirmation: None,
+        waiting_for_network: None,
         children_running: running_children(inner, &None),
         kernel: None,
     }
@@ -2366,6 +2398,7 @@ fn view_of(inner: &Inner, node: &Node, relationship: &str, observable: bool) -> 
         streaming: summary.streaming,
         tool_running: summary.tool_running.clone(),
         awaiting_confirmation: summary.awaiting_confirmation.clone(),
+        waiting_for_network: summary.waiting_for_network.clone(),
         children_running,
         kernel: None,
     }
@@ -2503,6 +2536,7 @@ async fn drive_child(
         }
     }
     family.update(&id, |child| {
+        child.waiting_for_network = None;
         if !child.status.settled() {
             child.status = if closing {
                 ChildStatus::Interrupted
@@ -4039,6 +4073,7 @@ mod tests {
                 streaming: false,
                 tool_running: None,
                 awaiting_confirmation: None,
+                waiting_for_network: None,
                 paused: None,
                 context: None,
             }],
@@ -4277,6 +4312,7 @@ mod tests {
             streaming: false,
             tool_running: None,
             awaiting_confirmation: None,
+            waiting_for_network: None,
             paused: None,
             context: None,
         }
@@ -5984,6 +6020,136 @@ mod tests {
         );
         process.kill().unwrap();
         process.wait().unwrap();
+    }
+
+    struct LosesTheNetworkOnce {
+        lost: std::sync::atomic::AtomicBool,
+        back: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl mush_ai::registry::ApiProvider for LosesTheNetworkOnce {
+        fn api(&self) -> mush_ai::types::Api {
+            mush_ai::types::Api::AnthropicMessages
+        }
+
+        async fn stream(
+            &self,
+            model: &mush_ai::types::Model,
+            context: &mush_ai::registry::LlmContext,
+            options: &mush_ai::types::StreamOptions,
+        ) -> Result<mush_ai::registry::EventStream, mush_ai::registry::ProviderError> {
+            if !self.lost.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let cut = mush_ai::types::AssistantMessage::builder()
+                    .model(model.id.clone())
+                    .provider(model.provider.clone())
+                    .api(model.api)
+                    .stop_reason(mush_ai::types::StopReason::Error)
+                    .error_message(format!(
+                        "{}: Network is unreachable (os error 101)",
+                        mush_ai::registry::NETWORK_LOST
+                    ))
+                    .timestamp_ms(Timestamp::zero())
+                    .build();
+                return Ok(Box::pin(futures::stream::iter([
+                    mush_ai::stream::StreamEvent::Error {
+                        reason: mush_ai::types::StopReason::Error,
+                        message: cut,
+                    },
+                ])));
+            }
+            self.back.notified().await;
+            Echo {
+                requests: Arc::default(),
+                reply: "back online".into(),
+            }
+            .stream(model, context, options)
+            .await
+        }
+    }
+
+    fn offline_factory(back: Arc<tokio::sync::Notify>) -> ChildFactory {
+        let echo = echo_factory(Arc::new(StdMutex::new(Vec::new())), "unused");
+        Arc::new(move |spec: ChildSpec, family: Arc<Family>| {
+            let back = Arc::clone(&back);
+            let echo = Arc::clone(&echo);
+            Box::pin(async move {
+                let mut parts = echo(spec, family).await?;
+                let mut registry = ApiRegistry::new();
+                registry.register(Box::new(LosesTheNetworkOnce {
+                    lost: std::sync::atomic::AtomicBool::new(false),
+                    back,
+                }));
+                parts.registry = registry;
+                Ok(parts)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn a_child_without_a_network_says_it_waits_for_it_and_answers_once_it_is_back() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let back = Arc::new(tokio::sync::Notify::new());
+        let family = Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(offline_factory(Arc::clone(&back))),
+            None,
+        );
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "scout".into(), None, None, &family)
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while family.children_of(&root)[0].waiting_for_network.is_none() {
+            assert!(Instant::now() < deadline, "the child never said it waits");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let waiting = family.children_of(&root)[0].clone();
+        assert_eq!(waiting.status, ChildStatus::Running);
+        assert_eq!(waiting.error, None);
+        let wait = waiting.waiting_for_network.clone().unwrap();
+        assert!(wait.error.contains("Network is unreachable"), "{wait:?}");
+        let handler = RlmHandler::new(Arc::clone(&family), root.clone());
+        let listed = mush_kernel::HostRequestHandler::handle(
+            &handler,
+            "rlm.list_subagents",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed[0]["status"], "running");
+        assert_eq!(listed[0]["state"], "working");
+        assert_eq!(
+            listed[0]["waiting_for_network"]["since"],
+            serde_json::json!(wait.since)
+        );
+        let view = family
+            .roster(&root)
+            .into_iter()
+            .find(|view| view.name == "scout")
+            .unwrap();
+        assert_eq!(view.status, "running");
+        assert_eq!(view.waiting_for_network, Some(wait));
+        let paused = mush_kernel::HostRequestHandler::handle(
+            &handler,
+            "rlm.pause_subagents",
+            serde_json::json!({ "reason": "a tunnel" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paused[0]["paused"]["reason"], "a tunnel");
+        assert!(paused[0]["waiting_for_network"].is_object());
+
+        back.notify_one();
+        let settled = settle(&family, &root).await;
+        assert_eq!(settled[0].status, ChildStatus::Idle);
+        assert_eq!(settled[0].answer.as_deref(), Some("back online"));
+        assert_eq!(settled[0].waiting_for_network, None);
+        assert_eq!(settled[0].error, None);
     }
 
     #[tokio::test]

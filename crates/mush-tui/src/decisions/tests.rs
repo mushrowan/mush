@@ -82,6 +82,7 @@ fn child(name: &str, confirmation: Option<&str>) -> ChildSummary {
         streaming: false,
         tool_running: None,
         awaiting_confirmation: confirmation.map(Into::into),
+        waiting_for_network: None,
     }
 }
 

@@ -47,8 +47,8 @@ pub use decisions::{
 };
 pub use family::{
     Activity, ChildFactory, ChildHandle, ChildId, ChildParts, ChildSpec, ChildStatus, ChildSummary,
-    CreateSessionRequest, CreatedSession, Family, Identity, MessageReceipt, MessageTarget, Receipt,
-    RlmHandler, RuntimeKind, SessionSpawner,
+    CreateSessionRequest, CreatedSession, Family, Identity, MessageReceipt, MessageTarget,
+    NetworkWait, Receipt, RlmHandler, RuntimeKind, SessionSpawner,
 };
 pub use goal::{Goal, GoalCommand, GoalStatus, GoalStore};
 pub use harness::HarnessStore;
