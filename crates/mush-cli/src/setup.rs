@@ -199,7 +199,7 @@ impl ClientSetup {
         let http_client = mush_ai::http::wrap(
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::limited(10))
-                .connect_timeout(std::time::Duration::from_secs(60))
+                .connect_timeout(std::time::Duration::from_secs(20))
                 .build()
                 .expect("failed to build http client"),
         );
