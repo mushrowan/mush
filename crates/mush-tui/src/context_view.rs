@@ -56,6 +56,9 @@ fn activity(child: &ChildSummary, family: &[ChildSummary]) -> Option<String> {
     if let Some(prompt) = &child.awaiting_confirmation {
         return Some(format!("waiting for you: {prompt}"));
     }
+    if child.waiting_for_network.is_some() {
+        return Some(crate::turn_activity::WAITING_FOR_NETWORK.into());
+    }
     if let Some(tool) = &child.tool_running {
         return Some(tool.clone());
     }
@@ -375,6 +378,23 @@ mod tests {
         assert!(rendered.contains("activity"));
         assert!(rendered.contains("waiting for you: run `rm -rf build`?"));
         assert!(!rendered.contains("halfway"));
+    }
+
+    #[test]
+    fn a_child_without_a_network_says_it_waits_for_it() {
+        let mut offline = child("a", "scout", None, ChildStatus::Running);
+        offline.streaming = true;
+        offline.progress_note = Some("halfway".into());
+        offline.waiting_for_network = Some(mush_runtime::NetworkWait {
+            since: Timestamp::zero(),
+            error: "failed to lookup address information".into(),
+        });
+
+        let rendered = format_context(&agent_tree("root", "m", &stats(), &[offline]), &stats());
+
+        assert!(rendered.contains("waiting for the network"), "{rendered}");
+        assert!(!rendered.contains("halfway"));
+        assert!(!rendered.contains("thinking"));
     }
 
     #[test]

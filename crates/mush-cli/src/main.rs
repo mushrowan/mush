@@ -970,6 +970,21 @@ fn print_progress(event: &AgentEvent, model: &Model, debug_cache: bool) {
                 ))
             );
         }
+        AgentEvent::NetworkWait { error, retry_in_ms } => {
+            eprintln!(
+                "{}",
+                Style::Yellow.stderr(format_args!(
+                    "⚠ waiting for the network, next try in {}s: {error}",
+                    retry_in_ms.div_ceil(1000)
+                ))
+            );
+        }
+        AgentEvent::NetworkRestored => {
+            eprintln!(
+                "{}",
+                Style::Dim.stderr(format_args!("(the network is back)"))
+            );
+        }
         AgentEvent::SteeringInjected { messages } => {
             eprintln!(
                 "{}",

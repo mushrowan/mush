@@ -196,6 +196,7 @@ fn reserve(text: &str, widest: &str) -> usize {
 fn short_verb(verb: &str) -> &str {
     match verb {
         "writing code" => "code",
+        crate::turn_activity::WAITING_FOR_NETWORK => "offline",
         other => other.strip_prefix("using ").unwrap_or(other),
     }
 }
@@ -325,6 +326,11 @@ fn agents(app: &App) -> Option<Segment> {
         .iter()
         .filter(|child| child.status == ChildStatus::Failed)
         .count();
+    let offline = app
+        .children
+        .iter()
+        .filter(|child| child.waiting_for_network.is_some())
+        .count();
     let live = if running > 0 {
         theme.context_ok
     } else {
@@ -333,11 +339,18 @@ fn agents(app: &App) -> Option<Segment> {
     let asking = theme.context_warn.add_modifier(Modifier::BOLD);
     let broken = theme.context_danger;
 
-    let worded = |waiting_word: &str| {
+    let worded = |waiting_word: &str, offline_word: &str| {
         let mut spans = Vec::new();
         if waiting > 0 {
             spans.push(sep(app));
             spans.push(Span::styled(format!("{waiting} {waiting_word}"), asking));
+        }
+        if offline > 0 {
+            spans.push(sep(app));
+            spans.push(Span::styled(
+                format!("{offline} {offline_word}"),
+                theme.context_warn,
+            ));
         }
         if failed > 0 {
             spans.push(sep(app));
@@ -361,13 +374,16 @@ fn agents(app: &App) -> Option<Segment> {
         Span::styled(format!("{running}/{total}"), live),
         Span::styled(" agents", theme.status_muted),
     ];
-    long.extend(worded("waiting on you"));
+    long.extend(worded(
+        "waiting on you",
+        crate::turn_activity::WAITING_FOR_NETWORK,
+    ));
     let mut medium = vec![
         Span::styled("◆ ", live),
         Span::styled(format!("{running}/{total}"), live),
     ];
     let mut short = medium.clone();
-    medium.extend(worded("waiting"));
+    medium.extend(worded("waiting", "offline"));
     short.extend(marked(" "));
     let mut tiny = vec![Span::styled(format!("◆{running}"), live)];
     tiny.extend(marked(""));

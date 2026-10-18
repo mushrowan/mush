@@ -16,6 +16,7 @@ pub struct StreamingState {
     phase_since: Option<Instant>,
     thinking_since: Option<Instant>,
     thinking_break: bool,
+    offline_since: Option<Instant>,
     text_tw: TypewriterState,
     think_tw: TypewriterState,
 }
@@ -100,8 +101,30 @@ impl StreamingState {
         self.phase_since = Some(now);
         self.thinking_since = None;
         self.thinking_break = false;
+        self.offline_since = None;
         self.text_tw.reset();
         self.think_tw.reset();
+    }
+
+    pub fn network_lost(&mut self, now: Instant) {
+        self.offline_since.get_or_insert(now);
+    }
+
+    #[must_use]
+    pub fn is_offline(&self) -> bool {
+        self.offline_since.is_some()
+    }
+
+    pub fn network_restored(&mut self, now: Instant) -> Option<Duration> {
+        self.offline_since
+            .take()
+            .map(|since| now.saturating_duration_since(since))
+    }
+
+    #[must_use]
+    pub fn offline_for(&self, now: Instant) -> Option<Duration> {
+        self.offline_since
+            .map(|since| now.saturating_duration_since(since))
     }
 
     pub fn begin(&mut self, part: StreamPart) {
@@ -235,6 +258,7 @@ impl StreamingState {
         self.phase_since = None;
         self.thinking_since = None;
         self.thinking_break = false;
+        self.offline_since = None;
         self.text_tw.reset();
         self.think_tw.reset();
         (text, thinking)

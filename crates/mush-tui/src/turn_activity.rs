@@ -2,6 +2,8 @@ use std::time::{Duration, Instant};
 
 const CHARS_PER_TOKEN: usize = 4;
 
+pub(crate) const WAITING_FOR_NETWORK: &str = "waiting for the network";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamPart {
     Thinking,

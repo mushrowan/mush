@@ -153,6 +153,9 @@ fn live_activity(
     now: std::time::Instant,
 ) -> (&'static str, Option<std::time::Duration>) {
     use crate::turn_activity::StreamPart;
+    if let Some(offline) = app.stream.offline_for(now) {
+        return (crate::turn_activity::WAITING_FOR_NETWORK, Some(offline));
+    }
     match app.stream.last_part {
         None => ("waiting", app.stream.phase_elapsed(now)),
         Some(StreamPart::Thinking) => ("thinking", app.stream.thinking_elapsed(now)),

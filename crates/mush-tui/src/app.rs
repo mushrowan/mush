@@ -500,6 +500,9 @@ impl App {
             });
         }
         if self.stream.active {
+            if self.stream.is_offline() {
+                return Some(crate::turn_activity::WAITING_FOR_NETWORK.into());
+            }
             return Some(
                 match self.stream.last_part {
                     None => "waiting",

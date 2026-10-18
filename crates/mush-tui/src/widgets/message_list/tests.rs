@@ -1568,6 +1568,23 @@ fn a_stream_with_nothing_yet_says_it_is_waiting_and_for_how_long() {
 }
 
 #[test]
+fn a_turn_without_a_network_says_it_waits_for_it_and_for_how_long() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let now = std::time::Instant::now();
+    app.clock = crate::clock::Clock::frozen_at(now);
+    app.start_streaming();
+    app.stream
+        .network_lost(now - std::time::Duration::from_secs(95));
+    let text = live_text(&app, 80);
+    assert!(text.contains("waiting for the network · 1m 35s"), "{text}");
+
+    app.stream.network_restored(now);
+    let text = live_text(&app, 80);
+    assert!(!text.contains("network"), "{text}");
+    assert!(text.contains("waiting"), "{text}");
+}
+
+#[test]
 fn a_compacting_run_shows_a_label() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.compacting = true;

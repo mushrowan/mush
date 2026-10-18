@@ -594,6 +594,36 @@ fn waiting_and_failed_children_are_counted() {
 }
 
 #[test]
+fn children_waiting_for_the_network_are_counted() {
+    use mush_runtime::ChildStatus::Running;
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    let mut offline = child("a", Running, None);
+    offline.waiting_for_network = Some(mush_runtime::NetworkWait {
+        since: mush_ai::types::Timestamp::zero(),
+        error: "failed to lookup address information".into(),
+    });
+    app.note_child(offline);
+    app.note_child(child("b", Running, None));
+
+    let wide = status(&app, 200);
+    assert!(
+        wide.contains("◆ 2/2 agents · 1 waiting for the network"),
+        "{wide}"
+    );
+    let medium = status(&app, 40);
+    assert!(medium.contains("◆ 2/2 · 1 offline"), "{medium}");
+}
+
+#[test]
+fn a_turn_without_a_network_says_so_in_the_status_bar() {
+    let mut app = App::new("test".into(), TokenCount::new(200_000));
+    app.start_streaming();
+    app.stream.network_lost(std::time::Instant::now());
+    let content = status(&app, 120);
+    assert!(content.contains("waiting for the network"), "{content}");
+}
+
+#[test]
 fn the_newest_note_of_a_running_child_shows() {
     use mush_runtime::ChildStatus::{Idle, Running};
     let mut app = App::new("test".into(), TokenCount::new(200_000));

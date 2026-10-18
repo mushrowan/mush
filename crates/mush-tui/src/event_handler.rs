@@ -56,6 +56,30 @@ pub fn handle_agent_event(
             app.start_streaming();
             app.status = Some(format!("provider error, retrying: {error}").into());
         }
+        AgentEvent::NetworkWait { error, retry_in_ms } => {
+            app.stream.network_lost(app.clock.now());
+            let next = crate::turn_activity::format_elapsed(std::time::Duration::from_secs(
+                retry_in_ms.div_ceil(1000),
+            ));
+            app.status = Some(
+                format!(
+                    "{}, next try in {next}: {error}",
+                    crate::turn_activity::WAITING_FOR_NETWORK
+                )
+                .into(),
+            );
+        }
+        AgentEvent::NetworkRestored => {
+            if let Some(offline) = app.stream.network_restored(app.clock.now()) {
+                app.status = Some(
+                    format!(
+                        "the network is back after {}",
+                        crate::turn_activity::format_elapsed(offline)
+                    )
+                    .into(),
+                );
+            }
+        }
         AgentEvent::TurnStart { .. } => {
             app.active_tools.clear();
             if !app.stream.active {
@@ -319,6 +343,74 @@ mod tests {
                 .as_ref()
                 .is_some_and(|status| status.text.contains("connection reset by peer"))
         );
+    }
+
+    #[test]
+    fn a_lost_network_says_the_turn_waits_until_it_is_back() {
+        use mush_ai::types::TokenCount;
+        use std::time::Duration;
+
+        let start = std::time::Instant::now();
+        let mut app = App::new("test".into(), TokenCount::new(200_000));
+        app.clock = crate::clock::Clock::frozen_at(start);
+        app.start_streaming();
+        let mut image_protos = std::collections::HashMap::new();
+        let model = mush_ai::models::all_models().first().unwrap().clone();
+        let mut ctx = EventCtx {
+            app: &mut app,
+            image_protos: &mut image_protos,
+        };
+        let handle = |ctx: &mut EventCtx<'_>, event: AgentEvent| {
+            handle_agent_event(
+                ctx,
+                &event,
+                mush_runtime::Applied::Nothing,
+                &model,
+                false,
+                &None,
+            );
+        };
+        let status = |ctx: &EventCtx<'_>| {
+            ctx.app
+                .status
+                .as_ref()
+                .map(|status| status.text.clone())
+                .unwrap_or_default()
+        };
+
+        handle(
+            &mut ctx,
+            AgentEvent::NetworkWait {
+                error: "failed to lookup address information".into(),
+                retry_in_ms: 1_500,
+            },
+        );
+        assert_eq!(
+            ctx.app.activity_label().as_deref(),
+            Some("waiting for the network")
+        );
+        assert_eq!(
+            status(&ctx),
+            "waiting for the network, next try in 2s: failed to lookup address information"
+        );
+
+        ctx.app.clock = crate::clock::Clock::frozen_at(start + Duration::from_secs(95));
+        handle(
+            &mut ctx,
+            AgentEvent::NetworkWait {
+                error: "Network is unreachable (os error 101)".into(),
+                retry_in_ms: 60_000,
+            },
+        );
+        assert_eq!(
+            status(&ctx),
+            "waiting for the network, next try in 1m 00s: Network is unreachable (os error 101)"
+        );
+
+        handle(&mut ctx, AgentEvent::NetworkRestored);
+        assert_eq!(status(&ctx), "the network is back after 1m 35s");
+        assert_eq!(ctx.app.activity_label().as_deref(), Some("waiting"));
+        assert!(ctx.app.stream.active);
     }
 
     #[test]
