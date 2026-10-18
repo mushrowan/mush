@@ -34,8 +34,9 @@ if child is not None:
   (`running`/`idle`/`inactive`), `state` (`working`/`napping`/`hibernating`;
   `agent_message.send("all", ...)` skips hibernating members), `observable` (whether it has a live session
   that can be read), and the live detail known for it: `model_id`,
-  `progress_note`, `streaming`, `tool_running`, `awaiting_confirmation`, and
-  `children_running`. Address a member with `agent_message.send` using its
+  `progress_note`, `streaming`, `tool_running`, `awaiting_confirmation`,
+  `waiting_for_network` (`since` and `error` while it waits for the network),
+  and `children_running`. Address a member with `agent_message.send` using its
   `relationship` plus its `name`. For direct children,
   `await rlm.list_subagents()` also exposes parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns one agent summary. `target`
