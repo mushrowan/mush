@@ -5512,6 +5512,8 @@ mod tests {
         pid: StdMutex<Option<u32>>,
         live_pid: StdMutex<Option<u32>>,
         background: std::sync::atomic::AtomicBool,
+        unsaveable: std::sync::atomic::AtomicBool,
+        failed_releases: std::sync::atomic::AtomicUsize,
         releases: std::sync::atomic::AtomicUsize,
         restores: std::sync::atomic::AtomicUsize,
         wakes: std::sync::atomic::AtomicUsize,
@@ -5571,6 +5573,11 @@ mod tests {
             };
             if mush_kernel::process::has_children(pid) != Some(false) {
                 return mush_kernel::Release::Busy;
+            }
+            if self.unsaveable.load(std::sync::atomic::Ordering::SeqCst) {
+                self.failed_releases
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return mush_kernel::Release::Failed("kernel request timed out after 5s".into());
             }
             self.releases
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -5744,6 +5751,30 @@ mod tests {
         kernel.set_background(false);
         assert!(!kernel_live_after(&family, &id, Duration::from_secs(5)).await);
         assert_eq!(FakeKernel::count(&kernel.releases), 1);
+        process.kill().unwrap();
+        process.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_idle_kernel_whose_state_cannot_be_saved_is_not_asked_again_every_second() {
+        let _dirs = crate::testing::IsolatedDirs::acquire().await;
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut process = sleeper();
+        let kernel = FakeKernel::live(process.id());
+        kernel
+            .unsaveable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let family = releasing_family(requests, vec![Arc::clone(&kernel)], None);
+        let root = Identity::root("root");
+        family
+            .spawn(&root, "task".into(), "hoarder".into(), None, None, &family)
+            .await
+            .unwrap();
+        let id = settle(&family, &root).await[0].id.clone();
+
+        assert!(kernel_live_after(&family, &id, Duration::from_millis(3500)).await);
+        assert_eq!(FakeKernel::count(&kernel.failed_releases), 1);
+        assert_eq!(FakeKernel::count(&kernel.releases), 0);
         process.kill().unwrap();
         process.wait().unwrap();
     }

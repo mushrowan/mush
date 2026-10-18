@@ -313,6 +313,15 @@ fn failed_event(text: impl Into<String>) -> ClientEvent {
     ClientEvent::Session(SessionEvent::Failed(text.into()))
 }
 
+const KERNEL_RELEASE_RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(60);
+const KERNEL_RELEASE_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn kernel_release_backoff(failures: u32) -> std::time::Duration {
+    KERNEL_RELEASE_RETRY_FIRST
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(KERNEL_RELEASE_RETRY_MAX)
+}
+
 fn take_finished<T>(slot: &mut Option<JoinHandle<T>>) -> Option<Result<T, JoinError>> {
     let result = slot
         .as_mut()
@@ -683,6 +692,10 @@ impl InProcessConnection {
         };
         if self.runtime.kernel_released
             || self.runtime.kernel_release.is_some()
+            || self
+                .runtime
+                .kernel_release_retry
+                .is_some_and(|retry| std::time::Instant::now() < retry)
             || kernel.pid().is_none()
             || !self.parked().await
         {
@@ -704,13 +717,26 @@ impl InProcessConnection {
                     "released an idle kernel"
                 );
                 self.runtime.kernel_released = true;
+                self.forget_kernel_release_failures();
             }
             Ok(mush_kernel::Release::Failed(error)) => {
-                tracing::warn!(%error, "kept an idle kernel whose state could not be saved");
+                self.runtime.kernel_release_failures += 1;
+                let wait = kernel_release_backoff(self.runtime.kernel_release_failures);
+                self.runtime.kernel_release_retry = Some(std::time::Instant::now() + wait);
+                tracing::warn!(
+                    %error,
+                    retry_in = ?wait,
+                    "kept an idle kernel whose state could not be saved"
+                );
             }
             Ok(mush_kernel::Release::NotRunning | mush_kernel::Release::Busy) => {}
             Err(error) => tracing::warn!(%error, "the kernel release task failed"),
         }
+    }
+
+    fn forget_kernel_release_failures(&mut self) {
+        self.runtime.kernel_release_failures = 0;
+        self.runtime.kernel_release_retry = None;
     }
 
     async fn continue_goal(&mut self) {
@@ -1517,6 +1543,7 @@ impl InProcessConnection {
         let Some(prompt) = self.runtime.pending_prompt.take() else {
             return false;
         };
+        self.forget_kernel_release_failures();
         self.note_spawn_view();
         let mut injections = self.injections.clone();
         injections.control_endpoint = self.runtime.control_endpoint();

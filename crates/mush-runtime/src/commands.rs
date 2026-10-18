@@ -399,6 +399,8 @@ impl SessionRuntime {
         self.pending_prompt = None;
         self.kernel_restore = None;
         self.kernel_released = false;
+        self.kernel_release_failures = 0;
+        self.kernel_release_retry = None;
         self.harness_digest_pending = true;
         self.attach_kernel_session();
     }
