@@ -17,3 +17,5 @@ profile.json.gz
 .pre-commit-config.yaml
 /data/
 /workspaces/
+
+*.profraw

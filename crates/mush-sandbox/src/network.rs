@@ -4,32 +4,49 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 
 fn parse(entry: &str) -> Result<(&str, u16)> {
-    let (host, port) = if let Some(rest) = entry.strip_prefix('[') {
-        rest.split_once("]:")
-            .ok_or_else(|| Error::NetworkEntry(entry.into()))?
+    let invalid = || Error::NetworkEntry(entry.into());
+    let (host, port, bracketed) = if let Some(rest) = entry.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:").ok_or_else(invalid)?;
+        (host, port, true)
     } else {
-        entry
-            .rsplit_once(':')
-            .ok_or_else(|| Error::NetworkEntry(entry.into()))?
+        let (host, port) = entry.rsplit_once(':').ok_or_else(invalid)?;
+        (host, port, false)
     };
     let port = port
         .parse::<u16>()
         .ok()
         .filter(|port| *port != 0)
-        .ok_or_else(|| Error::NetworkEntry(entry.into()))?;
-    if host.is_empty()
-        || (host.parse::<IpAddr>().is_err()
-            && !host
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.'))
-    {
-        return Err(Error::NetworkEntry(entry.into()));
+        .ok_or_else(invalid)?;
+    if bracketed {
+        host.parse::<std::net::Ipv6Addr>().map_err(|_| invalid())?;
+    } else if host.parse::<std::net::Ipv4Addr>().is_err() {
+        let name = host.strip_suffix('.').unwrap_or(host);
+        if name.len() > 253
+            || name.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || !label.as_bytes()[0].is_ascii_alphanumeric()
+                    || !label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                    || !label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+        {
+            return Err(invalid());
+        }
     }
-    Ok((host, port))
+    Ok((host.strip_suffix('.').unwrap_or(host), port))
 }
 
 pub(crate) fn validate_entry(entry: &str) -> Result<()> {
     parse(entry).map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn append_host(hosts: &mut String, host: &str, address: IpAddr) {
+    if host.parse::<IpAddr>().is_err() {
+        hosts.push_str(&format!("{address} {host}\n"));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -174,9 +191,7 @@ mod host {
                     if !endpoints.contains(&endpoint) {
                         endpoints.push(endpoint);
                     }
-                    if host.parse::<IpAddr>().is_err() {
-                        hosts.push_str(&format!("{} {host}\n", endpoint.ip()));
-                    }
+                    append_host(&mut hosts, host, endpoint.ip());
                 }
             }
             std::fs::write(directory.path().join("hosts"), hosts)?;

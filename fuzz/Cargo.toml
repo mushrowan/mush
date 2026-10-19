@@ -1,0 +1,39 @@
+[package]
+name = "mush-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+mush-sandbox = { path = "../crates/mush-sandbox" }
+serde_json = "1"
+tempfile = "3"
+toml = "1.1"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "sandbox_config"
+path = "fuzz_targets/sandbox_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sandbox_narrow"
+path = "fuzz_targets/sandbox_narrow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sandbox_edit"
+path = "fuzz_targets/sandbox_edit.rs"
+test = false
+doc = false
+bench = false

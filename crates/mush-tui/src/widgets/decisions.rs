@@ -14,6 +14,9 @@ const ID_WIDTH: usize = 8;
 const DETAIL_INDENT: usize = 6;
 
 fn width_of(text: &str) -> usize {
+    if text.len() == 1 && text.as_bytes()[0].is_ascii_control() {
+        return 0;
+    }
     usize::from(text.cell_width())
 }
 
@@ -22,6 +25,13 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
 }
 
 fn truncate(text: &str, width: usize) -> String {
+    let clean;
+    let text = if text.chars().any(char::is_control) {
+        clean = text.chars().filter(|c| !c.is_control()).collect::<String>();
+        clean.as_str()
+    } else {
+        text
+    };
     if width_of(text) <= width {
         return text.to_owned();
     }
@@ -44,7 +54,7 @@ fn truncate(text: &str, width: usize) -> String {
 fn pieces(word: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut piece = String::new();
-    for c in word.chars() {
+    for c in word.chars().filter(|c| !c.is_control()) {
         let mut buf = [0; 4];
         let c = c.encode_utf8(&mut buf);
         if !piece.is_empty() && width_of(&piece) + width_of(c) > width {
@@ -818,7 +828,7 @@ fn render_wide(
     area: Rect,
     buf: &mut Buffer,
 ) -> Shown {
-    let left_width = (area.width * 48 / 100).clamp(50, 64);
+    let left_width = (u32::from(area.width) * 48 / 100).clamp(50, 64) as u16;
     let left = Rect {
         width: left_width,
         ..area
@@ -1106,3 +1116,6 @@ fn render_review(app: &App, groups: &[Group<'_>], area: Rect, buf: &mut Buffer) 
     block.render(rect, buf);
     render_window(&lines, inner, window, theme.scroll_indicator, buf);
 }
+
+#[cfg(test)]
+mod tests;

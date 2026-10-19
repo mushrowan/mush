@@ -564,6 +564,8 @@ impl Sandbox {
 
 #[cfg(target_os = "linux")]
 mod edit;
+#[cfg(all(test, target_os = "linux"))]
+mod edit_properties;
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -609,3 +611,6 @@ fn helper_confine(manifest: &network::Manifest, command: &mut std::process::Comm
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod properties;

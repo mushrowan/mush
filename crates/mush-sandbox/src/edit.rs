@@ -1,11 +1,12 @@
 use crate::{Error, Result, Sandbox};
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const LIMIT: u64 = 16 * 1024 * 1024;
 const NO_SYMLINKS: u64 = 0x04;
@@ -63,15 +64,16 @@ pub(super) fn edit_file(sandbox: &Sandbox, path: &Path, old: &str, new: &str) ->
         .filter(|root| path.starts_with(root))
         .max_by_key(|root| root.components().count())
         .ok_or_else(|| Error::EditDenied(path.into()))?;
-    let mut file = if path == root {
+    let directory = if path == root {
         open_at(
             libc::AT_FDCWD,
-            path,
-            libc::O_RDWR | libc::O_NONBLOCK,
+            path.parent()
+                .ok_or_else(|| Error::EditDenied(path.into()))?,
+            libc::O_PATH | libc::O_DIRECTORY,
             NO_SYMLINKS,
         )?
     } else {
-        let directory = open_at(
+        let root_directory = open_at(
             libc::AT_FDCWD,
             root,
             libc::O_PATH | libc::O_DIRECTORY,
@@ -80,13 +82,26 @@ pub(super) fn edit_file(sandbox: &Sandbox, path: &Path, old: &str, new: &str) ->
         let relative = path
             .strip_prefix(root)
             .map_err(|_| Error::EditDenied(path.into()))?;
+        let parent = relative
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         open_at(
-            directory.as_raw_fd(),
-            relative,
-            libc::O_RDWR | libc::O_NONBLOCK,
+            root_directory.as_raw_fd(),
+            parent,
+            libc::O_PATH | libc::O_DIRECTORY,
             NO_SYMLINKS | BENEATH,
         )?
     };
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::EditDenied(path.into()))?;
+    let mut file = open_at(
+        directory.as_raw_fd(),
+        Path::new(name),
+        libc::O_RDWR | libc::O_NONBLOCK,
+        NO_SYMLINKS | BENEATH,
+    )?;
     let metadata = file.metadata().map_err(Error::EditIo)?;
     if !metadata.is_file() || metadata.nlink() != 1 {
         return Err(Error::EditFileType);
@@ -110,10 +125,74 @@ pub(super) fn edit_file(sandbox: &Sandbox, path: &Path, old: &str, new: &str) ->
     if replacement.len() as u64 > LIMIT {
         return Err(Error::EditTooLarge);
     }
-    file.seek(SeekFrom::Start(0)).map_err(Error::EditIo)?;
-    file.write_all(replacement.as_bytes())
-        .map_err(Error::EditIo)?;
-    file.set_len(replacement.len() as u64)
-        .map_err(Error::EditIo)?;
+    replace_at(
+        &directory,
+        name,
+        replacement.as_bytes(),
+        metadata.mode() & 0o777,
+    )
+}
+
+fn replace_at(directory: &File, name: &std::ffi::OsStr, content: &[u8], mode: u32) -> Result<()> {
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(Error::EditIo(std::io::Error::last_os_error()));
+    }
+    let mut temporary = unsafe { File::from_raw_fd(descriptor) };
+    temporary.write_all(content).map_err(Error::EditIo)?;
+    if unsafe { libc::fchmod(temporary.as_raw_fd(), mode) } != 0 {
+        return Err(Error::EditIo(std::io::Error::last_os_error()));
+    }
+    temporary.sync_all().map_err(Error::EditIo)?;
+    let source = CString::new(format!("/proc/self/fd/{}", temporary.as_raw_fd()))
+        .map_err(|error| Error::EditIo(std::io::Error::other(error)))?;
+    let target = CString::new(name.as_bytes())
+        .map_err(|error| Error::EditIo(std::io::Error::other(error)))?;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut linked = None;
+    for _ in 0..128 {
+        let next = NEXT.fetch_add(1, Ordering::Relaxed);
+        let candidate = CString::new(format!(".mush-edit-{}-{next}", std::process::id()))
+            .map_err(|error| Error::EditIo(std::io::Error::other(error)))?;
+        let result = unsafe {
+            libc::linkat(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                directory.as_raw_fd(),
+                candidate.as_ptr(),
+                libc::AT_SYMLINK_FOLLOW,
+            )
+        };
+        if result == 0 {
+            linked = Some(candidate);
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(Error::EditIo(error));
+        }
+    }
+    let linked = linked
+        .ok_or_else(|| Error::EditIo(std::io::Error::from(std::io::ErrorKind::AlreadyExists)))?;
+    let result = unsafe {
+        libc::renameat(
+            directory.as_raw_fd(),
+            linked.as_ptr(),
+            directory.as_raw_fd(),
+            target.as_ptr(),
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::unlinkat(directory.as_raw_fd(), linked.as_ptr(), 0) };
+        return Err(Error::EditIo(error));
+    }
     Ok(())
 }

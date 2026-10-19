@@ -969,3 +969,20 @@ fn the_editor_stays_in_view_on_a_tall_decision() {
         assert!(text.contains("my answer"), "{text}");
     }
 }
+
+#[test]
+fn very_wide_decisions_panel_does_not_overflow() {
+    let app = app();
+    render(&app, 1368, 6);
+}
+
+mod randomized;
+
+#[test]
+fn decision_option_control_text_does_not_panic() {
+    let mut app = app();
+    app.decisions.truncate(1);
+    app.decisions[0].options[0].label = "\0界".into();
+    app.decisions_panel.selected = Some(ItemKey::Decision(app.decisions[0].key.clone()));
+    render(&app, 24, 6);
+}

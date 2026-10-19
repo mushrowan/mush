@@ -59,6 +59,7 @@ regex.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+proptest.workspace = true
 criterion.workspace = true
 # start_paused test clocks for the oauth browser-login timeout
 tokio = { workspace = true, features = ["test-util"] }
