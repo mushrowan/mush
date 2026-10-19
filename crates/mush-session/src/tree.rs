@@ -1153,15 +1153,7 @@ mod tests {
         tree.append_message(digest("v2"));
         tree.append_message(user_msg("q1"));
 
-        let context: Vec<String> = tree
-            .build_context()
-            .iter()
-            .map(|message| match message {
-                Message::User(user) => user.text(),
-                Message::Assistant(assistant) => assistant.text(),
-                _ => String::new(),
-            })
-            .collect();
+        let context: Vec<String> = tree.build_context().iter().map(text_of).collect();
 
         assert_eq!(
             context,
@@ -1701,14 +1693,7 @@ mod tests {
             ctx.len()
         );
 
-        let texts: Vec<String> = ctx
-            .iter()
-            .map(|m| match m {
-                Message::User(u) => u.text(),
-                Message::Assistant(a) => a.text(),
-                _ => String::new(),
-            })
-            .collect();
+        let texts: Vec<String> = ctx.iter().map(text_of).collect();
 
         assert!(
             texts[0].contains("second summary"),

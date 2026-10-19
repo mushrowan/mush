@@ -1216,7 +1216,7 @@ mod tests {
         runtime.persist_pending_prompt();
         runtime.persist_pending_prompt();
 
-        assert_eq!(runtime.conversation.messages().len(), 1);
+        assert_eq!(runtime.conversation.context().len(), 1);
         assert!(runtime.pending_prompt.as_ref().unwrap().is_persisted());
     }
 }

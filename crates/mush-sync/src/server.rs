@@ -27,7 +27,6 @@ const UNREFERENCED_GRACE: Duration = Duration::from_secs(60 * 60);
 const STAGING_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 const PRUNE_FIRST: Duration = Duration::from_secs(10 * 60);
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
-pub const DEFAULT_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {

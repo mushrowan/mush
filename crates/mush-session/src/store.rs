@@ -1115,12 +1115,7 @@ mod tests {
     fn save_and_load_session() {
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("hello".into()))
-                .timestamp_ms(Timestamp::from_ms(1000))
-                .build(),
-        ));
+        session.push_message(user("hello"));
 
         store.save(&session).unwrap();
         let loaded = store.load(&session.meta.id).unwrap();
@@ -1132,19 +1127,7 @@ mod tests {
     fn loading_caps_oversized_tool_details_but_keeps_the_content() {
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
-        let stdout = "x\n".repeat(mush_ai::types::DETAIL_TEXT_LIMIT);
-        session
-            .conversation
-            .append_message(Message::ToolResult(ToolResultMessage {
-                tool_call_id: ToolCallId::from("call"),
-                tool_name: ToolName::from("ipython"),
-                content: vec![ToolResultContentPart::Text(TextContent {
-                    text: "shown to the model".into(),
-                })],
-                outcome: ToolOutcome::Success,
-                timestamp_ms: Timestamp::zero(),
-                details: Some(serde_json::json!({ "stdout": stdout })),
-            }));
+        session.conversation.append_message(bloated_tool_result());
         store.save(&session).unwrap();
 
         let loaded = store.load(&session.meta.id).unwrap();

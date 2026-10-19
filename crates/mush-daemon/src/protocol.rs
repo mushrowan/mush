@@ -138,8 +138,6 @@ pub enum Frame {
 pub enum CodecError {
     #[error("malformed frame: {0}")]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
 }
 
 pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {

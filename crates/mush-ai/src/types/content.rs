@@ -46,10 +46,6 @@ impl ThinkingContent {
             Self::Redacted { .. } => None,
         }
     }
-
-    pub fn is_redacted(&self) -> bool {
-        matches!(self, Self::Redacted { .. })
-    }
 }
 
 impl Serialize for ThinkingContent {
@@ -241,7 +237,7 @@ mod tests {
         let json = serde_json::to_string(&normal).unwrap();
         let back: ThinkingContent = serde_json::from_str(&json).unwrap();
         assert_eq!(normal, back);
-        assert!(!back.is_redacted());
+        assert!(!matches!(back, ThinkingContent::Redacted { .. }));
         assert_eq!(back.text(), "let me think");
         assert_eq!(back.signature(), Some("sig123"));
     }
@@ -254,7 +250,7 @@ mod tests {
         let json = serde_json::to_string(&redacted).unwrap();
         let back: ThinkingContent = serde_json::from_str(&json).unwrap();
         assert_eq!(redacted, back);
-        assert!(back.is_redacted());
+        assert!(matches!(back, ThinkingContent::Redacted { .. }));
         assert_eq!(back.text(), "[reasoning redacted]");
         assert_eq!(back.signature(), Some("opaque_data"));
     }
@@ -263,17 +259,17 @@ mod tests {
     fn thinking_content_deserialises_legacy_format() {
         let json = r#"{"thinking": "hello", "signature": "sig", "redacted": false}"#;
         let tc: ThinkingContent = serde_json::from_str(json).unwrap();
-        assert!(!tc.is_redacted());
+        assert!(!matches!(tc, ThinkingContent::Redacted { .. }));
         assert_eq!(tc.text(), "hello");
 
         let json = r#"{"thinking": "[reasoning redacted]", "signature": "data", "redacted": true}"#;
         let tc: ThinkingContent = serde_json::from_str(json).unwrap();
-        assert!(tc.is_redacted());
+        assert!(matches!(tc, ThinkingContent::Redacted { .. }));
         assert_eq!(tc.signature(), Some("data"));
 
         let json = r#"{"thinking": "no redacted field"}"#;
         let tc: ThinkingContent = serde_json::from_str(json).unwrap();
-        assert!(!tc.is_redacted());
+        assert!(!matches!(tc, ThinkingContent::Redacted { .. }));
         assert_eq!(tc.text(), "no redacted field");
     }
 }

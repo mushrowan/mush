@@ -24,25 +24,16 @@ fn test_config_with_prefix(
     prefix: u64,
 ) -> CallConfig {
     CallConfig {
-        model_id: model.into(),
-        thinking_level: thinking.into(),
-        effort: effort.map(Into::into),
-        context_management: ContextManagementMode::LocalMonotonic,
         messages_prefix_fingerprint: Some(prefix),
-        system_fingerprint: None,
-        tools_fingerprint: None,
+        ..test_config(model, thinking, effort)
     }
 }
 
 fn test_config_with_fingerprints(system: u64, tools: u64, prefix: u64) -> CallConfig {
     CallConfig {
-        model_id: "m".into(),
-        thinking_level: "off".into(),
-        effort: None,
-        context_management: ContextManagementMode::LocalMonotonic,
-        messages_prefix_fingerprint: Some(prefix),
         system_fingerprint: Some(system),
         tools_fingerprint: Some(tools),
+        ..test_config_with_prefix("m", "off", None, prefix)
     }
 }
 
@@ -86,20 +77,8 @@ fn cache_module_exposes_timer_and_stats() {
     timer.refresh();
     assert!(timer.remaining_secs().is_some());
 
-    let prev = Usage {
-        input_tokens: TokenCount::new(5_000),
-        output_tokens: TokenCount::new(3_000),
-        cache_read_tokens: TokenCount::new(95_000),
-        cache_write_tokens: TokenCount::ZERO,
-        ..Default::default()
-    };
-    let curr = Usage {
-        input_tokens: TokenCount::new(5_000),
-        output_tokens: TokenCount::new(3_000),
-        cache_read_tokens: TokenCount::ZERO,
-        cache_write_tokens: TokenCount::new(100_000),
-        ..Default::default()
-    };
+    let prev = prev_usage();
+    let curr = curr_usage();
 
     let anomalies = detect_cache_anomalies(Some(&prev), &curr, None, None);
     assert!(

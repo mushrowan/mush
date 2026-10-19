@@ -19,18 +19,6 @@ impl App {
         self.stream.push_thinking(delta);
     }
 
-    pub fn visible_streaming_text(&self) -> &str {
-        self.stream.visible_text()
-    }
-
-    pub fn visible_streaming_text_len(&self) -> usize {
-        self.stream.visible_text_len()
-    }
-
-    pub fn visible_streaming_thinking(&self) -> &str {
-        self.stream.visible_thinking()
-    }
-
     pub fn push_tool_args_delta(&mut self, delta: &str) {
         self.stream.push_tool_args(delta);
     }

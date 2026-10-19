@@ -20,8 +20,9 @@ impl HarnessStore {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub fn with_dirs(local: PathBuf, global: PathBuf) -> Self {
+    pub(crate) fn with_dirs(local: PathBuf, global: PathBuf) -> Self {
         Self {
             local,
             global,

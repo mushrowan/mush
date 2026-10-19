@@ -94,17 +94,17 @@ fn typewriter_advances_with_ticks() {
     app.start_streaming();
     app.push_text_delta("hello world");
 
-    assert_eq!(app.visible_streaming_text(), "");
+    assert_eq!(app.stream.visible_text(), "");
 
     app.tick();
-    let visible = app.visible_streaming_text();
+    let visible = app.stream.visible_text();
     assert!(!visible.is_empty());
     assert!(visible.len() < "hello world".len());
 
     for _ in 0..20 {
         app.tick();
     }
-    assert_eq!(app.visible_streaming_text(), "hello world");
+    assert_eq!(app.stream.visible_text(), "hello world");
 }
 
 #[test]
@@ -115,12 +115,12 @@ fn a_burst_eases_in_but_is_all_on_screen_within_the_reveal_window() {
     app.stream.push_text_at(&"x".repeat(200), start);
 
     app.stream.advance_typewriter_at(start);
-    let first = app.visible_streaming_text_len();
+    let first = app.stream.visible_text_len();
     assert!(0 < first && first < 200, "visible chars={first}");
 
     app.stream
         .advance_typewriter_at(start + crate::streaming::REVEAL_WINDOW);
-    assert_eq!(app.visible_streaming_text_len(), 200);
+    assert_eq!(app.stream.visible_text_len(), 200);
     assert!(!app.stream.reveal_pending());
 }
 
@@ -136,9 +136,9 @@ fn a_slow_trickle_never_falls_behind_the_reveal_window() {
         app.stream.advance_typewriter_at(now);
         let due = (step as usize).saturating_sub(1) * 16;
         assert!(
-            app.visible_streaming_text_len() >= due,
+            app.stream.visible_text_len() >= due,
             "step {step}: visible {} behind due {due}",
-            app.visible_streaming_text_len()
+            app.stream.visible_text_len()
         );
     }
 }
@@ -151,10 +151,10 @@ fn typewriter_resets_on_new_stream() {
     for _ in 0..20 {
         app.tick();
     }
-    assert_eq!(app.visible_streaming_text(), "first");
+    assert_eq!(app.stream.visible_text(), "first");
 
     app.start_streaming();
-    assert_eq!(app.visible_streaming_text(), "");
+    assert_eq!(app.stream.visible_text(), "");
 }
 
 #[test]

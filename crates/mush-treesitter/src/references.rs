@@ -37,7 +37,7 @@ fn collect_identifiers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Language, ParserPool};
+    use crate::Language;
 
     #[test]
     fn rust_identifiers() {
@@ -52,8 +52,8 @@ fn process(items: Vec<String>) -> HashMap<String, usize> {
     map
 }
 "#;
-        let pool = ParserPool::new();
-        let tree = pool.parse(Language::Rust, source.as_bytes()).unwrap();
+        let mut parser = crate::parser::new_parser(&Language::Rust.tree_sitter_language().unwrap());
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
         let refs = extract_references(source.as_bytes(), &tree);
 
         assert!(refs.contains("HashMap"), "missing HashMap: {refs:?}");
@@ -72,8 +72,9 @@ def analyse(words):
     counts = Counter(words)
     return counts.most_common(10)
 "#;
-        let pool = ParserPool::new();
-        let tree = pool.parse(Language::Python, source.as_bytes()).unwrap();
+        let mut parser =
+            crate::parser::new_parser(&Language::Python.tree_sitter_language().unwrap());
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
         let refs = extract_references(source.as_bytes(), &tree);
 
         assert!(refs.contains("Counter"), "missing Counter: {refs:?}");
@@ -84,8 +85,8 @@ def analyse(words):
     #[test]
     fn single_char_filtered_out() {
         let source = "fn f(x: MyType) -> MyType { x }";
-        let pool = ParserPool::new();
-        let tree = pool.parse(Language::Rust, source.as_bytes()).unwrap();
+        let mut parser = crate::parser::new_parser(&Language::Rust.tree_sitter_language().unwrap());
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
         let refs = extract_references(source.as_bytes(), &tree);
 
         assert!(!refs.contains("x"), "single-char x should be filtered");

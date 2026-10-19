@@ -111,7 +111,7 @@ pub(crate) fn streaming_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         let stream_content_width = message_content_width(width as usize);
         push_live_thinking(app, stream_content_width, now, &mut lines);
         if !app.stream.text.is_empty() {
-            let visible_text = app.visible_streaming_text();
+            let visible_text = app.stream.visible_text();
             let md_text = render_streaming_markdown_cached(app, visible_text, stream_content_width);
             for line in md_text.lines {
                 lines.extend(indent_line(line, stream_content_width));
@@ -214,7 +214,7 @@ fn push_live_thinking(
     if app.thinking_display == ThinkingDisplay::Hidden && !app.detail.shows_full_output() {
         return;
     }
-    let visible_thinking = app.visible_streaming_thinking().trim_end();
+    let visible_thinking = app.stream.visible_thinking().trim_end();
     let strip = common_leading_space(visible_thinking);
     for text_line in visible_thinking.lines() {
         let body = drop_leading_spaces(text_line, strip);

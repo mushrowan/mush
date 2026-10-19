@@ -84,10 +84,6 @@ impl ConversationState {
         self.tree.context_len()
     }
 
-    pub fn messages(&self) -> Vec<Message> {
-        self.context()
-    }
-
     pub fn tree(&self) -> &SessionTree {
         &self.tree
     }

@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use mush_ai::dirs::saved_output_name;
+
 use crate::engine::{Direction, Engine, RemoteEntry, Report, SyncError};
 use crate::local::{SessionState, Stamp, stamp};
 use crate::protocol::{Commit, FileRef, manifest_aad, now_ms};
@@ -11,18 +13,6 @@ pub const TOOL_OUTPUT: &str = "_tool_output";
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const PREFIX: &str = "tool-output/";
 const DIR_KEY: &str = ".";
-
-#[must_use]
-pub fn saved_output(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".txt") else {
-        return false;
-    };
-    let digits = stem
-        .strip_prefix("tool_")
-        .or_else(|| stem.strip_prefix("rejected_"))
-        .unwrap_or_default();
-    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
-}
 
 fn modified_ms(stamp: &Stamp) -> u64 {
     u64::try_from(stamp.mtime_ns / 1_000_000).unwrap_or(0)
@@ -44,7 +34,7 @@ fn scan(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !saved_output(&name) {
+        if !saved_output_name(&name) {
             continue;
         }
         if let Some(now) = stamp(&entry.path())?
@@ -108,7 +98,9 @@ impl Engine {
             let mut pulled = 0usize;
             if direction == Direction::Both {
                 for (key, file) in &remote.files {
-                    let Some(name) = key.strip_prefix(PREFIX).filter(|name| saved_output(name))
+                    let Some(name) = key
+                        .strip_prefix(PREFIX)
+                        .filter(|name| saved_output_name(name))
                     else {
                         continue;
                     };
@@ -252,7 +244,7 @@ mod tests {
     #[test]
     fn only_saved_tool_output_names_are_synced() {
         for name in ["tool_1791357088823.txt", "rejected_1791357088823.txt"] {
-            assert!(saved_output(name), "{name}");
+            assert!(saved_output_name(name), "{name}");
         }
         for name in [
             "oauth.json",
@@ -262,7 +254,7 @@ mod tests {
             "notes.txt",
             "../tool_1.txt",
         ] {
-            assert!(!saved_output(name), "{name}");
+            assert!(!saved_output_name(name), "{name}");
         }
     }
 }

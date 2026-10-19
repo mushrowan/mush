@@ -56,16 +56,6 @@ impl OrchestratorInbox {
         }
     }
 
-    pub fn set_store_dir(&mut self, store_dir: PathBuf) {
-        self.store_dir = store_dir;
-    }
-
-    pub fn age_staged(&mut self, by: Duration) {
-        if let Some((_, started)) = &mut self.staged {
-            *started -= by;
-        }
-    }
-
     pub fn rearm(&mut self) {
         self.replayed = false;
         self.next_poll = Instant::now();
@@ -291,7 +281,7 @@ mod tests {
         let binding = register(&fixture.inbox_dir, &session_id, fixture.cwd());
         let event = deliver(&fixture.inbox_dir, &binding);
         let mut inbox = fixture.open().unwrap();
-        inbox.set_store_dir(fixture.cwd().join("sessions"));
+        inbox.store_dir = fixture.cwd().join("sessions");
         fixture.connection.attach_inbox(inbox);
 
         assert!(!fixture.connection.poll_inbox().await);
@@ -305,7 +295,10 @@ mod tests {
             .connection
             .inbox_mut()
             .unwrap()
-            .age_staged(Duration::from_secs(6));
+            .staged
+            .as_mut()
+            .unwrap()
+            .1 -= Duration::from_secs(6);
         assert!(fixture.connection.poll_inbox().await);
 
         assert!(fixture.connection.inbox().is_none());

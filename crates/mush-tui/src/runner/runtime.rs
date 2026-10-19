@@ -1246,7 +1246,7 @@ mod tests {
         let mut runtime = mush_runtime::SessionRuntime::new(ConversationState::new());
         runtime.pending_prompt = Some(crate::session::PendingPrompt::text(text));
         runtime.persist_pending_prompt();
-        match runtime.conversation.messages().last().expect("a message") {
+        match runtime.conversation.context().last().expect("a message") {
             Message::User(user) => user.prompt_id.clone().expect("a prompt id"),
             other => panic!("expected a user message, got {other:?}"),
         }

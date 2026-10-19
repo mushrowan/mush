@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-use mush_ai::openrouter_coverage::{FieldStatus, assert_no_drift};
+use super::coverage_support::{FieldStatus, assert_no_drift};
 
 const BASE_URL: &str = "https://openrouter.ai/api/v1";
 

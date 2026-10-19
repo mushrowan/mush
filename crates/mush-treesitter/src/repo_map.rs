@@ -52,11 +52,6 @@ impl RenderOptions {
             summary_only: false,
         }
     }
-
-    #[must_use]
-    pub fn for_tokens(max_tokens: usize) -> Self {
-        Self::for_chars(max_tokens * 4)
-    }
 }
 
 impl RepoMap {
@@ -146,11 +141,6 @@ impl RepoMap {
     pub fn format(&self, max_chars: usize) -> String {
         self.render(RenderOptions::for_chars(max_chars))
     }
-}
-
-pub fn build_repo_map(root: &Path) -> RepoMap {
-    let incr = IncrementalRepoMap::new(root);
-    incr.current
 }
 
 fn rank_symbols(
@@ -621,7 +611,7 @@ impl Server {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let map = build_repo_map(dir.path());
+        let map = IncrementalRepoMap::new(dir.path()).current;
 
         assert!(!map.files.is_empty(), "map should have files");
 
@@ -649,7 +639,7 @@ impl Server {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let map = build_repo_map(dir.path());
+        let map = IncrementalRepoMap::new(dir.path()).current;
 
         let config_entry = map
             .files
@@ -678,7 +668,7 @@ impl Server {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let map = build_repo_map(dir.path());
+        let map = IncrementalRepoMap::new(dir.path()).current;
         let text = map.format(10_000);
 
         assert!(!text.is_empty());
@@ -697,7 +687,7 @@ impl Server {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let map = build_repo_map(dir.path());
+        let map = IncrementalRepoMap::new(dir.path()).current;
         let text = map.format(100);
 
         assert!(
@@ -710,7 +700,7 @@ impl Server {
     #[test]
     fn empty_dir_produces_empty_map() {
         let dir = tempfile::tempdir().unwrap();
-        let map = build_repo_map(dir.path());
+        let map = IncrementalRepoMap::new(dir.path()).current;
         assert!(map.files.is_empty());
     }
 
@@ -741,7 +731,7 @@ impl Server {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());
 
-        let full = build_repo_map(dir.path());
+        let full = IncrementalRepoMap::new(dir.path()).current;
         let incr = IncrementalRepoMap::new(dir.path());
 
         assert_eq!(

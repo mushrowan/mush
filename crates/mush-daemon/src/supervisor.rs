@@ -9,6 +9,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::client::{CONNECT_TIMEOUT, REQUEST_TIMEOUT};
 use crate::protocol::{decode, encode};
+use crate::worker::now_secs;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 const OPEN_TIMEOUT: Duration = SPAWN_TIMEOUT.saturating_add(Duration::from_secs(5));
@@ -232,10 +233,6 @@ impl Supervisor {
         }
     }
 
-    pub fn roster(&self) -> Vec<WorkerDescriptor> {
-        self.nursery.roster()
-    }
-
     pub async fn handle(&self, request: SupervisorRequest) -> SupervisorReply {
         match request {
             SupervisorRequest::Open {
@@ -247,17 +244,18 @@ impl Supervisor {
                 Ok(reply) => reply,
                 Err(error) => SupervisorReply::Error(error.to_string()),
             },
-            SupervisorRequest::List => SupervisorReply::Workers(self.roster()),
+            SupervisorRequest::List => SupervisorReply::Workers(self.nursery.roster()),
             SupervisorRequest::Status => SupervisorReply::Status {
                 build: crate::build::build_id(),
                 workers: self
+                    .nursery
                     .roster()
                     .iter()
                     .filter(|worker| worker.failed.is_none())
                     .count(),
             },
             SupervisorRequest::Stop { session_id } => {
-                let worker = match select(self.roster(), &session_id) {
+                let worker = match select(self.nursery.roster(), &session_id) {
                     Ok(Some(worker)) => worker,
                     Ok(None) => {
                         return SupervisorReply::Error(format!(
@@ -273,7 +271,7 @@ impl Supervisor {
             }
             SupervisorRequest::Shutdown => {
                 let mut stopping = tokio::task::JoinSet::new();
-                for worker in self.roster() {
+                for worker in self.nursery.roster() {
                     let nursery = std::sync::Arc::clone(&self.nursery);
                     stopping.spawn(async move {
                         if let Err(error) = nursery.stop(&worker).await {
@@ -842,12 +840,6 @@ pub async fn stop_unsupervised(worker: &WorkerDescriptor) -> io::Result<()> {
     stop(worker).await?;
     let _ = std::fs::remove_file(descriptor_of(worker));
     Ok(())
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn descriptor_of(worker: &WorkerDescriptor) -> PathBuf {

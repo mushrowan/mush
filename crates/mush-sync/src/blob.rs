@@ -236,23 +236,23 @@ impl<'k> Unsealer<'k> {
     }
 }
 
-pub fn open_all(
-    keys: &Keys,
-    sid: &str,
-    blob: &str,
-    len: u64,
-    sealed: &[u8],
-) -> Result<Vec<u8>, BlobError> {
-    let mut plain = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-    let mut unsealer = Unsealer::new(keys, sid, blob, len);
-    unsealer.feed(sealed, &mut plain)?;
-    unsealer.finish(&mut plain)?;
-    Ok(plain)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_all(
+        keys: &Keys,
+        sid: &str,
+        blob: &str,
+        len: u64,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, BlobError> {
+        let mut plain = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        let mut unsealer = Unsealer::new(keys, sid, blob, len);
+        unsealer.feed(sealed, &mut plain)?;
+        unsealer.finish(&mut plain)?;
+        Ok(plain)
+    }
 
     fn keys() -> Arc<Keys> {
         Arc::new(Keys::from_master(&[5; 32]))

@@ -24,11 +24,6 @@ impl LastModels {
     pub fn prune_missing_dirs(&mut self) {
         self.by_dir.retain(|p, _| p.exists());
     }
-
-    #[must_use]
-    pub fn directory_count(&self) -> usize {
-        self.by_dir.len()
-    }
 }
 
 #[must_use]
@@ -61,7 +56,7 @@ mod tests {
         last.set(PathBuf::from("/a"), "gpt-5".into());
         last.set(PathBuf::from("/a"), "claude-opus-4-7".into());
         assert_eq!(last.get(Path::new("/a")), Some("claude-opus-4-7"));
-        assert_eq!(last.directory_count(), 1);
+        assert_eq!(last.by_dir.len(), 1);
     }
 
     #[test]
@@ -74,7 +69,7 @@ mod tests {
             "claude-opus-4-7".into(),
         );
         last.prune_missing_dirs();
-        assert_eq!(last.directory_count(), 1);
+        assert_eq!(last.by_dir.len(), 1);
         assert!(last.get(tmp.path()).is_some());
     }
 

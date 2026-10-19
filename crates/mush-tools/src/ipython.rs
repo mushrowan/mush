@@ -499,12 +499,6 @@ impl IpythonTool {
         }
     }
 
-    #[must_use]
-    pub fn with_snapshot_debounce(mut self, debounce: Duration) -> Self {
-        self.snapshot_debounce = debounce;
-        self
-    }
-
     fn schedule_snapshot(&self) {
         let Some(path) = lock(&self.session)
             .as_ref()
@@ -1993,7 +1987,8 @@ mod tests {
         use mush_kernel::KernelState;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifacts/kernel-state.pickle");
-        let tool = tool(dir.path()).with_snapshot_debounce(std::time::Duration::from_millis(50));
+        let mut tool = tool(dir.path());
+        tool.snapshot_debounce = std::time::Duration::from_millis(50);
         tool.attach_session(mush_kernel::KernelSession {
             session_dir: dir.path().join("artifacts"),
             state_path: path.clone(),
@@ -2081,7 +2076,8 @@ mod tests {
     async fn a_cell_does_not_wait_for_the_auto_save_of_the_cell_before_it() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("pickling");
-        let tool = attached_tool(dir.path()).with_snapshot_debounce(Duration::from_millis(10));
+        let mut tool = attached_tool(dir.path());
+        tool.snapshot_debounce = Duration::from_millis(10);
         let first = tool
             .execute(json!({ "code": format!(
                 "import pathlib, time\nclass Slow:\n    def __reduce__(self):\n        pathlib.Path({:?}).touch()\n        time.sleep(30)\n        return (Slow, ())\nkeep = 41\nslow = Slow()",

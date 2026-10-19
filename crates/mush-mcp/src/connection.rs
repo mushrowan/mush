@@ -47,7 +47,6 @@ pub(crate) fn report_status(text: &str, ansi: &str) {
 }
 
 pub struct McpConnection {
-    pub name: String,
     pub service: RunningService<RoleClient, ()>,
     pub tools: Vec<McpToolDef>,
     timeout: Option<Duration>,
@@ -111,7 +110,6 @@ impl McpConnection {
         );
 
         Ok(Self {
-            name: name.to_string(),
             service,
             tools,
             timeout: config.request_timeout(),

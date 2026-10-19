@@ -56,21 +56,13 @@ enum RepoMapEnsureError {
 }
 
 impl RepoMapShared {
-    pub fn eager(map: SharedRepoMap, budget_tokens: usize) -> Self {
-        Self::with_state(map, PathBuf::new(), true, budget_tokens)
-    }
-
     pub fn lazy(root: impl Into<PathBuf>, budget_tokens: usize) -> Self {
         let empty = Arc::new(RwLock::new(RepoMap::default()));
-        Self::with_state(empty, root.into(), false, budget_tokens)
-    }
-
-    fn with_state(map: SharedRepoMap, root: PathBuf, started: bool, budget_tokens: usize) -> Self {
         Self {
-            map: Arc::new(RwLock::new(map)),
+            map: Arc::new(RwLock::new(empty)),
             state: Arc::new(RwLock::new(RepoMapState {
-                root,
-                started,
+                root: root.into(),
+                started: false,
                 build_error: None,
                 watcher: None,
             })),
@@ -278,7 +270,9 @@ mod tests {
     }
 
     fn make_tool(map: RepoMap) -> RepoMapTool {
-        let shared = RepoMapShared::eager(Arc::new(RwLock::new(map)), /*budget_tokens*/ 8192);
+        let shared = RepoMapShared::lazy(PathBuf::new(), 8192);
+        *shared.map().write().unwrap() = map;
+        shared.state.write().unwrap().started = true;
         RepoMapTool::new(shared)
     }
 

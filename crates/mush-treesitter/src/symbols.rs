@@ -145,8 +145,8 @@ mod tests {
     use super::*;
 
     fn parse_and_extract(lang: Language, source: &str) -> Vec<SymbolInfo> {
-        let pool = crate::ParserPool::new();
-        let tree = pool.parse(lang, source.as_bytes()).unwrap();
+        let mut parser = crate::parser::new_parser(&lang.tree_sitter_language().unwrap());
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
         extract_symbols(lang, source.as_bytes(), &tree)
     }
 

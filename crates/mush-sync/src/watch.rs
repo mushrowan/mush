@@ -25,7 +25,7 @@ fn changes_something(kind: notify::EventKind) -> bool {
 
 fn session_of(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    if crate::tool_output::saved_output(name) {
+    if mush_ai::dirs::saved_output_name(name) {
         return Some(crate::tool_output::TOOL_OUTPUT.to_owned());
     }
     let id = name

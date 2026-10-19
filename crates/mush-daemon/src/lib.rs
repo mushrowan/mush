@@ -7,7 +7,7 @@ pub mod worker;
 
 pub use build::build_id;
 pub use client::{ConnectError, DaemonConnection};
-pub use protocol::{ClientId, Cursor, Frame, Reply, Request, RequestId};
+pub use protocol::{Cursor, Frame, Reply};
 pub use supervisor::{
     ChildDescriptor, OpenTarget, Relaunch, Supervisor, SupervisorReply, SupervisorRequest,
     WorkerDescriptor, daemon_socket_path, workers_dir,

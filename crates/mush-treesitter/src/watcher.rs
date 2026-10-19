@@ -233,7 +233,7 @@ mod tests {
             .map()
             .read()
             .unwrap()
-            .render(crate::RenderOptions::for_tokens(1024))
+            .render(crate::RenderOptions::for_chars(4096))
     }
 
     #[test]

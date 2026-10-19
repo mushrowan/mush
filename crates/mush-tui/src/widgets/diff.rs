@@ -106,15 +106,6 @@ pub(crate) fn fit_spans(
 }
 
 #[must_use]
-pub fn paired_change_spans(
-    removed: &str,
-    added: &str,
-    theme: &Theme,
-) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
-    paired_change_spans_with_lang(removed, added, theme, None)
-}
-
-#[must_use]
 pub fn paired_change_spans_with_lang(
     removed: &str,
     added: &str,
@@ -651,7 +642,8 @@ mod tests {
     #[test]
     fn paired_change_spans_marks_changed_tokens() {
         let theme = Theme::dark();
-        let (removed, added) = paired_change_spans("foo bar baz", "foo qux baz", &theme);
+        let (removed, added) =
+            paired_change_spans_with_lang("foo bar baz", "foo qux baz", &theme, None);
 
         let has_intra_bar = removed
             .iter()
@@ -682,7 +674,8 @@ mod tests {
     #[test]
     fn paired_change_spans_identical_inputs_have_no_intra_highlight() {
         let theme = Theme::dark();
-        let (removed, added) = paired_change_spans("same text", "same text", &theme);
+        let (removed, added) =
+            paired_change_spans_with_lang("same text", "same text", &theme, None);
         let base_removed = theme.diff_base_removed();
         let base_added = theme.diff_base_added();
         assert!(

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::nonpoison::Mutex;
 
 use crate::language::Language;
 
@@ -14,42 +12,6 @@ pub enum ParseError {
     ParseFailed,
     #[error("could not read file: {0}")]
     Io(#[from] std::io::Error),
-}
-
-#[derive(Default)]
-pub struct ParserPool {
-    parsers: Mutex<HashMap<Language, tree_sitter::Parser>>,
-}
-
-impl ParserPool {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn parse(
-        &self,
-        language: Language,
-        source: &[u8],
-    ) -> Result<tree_sitter::Tree, ParseError> {
-        let ts_lang = language
-            .tree_sitter_language()
-            .ok_or(ParseError::GrammarNotAvailable(language))?;
-
-        let mut parsers = self.parsers.lock();
-        let parser = parsers
-            .entry(language)
-            .or_insert_with(|| new_parser(&ts_lang));
-
-        parser.parse(source, None).ok_or(ParseError::ParseFailed)
-    }
-}
-
-impl std::fmt::Debug for ParserPool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ParserPool")
-            .field("cached_parsers", &self.parsers.lock().len())
-            .finish()
-    }
 }
 
 pub(crate) fn detect_language(path: &Path) -> Result<Language, ParseError> {
@@ -75,33 +37,33 @@ mod tests {
 
     #[test]
     fn parse_rust_source() {
-        let pool = ParserPool::new();
+        let mut parser = new_parser(&Language::Rust.tree_sitter_language().unwrap());
         let source = b"fn main() { println!(\"hello\"); }";
-        let tree = pool.parse(Language::Rust, source).unwrap();
+        let tree = parser.parse(source, None).unwrap();
         assert_eq!(tree.root_node().kind(), "source_file");
     }
 
     #[test]
     fn parse_python_source() {
-        let pool = ParserPool::new();
+        let mut parser = new_parser(&Language::Python.tree_sitter_language().unwrap());
         let source = b"def hello():\n    print('hello')";
-        let tree = pool.parse(Language::Python, source).unwrap();
+        let tree = parser.parse(source, None).unwrap();
         assert_eq!(tree.root_node().kind(), "module");
     }
 
     #[test]
     fn parse_javascript_source() {
-        let pool = ParserPool::new();
+        let mut parser = new_parser(&Language::JavaScript.tree_sitter_language().unwrap());
         let source = b"function greet(name) { return `hello ${name}`; }";
-        let tree = pool.parse(Language::JavaScript, source).unwrap();
+        let tree = parser.parse(source, None).unwrap();
         assert_eq!(tree.root_node().kind(), "program");
     }
 
     #[test]
     fn parse_go_source() {
-        let pool = ParserPool::new();
+        let mut parser = new_parser(&Language::Go.tree_sitter_language().unwrap());
         let source = b"package main\nfunc main() {}";
-        let tree = pool.parse(Language::Go, source).unwrap();
+        let tree = parser.parse(source, None).unwrap();
         assert_eq!(tree.root_node().kind(), "source_file");
     }
 
@@ -115,12 +77,45 @@ mod tests {
 
     #[test]
     fn parser_reuse() {
-        let pool = ParserPool::new();
+        let mut parser = new_parser(&Language::Rust.tree_sitter_language().unwrap());
         let source = b"fn a() {} fn b() {}";
-        pool.parse(Language::Rust, source).unwrap();
-        pool.parse(Language::Rust, source).unwrap();
+        let first = parser.parse(source, None).unwrap();
+        let second = parser.parse(source, None).unwrap();
+        assert_eq!(first.root_node().to_sexp(), second.root_node().to_sexp());
+    }
 
-        let count = pool.parsers.lock().len();
-        assert_eq!(count, 1);
+    #[test]
+    fn reused_and_fresh_parsers_agree_on_generated_sources() {
+        let mut cached = std::collections::HashMap::new();
+        let mut state = 0x7a5c_324d_1e8b_960fu64;
+        for &language in crate::language::ALL {
+            let Some(grammar) = language.tree_sitter_language() else {
+                continue;
+            };
+            for _ in 0..32 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let source: Vec<u8> = (0..state as usize % 256)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state as u8
+                    })
+                    .collect();
+                let reused = cached
+                    .entry(language)
+                    .or_insert_with(|| new_parser(&grammar))
+                    .parse(&source, None)
+                    .unwrap();
+                let fresh = new_parser(&grammar).parse(&source, None).unwrap();
+                assert_eq!(reused.root_node().to_sexp(), fresh.root_node().to_sexp());
+                assert_eq!(
+                    reused.root_node().has_error(),
+                    fresh.root_node().has_error()
+                );
+            }
+        }
     }
 }

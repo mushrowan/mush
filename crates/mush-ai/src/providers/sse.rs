@@ -104,10 +104,6 @@ impl SseParser {
         chunk_buf.drain(..start);
         events
     }
-
-    pub fn buffered_bytes(&self) -> &[u8] {
-        &self.chunk_buf
-    }
 }
 
 pub enum ProcessResult {
@@ -396,7 +392,7 @@ mod tests {
         assert_eq!(pairs(&split), pairs(&whole));
         assert_eq!(whole.len(), 3);
         assert_eq!(whole[0].data, "h\u{e9}llo");
-        assert_eq!(parser.buffered_bytes(), b"data: open");
+        assert_eq!(parser.chunk_buf.as_slice(), b"data: open");
     }
 
     struct Quiet;
@@ -455,7 +451,7 @@ mod tests {
     fn buffered_bytes_diagnostic() {
         let mut parser = SseParser::new();
         parser.push(b"data: partial");
-        assert!(!parser.buffered_bytes().is_empty());
+        assert!(!parser.chunk_buf.is_empty());
     }
 
     #[test]

@@ -6,36 +6,14 @@ use mush_tui::session_picker::{SessionPickerState, SessionScope, filtered_sessio
 fn session_picker_module_exposes_state_and_filtering() {
     let sessions = vec![
         SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: SessionId::from("local"),
             title: Some("local work".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
             message_count: 1,
-            cwd: "/tmp/project".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
+            ..meta("local", "/tmp/project")
         },
         SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: SessionId::from("remote"),
             title: Some("remote work".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
             message_count: 2,
-            cwd: "/tmp/other".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
+            ..meta("remote", "/tmp/other")
         },
     ];
 
@@ -61,36 +39,16 @@ fn drain_incoming_appends_and_flips_loading() {
     assert!(picker.loading, "streaming picker starts in loading state");
 
     let older = SessionMeta {
-        paused: None,
-        rlm_max_depth: None,
-        spawn_view: None,
-        id: SessionId::from("a"),
         title: Some("old".into()),
-        model_id: "m".into(),
         created_at: Timestamp::from_ms(100),
         updated_at: Timestamp::from_ms(100),
-        message_count: 1,
-        cwd: "/tmp/project".into(),
-        parent: None,
-        subagent_model: None,
-        accounts: Default::default(),
-        lifecycle: mush_session::Lifecycle::Live,
+        ..meta("a", "/tmp/project")
     };
     let newer = SessionMeta {
-        paused: None,
-        rlm_max_depth: None,
-        spawn_view: None,
-        id: SessionId::from("b"),
         title: Some("new".into()),
-        model_id: "m".into(),
         created_at: Timestamp::from_ms(200),
         updated_at: Timestamp::from_ms(200),
-        message_count: 1,
-        cwd: "/tmp/project".into(),
-        parent: None,
-        subagent_model: None,
-        accounts: Default::default(),
-        lifecycle: mush_session::Lifecycle::Live,
+        ..meta("b", "/tmp/project")
     };
     tx.send(older).unwrap();
     tx.send(newer).unwrap();

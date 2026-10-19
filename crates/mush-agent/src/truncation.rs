@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::tool::{OutputLimit, ToolResult};
+use mush_ai::dirs::saved_output_name;
 use mush_ai::types::ToolResultContentPart;
 
 pub const MAX_LINES: usize = 2000;
@@ -19,18 +20,6 @@ fn output_dir() -> PathBuf {
         PathBuf::from("/tmp/mush")
     };
     base.join("tool-output")
-}
-
-#[must_use]
-pub fn saved_output_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".txt") else {
-        return false;
-    };
-    let digits = stem
-        .strip_prefix("tool_")
-        .or_else(|| stem.strip_prefix("rejected_"))
-        .unwrap_or_default();
-    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[must_use]
