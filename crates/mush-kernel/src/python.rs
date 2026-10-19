@@ -63,6 +63,25 @@ impl PythonPlan {
     }
 }
 
+pub fn runtime_read_paths(python: &Path) -> Result<Vec<PathBuf>, KernelError> {
+    let resolved = python.canonicalize()?;
+    let mut paths = Vec::new();
+    for executable in [python, resolved.as_path()] {
+        if executable.starts_with("/nix/store") {
+            continue;
+        }
+        match executable
+            .parent()
+            .filter(|bin| bin.file_name().is_some_and(|name| name == "bin"))
+            .and_then(Path::parent)
+        {
+            Some(root) if root.join("pyvenv.cfg").is_file() => paths.push(root.to_path_buf()),
+            _ => paths.push(executable.to_path_buf()),
+        }
+    }
+    Ok(paths)
+}
+
 pub(crate) fn system_python() -> Result<PathBuf, KernelError> {
     ["python3", "python"]
         .into_iter()

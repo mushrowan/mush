@@ -100,6 +100,7 @@ pub struct MushHost {
     diffs: Mutex<HashMap<String, Vec<CellDiff>>>,
     sent: Mutex<HashMap<String, Vec<SentMessage>>>,
     extension: RwLock<Option<Arc<dyn HostRequestHandler>>>,
+    sandbox: RwLock<Option<Arc<mush_sandbox::Sandbox>>>,
 }
 
 impl MushHost {
@@ -116,6 +117,7 @@ impl MushHost {
             diffs: Mutex::new(HashMap::new()),
             sent: Mutex::new(HashMap::new()),
             extension: RwLock::new(None),
+            sandbox: RwLock::new(None),
         }
     }
 
@@ -154,6 +156,11 @@ impl MushHost {
                 text: text.clone(),
             });
         }
+    }
+
+    pub fn set_sandbox(&self, sandbox: Option<Arc<mush_sandbox::Sandbox>>) {
+        self.jobs.set_sandbox(sandbox.clone());
+        *write_lock(&self.sandbox) = sandbox;
     }
 
     pub fn set_web_search(&self, tool: Arc<dyn AgentTool>) {
@@ -268,6 +275,45 @@ impl MushHost {
     }
 
     async fn apply_edit(&self, payload: &Value) -> Result<Value, HostError> {
+        let sandbox = read_lock(&self.sandbox).clone();
+        if let Some(sandbox) = sandbox {
+            let path = payload
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("edit needs a path")?;
+            let old = payload
+                .get("old")
+                .and_then(Value::as_str)
+                .ok_or("edit needs old text")?;
+            let new = payload
+                .get("new")
+                .and_then(Value::as_str)
+                .ok_or("edit needs new text")?;
+            let allow_marker = payload
+                .get(crate::redaction_guard::ALLOW_REDACTION_MARKER_KEY)
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !allow_marker && crate::redaction_guard::introduced_marker(old, new) {
+                return Err(HostError("edit introduces a redaction marker; set allow_redaction_marker only when literal marker text is intended".into()));
+            }
+            let target = self.cwd.join(path);
+            let old = old.to_string();
+            let new = new.to_string();
+            tokio::task::spawn_blocking(move || sandbox.edit_file(&target, &old, &new))
+                .await
+                .map_err(|error| HostError(error.to_string()))?
+                .map_err(|error| HostError(error.to_string()))?;
+            self.record_diff(
+                origin(payload),
+                path.to_string(),
+                format!(
+                    "-{old_text}\n+{new_text}",
+                    old_text = payload["old"].as_str().unwrap_or_default(),
+                    new_text = payload["new"].as_str().unwrap_or_default()
+                ),
+            );
+            return Ok(json!({"summary": format!("edited {path}")}));
+        }
         let args = json!({
             "path": payload.get("path").cloned().unwrap_or(Value::Null),
             "oldText": payload.get("old").cloned().unwrap_or(Value::Null),
@@ -291,6 +337,14 @@ impl MushHost {
 
 #[async_trait::async_trait]
 impl HostRequestHandler for MushHost {
+    fn configure_sandbox(&self, sandbox: Arc<mush_sandbox::Sandbox>) {
+        self.set_sandbox(Some(sandbox));
+    }
+
+    fn sandboxed_edit(&self) -> bool {
+        read_lock(&self.sandbox).is_some()
+    }
+
     fn cancellable(&self, kind: &str) -> bool {
         matches!(
             kind,
@@ -299,6 +353,11 @@ impl HostRequestHandler for MushHost {
     }
 
     async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
+        if let Some(sandbox) = read_lock(&self.sandbox).as_ref()
+            && !sandbox.allows_host_request(kind)
+        {
+            return Err(HostError(format!("sandbox denied host request {kind}")));
+        }
         match kind {
             "bash.start" => self.start_bash(&payload).await,
             "bash.wait" => Ok(job_reply(
@@ -510,6 +569,56 @@ impl IpythonTool {
     pub fn with_busy_prompt(mut self, prompt: BusyKernelPrompt) -> Self {
         self.busy_prompt = Some(prompt);
         self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Arc<mush_sandbox::Sandbox>) -> Result<Self, String> {
+        self.set_sandbox(Some(sandbox))?;
+        Ok(self)
+    }
+
+    pub fn set_sandbox(
+        &mut self,
+        sandbox: Option<Arc<mush_sandbox::Sandbox>>,
+    ) -> Result<(), String> {
+        if self
+            .kernel
+            .try_lock()
+            .map_err(|_| "kernel is running".to_string())?
+            .is_some()
+            || self
+                .mush_host
+                .as_ref()
+                .is_some_and(|host| host.jobs().any_running())
+        {
+            return Err("sandbox cannot be changed while the kernel or jobs are running".into());
+        }
+        let sandbox = match sandbox {
+            Some(sandbox) => {
+                let plan = mush_kernel::PythonPlan::resolve(
+                    self.config.python.as_deref(),
+                    self.config.managed_venv.as_ref(),
+                )
+                .map_err(|error| error.to_string())?;
+                let python = plan.python_if_present().ok_or("initialize the managed Python environment in a trusted session before sandbox launch")?;
+                let mut paths = mush_kernel::python::runtime_read_paths(&python)
+                    .map_err(|error| error.to_string())?;
+                if let mush_kernel::PythonPlan::Managed(venv) = &plan {
+                    paths.push(venv.dir.clone());
+                    paths.extend(venv.skills.iter().map(|skill| skill.dir.clone()));
+                }
+                Some(Arc::new(
+                    sandbox
+                        .with_paths(&paths, &[])
+                        .map_err(|error| error.to_string())?,
+                ))
+            }
+            None => None,
+        };
+        if let Some(host) = &self.mush_host {
+            host.set_sandbox(sandbox.clone());
+        }
+        self.config.sandbox = sandbox;
+        Ok(())
     }
 
     pub fn kernel_config_mut(&mut self) -> &mut KernelConfig {

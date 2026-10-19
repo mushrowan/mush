@@ -68,6 +68,8 @@ fn child(name: &str, confirmation: Option<&str>) -> ChildSummary {
         depth: 1,
         session_id: format!("{name}-s"),
         model_id: "m".into(),
+        sandbox: None,
+        sandbox_profile: None,
         thinking: None,
         status: mush_runtime::ChildStatus::Running,
         spawned_at: Timestamp::zero(),

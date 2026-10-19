@@ -24,6 +24,7 @@ pub const MAX_BACKGROUND_OUTPUT_CHARS: usize = 64 * 1024;
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
     pub python: Option<PathBuf>,
+    pub sandbox: Option<Arc<mush_sandbox::Sandbox>>,
     pub managed_venv: Option<crate::venv::ManagedVenv>,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
@@ -36,6 +37,7 @@ impl Default for KernelConfig {
     fn default() -> Self {
         Self {
             python: None,
+            sandbox: None,
             managed_venv: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             env: Vec::new(),
@@ -68,6 +70,36 @@ pub trait HostRequestHandler: Send + Sync {
 
     fn cancellable(&self, _kind: &str) -> bool {
         false
+    }
+
+    fn sandboxed_edit(&self) -> bool {
+        false
+    }
+
+    fn configure_sandbox(&self, _sandbox: Arc<mush_sandbox::Sandbox>) {}
+}
+
+struct SandboxedHost {
+    sandbox: Arc<mush_sandbox::Sandbox>,
+    inner: Arc<dyn HostRequestHandler>,
+}
+
+#[async_trait::async_trait]
+impl HostRequestHandler for SandboxedHost {
+    async fn handle(&self, kind: &str, payload: Value) -> Result<Value, HostError> {
+        if kind == "edit" && !self.inner.sandboxed_edit() {
+            return Err(HostError(
+                "host edit is not supported in a sandbox; use pathlib".into(),
+            ));
+        }
+        if !self.sandbox.allows_host_request(kind) {
+            return Err(HostError(format!("sandbox denied host request {kind}")));
+        }
+        self.inner.handle(kind, payload).await
+    }
+
+    fn cancellable(&self, kind: &str) -> bool {
+        self.sandbox.allows_host_request(kind) && self.inner.cancellable(kind)
     }
 }
 
@@ -209,13 +241,23 @@ impl Kernel {
         handler: Arc<dyn HostRequestHandler>,
         progress: &(dyn Fn(&str) + Sync),
     ) -> Result<Self, KernelError> {
-        let python = crate::python::PythonPlan::resolve(
+        let plan = crate::python::PythonPlan::resolve(
             config.python.as_deref(),
             config.managed_venv.as_ref(),
-        )?
-        .realise(progress)
-        .await?;
-        let shim_dir = tempfile::Builder::new().prefix("mush-kernel-").tempdir()?;
+        )?;
+        if config.sandbox.is_some() && plan.managed() && plan.python_if_present().is_none() {
+            return Err(KernelError::Bootstrap(
+                "initialize the managed Python environment in a trusted session before sandbox launch".into(),
+            ));
+        }
+        let python = plan.realise(progress).await?;
+        let mut shim_builder = tempfile::Builder::new();
+        shim_builder.prefix("mush-kernel-");
+        let shim_dir = if config.sandbox.is_some() {
+            shim_builder.tempdir_in("/tmp")?
+        } else {
+            shim_builder.tempdir()?
+        };
         let shim_path = shim_dir.path().join("mush_kernel.py");
         std::fs::write(&shim_path, SHIM)?;
 
@@ -231,6 +273,28 @@ impl Kernel {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let handler = if let Some(sandbox) = &config.sandbox {
+            let mut runtime = crate::python::runtime_read_paths(&python)?;
+            runtime.push(shim_dir.path().to_path_buf());
+            if let crate::python::PythonPlan::Managed(venv) = &plan {
+                runtime.push(venv.dir.clone());
+                runtime.extend(venv.skills.iter().map(|skill| skill.dir.clone()));
+            }
+            let sandbox = Arc::new(sandbox.with_paths(&runtime, &[])?);
+            sandbox.prepare_command(&mut command)?;
+            handler.configure_sandbox(sandbox.clone());
+            command
+                .env("PYTHONUNBUFFERED", "1")
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .env("MUSH_KERNEL_OWNER_PID", std::process::id().to_string())
+                .env("MUSH_KERNEL_SKILLS", config.skills.join(","));
+            Arc::new(SandboxedHost {
+                sandbox: sandbox.clone(),
+                inner: handler,
+            }) as Arc<dyn HostRequestHandler>
+        } else {
+            handler
+        };
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().ok_or(KernelError::Pipes)?;
         let stdout = child.stdout.take().ok_or(KernelError::Pipes)?;

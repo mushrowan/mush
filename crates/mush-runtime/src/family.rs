@@ -70,6 +70,8 @@ pub struct ChildSpec {
     pub parent_thinking: Option<ThinkingLevel>,
     pub parent_model: Option<String>,
     pub resume_session: Option<String>,
+    pub sandbox: Option<String>,
+    pub inherited_sandbox: Option<mush_sandbox::Profile>,
 }
 
 pub struct ChildParts {
@@ -143,6 +145,10 @@ pub struct ChildSummary {
     pub depth: u32,
     pub session_id: String,
     pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<mush_sandbox::Profile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,
     pub status: ChildStatus,
@@ -1155,6 +1161,21 @@ impl Family {
         thinking: Option<ThinkingLevel>,
         this: &Arc<Self>,
     ) -> Result<ChildHandle, String> {
+        self.spawn_with_sandbox(caller, prompt, name, model, thinking, None, this)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_with_sandbox(
+        &self,
+        caller: &Identity,
+        prompt: String,
+        name: String,
+        model: Option<String>,
+        thinking: Option<ThinkingLevel>,
+        sandbox: Option<String>,
+        this: &Arc<Self>,
+    ) -> Result<ChildHandle, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err("name is required".into());
@@ -1173,6 +1194,25 @@ impl Family {
                 "recursion depth {max_depth} is the limit, this agent cannot spawn children"
             ));
         }
+        let (sandbox, inherited_sandbox) = {
+            let inner = self.lock();
+            let parent = caller.id.as_ref().and_then(|id| inner.children.get(id));
+            match parent.filter(|parent| parent.summary.sandbox_profile.is_some()) {
+                Some(parent) => {
+                    if sandbox.is_some() && sandbox != parent.summary.sandbox {
+                        return Err(
+                            "sandboxed children cannot switch their descendants sandbox profile"
+                                .into(),
+                        );
+                    }
+                    (
+                        parent.summary.sandbox.clone(),
+                        parent.summary.sandbox_profile.clone(),
+                    )
+                }
+                None => (sandbox, None),
+            }
+        };
         let factory = self
             .factory
             .clone()
@@ -1229,6 +1269,8 @@ impl Family {
             parent_thinking,
             parent_model,
             resume_session: None,
+            sandbox: sandbox.clone(),
+            inherited_sandbox,
         };
         let parts = match (factory)(spec, Arc::clone(this)).await {
             Ok(parts) => parts,
@@ -1247,6 +1289,8 @@ impl Family {
             depth: caller.depth + 1,
             session_id: session_id.clone(),
             model_id: model_id.clone(),
+            sandbox,
+            sandbox_profile: parts.config.sandbox_profile.clone(),
             thinking: Some(parts.config.thinking_level.clone()),
             status: ChildStatus::Starting,
             spawned_at: now,
@@ -1401,6 +1445,8 @@ impl Family {
                 parent_thinking,
                 parent_model,
                 resume_session: Some(summary.session_id.clone()),
+                sandbox: summary.sandbox.clone(),
+                inherited_sandbox: summary.sandbox_profile.clone(),
             };
             (spec, summary.status == ChildStatus::Interrupted)
         };
@@ -1408,6 +1454,7 @@ impl Family {
         if interrupted {
             parts.config.recovery_notice = Some(CHILD_INTERRUPTED.into());
         }
+        let sandbox_profile = parts.config.sandbox_profile.clone();
         let live = Self::launch(this, id, parts, None);
         {
             let mut inner = self.lock();
@@ -1415,6 +1462,7 @@ impl Family {
                 let _ = live.shutdown.send(());
                 return Err(format!("{id} is not in the family"));
             };
+            node.summary.sandbox_profile = sandbox_profile;
             node.inbox = Some(live.inbox);
             node.observe = Some(live.observe);
             node.control = Some(live.control);
@@ -4059,6 +4107,8 @@ mod tests {
                 depth: 1,
                 session_id: "s".into(),
                 model_id: "m".into(),
+                sandbox: None,
+                sandbox_profile: None,
                 thinking: None,
                 status: ChildStatus::Running,
                 spawned_at: Timestamp::zero(),
@@ -4290,6 +4340,161 @@ mod tests {
         )));
     }
 
+    #[tokio::test]
+    async fn a_sandboxed_child_cannot_widen_its_descendants_profile() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let factory: ChildFactory = Arc::new({
+            let seen = seen.clone();
+            let inner = echo_factory(requests, "hi");
+            move |spec, family| {
+                seen.lock().unwrap().push(spec.inherited_sandbox.clone());
+                let future = inner(spec, family);
+                Box::pin(async move {
+                    let mut parts = future.await?;
+                    parts.config.sandbox_profile = Some(mush_sandbox::Profile::default());
+                    Ok(parts)
+                })
+            }
+        });
+        let root = Identity::root("root");
+        let family = Family::new(root.clone(), "root-session".into(), 2, Some(factory), None);
+        let child = family
+            .spawn_with_sandbox(
+                &root,
+                "task".into(),
+                "worker".into(),
+                None,
+                None,
+                Some("restricted".into()),
+                &family,
+            )
+            .await
+            .unwrap();
+        let caller = Identity {
+            id: Some(child.rlm_child_id.clone()),
+            name: child.name,
+            depth: 1,
+        };
+        let refused = family
+            .spawn_with_sandbox(
+                &caller,
+                "task".into(),
+                "wide".into(),
+                None,
+                None,
+                Some("wide".into()),
+                &family,
+            )
+            .await;
+        assert!(refused.unwrap_err().contains("cannot switch"));
+        let grandchild = family
+            .spawn(&caller, "task".into(), "same".into(), None, None, &family)
+            .await
+            .unwrap();
+        let inherited = family
+            .all()
+            .into_iter()
+            .find(|summary| summary.id == grandchild.rlm_child_id)
+            .unwrap();
+        assert_eq!(inherited.sandbox.as_deref(), Some("restricted"));
+        assert_eq!(
+            inherited.sandbox_profile,
+            Some(mush_sandbox::Profile::default())
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some(mush_sandbox::Profile::default())]
+        );
+        family
+            .delete(&caller, &grandchild.rlm_child_id)
+            .await
+            .unwrap();
+        family.delete(&root, &child.rlm_child_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_restored_child_keeps_its_sandbox_snapshot_when_woken() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let mut child = saved_child("sub-1", "left");
+        child.sandbox = Some("restricted".into());
+        child.sandbox_profile = Some(mush_sandbox::Profile::default());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&Registry {
+                children: vec![child],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let factory: ChildFactory = Arc::new({
+            let seen = seen.clone();
+            let inner = echo_factory(Arc::new(StdMutex::new(Vec::new())), "hi");
+            move |spec, family| {
+                seen.lock()
+                    .unwrap()
+                    .push((spec.sandbox.clone(), spec.inherited_sandbox.clone()));
+                inner(spec, family)
+            }
+        });
+        let root = Identity::root("root");
+        let family = Family::new(
+            root.clone(),
+            "root-session".into(),
+            2,
+            Some(factory),
+            Some(path),
+        );
+        family.wake("sub-1", &family).await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(
+                Some("restricted".into()),
+                Some(mush_sandbox::Profile::default())
+            )]
+        );
+        family.delete(&root, "sub-1").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_child_sandbox_selection_is_serialized() {
+        let requests: Requests = Arc::new(StdMutex::new(Vec::new()));
+        let selected = Arc::new(StdMutex::new(Vec::new()));
+        let factory: ChildFactory = Arc::new({
+            let selected = selected.clone();
+            let inner = echo_factory(requests, "hi");
+            move |spec, family| {
+                selected.lock().unwrap().push(spec.sandbox.clone());
+                inner(spec, family)
+            }
+        });
+        let root = Identity::root("root");
+        let family = Family::new(root.clone(), "root-session".into(), 2, Some(factory), None);
+        let child = family
+            .spawn_with_sandbox(
+                &root,
+                "task".into(),
+                "worker".into(),
+                None,
+                None,
+                Some("restricted".into()),
+                &family,
+            )
+            .await
+            .unwrap();
+        assert_eq!(family.all()[0].sandbox.as_deref(), Some("restricted"));
+        assert_eq!(
+            *selected.lock().unwrap(),
+            vec![Some("restricted".to_string())]
+        );
+        let encoded = serde_json::to_value(&family.all()[0]).unwrap();
+        let decoded: ChildSummary = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.sandbox.as_deref(), Some("restricted"));
+        family.delete(&root, &child.rlm_child_id).await.unwrap();
+    }
+
     fn saved_child(id: &str, name: &str) -> ChildSummary {
         ChildSummary {
             id: id.into(),
@@ -4298,6 +4503,8 @@ mod tests {
             depth: 1,
             session_id: format!("session-{id}"),
             model_id: "m".into(),
+            sandbox: None,
+            sandbox_profile: None,
             thinking: None,
             status: ChildStatus::Idle,
             spawned_at: Timestamp::zero(),

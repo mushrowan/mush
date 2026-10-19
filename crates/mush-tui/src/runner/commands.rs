@@ -1347,6 +1347,8 @@ mod tests {
             depth: 1,
             session_id: "s".into(),
             model_id: "m".into(),
+            sandbox: None,
+            sandbox_profile: None,
             thinking: None,
             status: mush_runtime::ChildStatus::Idle,
             spawned_at: Timestamp::zero(),

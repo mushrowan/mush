@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+mush-sandbox.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,6 +17,9 @@ async-trait.workspace = true
 tempfile.workspace = true
 sha2.workspace = true
 
+
+[build-dependencies]
+mush-sandbox.workspace = true
 
 [lints]
 workspace = true

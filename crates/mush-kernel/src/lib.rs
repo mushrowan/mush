@@ -82,6 +82,8 @@ impl KernelSession {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
+    #[error(transparent)]
+    Sandbox(#[from] mush_sandbox::Error),
     #[error("no python interpreter found on PATH (set {})", python::PYTHON_ENV)]
     NoPython,
     #[error("python interpreter not found at {0}")]

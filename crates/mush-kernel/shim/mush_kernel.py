@@ -603,8 +603,8 @@ def _child_targets(targets) -> list:
 
 
 class _Rlm:
-    async def spawn(self, prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> ChildHandle:
-        payload = _with_optional({"prompt": prompt, "name": name}, model=model, thinking=thinking)
+    async def spawn(self, prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, sandbox: str | None = None) -> ChildHandle:
+        payload = _with_optional({"prompt": prompt, "name": name}, model=model, thinking=thinking, sandbox=sandbox)
         return ChildHandle(await host_request("rlm.spawn", payload))
 
     async def list_subagents(self) -> list:

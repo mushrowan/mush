@@ -41,6 +41,10 @@ mush-tui = { path = "crates/mush-tui" }
 mush-treesitter = { path = "crates/mush-treesitter" }
 mush-lsp = { path = "crates/mush-lsp" }
 mush-notify = { path = "crates/mush-notify" }
+mush-sandbox = { path = "crates/mush-sandbox" }
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+libc = "0.2"
 rustix = { version = "1.1.5", features = ["process", "time"] }
 
 # async

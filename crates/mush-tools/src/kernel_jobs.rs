@@ -170,6 +170,7 @@ struct Inner {
     live: AtomicUsize,
     notice: std::sync::Mutex<Option<NoticeSink>>,
     orphans: std::sync::Mutex<Option<crate::orphans::OrphanJournal>>,
+    sandbox: std::sync::Mutex<Option<Arc<mush_sandbox::Sandbox>>>,
 }
 
 struct JobCell {
@@ -217,7 +218,8 @@ fn job_command(
     cwd: &Path,
     command: &str,
     env: Option<&[(String, String)]>,
-) -> tokio::process::Command {
+    sandbox: Option<&mush_sandbox::Sandbox>,
+) -> Result<tokio::process::Command, String> {
     let mut cmd = tokio::process::Command::new("bash");
     match env {
         Some(env) => {
@@ -232,13 +234,30 @@ fn job_command(
         None => mush_agent::exec_context::apply_control_environment(&mut cmd),
     }
     cmd.arg("-c")
-        .arg(crate::bash::command_with_direnv(command))
+        .arg(if sandbox.is_some() {
+            command.to_string()
+        } else {
+            crate::bash::command_with_direnv(command)
+        })
         .current_dir(cwd)
         .stdin(Stdio::null());
+    if let Some(sandbox) = sandbox {
+        sandbox
+            .prepare_command(&mut cmd)
+            .map_err(|error| error.to_string())?;
+        for name in [
+            "MUSH_CONTROL_SOCKET",
+            "MUSH_CONTROL_INSTANCE",
+            "MUSH_CONTROL_SESSION",
+            "MUSH_CONTROL_ACTIVATION",
+        ] {
+            cmd.env_remove(name);
+        }
+    }
     cmd.envs(QUIET_ENV.iter().copied());
     #[cfg(unix)]
     cmd.process_group(0);
-    cmd
+    Ok(cmd)
 }
 
 async fn pump_output(reader: std::io::PipeReader, cell: Arc<JobCell>) {
@@ -254,6 +273,10 @@ async fn pump_output(reader: std::io::PipeReader, cell: Arc<JobCell>) {
 }
 
 impl KernelJobs {
+    pub fn set_sandbox(&self, sandbox: Option<Arc<mush_sandbox::Sandbox>>) {
+        *lock(&self.inner.sandbox) = sandbox;
+    }
+
     pub fn set_notice_sink(&self, sink: NoticeSink) {
         *lock(&self.inner.notice) = Some(sink);
     }
@@ -284,7 +307,8 @@ impl KernelJobs {
         let (reader, writer) = std::io::pipe().map_err(|e| format!("pipe: {e}"))?;
         let stderr = writer.try_clone().map_err(|e| format!("pipe: {e}"))?;
 
-        let child = job_command(cwd, command, env)
+        let sandbox = lock(&self.inner.sandbox).clone();
+        let child = job_command(cwd, command, env, sandbox.as_deref())?
             .stdout(Stdio::from(writer))
             .stderr(Stdio::from(stderr))
             .spawn()

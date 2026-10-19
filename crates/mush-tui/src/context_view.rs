@@ -254,6 +254,8 @@ mod tests {
             depth: u32::from(parent.is_some()) + 1,
             session_id: format!("session-{id}"),
             model_id: "claude-opus-4-7".into(),
+            sandbox: None,
+            sandbox_profile: None,
             thinking: None,
             status,
             spawned_at: Timestamp::zero(),

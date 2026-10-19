@@ -58,6 +58,8 @@ fn child(
         depth: 1,
         session_id: format!("s-{id}"),
         model_id: "claude-opus-5-5".into(),
+        sandbox: None,
+        sandbox_profile: None,
         thinking: None,
         status,
         spawned_at: mush_ai::types::Timestamp::zero(),

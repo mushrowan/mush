@@ -195,12 +195,13 @@ impl RlmHandler {
         let thinking = requested_thinking(payload.text("thinking"))?;
         let handle = self
             .family
-            .spawn(
+            .spawn_with_sandbox(
                 &self.identity,
                 prompt,
                 name,
                 payload.text("model"),
                 thinking,
+                payload.text("sandbox"),
                 &self.family,
             )
             .await?;

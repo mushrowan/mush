@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+mush-sandbox.workspace = true
 mush-ai.workspace = true
 mush-agent.workspace = true
 mush-treesitter.workspace = true
@@ -41,6 +42,9 @@ tokio = { workspace = true, features = ["test-util"] }
 pretty_assertions.workspace = true
 tempfile.workspace = true
 filetime.workspace = true
+
+[build-dependencies]
+mush-sandbox.workspace = true
 
 [lints]
 workspace = true

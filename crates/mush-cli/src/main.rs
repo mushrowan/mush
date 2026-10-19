@@ -1554,6 +1554,48 @@ fn child_model(
     })
 }
 
+fn child_sandbox_from(
+    config_path: &std::path::Path,
+    cwd: &std::path::Path,
+    selection: Option<&str>,
+    artifacts: Option<std::path::PathBuf>,
+    inherited: Option<mush_sandbox::Profile>,
+) -> Result<Option<std::sync::Arc<mush_sandbox::Sandbox>>, String> {
+    let cwd = cwd
+        .canonicalize()
+        .map_err(|error| format!("sandbox workspace: {error}"))?;
+    let profile = if let Some(profile) = inherited {
+        profile
+    } else {
+        let config = mush_sandbox::Config::load(config_path).map_err(|error| error.to_string())?;
+        let Some(config) = config else {
+            return if selection.is_some() {
+                Err("a sandbox profile was requested but sandbox.toml does not exist".into())
+            } else {
+                Ok(None)
+            };
+        };
+        config
+            .resolve(&cwd, selection)
+            .map_err(|error| error.to_string())?
+    };
+    let mut write = Vec::new();
+    if let Some(artifacts) = artifacts {
+        std::fs::create_dir_all(&artifacts)
+            .map_err(|error| format!("sandbox artifacts: {error}"))?;
+        write.push(artifacts);
+    }
+    let sandbox = mush_sandbox::Sandbox::new(profile, &cwd, &[], &write)
+        .map_err(|error| error.to_string())?;
+    if config_path
+        .ancestors()
+        .any(|path| sandbox.allows_write(path))
+    {
+        return Err("sandbox configuration must not be writable by children".into());
+    }
+    Ok(Some(std::sync::Arc::new(sandbox)))
+}
+
 fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
     std::sync::Arc::new(move |spec: mush_runtime::ChildSpec, family| {
         let seed = seed.clone();
@@ -1582,12 +1624,20 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
             let mut project =
                 mush_ext::loader::discover_project_context_with(&seed.cwd, &seed.discovery);
             seed.prompt_overrides.apply(&mut project);
-            let ipython = std::sync::Arc::new(setup::build_ipython_tool(
-                &cfg,
+            let sandbox_path =
+                mush_sandbox::default_config_path().map_err(|error| error.to_string())?;
+            let sandbox = child_sandbox_from(
+                &sandbox_path,
                 &seed.cwd,
-                &project.skills,
-                sinks.into(),
-            ));
+                spec.sandbox.as_deref(),
+                child_artifacts(seed.saver.is_some(), &session.meta.id),
+                spec.inherited_sandbox.clone(),
+            )?;
+            let mut ipython =
+                setup::build_ipython_tool(&cfg, &seed.cwd, &project.skills, sinks.into());
+            let sandbox_profile = sandbox.as_ref().map(|sandbox| sandbox.profile().clone());
+            ipython.set_sandbox(sandbox)?;
+            let ipython = std::sync::Arc::new(ipython);
             let max_depth = family.max_depth();
             let role = setup::RlmRole::child(&spec.name, spec.depth, max_depth)
                 .spawned_by(parent_agent_name(&spec, &seed.session_dir));
@@ -1599,6 +1649,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 model,
                 options.clone(),
             ));
+            worker.sandbox_profile = sandbox_profile;
             worker.turn.compaction.below_price_cliff = family.price_cliff_pin();
             worker.spawn_view = session.meta.spawn_view.clone();
             worker.conversation = session.conversation.clone();
@@ -2254,7 +2305,28 @@ mod tests {
             parent_thinking: None,
             parent_model: None,
             resume_session,
+            sandbox: None,
+            inherited_sandbox: None,
         }
+    }
+
+    #[test]
+    fn a_repository_sandbox_config_cannot_enable_or_loosen_sandboxing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".mush")).unwrap();
+        std::fs::write(repo.join("sandbox.toml"), "invalid").unwrap();
+        std::fs::write(repo.join(".mush/sandbox.toml"), "invalid").unwrap();
+        let absent = dir.path().join("trusted/sandbox.toml");
+        assert!(
+            child_sandbox_from(&absent, &repo, None, None, None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(child_sandbox_from(&absent, &repo, Some("wide"), None, None).is_err());
+        let invalid = dir.path().join("sandbox.toml");
+        std::fs::write(&invalid, "network = ['example.com:443']").unwrap();
+        assert!(child_sandbox_from(&invalid, &repo, None, None, None).is_err());
     }
 
     #[test]
@@ -2404,6 +2476,8 @@ mod tests {
             parent_thinking: None,
             parent_model: None,
             resume_session: None,
+            sandbox: None,
+            inherited_sandbox: None,
         };
 
         let Err(refused) = child_factory(seed)(spec, family).await else {

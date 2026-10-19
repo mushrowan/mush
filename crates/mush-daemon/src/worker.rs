@@ -766,6 +766,8 @@ mod tests {
             depth: 1,
             session_id: "child-session".into(),
             model_id: "m".into(),
+            sandbox: None,
+            sandbox_profile: None,
             thinking: None,
             status,
             spawned_at: mush_ai::types::Timestamp::zero(),
