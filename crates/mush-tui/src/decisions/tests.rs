@@ -748,3 +748,222 @@ fn each_option_shows_its_pros_and_cons_under_it() {
         assert_eq!(row_of("+ the soak test finishes"), b + 1, "{text}");
     }
 }
+
+const POPULATION_CONTEXT: &str = "The problem: some agent activity forms clusters where our data cannot say whether it is one population, none, or several.\n\nTwo questions get mixed up. \"Is this an agent?\" is a row-level label and can be confident. \"Which population?\" is a grouping and can stay open.";
+
+fn option(label: &str, detail: &str, pros: &[&str], cons: &[&str]) -> DecisionOption {
+    DecisionOption {
+        label: label.into(),
+        detail: Some(detail.into()),
+        pros: pros.iter().map(|point| (*point).into()).collect(),
+        cons: cons.iter().map(|point| (*point).into()).collect(),
+    }
+}
+
+fn population(app: &mut App) {
+    let triage = asker("triage", false);
+    let mut long = decision(
+        &triage,
+        "population",
+        "How do we encode agent clusters whose population is unclear, starting with the March runs?",
+        &[],
+        Some(0),
+    );
+    long.options = vec![
+        option(
+            "Provisional clusters in the existing schema",
+            "catalogue each task-anchored cluster as its own assessed campaign (UNC-style); put singletons in one catch-all campaign; merge only on a specific tie",
+            &[
+                "encodes one/none/several explicitly",
+                "reversible",
+                "no new tables",
+            ],
+            &[
+                "more catalogue entries through change sets",
+                "the map shows several small operations",
+            ],
+        ),
+        option(
+            "Store ties, compute populations",
+            "a new derived table of run-to-run ties with populations as connected components at a chosen strength",
+            &[
+                "keeps evidence rather than conclusions",
+                "updates as data arrives",
+            ],
+            &[
+                "new table, writer and map work",
+                "needs your OK on a new table",
+            ],
+        ),
+        option(
+            "Fold into research-pool at low confidence, extending the campaign back to the seventh of March",
+            "extend the campaign to 7 Mar and load weak runs at assessed",
+            &["quickest"],
+            &[
+                "asserts one population",
+                "hides the doubt in a confidence number",
+            ],
+        ),
+    ];
+    long.context = Some(POPULATION_CONTEXT.into());
+    app.decisions.push(long);
+    select(app, "population");
+}
+
+fn population_words(app: &App) -> Vec<String> {
+    let decision = app
+        .decisions
+        .iter()
+        .find(|decision| decision.key.id == "population")
+        .unwrap();
+    let mut text = vec![decision.question.clone(), POPULATION_CONTEXT.to_owned()];
+    for option in &decision.options {
+        text.push(option.label.clone());
+        text.extend(option.detail.clone());
+        text.extend(option.pros.iter().cloned());
+        text.extend(option.cons.iter().cloned());
+    }
+    text.iter()
+        .flat_map(|text| text.split_whitespace().map(str::to_owned))
+        .collect()
+}
+
+fn scroll_through(app: &mut App, width: u16, height: u16, key: KeyEvent) -> Vec<String> {
+    let mut seen = Vec::new();
+    for _ in 0..80 {
+        let (text, _) = render(app, width, height);
+        if seen.last() == Some(&text) {
+            break;
+        }
+        seen.push(text);
+        crate::input::handle_key(app, key);
+    }
+    seen
+}
+
+fn unreached(words: &[String], screens: &[String]) -> Vec<String> {
+    let shown: std::collections::HashSet<&str> = screens
+        .iter()
+        .flat_map(|screen| screen.split(|c: char| c.is_whitespace() || c == '\u{2502}'))
+        .collect();
+    words
+        .iter()
+        .filter(|word| !shown.contains(word.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_tall_focused_decision_scrolls_in_the_narrow_panel_until_its_last_option_shows() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    population(&mut app);
+    let (text, _) = render(&app, 80, 16);
+    assert!(!text.contains("c) Fold"), "{text}");
+    assert!(text.contains("J/K scroll"), "{text}");
+    assert!(text.contains("\u{2193} more"), "{text}");
+    let screens = scroll_through(
+        &mut app,
+        80,
+        16,
+        KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+    );
+    let last = screens.last().unwrap();
+    assert!(last.contains("c) Fold into research-pool"), "{last}");
+    assert!(
+        last.contains("hides the doubt in a confidence number"),
+        "{last}"
+    );
+    assert!(last.contains("\u{2191}"), "{last}");
+    let missing = unreached(&population_words(&app), &screens);
+    assert!(missing.is_empty(), "never shown: {missing:?}");
+    for _ in 0..10 {
+        ctrl(&mut app, 'u');
+    }
+    let (text, _) = render(&app, 80, 16);
+    assert!(text.contains("\u{25be} 5 populat"), "{text}");
+}
+
+#[test]
+fn a_tall_focused_decision_scrolls_in_the_wide_panel_until_its_last_option_shows() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    population(&mut app);
+    let (text, _) = render(&app, 140, 20);
+    assert!(!text.contains("c) Fold"), "{text}");
+    assert!(text.contains("J/K scroll"), "{text}");
+    let screens = scroll_through(
+        &mut app,
+        140,
+        20,
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+    );
+    assert!(screens.len() > 1, "ctrl+d moved the view");
+    let last = screens.last().unwrap();
+    assert!(last.contains("c) Fold into research-pool"), "{last}");
+    assert!(
+        last.contains("hides the doubt in a confidence number"),
+        "{last}"
+    );
+    let missing = unreached(&population_words(&app), &screens);
+    assert!(missing.is_empty(), "never shown: {missing:?}");
+    press(&mut app, KeyCode::Char('K'));
+    let (text, _) = render(&app, 140, 20);
+    assert_ne!(&text, last, "K scrolls back up");
+}
+
+#[test]
+fn a_narrow_terminal_wraps_every_label_and_description_instead_of_cutting_them() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    population(&mut app);
+    let screens = scroll_through(
+        &mut app,
+        44,
+        12,
+        KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+    );
+    let missing = unreached(&population_words(&app), &screens);
+    assert!(missing.is_empty(), "never shown: {missing:?}");
+}
+
+#[test]
+fn moving_to_another_decision_starts_it_from_the_top() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    population(&mut app);
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Char('J'));
+    }
+    press(&mut app, KeyCode::Char('k'));
+    press(&mut app, KeyCode::Char('j'));
+    let (text, _) = render(&app, 80, 16);
+    assert!(text.contains("\u{25be} 5 populat"), "{text}");
+}
+
+#[test]
+fn a_decision_that_fits_offers_no_scroll_keys() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    select(&mut app, "layout");
+    let (text, _) = render(&app, 80, 24);
+    assert!(!text.contains("J/K"), "{text}");
+    assert!(!text.contains("\u{2191}"), "{text}");
+    press(&mut app, KeyCode::Char('J'));
+    let (after, _) = render(&app, 80, 24);
+    assert!(!after.contains("\u{2191}"), "{after}");
+    assert!(after.contains("\u{25be} 3 layout"), "{after}");
+}
+
+#[test]
+fn the_editor_stays_in_view_on_a_tall_decision() {
+    let mut app = app();
+    ctrl(&mut app, 'q');
+    population(&mut app);
+    press(&mut app, KeyCode::Char('w'));
+    for (width, height) in [(80, 16), (140, 20)] {
+        let (text, cursor) = render(&app, width, height);
+        assert!(cursor.is_some(), "{text}");
+        assert!(text.contains("my answer"), "{text}");
+    }
+}

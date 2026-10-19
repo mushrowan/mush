@@ -70,6 +70,8 @@ pub struct DecisionsPanel {
     pub editor: Option<Editor>,
     pub review: bool,
     pub review_scroll: Cell<usize>,
+    pub detail_scroll: Cell<usize>,
+    pub detail_page: Cell<usize>,
     pub confirms: BTreeMap<String, bool>,
     pub notice: Option<String>,
 }
@@ -322,6 +324,7 @@ pub fn open(app: &mut App) {
     app.decisions_panel.review = false;
     app.decisions_panel.editor = None;
     app.decisions_panel.notice = None;
+    app.decisions_panel.detail_scroll.set(0);
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<AppEvent>> {
@@ -396,7 +399,20 @@ fn list_key(app: &mut App, key: KeyEvent, toggle: bool) -> Option<AppEvent> {
         _ => None,
     };
     if let Some(index) = moved {
-        app.decisions_panel.selected = Some(keys[index].clone());
+        select_item(app, keys[index].clone());
+        return None;
+    }
+    let scroll = &app.decisions_panel.detail_scroll;
+    let half_page = (app.decisions_panel.detail_page.get() / 2).max(1);
+    let scrolled = match (key.code, plain_char(key)) {
+        (KeyCode::Char('d'), _) if control => Some(scroll.get().saturating_add(half_page)),
+        (KeyCode::Char('u'), _) if control => Some(scroll.get().saturating_sub(half_page)),
+        (_, Some('J')) => Some(scroll.get().saturating_add(1)),
+        (_, Some('K')) => Some(scroll.get().saturating_sub(1)),
+        _ => None,
+    };
+    if let Some(offset) = scrolled {
+        scroll.set(offset);
         return None;
     }
     let selected = keys[position].clone();
@@ -405,8 +421,8 @@ fn list_key(app: &mut App, key: KeyEvent, toggle: bool) -> Option<AppEvent> {
         return start_review(app);
     }
     match plain_char(key)? {
-        'j' => app.decisions_panel.selected = Some(keys[step(1)].clone()),
-        'k' => app.decisions_panel.selected = Some(keys[step(-1)].clone()),
+        'j' => select_item(app, keys[step(1)].clone()),
+        'k' => select_item(app, keys[step(-1)].clone()),
         letter @ 'a'..='i' => return pick(app, &selected, letter),
         'w' => open_editor(app, &selected, EditorKind::Own),
         '?' => open_editor(app, &selected, EditorKind::Clarify),
@@ -417,6 +433,13 @@ fn list_key(app: &mut App, key: KeyEvent, toggle: bool) -> Option<AppEvent> {
         _ => {}
     }
     None
+}
+
+fn select_item(app: &mut App, key: ItemKey) {
+    if app.decisions_panel.selected.as_ref() != Some(&key) {
+        app.decisions_panel.detail_scroll.set(0);
+    }
+    app.decisions_panel.selected = Some(key);
 }
 
 fn group_step(app: &App, keys: &[ItemKey], position: usize, forward: bool) -> usize {
@@ -524,6 +547,7 @@ fn open_editor(app: &mut App, selected: &ItemKey, kind: EditorKind) {
         (_, kind) => (kind, String::new()),
     };
     app.decisions_panel.editor = Some(Editor::new(kind, text));
+    app.decisions_panel.detail_scroll.set(usize::MAX);
 }
 
 fn later(app: &mut App, selected: &ItemKey) -> Option<AppEvent> {

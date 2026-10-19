@@ -41,13 +41,30 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+fn pieces(word: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    for c in word.chars() {
+        let mut buf = [0; 4];
+        let c = c.encode_utf8(&mut buf);
+        if !piece.is_empty() && width_of(&piece) + width_of(c) > width {
+            out.push(std::mem::take(&mut piece));
+        }
+        piece.push_str(c);
+    }
+    out.push(piece);
+    out
+}
+
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
     let mut lines = Vec::new();
     for paragraph in text.lines() {
         let mut line = String::new();
-        for word in paragraph.split_whitespace() {
-            let word = truncate(word, width);
+        for word in paragraph
+            .split_whitespace()
+            .flat_map(|word| pieces(word, width))
+        {
             if line.is_empty() {
                 line = word;
             } else if width_of(&line) + 1 + width_of(&word) <= width {
@@ -139,7 +156,7 @@ fn item_row(
     selected: bool,
     expanded: bool,
     width: usize,
-) -> Line<'static> {
+) -> (Line<'static>, bool) {
     let theme = &app.theme;
     let base = if selected {
         Style::default().bg(theme.menu_selected_bg)
@@ -173,7 +190,9 @@ fn item_row(
     let right_text = format!("  {:>4} ", age(item));
     let right_width = spans_width(&chip) + width_of(&right_text);
     let room = width.saturating_sub(spans_width(&left) + right_width + 1);
-    let question = truncate(&item.question(), room);
+    let full_question = item.question();
+    let question = truncate(&full_question, room);
+    let cut = question != full_question;
     let mut spans = left;
     spans.push(Span::styled(question, base));
     let used = spans_width(&spans);
@@ -183,7 +202,7 @@ fn item_row(
     ));
     spans.extend(chip);
     spans.push(Span::styled(right_text, theme.dim.patch(base)));
-    Line::from(spans)
+    (Line::from(spans), cut)
 }
 
 fn group_line(app: &App, group: &Group<'_>, width: usize) -> Line<'static> {
@@ -270,7 +289,7 @@ fn detail_lines(app: &App, item: &Item<'_>, width: usize, indent: usize, full: b
         Item::Decision(decision) => (decision.asker.name.clone(), Some(*decision)),
         Item::Confirm(child) => (child.name.clone(), None),
     };
-    if full || width_of(&item.question()) + 30 > width {
+    if full {
         push_wrapped(
             &mut lines,
             &item.question(),
@@ -308,6 +327,12 @@ fn detail_lines(app: &App, item: &Item<'_>, width: usize, indent: usize, full: b
     };
     for (index, label) in item.options().iter().enumerate() {
         let picked = drafted_option == Some(index);
+        let label_style = if picked {
+            theme.context_ok.add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut label_lines = wrap(label, text_width.saturating_sub(5)).into_iter();
         let mut spans = vec![
             Span::raw(pad.clone()),
             Span::styled(if picked { "\u{25cf} " } else { "  " }, theme.context_ok),
@@ -316,17 +341,22 @@ fn detail_lines(app: &App, item: &Item<'_>, width: usize, indent: usize, full: b
                 theme.status_model.add_modifier(Modifier::BOLD),
             ),
             Span::styled(") ", theme.dim),
-            Span::styled(
-                truncate(label, text_width.saturating_sub(16)),
-                if picked {
-                    theme.context_ok.add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            ),
+            Span::styled(label_lines.next().unwrap_or_default(), label_style),
         ];
+        for line in label_lines {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            spans = vec![
+                Span::raw(format!("{pad}     ")),
+                Span::styled(line, label_style),
+            ];
+        }
         if decision.is_some_and(|decision| decision.lean == Some(index)) {
-            spans.push(Span::styled("   \u{25c2} lean", theme.context_warn));
+            let lean = "   \u{25c2} lean";
+            if spans_width(&spans) + width_of(lean) >= width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                spans = vec![Span::raw(format!("{pad}  "))];
+            }
+            spans.push(Span::styled(lean, theme.context_warn));
         }
         lines.push(Line::from(spans));
         if let Some(detail) = decision
@@ -409,38 +439,48 @@ fn detail_lines(app: &App, item: &Item<'_>, width: usize, indent: usize, full: b
                     Span::styled(format!(" {label}   "), theme.status_muted),
                 ]
             };
-            let mut spans = vec![Span::raw(pad.clone())];
             let write_label = if drafted_option.is_some() {
                 "add a note"
             } else {
                 "write my own"
             };
-            spans.extend(action("w", write_label));
-            spans.extend(action("?", "ask for clarification"));
-            spans.extend(action("l", "later"));
+            let mut actions = vec![
+                action("w", write_label),
+                action("?", "ask for clarification"),
+                action("l", "later"),
+            ];
             if decision.draft.is_some() {
-                spans.extend(action("x", "clear"));
+                actions.push(action("x", "clear"));
+            }
+            let mut spans = vec![Span::raw(pad.clone())];
+            for pair in actions {
+                if spans.len() > 1 && spans_width(&spans) + spans_width(&pair) > width + 2 {
+                    lines.push(Line::from(std::mem::take(&mut spans)));
+                    spans.push(Span::raw(pad.clone()));
+                }
+                spans.extend(pair);
             }
             lines.push(Line::from(spans));
             for reference in &decision.refs {
-                lines.push(Line::from(vec![
-                    Span::raw(pad.clone()),
-                    Span::styled(
-                        format!(
-                            "\u{2197} {}",
-                            truncate(reference, text_width.saturating_sub(2))
-                        ),
-                        theme.link,
-                    ),
-                ]));
+                for (row, line) in wrap(reference, text_width.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let arrow = if row == 0 { "\u{2197} " } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::raw(pad.clone()),
+                        Span::styled(format!("{arrow}{line}"), theme.link),
+                    ]));
+                }
             }
         }
+
         _ => {}
     }
     Detail { lines, cursor }
 }
 
-fn hints(app: &App, drafted: usize) -> Line<'static> {
+fn hints(app: &App, drafted: usize, overflow: bool) -> Line<'static> {
     let theme = &app.theme;
     let panel = &app.decisions_panel;
     let pairs: Vec<(String, &str)> = if panel.editor.is_some() {
@@ -448,8 +488,11 @@ fn hints(app: &App, drafted: usize) -> Line<'static> {
     } else if panel.review {
         vec![("enter".into(), "send"), ("esc".into(), "back to the list")]
     } else {
-        vec![
-            ("j/k".into(), "move"),
+        let mut pairs = vec![("j/k".into(), "move")];
+        if overflow {
+            pairs.push(("J/K".into(), "scroll"));
+        }
+        pairs.extend([
             ("a-i".into(), "pick"),
             ("w".into(), "write"),
             ("?".into(), "clarify"),
@@ -457,7 +500,8 @@ fn hints(app: &App, drafted: usize) -> Line<'static> {
             ("A".into(), "accept leans"),
             ("S".into(), if drafted > 0 { "send" } else { "review" }),
             ("esc".into(), "close, drafts kept"),
-        ]
+        ]);
+        pairs
     };
     let mut spans = vec![Span::raw(" ")];
     for (index, (key, label)) in pairs.into_iter().enumerate() {
@@ -488,6 +532,12 @@ fn shrink_hints(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct Shown {
+    cursor: Option<(u16, u16)>,
+    overflow: bool,
+}
+
 pub fn render(app: &App, area: Rect, buf: &mut Buffer) -> Option<(u16, u16)> {
     if area.width < 24 || area.height < 6 {
         return None;
@@ -495,6 +545,23 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) -> Option<(u16, u16)> {
     Clear.render(area, buf);
     let theme = &app.theme;
     let groups = groups(&app.decisions, &app.children);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    let selected = selected_key(app, &groups);
+    let shown = if groups.is_empty() {
+        Line::from(Span::styled("  nothing is waiting on you", theme.dim)).render(
+            Rect {
+                y: inner.y + 1,
+                height: 1,
+                ..inner
+            },
+            buf,
+        );
+        Shown::default()
+    } else if inner.width >= WIDE {
+        render_wide(app, &groups, selected.as_ref(), inner, buf)
+    } else {
+        render_narrow(app, &groups, selected.as_ref(), inner, buf)
+    };
     let (open, blocking) = crate::decisions::counts(app);
     let drafted = outgoing(app).count();
     let mut counts = vec![
@@ -520,9 +587,9 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) -> Option<(u16, u16)> {
             Span::styled(notice.clone(), theme.context_warn),
             Span::raw(" "),
         ]),
-        None => shrink_hints(hints(app, drafted), usize::from(area.width)),
+        None => shrink_hints(hints(app, drafted, shown.overflow), usize::from(area.width)),
     };
-    let block = Block::default()
+    Block::default()
         .borders(Borders::ALL)
         .border_style(theme.input_border)
         .title(Line::from(Span::styled(
@@ -530,31 +597,13 @@ pub fn render(app: &App, area: Rect, buf: &mut Buffer) -> Option<(u16, u16)> {
             Style::default().add_modifier(Modifier::BOLD),
         )))
         .title(Line::from(counts).right_aligned())
-        .title_bottom(bottom.right_aligned());
-    let inner = block.inner(area);
-    block.render(area, buf);
-    if groups.is_empty() {
-        Line::from(Span::styled("  nothing is waiting on you", theme.dim)).render(
-            Rect {
-                y: inner.y + 1,
-                height: 1,
-                ..inner
-            },
-            buf,
-        );
-        return None;
-    }
-    let selected = selected_key(app, &groups);
-    let cursor = if inner.width >= WIDE {
-        render_wide(app, &groups, selected.as_ref(), inner, buf)
-    } else {
-        render_narrow(app, &groups, selected.as_ref(), inner, buf)
-    };
-    if app.decisions_panel.review {
+        .title_bottom(bottom.right_aligned())
+        .render(area, buf);
+    if app.decisions_panel.review && !groups.is_empty() {
         render_review(app, &groups, inner, buf);
         return None;
     }
-    cursor
+    shown.cursor
 }
 
 fn render_lines(lines: &[Line<'static>], area: Rect, offset: usize, buf: &mut Buffer) {
@@ -612,6 +661,27 @@ impl Window {
             (end + 3).saturating_sub(height).min(start)
         };
         Self::at(rows, height, want)
+    }
+
+    fn within(
+        rows: &[(Row, Line<'static>)],
+        height: usize,
+        focus: (usize, usize),
+        scroll: usize,
+    ) -> Option<(Self, usize)> {
+        let (start, end) = focus;
+        if Self::around(rows, height, focus).screen_row(end).is_some() {
+            return None;
+        }
+        let deepest = (0..=end - start)
+            .find(|depth| {
+                Self::at(rows, height, start + depth)
+                    .screen_row(end)
+                    .is_some()
+            })
+            .unwrap_or(end - start);
+        let depth = scroll.min(deepest);
+        Some((Self::at(rows, height, start + depth), depth))
     }
 
     fn at(rows: &[(Row, Line<'static>)], height: usize, want: usize) -> Self {
@@ -697,7 +767,7 @@ fn render_narrow(
     selected: Option<&ItemKey>,
     area: Rect,
     buf: &mut Buffer,
-) -> Option<(u16, u16)> {
+) -> Shown {
     let width = usize::from(area.width);
     let mut rows: Listing = vec![(Row::Gap, Line::default())];
     let mut focus = (0, 0);
@@ -709,12 +779,10 @@ fn render_narrow(
             index += 1;
             let is_selected = selected == Some(&item.key());
             let start = rows.len();
-            rows.push((
-                Row::Item,
-                item_row(app, item, index, is_selected, is_selected, width),
-            ));
+            let (row, cut) = item_row(app, item, index, is_selected, is_selected, width);
+            rows.push((Row::Item, row));
             if is_selected {
-                let detail = detail_lines(app, item, width, DETAIL_INDENT, false);
+                let detail = detail_lines(app, item, width, DETAIL_INDENT, cut);
                 cursor = detail
                     .cursor
                     .map(|(row, column)| (rows.len() + row, column));
@@ -723,9 +791,24 @@ fn render_narrow(
             }
         }
     }
-    let window = Window::around(&rows, usize::from(area.height), focus);
+    let height = usize::from(area.height);
+    let panel = &app.decisions_panel;
+    let (window, overflow) = match Window::within(&rows, height, focus, panel.detail_scroll.get()) {
+        Some((window, depth)) => {
+            panel.detail_scroll.set(depth);
+            panel.detail_page.set(window.body);
+            (window, true)
+        }
+        None => {
+            panel.detail_scroll.set(0);
+            (Window::around(&rows, height, focus), false)
+        }
+    };
     render_window(&rows, area, window, app.theme.scroll_indicator, buf);
-    to_screen(area, window, cursor)
+    Shown {
+        cursor: to_screen(area, window, cursor),
+        overflow,
+    }
 }
 
 fn render_wide(
@@ -734,7 +817,7 @@ fn render_wide(
     selected: Option<&ItemKey>,
     area: Rect,
     buf: &mut Buffer,
-) -> Option<(u16, u16)> {
+) -> Shown {
     let left_width = (area.width * 48 / 100).clamp(50, 64);
     let left = Rect {
         width: left_width,
@@ -768,13 +851,15 @@ fn render_wide(
             }
             rows.push((
                 Row::Item,
-                item_row(app, item, index, is_selected, false, width),
+                item_row(app, item, index, is_selected, false, width).0,
             ));
         }
     }
     let window = Window::around(&rows, usize::from(left.height), focus);
     render_window(&rows, left, window, app.theme.scroll_indicator, buf);
-    let item = chosen?;
+    let Some(item) = chosen else {
+        return Shown::default();
+    };
     let right_width = usize::from(right.width);
     let theme = &app.theme;
     let (who, asked) = match &item {
@@ -798,17 +883,27 @@ fn render_wide(
     let gap = right_width.saturating_sub(used + spans_width(&header_right));
     let mut header = pad(header_left, used + gap, Style::default());
     header.extend(header_right);
-    let mut detail_rows = vec![Line::default(), Line::from(header), Line::default()];
+    let mut detail_rows: Listing = [Line::default(), Line::from(header), Line::default()]
+        .into_iter()
+        .map(|line| (Row::Detail, line))
+        .collect();
     let detail = detail_lines(app, &item, right_width, 1, true);
     let base = detail_rows.len();
-    detail_rows.extend(detail.lines);
-    render_lines(&detail_rows, right, 0, buf);
+    detail_rows.extend(detail.lines.into_iter().map(|line| (Row::Detail, line)));
+    let panel = &app.decisions_panel;
+    let window = Window::at(
+        &detail_rows,
+        usize::from(right.height),
+        panel.detail_scroll.get(),
+    );
+    panel.detail_scroll.set(window.offset);
+    panel.detail_page.set(window.body);
+    render_window(&detail_rows, right, window, theme.scroll_indicator, buf);
     let cursor = detail.cursor.map(|(row, column)| (base + row, column));
-    to_screen(
-        right,
-        Window::whole(detail_rows.len(), usize::from(right.height)),
-        cursor,
-    )
+    Shown {
+        cursor: to_screen(right, window, cursor),
+        overflow: window.above || window.below,
+    }
 }
 
 fn recipient_state(app: &App, child: Option<&str>, confirming: bool) -> &'static str {
