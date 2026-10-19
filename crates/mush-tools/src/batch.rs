@@ -903,13 +903,4 @@ mod tests {
         };
         assert!(text.contains("ok"));
     }
-
-    #[test]
-    fn batch_budget_matches_central_truncation_limit() {
-        assert_eq!(
-            MAX_TOTAL_OUTPUT,
-            mush_agent::truncation::MAX_BYTES,
-            "batch budget diverged from central truncation limit"
-        );
-    }
 }

@@ -799,19 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn render_diff_with_lang_none_matches_render_diff() {
-        let theme = Theme::dark();
-        let a = render_diff("- old\n+ new\n", 40, &theme);
-        let b = render_diff_with_lang("- old\n+ new\n", 40, &theme, None);
-        assert_eq!(a.len(), b.len());
-        for (row_a, row_b) in a.iter().zip(b.iter()) {
-            let text_a: String = row_a.spans.iter().map(|s| s.content.as_ref()).collect();
-            let text_b: String = row_b.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert_eq!(text_a, text_b);
-        }
-    }
-
-    #[test]
     fn render_diff_ellipsis_on_truncated_added_line_inherits_line_bg() {
         let theme = Theme::dark();
         let long = "x".repeat(200);

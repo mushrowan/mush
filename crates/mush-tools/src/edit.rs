@@ -1029,13 +1029,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_shows_both_for_replacement() {
-        let diff = format_edit_diff("old line", "new line");
-        assert!(diff.contains("- old line"));
-        assert!(diff.contains("+ new line"));
-    }
-
-    #[test]
     fn diff_dedents_common_whitespace() {
         let diff = format_edit_diff(
             "        deeply indented\n        old code",

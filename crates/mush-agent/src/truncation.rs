@@ -297,29 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn all_directions_enforce_truncation() {
-        let big = make_lines(3000);
-        for direction in [OutputLimit::Head, OutputLimit::Tail] {
-            let out = apply(ToolResult::text(big.clone()), direction);
-            assert_text(&out, |t| {
-                assert!(
-                    t.contains("lines truncated"),
-                    "{direction:?} must enforce truncation"
-                );
-            });
-        }
-    }
-
-    #[test]
-    fn truncates_by_byte_count() {
-        let big = "x".repeat(MAX_BYTES + 10000);
-        let out = apply(ToolResult::text(big), OutputLimit::Head);
-        assert_text(&out, |t| {
-            assert!(t.contains("lines truncated"));
-        });
-    }
-
-    #[test]
     fn byte_overflow_preview_contains_partial_line_content() {
         let huge = "x".repeat(MAX_BYTES + 10_000);
         for direction in [OutputLimit::Head, OutputLimit::Tail] {

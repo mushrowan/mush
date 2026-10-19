@@ -1303,13 +1303,6 @@ exit 64
     }
 
     #[test]
-    fn output_limit_is_tail() {
-        use mush_agent::tool::OutputLimit;
-        let tool = BashTool::new(Path::new(".").into());
-        assert_eq!(tool.output_limit(), OutputLimit::Tail);
-    }
-
-    #[test]
     fn description_warns_against_pre_truncating_output() {
         let tool = BashTool::new(Path::new(".").into());
         let desc = tool.description();

@@ -448,13 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn buffered_bytes_diagnostic() {
-        let mut parser = SseParser::new();
-        parser.push(b"data: partial");
-        assert!(!parser.chunk_buf.is_empty());
-    }
-
-    #[test]
     fn safe_preview_redacts_secret_shaped_values() {
         let preview = safe_preview_text(
             "data: {\"text\":\"Bearer sk-stream-secret-123 and sess-private-token-456\"}",

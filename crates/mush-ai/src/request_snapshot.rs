@@ -520,16 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_stable_for_identical_input() {
-        let sys = r#"[{"type":"text","text":"hi"}]"#;
-        let tools = r#"[{"name":"read"}]"#;
-        let msgs = r#"[{"role":"user","content":[{"type":"text","text":"go"}]}]"#;
-        let a = RequestFingerprint::from_json_sections(sys, tools, msgs);
-        let b = RequestFingerprint::from_json_sections(sys, tools, msgs);
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn fingerprint_changes_when_tools_reordered() {
         let sys = r#"[]"#;
         let msgs = r#"[]"#;

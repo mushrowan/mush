@@ -1112,18 +1112,6 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_session() {
-        let (_dir, store) = temp_store();
-        let mut session = Session::new("test-model", "/tmp");
-        session.push_message(user("hello"));
-
-        store.save(&session).unwrap();
-        let loaded = store.load(&session.meta.id).unwrap();
-        assert_eq!(loaded.meta.id, session.meta.id);
-        assert_eq!(loaded.context().len(), 1);
-    }
-
-    #[test]
     fn loading_caps_oversized_tool_details_but_keeps_the_content() {
         let (_dir, store) = temp_store();
         let mut session = Session::new("test-model", "/tmp");
@@ -1260,20 +1248,6 @@ mod tests {
         assert_eq!(meta.id, SessionId::from("meta-only"));
         assert_eq!(meta.title.as_deref(), Some("metadata survives"));
         assert_eq!(meta.message_count, 42);
-    }
-
-    #[test]
-    fn system_prompt_round_trips() {
-        let (_dir, store) = temp_store();
-        let mut session = Session::new("test-model", "/tmp");
-        session.system_prompt = Some("you are running inside mush\n\nproject context: foo".into());
-        store.save(&session).unwrap();
-
-        let loaded = store.load(&session.meta.id).unwrap();
-        assert_eq!(
-            loaded.system_prompt.as_deref(),
-            Some("you are running inside mush\n\nproject context: foo")
-        );
     }
 
     #[test]

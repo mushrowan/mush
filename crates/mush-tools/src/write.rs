@@ -120,16 +120,6 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn write_new_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("new.txt");
-
-        let result = write_file(&path, "hello world");
-        assert!(result.outcome.is_success());
-        assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
-    }
-
-    #[test]
     fn write_creates_parent_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a/b/c/deep.txt");

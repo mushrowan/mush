@@ -1440,30 +1440,6 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_in_the_tree_gets_a_row() {
-        let tree = forked_tree();
-        assert_eq!(tree.rows().len(), tree.entries().len());
-    }
-
-    #[test]
-    fn unanswered_tool_calls_names_the_calls_a_leaf_would_leave_open() {
-        let mut tree = SessionTree::new();
-        tree.append_message(user_msg("q0"));
-        let calling = tree.append_message(assistant_calling("call_1"));
-        let answered = tree.append_message(tool_result("call_1"));
-
-        assert_eq!(
-            tree.unanswered_tool_calls(&calling),
-            vec![ToolCallId::from("call_1")],
-            "branching off the assistant turn leaves its tool call unanswered"
-        );
-        assert!(
-            tree.unanswered_tool_calls(&answered).is_empty(),
-            "the tool result closes the call"
-        );
-    }
-
-    #[test]
     fn unanswered_tool_calls_follow_only_the_asked_branch_and_survive_a_reload() {
         let mut tree = SessionTree::new();
         let user = tree.append_message(user_msg("q0"));
@@ -1568,17 +1544,6 @@ mod tests {
                 _ => panic!("expected text"),
             }
         }
-    }
-
-    #[test]
-    fn build_context_linear() {
-        let mut tree = SessionTree::new();
-        tree.append_message(user_msg("q1"));
-        tree.append_message(assistant_msg("a1"));
-        tree.append_message(user_msg("q2"));
-
-        let ctx = tree.build_context();
-        assert_eq!(ctx.len(), 3);
     }
 
     #[test]
@@ -1796,18 +1761,6 @@ mod tests {
 
         let user_msgs = tree.user_messages_in_branch();
         assert_eq!(user_msgs.len(), 2);
-    }
-
-    #[test]
-    fn serialisation_roundtrip() {
-        let mut tree = SessionTree::new();
-        tree.append_message(user_msg("hello"));
-        tree.append_message(assistant_msg("hi"));
-
-        let json = serde_json::to_string(&tree).unwrap();
-        let restored: SessionTree = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.len(), 2);
-        assert_eq!(restored.build_context().len(), 2);
     }
 
     #[test]

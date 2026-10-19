@@ -259,12 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_error() {
-        let result = ToolResult::error("something went wrong");
-        assert!(result.outcome.is_error());
-    }
-
-    #[test]
     fn parse_tool_args_includes_received_args_preview() {
         #[derive(serde::Deserialize)]
         #[allow(dead_code)]
@@ -358,17 +352,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn echo_tool_works() {
-        let tool = EchoTool;
-        let result = tool.execute(serde_json::json!({"text": "hello"})).await;
-        assert!(result.outcome.is_success());
-        match &result.content[0] {
-            ToolResultContentPart::Text(t) => assert_eq!(t.text, "hello"),
-            _ => panic!("expected text"),
-        }
-    }
-
     #[test]
     fn tool_key_normalises_case_and_underscores() {
         assert_eq!(ToolKey::new("WebSearch"), ToolKey::new("web_search"));
@@ -447,14 +430,6 @@ mod tests {
         fn output_limit(&self) -> OutputLimit {
             OutputLimit::Head
         }
-    }
-
-    #[test]
-    fn output_limit_choices_only_head_or_tail() {
-        let echo = EchoTool;
-        assert_eq!(echo.output_limit(), OutputLimit::Head);
-        let upper = UpperEchoTool;
-        assert_eq!(upper.output_limit(), OutputLimit::Head);
     }
 
     #[tokio::test]

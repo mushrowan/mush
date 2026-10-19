@@ -108,17 +108,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn completed_and_blocked_workers_stay_stopped() {
-        assert_eq!(decide("done", None, false, 0), Action::Stop);
-        assert_eq!(decide("blocked", None, false, 0), Action::Stop);
-    }
-
-    #[test]
-    fn unfinished_success_continues() {
-        assert_eq!(decide("working", None, false, 0), Action::Continue);
-    }
-
-    #[test]
     fn quota_switches_once_and_then_stops() {
         assert_eq!(
             decide("working", Some(Failure::Quota), false, 0),

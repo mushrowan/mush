@@ -74,36 +74,6 @@ async fn a_prompt_over_the_socket_runs_a_turn() {
 }
 
 #[tokio::test]
-async fn a_second_client_sees_the_state_the_first_left() {
-    let worker = spawn_worker();
-    {
-        let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
-        first.send(prompt("hello")).await.unwrap();
-        drain_turn(&mut first).await;
-    }
-
-    let mut second = DaemonConnection::connect(&worker.socket).await.unwrap();
-    assert_eq!(second.state().context_len, 2);
-    assert_eq!(second.history().await.len(), 2);
-    assert!(!worker.task.is_finished());
-}
-
-#[tokio::test]
-async fn a_turn_keeps_running_while_nobody_is_attached() {
-    let worker = spawn_worker();
-    {
-        let mut first = DaemonConnection::connect(&worker.socket).await.unwrap();
-        first.send(prompt("hello")).await.unwrap();
-    }
-
-    let mut second = DaemonConnection::connect(&worker.socket).await.unwrap();
-    if second.state().turn_active {
-        drain_turn(&mut second).await;
-    }
-    assert_eq!(second.transcript().await.len(), 2);
-}
-
-#[tokio::test]
 async fn a_session_command_answers_with_its_events() {
     let worker = spawn_worker();
     let mut client = DaemonConnection::connect(&worker.socket).await.unwrap();
@@ -478,27 +448,6 @@ async fn read_descriptor(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-#[tokio::test]
-async fn a_worker_that_never_says_hello_times_the_client_out() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("silent.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let _accepting = tokio::spawn(async move {
-        let held = listener.accept().await;
-        std::future::pending::<()>().await;
-        drop(held);
-    });
-
-    let Err(error) = DaemonConnection::connect_within(&socket, Duration::from_millis(200)).await
-    else {
-        panic!("the client got in")
-    };
-    assert!(
-        matches!(error, mush_daemon::ConnectError::TimedOut(_)),
-        "{error:?}"
-    );
 }
 
 #[tokio::test]

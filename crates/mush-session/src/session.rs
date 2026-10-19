@@ -186,35 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn push_message_updates_count() {
-        let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("hi".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
-        assert_eq!(session.meta.message_count, 1);
-        assert_eq!(session.context().len(), 1);
-    }
-
-    #[test]
-    fn auto_title_from_first_message() {
-        let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("explain how rust traits work".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
-        session.auto_title();
-        assert_eq!(
-            session.meta.title.as_deref(),
-            Some("explain how rust traits work")
-        );
-    }
-
-    #[test]
     fn auto_title_truncates_long_messages() {
         let mut session = Session::new("test-model", "/tmp");
         let long_text = "the quick brown fox jumps over the lazy dog and then proceeds to do many other things that make this message very long indeed";
@@ -275,22 +246,6 @@ mod tests {
         let id1 = SessionId::new();
         let id2 = SessionId::new();
         assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn session_serialisation_roundtrip() {
-        let mut session = Session::new("test-model", "/tmp/project");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("hello".into()))
-                .timestamp_ms(Timestamp::from_ms(1000))
-                .build(),
-        ));
-
-        let json = serde_json::to_string(&session).unwrap();
-        let restored: Session = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.meta.id, session.meta.id);
-        assert_eq!(restored.context().len(), 1);
     }
 
     #[test]

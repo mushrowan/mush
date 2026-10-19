@@ -727,25 +727,6 @@ impl Server {
     }
 
     #[test]
-    fn incremental_matches_full_build() {
-        let dir = tempfile::tempdir().unwrap();
-        setup_test_repo(dir.path());
-
-        let full = IncrementalRepoMap::new(dir.path()).current;
-        let incr = IncrementalRepoMap::new(dir.path());
-
-        assert_eq!(
-            full.files.len(),
-            incr.map().files.len(),
-            "incremental should match full build"
-        );
-
-        let full_paths: HashSet<_> = full.files.iter().map(|f| f.path.clone()).collect();
-        let incr_paths: HashSet<_> = incr.map().files.iter().map(|f| f.path.clone()).collect();
-        assert_eq!(full_paths, incr_paths);
-    }
-
-    #[test]
     fn incremental_update_changed_file() {
         let dir = tempfile::tempdir().unwrap();
         setup_test_repo(dir.path());

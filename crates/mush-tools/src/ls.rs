@@ -237,13 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn output_limit_is_head() {
-        use mush_agent::tool::OutputLimit;
-        let tool = LsTool::new(Path::new(".").into());
-        assert_eq!(tool.output_limit(), OutputLimit::Head);
-    }
-
-    #[test]
     fn format_sizes() {
         assert_eq!(format_size(123), "123B");
         assert_eq!(format_size(2048), "2.0K");

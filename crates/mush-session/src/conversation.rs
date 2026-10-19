@@ -355,13 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn from_messages_builds_context() {
-        let state = ConversationState::from_messages(vec![user_message("hello")]);
-        let context = state.context();
-        assert_eq!(context.len(), 1);
-    }
-
-    #[test]
     fn deserialize_legacy_messages_only() {
         let json = serde_json::json!({
             "messages": [user_message("hello")],

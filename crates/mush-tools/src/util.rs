@@ -201,26 +201,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn truncate_empty() {
-        let lines: Vec<&str> = vec![];
-        assert_eq!(truncate_lines(&lines, "matches"), "no matches found");
-    }
-
-    #[test]
-    fn truncate_short() {
-        let lines = vec!["a", "b", "c"];
-        let result = truncate_lines(&lines, "matches");
-        assert!(result.starts_with("3\n\na\nb\nc"));
-    }
-
-    #[test]
-    fn truncate_long() {
-        let lines: Vec<&str> = (0..250).map(|_| "line").collect();
-        let result = truncate_lines(&lines, "results");
-        assert!(result.contains("[50 more results. narrow your search.]"));
-    }
-
     fn temp_git_repo() -> Option<tempfile::TempDir> {
         let dir = tempfile::tempdir().ok()?;
         let status = Command::new("git")

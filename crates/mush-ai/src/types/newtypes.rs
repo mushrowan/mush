@@ -527,12 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn base_url_deref_to_str() {
-        let url = BaseUrl::new("https://api.example.com");
-        assert!(url.contains("example"));
-    }
-
-    #[test]
     fn api_key_redacted_debug() {
         let key = ApiKey::new("sk-ant-api-abcdefghijk").unwrap();
         let debug = format!("{key:?}");

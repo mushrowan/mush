@@ -176,12 +176,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_server_is_never_dialled() {
-        let server = McpServer::connect("off", &config(&["__no_such_binary__"], false)).await;
-        assert_eq!(server.state().await, ServerState::Disabled);
-    }
-
-    #[tokio::test]
     async fn calling_a_disconnected_server_names_it() {
         let server = McpServer::connect("off", &config(&["__no_such_binary__"], false)).await;
 

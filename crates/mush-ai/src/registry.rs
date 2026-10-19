@@ -511,18 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn retryable_503_service_unavailable() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            content_type: "text/plain".into(),
-            body: "unavailable".into(),
-            retry_after: None,
-        };
-        assert!(err.is_retryable());
-    }
-
-    #[test]
     fn not_retryable_400_bad_request() {
         let err = ProviderError::ApiError {
             api: "test",

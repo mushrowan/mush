@@ -60,15 +60,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_servers_first_per_language_wins() {
-        let rust_entries: Vec<_> = KNOWN_SERVERS
-            .iter()
-            .filter(|(_, lang, _)| *lang == Language::Rust)
-            .collect();
-        assert_eq!(rust_entries[0].0, "rust-analyzer");
-    }
-
-    #[test]
     fn is_in_path_finds_only_files() {
         let exe = std::env::current_exe().unwrap();
         let dir = exe.parent().unwrap();

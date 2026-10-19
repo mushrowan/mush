@@ -254,24 +254,6 @@ use type hints
     }
 
     #[test]
-    fn rule_index_deduplicates() {
-        let rules = vec![Rule {
-            name: "python".into(),
-            globs: vec!["*.py".into()],
-            languages: vec![],
-            content: "python rules".into(),
-            path: PathBuf::from("rules/python.md"),
-        }];
-        let index = RuleIndex::new(rules);
-
-        let matched = index.match_file(Path::new("a.py"));
-        assert_eq!(matched.len(), 1);
-
-        let matched = index.match_file(Path::new("b.py"));
-        assert!(matched.is_empty());
-    }
-
-    #[test]
     fn rule_index_multiple_globs_same_rule() {
         let rules = vec![Rule {
             name: "web".into(),

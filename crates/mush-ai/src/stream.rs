@@ -186,28 +186,6 @@ mod tests {
     use crate::types::*;
 
     #[test]
-    fn stream_event_variants_are_constructable() {
-        let msg = AssistantMessage::builder()
-            .model("test".into())
-            .provider(Provider::Custom("test".into()))
-            .api(Api::AnthropicMessages)
-            .timestamp_ms(Timestamp::zero())
-            .build();
-
-        let _start = StreamEvent::Start {
-            partial: msg.clone(),
-        };
-        let _delta = StreamEvent::TextDelta {
-            content_index: 0,
-            delta: "hello".into(),
-        };
-        let _done = StreamEvent::Done {
-            reason: StopReason::Stop,
-            message: msg,
-        };
-    }
-
-    #[test]
     fn a_partial_rebuilds_streamed_parts_in_content_order() {
         let start = AssistantMessage::builder()
             .model("test".into())

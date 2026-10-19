@@ -264,10 +264,3 @@ impl StreamingState {
         (text, thinking)
     }
 }
-
-#[cfg(test)]
-pub(crate) fn char_prefix(s: &str, n: usize) -> &str {
-    s.char_indices()
-        .nth(n)
-        .map_or(s, |(byte_pos, _)| &s[..byte_pos])
-}

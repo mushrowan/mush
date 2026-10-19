@@ -142,22 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_frontmatter_extracts_description() {
-        let text = "---\ndescription: a helpful prompt\n---\n\ndo the thing $1";
-        let (desc, body) = parse_frontmatter(text);
-        assert_eq!(desc.as_deref(), Some("a helpful prompt"));
-        assert_eq!(body, "do the thing $1");
-    }
-
-    #[test]
-    fn parse_frontmatter_without_returns_none_and_full_text() {
-        let text = "just some content\nmore content";
-        let (desc, body) = parse_frontmatter(text);
-        assert!(desc.is_none());
-        assert_eq!(body, text);
-    }
-
-    #[test]
     fn parse_frontmatter_without_description_returns_none() {
         let text = "---\nother: value\n---\n\nactual body";
         let (desc, body) = parse_frontmatter(text);

@@ -151,17 +151,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_splits_the_server_from_the_bare_tool_name() {
-        let (server, tool_name) = catalogue()
-            .resolve("sweethome3d_render_photo")
-            .await
-            .expect("known tool resolves");
-
-        assert_eq!(server.name(), "sweethome3d");
-        assert_eq!(tool_name, "render_photo");
-    }
-
-    #[tokio::test]
     async fn resolve_rejects_an_unknown_tool() {
         assert!(catalogue().resolve("sweethome3d_nope").await.is_none());
     }

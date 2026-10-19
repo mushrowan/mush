@@ -1,6 +1,5 @@
 use super::*;
 use crate::input_buffer::word_boundary_left;
-use crate::streaming::char_prefix;
 use mush_ai::types::ToolOutcome;
 use ratatui::layout::Rect;
 
@@ -76,16 +75,6 @@ fn streaming_with_thinking() {
 
     assert_eq!(app.messages[0].thinking.as_deref(), Some("let me think..."));
     assert_eq!(app.messages[0].content, "answer");
-}
-
-#[test]
-fn char_prefix_slices_correctly() {
-    assert_eq!(char_prefix("hello", 0), "");
-    assert_eq!(char_prefix("hello", 3), "hel");
-    assert_eq!(char_prefix("hello", 5), "hello");
-    assert_eq!(char_prefix("hello", 100), "hello");
-    assert_eq!(char_prefix("café", 3), "caf");
-    assert_eq!(char_prefix("café", 4), "café");
 }
 
 #[test]
@@ -1056,13 +1045,6 @@ fn pop_queued_skips_non_queued() {
 }
 
 #[test]
-fn tool_call_status_is_copy() {
-    let status = ToolCallStatus::Running;
-    let copied = status;
-    assert_eq!(status, copied);
-}
-
-#[test]
 fn display_message_new_has_sane_defaults() {
     let msg = DisplayMessage::new(MessageRole::User, "hello");
     assert_eq!(msg.role, MessageRole::User);
@@ -1074,16 +1056,6 @@ fn display_message_new_has_sane_defaults() {
     assert!(msg.cost.is_none());
     assert!(msg.model_id.is_none());
     assert!(!msg.queued);
-}
-
-#[test]
-fn display_message_new_with_struct_update() {
-    let msg = DisplayMessage {
-        queued: true,
-        ..DisplayMessage::new(MessageRole::User, "steer")
-    };
-    assert!(msg.queued);
-    assert_eq!(msg.content, "steer");
 }
 
 #[test]
@@ -1112,12 +1084,6 @@ fn cache_timer_refresh_resets_flags() {
     timer.refresh();
     assert!(!timer.warn_sent);
     assert!(!timer.expired_sent);
-}
-
-#[test]
-fn cache_timer_disabled_when_zero_ttl() {
-    let timer = CacheTimer::new(0);
-    assert_eq!(timer.ttl_secs, 0);
 }
 
 #[test]

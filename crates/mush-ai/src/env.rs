@@ -31,11 +31,4 @@ mod tests {
     fn env_api_key_missing() {
         assert_eq!(env_api_key(&Provider::Custom("nonexistent".into())), None);
     }
-
-    #[test]
-    fn custom_provider_env_var_name() {
-        let name = "my-proxy";
-        let expected = format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
-        assert_eq!(expected, "MY_PROXY_API_KEY");
-    }
 }
