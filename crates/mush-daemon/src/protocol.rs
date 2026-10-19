@@ -155,39 +155,10 @@ mod tests {
     use super::*;
     use mush_agent::AgentEvent;
     use mush_ai::stream::StreamEvent;
-    use mush_ai::types::{SessionId, ThinkingLevel, TokenCount};
+    use mush_ai::types::ThinkingLevel;
     use mush_runtime::{Applied, StreamGeneration};
 
-    fn state() -> ConnectionState {
-        ConnectionState {
-            paused: None,
-            session_id: SessionId::new(),
-            title: None,
-            model_id: "m".into(),
-            subagent_model: None,
-            accounts: Default::default(),
-            thinking_level: ThinkingLevel::Off,
-            context_tokens: TokenCount::ZERO,
-            context_len: 0,
-            tree_len: 0,
-            rlm_depth: 0,
-            rlm_max_depth: 2,
-            rlm_max_depth_source: Default::default(),
-            turn_active: false,
-            turn_model: None,
-            active_turns: 0,
-            compacting: false,
-            pending_prompt: false,
-            controlled: false,
-            last_request: None,
-            cwd: None,
-            sync: Default::default(),
-            auto_compact: true,
-            price_cliff: None,
-            below_price_cliff: Default::default(),
-            anthropic_betas: None,
-        }
-    }
+    use crate::test_support::state;
 
     #[test]
     fn a_command_request_survives_the_wire() {

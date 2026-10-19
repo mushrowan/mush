@@ -13,3 +13,6 @@ pub use supervisor::{
     WorkerDescriptor, daemon_socket_path, workers_dir,
 };
 pub use worker::{Descriptor, bind, serve};
+
+#[cfg(test)]
+mod test_support;

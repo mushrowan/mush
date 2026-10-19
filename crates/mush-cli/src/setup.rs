@@ -1800,13 +1800,7 @@ mod tests {
 
     #[test]
     fn default_prompt_encourages_targeted_exploration() {
-        let context = ProjectContext {
-            agents_md: vec![],
-            skills: vec![],
-            skill_diagnostics: vec![],
-            system_prompt: None,
-            append_system_prompt: None,
-        };
+        let context = ProjectContext::default();
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(
             prompt.contains("grep"),
@@ -1820,13 +1814,7 @@ mod tests {
 
     #[test]
     fn default_prompt_mentions_terminal_markdown_rendering() {
-        let context = ProjectContext {
-            agents_md: vec![],
-            skills: vec![],
-            skill_diagnostics: vec![],
-            system_prompt: None,
-            append_system_prompt: None,
-        };
+        let context = ProjectContext::default();
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
 
         assert!(prompt.contains("plain text that will be styled by the terminal TUI"));
@@ -1838,13 +1826,7 @@ mod tests {
 
     #[test]
     fn default_prompt_sets_work_boundaries_without_presence_claims() {
-        let context = ProjectContext {
-            agents_md: vec![],
-            skills: vec![],
-            skill_diagnostics: vec![],
-            system_prompt: None,
-            append_system_prompt: None,
-        };
+        let context = ProjectContext::default();
         let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
         assert!(prompt.contains("Continue authorised work within the task scope."));
         assert!(prompt.contains("Keep a record of decisions, checks and unresolved issues."));

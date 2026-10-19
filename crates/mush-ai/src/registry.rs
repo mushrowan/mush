@@ -436,6 +436,22 @@ impl ApiRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_retryable(
+        status: reqwest::StatusCode,
+        content_type: &str,
+        body: &str,
+        expected: bool,
+    ) {
+        let error = ProviderError::ApiError {
+            api: "test",
+            status,
+            content_type: content_type.into(),
+            body: body.into(),
+            retry_after: None,
+        };
+        assert_eq!(error.is_retryable(), expected);
+    }
     use crate::types::TokenCount;
 
     #[test]
@@ -476,86 +492,72 @@ mod tests {
 
     #[test]
     fn retryable_429_rate_limit() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
-            content_type: "application/json".into(),
-            body: "rate limited".into(),
-            retry_after: None,
-        };
-        assert!(err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "application/json",
+            "rate limited",
+            true,
+        );
     }
 
     #[test]
     fn retryable_500_server_error() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-            content_type: "application/json".into(),
-            body: "internal error".into(),
-            retry_after: None,
-        };
-        assert!(err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "application/json",
+            "internal error",
+            true,
+        );
     }
 
     #[test]
     fn retryable_502_bad_gateway() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::BAD_GATEWAY,
-            content_type: "text/html".into(),
-            body: "bad gateway".into(),
-            retry_after: None,
-        };
-        assert!(err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "text/html",
+            "bad gateway",
+            true,
+        );
     }
 
     #[test]
     fn not_retryable_400_bad_request() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::BAD_REQUEST,
-            content_type: "application/json".into(),
-            body: "bad request".into(),
-            retry_after: None,
-        };
-        assert!(!err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::BAD_REQUEST,
+            "application/json",
+            "bad request",
+            false,
+        );
     }
 
     #[test]
     fn retryable_400_refusal() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::BAD_REQUEST,
-            content_type: "application/json".into(),
-            body: r#"{"error":{"type":"invalid_request","code":"cyber_policy"}}"#.into(),
-            retry_after: None,
-        };
-        assert!(err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::BAD_REQUEST,
+            "application/json",
+            r#"{"error":{"type":"invalid_request","code":"cyber_policy"}}"#,
+            true,
+        );
     }
 
     #[test]
     fn not_retryable_401_unauthorized() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::UNAUTHORIZED,
-            content_type: "application/json".into(),
-            body: "unauthorized".into(),
-            retry_after: None,
-        };
-        assert!(!err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "application/json",
+            "unauthorized",
+            false,
+        );
     }
 
     #[test]
     fn not_retryable_403_forbidden() {
-        let err = ProviderError::ApiError {
-            api: "test",
-            status: reqwest::StatusCode::FORBIDDEN,
-            content_type: "application/json".into(),
-            body: "forbidden".into(),
-            retry_after: None,
-        };
-        assert!(!err.is_retryable());
+        assert_retryable(
+            reqwest::StatusCode::FORBIDDEN,
+            "application/json",
+            "forbidden",
+            false,
+        );
     }
 
     #[test]

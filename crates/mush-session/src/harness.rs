@@ -1982,15 +1982,8 @@ mod tests {
 
     #[test]
     fn recent_texts_skip_harness_deliveries_and_keep_the_newest_four() {
-        use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
-        let user = |text: &str| {
-            Message::User(
-                UserMessage::builder()
-                    .content(UserContent::Text(text.into()))
-                    .timestamp_ms(Timestamp::zero())
-                    .build(),
-            )
-        };
+        use mush_ai::types::Timestamp;
+        let user = |text: &str| crate::user_text::user_text(text.into(), Timestamp::zero());
         let digest = digest_message(&crowded_memories(), &Focus::default());
         let messages = vec![
             user("first"),

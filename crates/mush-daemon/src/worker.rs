@@ -675,36 +675,7 @@ async fn handle(
 mod tests {
     use super::*;
 
-    fn state() -> ConnectionState {
-        ConnectionState {
-            paused: None,
-            session_id: mush_ai::types::SessionId::new(),
-            title: None,
-            model_id: "m".into(),
-            subagent_model: None,
-            accounts: Default::default(),
-            thinking_level: mush_ai::types::ThinkingLevel::Off,
-            context_tokens: mush_ai::types::TokenCount::ZERO,
-            context_len: 0,
-            tree_len: 0,
-            rlm_depth: 0,
-            rlm_max_depth: 2,
-            rlm_max_depth_source: Default::default(),
-            turn_active: false,
-            turn_model: None,
-            active_turns: 0,
-            compacting: false,
-            pending_prompt: false,
-            controlled: false,
-            last_request: None,
-            cwd: None,
-            sync: Default::default(),
-            auto_compact: true,
-            price_cliff: None,
-            below_price_cliff: Default::default(),
-            anthropic_betas: None,
-        }
-    }
+    use crate::test_support::state;
 
     fn hub_with_one_slot() -> (
         Hub,

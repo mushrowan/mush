@@ -1150,6 +1150,28 @@ mod tests {
 
     use super::*;
 
+    fn standard_model() -> Model {
+        Model::builder()
+            .id("gpt-5.2".into())
+            .name("GPT-5.2".into())
+            .api(Api::OpenaiResponses)
+            .provider(Provider::Custom("openai".into()))
+            .base_url("https://api.openai.com/v1".into())
+            .context_window(TokenCount::new(200_000))
+            .max_output_tokens(TokenCount::new(32768))
+            .reasoning(true)
+            .build()
+    }
+
+    fn test_output() -> AssistantMessage {
+        AssistantMessage::builder()
+            .model("test".into())
+            .provider(Provider::Custom("test".into()))
+            .api(Api::OpenaiResponses)
+            .timestamp_ms(Timestamp::zero())
+            .build()
+    }
+
     fn fake_jwt(subject: &str) -> String {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::json!({ "sub": subject }).to_string());
@@ -1216,15 +1238,13 @@ mod tests {
             serve_once(&listener, "HTTP/1.1 200 OK").await
         });
 
-        let model = Model::builder()
-            .id("gpt-5.5".into())
-            .name("GPT-5.5".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai-codex".into()))
-            .base_url(base_url.as_str().into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .build();
+        let model = Model {
+            id: "gpt-5.5".into(),
+            name: "GPT-5.5".into(),
+            base_url: base_url.as_str().into(),
+            reasoning: false,
+            ..codex_model()
+        };
         let options = StreamOptions {
             api_key: ApiKey::new(stale.clone()),
             ..Default::default()
@@ -1252,12 +1272,10 @@ mod tests {
 
     #[test]
     fn failed_response_preserves_nested_quota_code() {
-        let mut output = AssistantMessage::builder()
-            .model("test".into())
-            .provider(Provider::Custom("openai-codex".into()))
-            .api(Api::OpenaiResponses)
-            .timestamp_ms(Timestamp::zero())
-            .build();
+        let mut output = AssistantMessage {
+            provider: Provider::Custom("openai-codex".into()),
+            ..test_output()
+        };
         let events = process_sse_event(
             Some("response.failed"),
             r#"{"type":"response.failed","response":{"error":{"code":"insufficient_quota","message":"limit reached"}}}"#,
@@ -1277,17 +1295,10 @@ mod tests {
 
     #[test]
     fn resolve_standard_url() {
-        let model = Model::builder()
-            .id("gpt-5.2".into())
-            .name("GPT-5.2".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai".into()))
-            .base_url("https://api.openai.com/v1".into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .reasoning(true)
-            .input(vec![InputModality::Text, InputModality::Image])
-            .build();
+        let model = Model {
+            input: vec![InputModality::Text, InputModality::Image],
+            ..standard_model()
+        };
 
         assert_eq!(
             resolve_url(&model, false),
@@ -1297,16 +1308,7 @@ mod tests {
 
     #[test]
     fn resolve_codex_url() {
-        let model = Model::builder()
-            .id("gpt-5.2-codex".into())
-            .name("GPT-5.2 Codex".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai-codex".into()))
-            .base_url("https://chatgpt.com/backend-api".into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .reasoning(true)
-            .build();
+        let model = codex_model();
 
         assert_eq!(
             resolve_url(&model, true),
@@ -1364,16 +1366,7 @@ mod tests {
 
     #[test]
     fn build_body_respects_cache_retention() {
-        let model = Model::builder()
-            .id("gpt-5.2".into())
-            .name("GPT-5.2".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai".into()))
-            .base_url("https://api.openai.com/v1".into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .reasoning(true)
-            .build();
+        let model = standard_model();
 
         let options = StreamOptions {
             cache_retention: Some(CacheRetention::Long),
@@ -1388,16 +1381,7 @@ mod tests {
 
     #[test]
     fn a_reasoning_model_with_thinking_off_asks_for_no_reasoning() {
-        let model = Model::builder()
-            .id("gpt-5.2".into())
-            .name("GPT-5.2".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai".into()))
-            .base_url("https://api.openai.com/v1".into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .reasoning(true)
-            .build();
+        let model = standard_model();
         let off = |thinking| StreamOptions {
             thinking,
             ..Default::default()
@@ -1580,12 +1564,7 @@ mod tests {
 
     #[test]
     fn summary_parts_are_separated_by_a_blank_line() {
-        let mut output = AssistantMessage::builder()
-            .model("test".into())
-            .provider(Provider::Custom("test".into()))
-            .api(Api::OpenaiResponses)
-            .timestamp_ms(Timestamp::zero())
-            .build();
+        let mut output = test_output();
         let mut active = ActiveBlocks::new();
         let feed = |name: &str, data: serde_json::Value, output: &mut _, active: &mut _| {
             process_sse_event(Some(name), &data.to_string(), output, active)
@@ -1635,12 +1614,7 @@ mod tests {
 
     #[test]
     fn tool_call_args_materialise_at_block_end() {
-        let mut output = AssistantMessage::builder()
-            .model("test".into())
-            .provider(Provider::Custom("test".into()))
-            .api(Api::OpenaiResponses)
-            .timestamp_ms(Timestamp::zero())
-            .build();
+        let mut output = test_output();
         let mut active = ActiveBlocks::new();
 
         let added = serde_json::json!({
@@ -1754,8 +1728,8 @@ mod tests {
 
     #[test]
     fn finish_all_blocks_keeps_content_order_with_sparse_indexes() {
-        let mut output = AssistantMessage::builder()
-            .content(vec![
+        let mut output = AssistantMessage {
+            content: vec![
                 AssistantContentPart::Thinking(ThinkingContent::Thinking {
                     thinking: String::new(),
                     signature: None,
@@ -1763,12 +1737,9 @@ mod tests {
                 AssistantContentPart::Text(TextContent {
                     text: String::new(),
                 }),
-            ])
-            .model("test".into())
-            .provider(Provider::Custom("test".into()))
-            .api(Api::OpenaiResponses)
-            .timestamp_ms(Timestamp::zero())
-            .build();
+            ],
+            ..test_output()
+        };
         let mut active = ActiveBlocks::new();
         active.insert(
             42,
@@ -1886,16 +1857,7 @@ mod tests {
 
     #[test]
     fn non_codex_omits_instructions_field() {
-        let model = Model::builder()
-            .id("gpt-5.2".into())
-            .name("GPT-5.2".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai".into()))
-            .base_url("https://api.openai.com/v1".into())
-            .context_window(TokenCount::new(200_000))
-            .max_output_tokens(TokenCount::new(32768))
-            .reasoning(true)
-            .build();
+        let model = standard_model();
         let prompt = Some("you are a coding assistant".into());
         let options = StreamOptions::default();
 
@@ -1907,16 +1869,13 @@ mod tests {
 
     #[test]
     fn gpt_5_4_preserves_xhigh_reasoning_effort() {
-        let model = Model::builder()
-            .id("gpt-5.4".into())
-            .name("GPT-5.4".into())
-            .api(Api::OpenaiResponses)
-            .provider(Provider::Custom("openai-codex".into()))
-            .base_url("https://chatgpt.com/backend-api".into())
-            .context_window(TokenCount::new(1_050_000))
-            .max_output_tokens(TokenCount::new(128_000))
-            .reasoning(true)
-            .build();
+        let model = Model {
+            id: "gpt-5.4".into(),
+            name: "GPT-5.4".into(),
+            context_window: TokenCount::new(1_050_000),
+            max_output_tokens: TokenCount::new(128_000),
+            ..codex_model()
+        };
         let options = StreamOptions {
             thinking: Some(ThinkingLevel::Xhigh),
             ..Default::default()

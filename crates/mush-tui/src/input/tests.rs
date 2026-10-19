@@ -1,6 +1,7 @@
 use super::pickers::apply_model_completions;
 use super::*;
 use crate::session_picker::SessionScope;
+use crate::test_support::session_meta;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use mush_ai::types::{ThinkingLevel, TokenCount};
 use ratatui::layout::Rect;
@@ -189,14 +190,11 @@ fn escape_does_not_abort_while_tool_runs_between_messages() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.stream.active = false;
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "bash_1".into(),
-            name: "bash".into(),
-            summary: "running".into(),
-            live_output: None,
-            status: crate::display_types::ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "bash_1".into(),
+            "bash".into(),
+            "running".into(),
+        ));
     assert!(app.is_busy());
 
     let event = handle_key(&mut app, key(KeyCode::Esc));
@@ -1906,40 +1904,9 @@ fn session_picker_tab_toggles_scope() {
 }
 
 fn test_sessions() -> Vec<mush_session::SessionMeta> {
-    use mush_ai::types::{ModelId, SessionId, Timestamp};
     vec![
-        mush_session::SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: SessionId::from("one"),
-            title: Some("hello".into()),
-            model_id: ModelId::from("m"),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 1,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
-        mush_session::SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: SessionId::from("two"),
-            title: Some("jkl session".into()),
-            model_id: ModelId::from("m"),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 1,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
+        session_meta("one", "hello", "m", 1, "/tmp"),
+        session_meta("two", "jkl session", "m", 1, "/tmp"),
     ]
 }
 

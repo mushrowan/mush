@@ -852,11 +852,16 @@ mod tests {
     use crate::util::extract_text;
     use std::fs;
 
+    fn file_fixture(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        fs::write(&path, content).unwrap();
+        (dir, path)
+    }
+
     #[test]
     fn edit_replaces_exact_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "fn main() {\n    println!(\"hello\");\n}");
 
         let result = edit_file(
             &path,
@@ -884,9 +889,7 @@ mod tests {
 
     #[test]
     fn edit_fails_on_no_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "fn main() {}").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "fn main() {}");
 
         let result = edit_file(
             &path,
@@ -899,9 +902,7 @@ mod tests {
 
     #[test]
     fn edit_fails_on_multiple_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "foo bar foo bar").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "foo bar foo bar");
 
         let result = edit_file(&path, "foo", "baz", &EditOpts::default());
         assert!(result.outcome.is_error());
@@ -920,9 +921,7 @@ mod tests {
 
     #[test]
     fn edit_preserves_surrounding_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "before\ntarget line\nafter").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "before\ntarget line\nafter");
 
         let result = edit_file(&path, "target line", "replaced line", &EditOpts::default());
         assert!(result.outcome.is_success());
@@ -933,9 +932,7 @@ mod tests {
 
     #[test]
     fn edit_supports_lf_old_text_on_crlf_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "before\r\ntarget line\r\nafter\r\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "before\r\ntarget line\r\nafter\r\n");
 
         let result = edit_file(
             &path,
@@ -969,9 +966,7 @@ mod tests {
 
     #[test]
     fn edit_fails_on_identical_replacement() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("same.txt");
-        fs::write(&path, "unchanged").unwrap();
+        let (_dir, path) = file_fixture("same.txt", "unchanged");
 
         let result = edit_file(&path, "unchanged", "unchanged", &EditOpts::default());
         assert!(result.outcome.is_error());
@@ -979,9 +974,7 @@ mod tests {
 
     #[test]
     fn edit_on_empty_file_returns_error_does_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.txt");
-        fs::write(&path, "").unwrap();
+        let (_dir, path) = file_fixture("empty.txt", "");
 
         let result = edit_file(&path, "missing", "present", &EditOpts::default());
         assert!(result.outcome.is_error());
@@ -989,9 +982,7 @@ mod tests {
 
     #[test]
     fn edit_oldtext_longer_than_file_returns_error_does_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("short.txt");
-        fs::write(&path, "single line\n").unwrap();
+        let (_dir, path) = file_fixture("short.txt", "single line\n");
 
         let result = edit_file(
             &path,
@@ -1107,9 +1098,7 @@ mod tests {
 
     #[test]
     fn an_edit_matches_through_smart_punctuation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("quotes.rs");
-        fs::write(&path, "let s = \"hi\";\nlet n = 1 - 2;\n").unwrap();
+        let (_dir, path) = file_fixture("quotes.rs", "let s = \"hi\";\nlet n = 1 - 2;\n");
 
         let result = edit_file(
             &path,
@@ -1123,9 +1112,7 @@ mod tests {
 
     #[test]
     fn an_edit_matches_through_a_fullwidth_form() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("width.rs");
-        fs::write(&path, "print(x);\n").unwrap();
+        let (_dir, path) = file_fixture("width.rs", "print(x);\n");
 
         let result = edit_file(
             &path,
@@ -1139,9 +1126,7 @@ mod tests {
 
     #[test]
     fn an_edit_matches_a_differently_composed_accent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accent.md");
-        fs::write(&path, "cafe\u{301} au lait\n").unwrap();
+        let (_dir, path) = file_fixture("accent.md", "cafe\u{301} au lait\n");
 
         let result = edit_file(&path, "caf\u{e9} au lait", "tea", &EditOpts::default());
         assert!(result.outcome.is_success(), "{result:?}");
@@ -1150,9 +1135,7 @@ mod tests {
 
     #[test]
     fn a_fold_match_cannot_start_mid_grapheme() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ligature.md");
-        fs::write(&path, "\u{fb01}ne\n").unwrap();
+        let (_dir, path) = file_fixture("ligature.md", "\u{fb01}ne\n");
 
         let result = edit_file(&path, "i", "x", &EditOpts::default());
         assert!(result.outcome.is_error(), "{result:?}");
@@ -1176,9 +1159,7 @@ mod tests {
 
     #[test]
     fn an_edit_matches_through_a_non_breaking_space() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nbsp.md");
-        fs::write(&path, "a b c\n").unwrap();
+        let (_dir, path) = file_fixture("nbsp.md", "a b c\n");
 
         let result = edit_file(&path, "a\u{a0}b c", "done", &EditOpts::default());
         assert!(result.outcome.is_success(), "{result:?}");
@@ -1187,9 +1168,7 @@ mod tests {
 
     #[test]
     fn a_match_outside_the_range_says_so() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ranged.rs");
-        fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        let (_dir, path) = file_fixture("ranged.rs", "one\ntwo\nthree\nfour\nfive\n");
 
         let result = edit_file(
             &path,
@@ -1254,9 +1233,7 @@ mod tests {
 
     #[test]
     fn a_near_miss_from_line_zero_counts_from_the_first_line() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("zero.rs");
-        fs::write(&path, "let  x  =  1;\n").unwrap();
+        let (_dir, path) = file_fixture("zero.rs", "let  x  =  1;\n");
 
         let result = edit_file(
             &path,
@@ -1275,9 +1252,7 @@ mod tests {
 
     #[test]
     fn an_edit_accepts_file_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("aliased.rs");
-        fs::write(&path, "before\n").unwrap();
+        let (dir, path) = file_fixture("aliased.rs", "before\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1294,9 +1269,7 @@ mod tests {
 
     #[test]
     fn one_call_applies_several_edits() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("many.rs");
-        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let (dir, path) = file_fixture("many.rs", "one\ntwo\nthree\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1315,9 +1288,7 @@ mod tests {
 
     #[test]
     fn edits_arrive_as_a_json_string() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stringified.rs");
-        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        let (dir, path) = file_fixture("stringified.rs", "one\ntwo\nthree\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1333,9 +1304,7 @@ mod tests {
 
     #[test]
     fn an_edit_accepts_claude_code_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("named.rs");
-        fs::write(&path, "before\n").unwrap();
+        let (dir, path) = file_fixture("named.rs", "before\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1352,9 +1321,7 @@ mod tests {
 
     #[test]
     fn replace_all_takes_every_occurrence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rename.rs");
-        fs::write(&path, "old\nkeep\nold\nold\n").unwrap();
+        let (dir, path) = file_fixture("rename.rs", "old\nkeep\nold\nold\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1372,9 +1339,7 @@ mod tests {
 
     #[test]
     fn an_edit_accepts_expected_replacements() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("counted.rs");
-        fs::write(&path, "x\ny\nx\n").unwrap();
+        let (dir, path) = file_fixture("counted.rs", "x\ny\nx\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1392,9 +1357,7 @@ mod tests {
 
     #[test]
     fn an_entry_accepts_claude_code_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("multi.rs");
-        fs::write(&path, "one\ntwo\nthree\ntwo\n").unwrap();
+        let (dir, path) = file_fixture("multi.rs", "one\ntwo\nthree\ntwo\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1413,9 +1376,7 @@ mod tests {
 
     #[test]
     fn an_entry_without_replace_all_still_wants_one_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ambiguous.rs");
-        fs::write(&path, "dup\nkeep\ndup\n").unwrap();
+        let (dir, path) = file_fixture("ambiguous.rs", "dup\nkeep\ndup\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1434,9 +1395,7 @@ mod tests {
 
     #[test]
     fn a_failing_edit_in_a_batch_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("atomic.rs");
-        fs::write(&path, "one\ntwo\n").unwrap();
+        let (dir, path) = file_fixture("atomic.rs", "one\ntwo\n");
         let tool = EditTool::new(dir.path().into());
 
         let result = tokio::runtime::Runtime::new()
@@ -1509,9 +1468,7 @@ mod tests {
 
     #[test]
     fn edit_multiple_match_shows_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\n").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "let x = 1;\nlet y = 2;\nlet x = 1;\n");
 
         let result = edit_file(&path, "let x = 1;", "let x = 42;", &EditOpts::default());
         let text = extract_text(&result);
@@ -1535,9 +1492,7 @@ mod tests {
 
     #[test]
     fn edit_trailing_newline_normalisation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "fn main() {\n    hello();\n}\n").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "fn main() {\n    hello();\n}\n");
 
         let result = edit_file(
             &path,
@@ -1552,9 +1507,7 @@ mod tests {
 
     #[test]
     fn edit_extra_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "hello world").unwrap();
+        let (_dir, path) = file_fixture("test.rs", "hello world");
 
         let result = edit_file(
             &path,
@@ -1569,9 +1522,8 @@ mod tests {
 
     #[test]
     fn edit_matches_with_trailing_whitespace_in_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        fs::write(&path, "fn main() {  \n    println!(\"hello\");  \n}\n").unwrap();
+        let (_dir, path) =
+            file_fixture("test.rs", "fn main() {  \n    println!(\"hello\");  \n}\n");
 
         let result = edit_file(
             &path,
@@ -1589,9 +1541,7 @@ mod tests {
 
     #[test]
     fn edit_matches_trailing_tabs_in_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "line one\t\nline two\t\t\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "line one\t\nline two\t\t\n");
 
         let result = edit_file(
             &path,
@@ -1608,9 +1558,7 @@ mod tests {
 
     #[test]
     fn edit_trailing_ws_no_match_when_content_differs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "foo  \nbar  \n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "foo  \nbar  \n");
 
         let result = edit_file(&path, "fox\nbaz\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
@@ -1619,9 +1567,7 @@ mod tests {
 
     #[test]
     fn edit_trailing_ws_rejects_ambiguous_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "foo  \nbar\nfoo  \nbaz\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "foo  \nbar\nfoo  \nbaz\n");
 
         let result = edit_file(&path, "foo\n", "replaced\n", &EditOpts::default());
         let text = extract_text(&result);
@@ -1633,9 +1579,7 @@ mod tests {
 
     #[test]
     fn edit_expected_matches_multiple() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "TODO: fix\nsome code\nTODO: fix\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "TODO: fix\nsome code\nTODO: fix\n");
 
         let result = edit_file(
             &path,
@@ -1653,9 +1597,7 @@ mod tests {
 
     #[test]
     fn edit_expected_matches_mismatch_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "foo\nbar\nfoo\nbaz\nfoo\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "foo\nbar\nfoo\nbaz\nfoo\n");
 
         let result = edit_file(
             &path,
@@ -1726,9 +1668,10 @@ mod tests {
 
     #[test]
     fn edit_range_limited() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "let x = 1;\nlet y = 2;\nlet x = 1;\nlet z = 3;\n").unwrap();
+        let (_dir, path) = file_fixture(
+            "test.txt",
+            "let x = 1;\nlet y = 2;\nlet x = 1;\nlet z = 3;\n",
+        );
 
         let result = edit_file(
             &path,
@@ -1771,9 +1714,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_edit_after_a_foreign_change_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "hello\n").unwrap();
+        let (dir, path) = file_fixture("test.txt", "hello\n");
 
         let result = read_then_edit(dir.path(), &path, true).await;
 
@@ -1784,9 +1725,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_edit_on_an_unchanged_file_goes_through() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "hello\n").unwrap();
+        let (dir, path) = file_fixture("test.txt", "hello\n");
 
         let result = read_then_edit(dir.path(), &path, false).await;
 
@@ -1796,9 +1735,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_edits_in_a_row_do_not_trip_the_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "one two\n").unwrap();
+        let (dir, path) = file_fixture("test.txt", "one two\n");
         let ledger = crate::read_ledger::ReadLedger::default();
         let read = crate::read::ReadTool::new(dir.path().into()).with_read_ledger(ledger.clone());
         let edit = super::EditTool::new(dir.path().into()).with_read_ledger(ledger);
@@ -1829,9 +1766,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_invalid_line_range_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "hello\nworld\n").unwrap();
+        let (dir, path) = file_fixture("test.txt", "hello\nworld\n");
 
         let tool = super::EditTool::new(dir.path().into());
         let result = tool
@@ -1860,9 +1795,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_accepts_stringified_line_numbers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "let x = 1;\nlet x = 1;\nlet x = 1;\n").unwrap();
+        let (dir, path) = file_fixture("test.txt", "let x = 1;\nlet x = 1;\nlet x = 1;\n");
 
         let tool = super::EditTool::new(dir.path().into());
         let result = tool
@@ -1885,9 +1818,7 @@ mod tests {
 
     #[test]
     fn edit_trailing_ws_without_trailing_newline() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.txt");
-        fs::write(&path, "alpha  \nbeta  \ngamma\n").unwrap();
+        let (_dir, path) = file_fixture("test.txt", "alpha  \nbeta  \ngamma\n");
 
         let result = edit_file(&path, "alpha\nbeta", "one\ntwo", &EditOpts::default());
         let text = extract_text(&result);

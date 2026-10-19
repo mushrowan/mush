@@ -56,3 +56,28 @@ pub(crate) fn tempdir() -> std::io::Result<tempfile::TempDir> {
         tempfile::tempdir()
     }
 }
+
+pub(crate) fn session_meta(
+    id: &str,
+    title: &str,
+    model_id: &str,
+    message_count: usize,
+    cwd: &str,
+) -> mush_session::SessionMeta {
+    mush_session::SessionMeta {
+        paused: None,
+        rlm_max_depth: None,
+        spawn_view: None,
+        id: id.into(),
+        title: Some(title.into()),
+        model_id: model_id.into(),
+        created_at: mush_ai::types::Timestamp::now(),
+        updated_at: mush_ai::types::Timestamp::now(),
+        message_count,
+        cwd: cwd.into(),
+        parent: None,
+        subagent_model: None,
+        accounts: Default::default(),
+        lifecycle: mush_session::Lifecycle::Live,
+    }
+}

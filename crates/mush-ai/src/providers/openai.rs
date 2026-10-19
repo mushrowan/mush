@@ -1409,20 +1409,15 @@ mod tests {
     fn convert_tool_result_in_messages() {
         let model = test_model();
         let messages = vec![
-            Message::Assistant(
-                AssistantMessage::builder()
-                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
-                        id: "tc_1".into(),
-                        name: "read".into(),
-                        arguments: serde_json::json!({"path": "foo.rs"}),
-                    })])
-                    .model("test".into())
-                    .provider(Provider::Custom("test".into()))
-                    .api(Api::OpenaiCompletions)
-                    .stop_reason(StopReason::ToolUse)
-                    .timestamp_ms(Timestamp::zero())
-                    .build(),
-            ),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "foo.rs"}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                ..test_output()
+            }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
                 tool_name: "read".into(),
@@ -1455,20 +1450,15 @@ mod tests {
     fn old_tool_turn(output: &str) -> Vec<Message> {
         let mut messages = vec![
             user_turn("run it"),
-            Message::Assistant(
-                AssistantMessage::builder()
-                    .content(vec![AssistantContentPart::ToolCall(ToolCall {
-                        id: "tc_1".into(),
-                        name: "bash".into(),
-                        arguments: serde_json::json!({}),
-                    })])
-                    .model("test".into())
-                    .provider(Provider::Custom("test".into()))
-                    .api(Api::OpenaiCompletions)
-                    .stop_reason(StopReason::ToolUse)
-                    .timestamp_ms(Timestamp::zero())
-                    .build(),
-            ),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContentPart::ToolCall(ToolCall {
+                    id: "tc_1".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({}),
+                })],
+                stop_reason: StopReason::ToolUse,
+                ..test_output()
+            }),
             Message::ToolResult(ToolResultMessage {
                 tool_call_id: "tc_1".into(),
                 tool_name: "bash".into(),

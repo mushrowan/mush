@@ -234,7 +234,7 @@ impl<'de> Deserialize<'de> for ConversationState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::{Message, Timestamp, UserContent, UserMessage};
+    use mush_ai::types::{Message, Timestamp};
 
     #[test]
     fn a_branch_keeps_the_thinking_level_recorded_on_it() {
@@ -260,12 +260,7 @@ mod tests {
     }
 
     fn user_message(text: &str) -> Message {
-        Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(text.into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        )
+        crate::user_text::user_text(text.into(), Timestamp::zero())
     }
 
     #[test]

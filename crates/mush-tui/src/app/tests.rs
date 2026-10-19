@@ -1,5 +1,6 @@
 use super::*;
 use crate::input_buffer::word_boundary_left;
+use crate::test_support::session_meta;
 use mush_ai::types::ToolOutcome;
 use ratatui::layout::Rect;
 
@@ -666,22 +667,13 @@ fn session_picker_open_close() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     assert_eq!(app.interaction.mode, AppMode::Insert);
 
-    let sessions = vec![SessionMeta {
-        paused: None,
-        rlm_max_depth: None,
-        spawn_view: None,
-        id: mush_session::SessionId::from("abc"),
-        title: Some("test session".into()),
-        model_id: "claude-sonnet".into(),
-        created_at: Timestamp::now(),
-        updated_at: Timestamp::now(),
-        message_count: 5,
-        cwd: "/tmp".into(),
-        parent: None,
-        subagent_model: None,
-        accounts: Default::default(),
-        lifecycle: mush_session::Lifecycle::Live,
-    }];
+    let sessions = vec![session_meta(
+        "abc",
+        "test session",
+        "claude-sonnet",
+        5,
+        "/tmp",
+    )];
 
     app.open_session_picker(sessions, "/tmp".into());
     assert_eq!(app.interaction.mode, AppMode::SessionPicker);
@@ -695,38 +687,8 @@ fn session_picker_open_close() {
 #[test]
 fn session_picker_filter() {
     let sessions = vec![
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("a"),
-            title: Some("rust project".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 1,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("b"),
-            title: Some("python script".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 2,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
+        session_meta("a", "rust project", "m", 1, "/tmp"),
+        session_meta("b", "python script", "m", 2, "/tmp"),
     ];
 
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -742,38 +704,8 @@ fn session_picker_filter() {
 #[test]
 fn session_picker_filter_is_fuzzy_subsequence() {
     let sessions = vec![
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("a"),
-            title: Some("rust project".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 1,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("b"),
-            title: Some("python script".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 2,
-            cwd: "/tmp".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
+        session_meta("a", "rust project", "m", 1, "/tmp"),
+        session_meta("b", "python script", "m", 2, "/tmp"),
     ];
 
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -793,38 +725,8 @@ fn session_picker_filter_is_fuzzy_subsequence() {
 #[test]
 fn session_picker_scope_filter() {
     let sessions = vec![
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("a"),
-            title: Some("local session".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 1,
-            cwd: "/home/user/project".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
-        SessionMeta {
-            paused: None,
-            rlm_max_depth: None,
-            spawn_view: None,
-            id: mush_session::SessionId::from("b"),
-            title: Some("other session".into()),
-            model_id: "m".into(),
-            created_at: Timestamp::now(),
-            updated_at: Timestamp::now(),
-            message_count: 2,
-            cwd: "/home/user/other".into(),
-            parent: None,
-            subagent_model: None,
-            accounts: Default::default(),
-            lifecycle: mush_session::Lifecycle::Live,
-        },
+        session_meta("a", "local session", "m", 1, "/home/user/project"),
+        session_meta("b", "other session", "m", 2, "/home/user/other"),
     ];
 
     let mut app = App::new("test".into(), TokenCount::new(200_000));
@@ -1160,14 +1062,11 @@ fn is_busy_during_tool_execution() {
     assert!(!app.is_busy());
 
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "test_1".into(),
-            name: "bash".into(),
-            summary: "running command".into(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "test_1".into(),
+            "bash".into(),
+            "running command".into(),
+        ));
 
     assert!(
         !app.stream.active,
@@ -1185,14 +1084,11 @@ fn is_busy_during_tool_execution() {
 fn running_tool_is_busy_and_animates_activity_label() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "test_1".into(),
-            name: "bash".into(),
-            summary: "running command".into(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "test_1".into(),
+            "bash".into(),
+            "running command".into(),
+        ));
 
     assert!(app.is_busy());
     assert!(app.has_visible_animation());
@@ -1341,14 +1237,11 @@ fn disabling_feature_hints_keeps_the_row_empty_through_a_busy_turn() {
 fn activity_label_uses_tool_name_when_one_running() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "t1".into(),
-            name: "bash".into(),
-            summary: String::new(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "t1".into(),
+            "bash".into(),
+            String::new(),
+        ));
     assert_eq!(app.activity_label().as_deref(), Some("using bash"));
 }
 
@@ -1357,14 +1250,11 @@ fn activity_label_collapses_distinct_parallel_tools_to_count() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for (i, name) in ["bash", "read", "edit"].iter().enumerate() {
         app.active_tools
-            .push(crate::display_types::ActiveToolState {
-                tool_call_id: format!("t{i}").into(),
-                name: (*name).into(),
-                summary: String::new(),
-                live_output: None,
-                status: ToolCallStatus::Running,
-                output: None,
-            });
+            .push(crate::display_types::ActiveToolState::running(
+                format!("t{i}").into(),
+                (*name).into(),
+                String::new(),
+            ));
     }
     assert_eq!(app.activity_label().as_deref(), Some("using 3 tools"));
 }
@@ -1374,14 +1264,11 @@ fn activity_label_keeps_tool_name_when_all_same_tool() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     for i in 0..3 {
         app.active_tools
-            .push(crate::display_types::ActiveToolState {
-                tool_call_id: format!("t{i}").into(),
-                name: "read".into(),
-                summary: String::new(),
-                live_output: None,
-                status: ToolCallStatus::Running,
-                output: None,
-            });
+            .push(crate::display_types::ActiveToolState::running(
+                format!("t{i}").into(),
+                "read".into(),
+                String::new(),
+            ));
     }
     assert_eq!(app.activity_label().as_deref(), Some("using read"));
 }
@@ -1417,14 +1304,11 @@ fn compacting_label_takes_precedence_over_streaming_and_tools() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "t1".into(),
-            name: "edit".into(),
-            summary: String::new(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "t1".into(),
+            "edit".into(),
+            String::new(),
+        ));
     app.compacting = true;
     assert_eq!(app.activity_label().as_deref(), Some("compacting"));
 }
@@ -1434,14 +1318,11 @@ fn activity_label_prefers_tool_over_streaming() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.start_streaming();
     app.active_tools
-        .push(crate::display_types::ActiveToolState {
-            tool_call_id: "t1".into(),
-            name: "edit".into(),
-            summary: String::new(),
-            live_output: None,
-            status: ToolCallStatus::Running,
-            output: None,
-        });
+        .push(crate::display_types::ActiveToolState::running(
+            "t1".into(),
+            "edit".into(),
+            String::new(),
+        ));
     assert_eq!(app.activity_label().as_deref(), Some("using edit"));
 }
 

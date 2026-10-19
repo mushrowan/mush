@@ -175,7 +175,7 @@ fn clean_title(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mush_ai::types::*;
+    use crate::user_text::user_text;
 
     #[test]
     fn new_session_has_no_messages() {
@@ -189,12 +189,7 @@ mod tests {
     fn auto_title_truncates_long_messages() {
         let mut session = Session::new("test-model", "/tmp");
         let long_text = "the quick brown fox jumps over the lazy dog and then proceeds to do many other things that make this message very long indeed";
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(long_text.into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
+        session.push_message(user_text(long_text.into(), Timestamp::zero()));
         session.auto_title();
         let title = session.meta.title.unwrap();
         assert!(title.len() <= 81);
@@ -205,12 +200,7 @@ mod tests {
     #[test]
     fn auto_title_collapses_whitespace() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("hello\n\nworld\t  foo".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
+        session.push_message(user_text("hello\n\nworld\t  foo".into(), Timestamp::zero()));
         session.auto_title();
         assert_eq!(session.meta.title.as_deref(), Some("hello world foo"));
     }
@@ -218,14 +208,9 @@ mod tests {
     #[test]
     fn auto_title_strips_skill_hints() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(
-                    "[relevant skills: commit, jj. follow their instructions.]\nfix the build"
-                        .into(),
-                ))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
+        session.push_message(user_text(
+            "[relevant skills: commit, jj. follow their instructions.]\nfix the build".into(),
+            Timestamp::zero(),
         ));
         session.auto_title();
         assert_eq!(session.meta.title.as_deref(), Some("fix the build"));
@@ -251,20 +236,10 @@ mod tests {
     #[test]
     fn session_with_panes_roundtrips() {
         let mut session = Session::new("test-model", "/tmp");
-        session.push_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("main pane".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
+        session.push_message(user_text("main pane".into(), Timestamp::zero()));
 
         let mut pane_conv = ConversationState::new();
-        pane_conv.append_message(Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text("pane 2".into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        ));
+        pane_conv.append_message(user_text("pane 2".into(), Timestamp::zero()));
         session.panes.push(PaneSession {
             pane_id: PaneId::new(2),
             label: Some("helper".into()),

@@ -605,6 +605,13 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    fn numbered_lines(count: usize) -> String {
+        (1..=count)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn make_png(w: u32, h: u32) -> Vec<u8> {
         let img = image::ImageBuffer::from_fn(w, h, |x, y| {
             image::Rgb([
@@ -813,10 +820,7 @@ mod tests {
     fn read_with_limit() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(100);
         fs::write(&file, &content).unwrap();
 
         let result = read_file(&file, None, Some(5), false, DEFAULT_MAX_IMAGE_BYTES);
@@ -912,10 +916,7 @@ mod tests {
     async fn read_start_end_window() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=20)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(20);
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().into());
@@ -937,10 +938,7 @@ mod tests {
     async fn read_accepts_stringified_line_numbers() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=20)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(20);
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().into());
@@ -993,10 +991,7 @@ mod tests {
     async fn read_start_line_accepts_offset_as_relative_skip() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=20)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(20);
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().into());
@@ -1022,10 +1017,7 @@ mod tests {
     async fn read_around_line_window() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(100);
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().into());
@@ -1049,10 +1041,7 @@ mod tests {
     async fn read_around_line_default_context() {
         let dir = temp_dir();
         let file = dir.path().join("test.txt");
-        let content: String = (1..=100)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(100);
         fs::write(&file, &content).unwrap();
 
         let tool = super::ReadTool::new(dir.path().into());
@@ -1165,10 +1154,7 @@ mod tests {
     fn large_file_output_within_central_truncation_limits() {
         let dir = temp_dir();
         let file = dir.path().join("big.txt");
-        let content: String = (1..=5000)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = numbered_lines(5000);
         fs::write(&file, &content).unwrap();
 
         let result = read_file(&file, None, None, false, DEFAULT_MAX_IMAGE_BYTES);

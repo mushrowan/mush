@@ -3242,14 +3242,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_does_not_hide_a_later_failure() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let family = Family::new(
-            Identity::root("root"),
-            "root".into(),
-            2,
-            Some(stall_factory("slow", release)),
-            None,
-        );
+        let family = stalled_family();
         let mut root_inbox = family.root_inbox();
         let root = Identity::root("root");
         let slow = family
@@ -5396,14 +5389,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_parent_message_that_never_arrives_does_not_re_arm_the_exit_notice() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let family = Family::new(
-            Identity::root("root"),
-            "root".into(),
-            2,
-            Some(stall_factory("slow", release)),
-            None,
-        );
+        let family = stalled_family();
         let root = Identity::root("root");
         let slow = family
             .spawn(&root, "task".into(), "slow".into(), None, None, &family)
@@ -5424,6 +5410,16 @@ mod tests {
         let inner = family.lock();
         let node = &inner.children[&slow.rlm_child_id];
         assert!(node.replied && node.notified);
+    }
+
+    fn stalled_family() -> Arc<Family> {
+        Family::new(
+            Identity::root("root"),
+            "root".into(),
+            2,
+            Some(stall_factory("slow", Arc::new(tokio::sync::Notify::new()))),
+            None,
+        )
     }
 
     fn reply_with_usage(text: &str, input_tokens: u64) -> ClientEvent {
@@ -5447,14 +5443,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_child_spend_prices_its_hour_long_cache_writes_at_twice_the_input_price() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let family = Family::new(
-            Identity::root("root"),
-            "root".into(),
-            2,
-            Some(stall_factory("slow", release)),
-            None,
-        );
+        let family = stalled_family();
         let root = Identity::root("root");
         let slow = family
             .spawn(&root, "task".into(), "slow".into(), None, None, &family)
@@ -5501,14 +5490,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_parent_sees_how_full_a_child_is_and_how_often_it_compacted() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let family = Family::new(
-            Identity::root("root"),
-            "root".into(),
-            2,
-            Some(stall_factory("slow", release)),
-            None,
-        );
+        let family = stalled_family();
         let root = Identity::root("root");
         let slow = family
             .spawn(&root, "task".into(), "slow".into(), None, None, &family)
@@ -5568,14 +5550,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_child_tells_its_parent_how_far_it_got() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let family = Family::new(
-            Identity::root("root"),
-            "root".into(),
-            2,
-            Some(stall_factory("slow", release)),
-            None,
-        );
+        let family = stalled_family();
         let mut root_inbox = family.root_inbox();
         let root = Identity::root("root");
         let slow = family

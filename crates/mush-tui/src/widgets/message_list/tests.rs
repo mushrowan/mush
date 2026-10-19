@@ -308,17 +308,13 @@ fn usage_line_deferred_while_tool_running() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.interaction.show_usage_lines = true;
     app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            tool_call_id: "tc".into(),
-            name: "bash".into(),
-            summary: "ls -la".into(),
-            status: ToolCallStatus::Running,
-            output: None,
-            image_data: None,
-            batch: 1,
-            bash_done: None,
-            cell: None,
-        }],
+        tool_calls: vec![crate::app::DisplayToolCall::new(
+            "tc".into(),
+            "bash".into(),
+            "ls -la".into(),
+            ToolCallStatus::Running,
+            1,
+        )],
         usage: Some(Usage {
             input_tokens: TokenCount::new(100),
             output_tokens: TokenCount::new(20),
@@ -363,17 +359,13 @@ fn tool_calls_render() {
                 bash_done: None,
                 cell: None,
             },
-            crate::app::DisplayToolCall {
-                tool_call_id: "tc".into(),
-                name: "read".into(),
-                summary: "src/main.rs".into(),
-                status: ToolCallStatus::Error,
-                output: None,
-                image_data: None,
-                batch: 2,
-                bash_done: None,
-                cell: None,
-            },
+            crate::app::DisplayToolCall::new(
+                "tc".into(),
+                "read".into(),
+                "src/main.rs".into(),
+                ToolCallStatus::Error,
+                2,
+            ),
         ],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
     });
@@ -515,17 +507,13 @@ fn expanded_thinking_uses_thinking_style() {
 fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            tool_call_id: "tc".into(),
-            name: "bash".into(),
-            summary: "cargo test".into(),
-            status: ToolCallStatus::Done,
-            output: None,
-            image_data: None,
-            batch: 1,
-            bash_done: None,
-            cell: None,
-        }],
+        tool_calls: vec![crate::app::DisplayToolCall::new(
+            "tc".into(),
+            "bash".into(),
+            "cargo test".into(),
+            ToolCallStatus::Done,
+            1,
+        )],
         ..DisplayMessage::new(MessageRole::Assistant, "checking")
     });
     let buf = render_app(&app, 50, 10);
@@ -556,16 +544,14 @@ fn a_completed_tool_is_a_tinted_panel_with_a_status_header() {
 #[test]
 fn batched_tools_stack_one_panel_per_call() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
-    let tool = |name: &str| crate::app::DisplayToolCall {
-        tool_call_id: "tc".into(),
-        name: name.into(),
-        summary: format!("{name} summary"),
-        status: ToolCallStatus::Done,
-        output: None,
-        image_data: None,
-        batch: 1,
-        bash_done: None,
-        cell: None,
+    let tool = |name: &str| {
+        crate::app::DisplayToolCall::new(
+            "tc".into(),
+            name.into(),
+            format!("{name} summary"),
+            ToolCallStatus::Done,
+            1,
+        )
     };
     app.messages.push(DisplayMessage {
         tool_calls: vec![tool("read"), tool("grep"), tool("bash"), tool("edit")],
@@ -811,17 +797,13 @@ fn tool_box_wraps_long_summary() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     let long_path = "/home/user/dev/mush/crates/mush-tui/src/widgets/message_list.rs";
     app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            tool_call_id: "tc".into(),
-            name: "read".into(),
-            summary: long_path.into(),
-            status: ToolCallStatus::Done,
-            output: None,
-            image_data: None,
-            batch: 1,
-            bash_done: None,
-            cell: None,
-        }],
+        tool_calls: vec![crate::app::DisplayToolCall::new(
+            "tc".into(),
+            "read".into(),
+            long_path.into(),
+            ToolCallStatus::Done,
+            1,
+        )],
         ..DisplayMessage::new(MessageRole::Assistant, "reading")
     });
     let buf = render_app(&app, 40, 12);
@@ -1513,17 +1495,13 @@ fn a_running_tool_defers_the_usage_line() {
         output_tokens: mush_ai::types::TokenCount::new(50),
         ..Default::default()
     });
-    msg.tool_calls.push(DisplayToolCall {
-        tool_call_id: "tc".into(),
-        name: "bash".into(),
-        summary: "ls".into(),
-        status: ToolCallStatus::Running,
-        output: None,
-        image_data: None,
-        batch: 1,
-        bash_done: None,
-        cell: None,
-    });
+    msg.tool_calls.push(DisplayToolCall::new(
+        "tc".into(),
+        "bash".into(),
+        "ls".into(),
+        ToolCallStatus::Running,
+        1,
+    ));
 
     let lines = message_lines(
         &msg,
@@ -1810,17 +1788,13 @@ fn expanding_a_thinking_block_rebuilds_only_that_message() {
 fn a_running_tool_call_renders_its_header() {
     let mut app = App::new("test".into(), TokenCount::new(200_000));
     app.messages.push(DisplayMessage {
-        tool_calls: vec![crate::app::DisplayToolCall {
-            tool_call_id: "tc".into(),
-            name: "bash".into(),
-            summary: "ls -la".into(),
-            status: ToolCallStatus::Running,
-            output: None,
-            image_data: None,
-            batch: 1,
-            bash_done: None,
-            cell: None,
-        }],
+        tool_calls: vec![crate::app::DisplayToolCall::new(
+            "tc".into(),
+            "bash".into(),
+            "ls -la".into(),
+            ToolCallStatus::Running,
+            1,
+        )],
         ..DisplayMessage::new(MessageRole::Assistant, "let me check")
     });
 

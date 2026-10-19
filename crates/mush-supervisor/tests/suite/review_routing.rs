@@ -29,18 +29,22 @@ struct Fixture {
 
 #[expect(clippy::unwrap_used)]
 impl Fixture {
+    fn process(&self) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"));
+        command.env("HOME", self.root.path()).env(
+            "PATH",
+            format!(
+                "{}:{}",
+                self.root.path().join("bin").display(),
+                std::env::var("PATH").unwrap()
+            ),
+        );
+        command
+    }
+
     fn command(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        self.process()
             .args(args)
-            .env("HOME", self.root.path())
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    self.root.path().join("bin").display(),
-                    std::env::var("PATH").unwrap()
-                ),
-            )
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -534,17 +538,9 @@ fn unsafe_paths_and_duplicate_keys() {
 )]
 fn concurrent_router_and_manual_follow_up_cannot_duplicate() {
     let fixture = Fixture::new_worker(true, false, "rejected", "sleep 1");
-    let mut first = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut first = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -595,17 +591,9 @@ fn crash_after_spawn_preserves_claim_and_refuses_relaunch() {
         "rejected",
         "printf '%s' \"$$\" >../spawned\nsleep 30",
     );
-    let mut first = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut first = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -917,17 +905,9 @@ fn disabling_an_active_correction_cancels_without_retry() {
         "rejected",
         "printf '%s' \"$$\" >../spawned\nsleep 30",
     );
-    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut router = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1437,21 +1417,13 @@ fn concurrent_generation_registration_and_crash_replay_preserve_history() {
     fixture.route();
     let preparation = fixture.continuation();
     let start = || {
-        Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+        fixture
+            .process()
             .args([
                 "continue-review",
                 fixture.route.to_str().unwrap(),
                 preparation.to_str().unwrap(),
             ])
-            .env("HOME", fixture.root.path())
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    fixture.root.path().join("bin").display(),
-                    std::env::var("PATH").unwrap()
-                ),
-            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -1544,17 +1516,9 @@ fn unrelated_task_can_establish_a_separate_pair_in_shared_registry() {
 fn running_owner_discovers_prepared_successor_without_another_wake() {
     let fixture = Fixture::new_worker(true, false, "rejected", "sleep 0.1");
     fixture.reviewer_history();
-    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut router = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap()])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1651,17 +1615,9 @@ fn reviewer_launch_crash_keeps_original_session_and_never_replays() {
         fixture.route.to_str().unwrap(),
         preparation.to_str().unwrap(),
     ]);
-    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut router = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -1749,17 +1705,9 @@ fn surviving_correction_retains_workspace_lock_after_router_crash() {
         "rejected",
         "printf '%s' \"$$\" >../spawned\nsleep 30",
     );
-    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut router = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -2098,17 +2046,9 @@ fn disable_during_final_validation_prevents_spawn() {
     let fixture = Fixture::new(true, false, "rejected");
     let marker = fixture.root.path().join("validating");
     fs::write(fixture.root.path().join("bin/jj"),format!("#!/bin/sh\nset -eu\ncase \"$*\" in *'conflicts() & @'*) exit 0;; esac\nif test -f '{}'; then : >'{}'; sleep 1; fi\nprintf '%s' '{}'\n",fixture.run.join("review-reservation.json").display(),marker.display(),"1".repeat(40))).unwrap();
-    let mut router = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
+    let mut router = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -2464,16 +2404,8 @@ fn router_killed_after_outbox_write_replays_the_same_parent_event() {
         .open(fixture.inbox.join("queue.lock"))
         .unwrap();
     lock.lock().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mush-supervisor"))
-        .env("HOME", fixture.root.path())
-        .env(
-            "PATH",
-            format!(
-                "{}:{}",
-                fixture.root.path().join("bin").display(),
-                std::env::var("PATH").unwrap()
-            ),
-        )
+    let mut child = fixture
+        .process()
         .args(["route-reviews", fixture.route.to_str().unwrap(), "--once"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

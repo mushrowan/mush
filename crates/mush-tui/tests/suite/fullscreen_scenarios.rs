@@ -888,15 +888,7 @@ fn sideways_wheel_and_middle_click_are_ignored() {
 }
 
 fn log_with_world() -> App {
-    let mut app = conversation(1);
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, "world"));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("world");
     press(&mut app, KeyCode::Char('l'));
     app
 }
@@ -957,17 +949,7 @@ fn yank_copies_the_selection_and_leaves_the_cursor_put() {
 }
 
 fn log_with_indented_hello() -> App {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "  hello\n    hello",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("  hello\n    hello");
     press(&mut app, KeyCode::Char('v'));
     press(&mut app, KeyCode::Char('j'));
     for _ in 0..20 {
@@ -1069,17 +1051,7 @@ fn capital_v_highlights_the_whole_row() {
 
 #[test]
 fn a_motion_in_linewise_mode_adds_whole_rows() {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "  hello\n    hello",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("  hello\n    hello");
     press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
 
     press(&mut app, KeyCode::Char('j'));
@@ -1091,12 +1063,10 @@ fn a_motion_in_linewise_mode_adds_whole_rows() {
     assert_eq!(selected_cells(&app), expected);
 }
 
-fn log_with_alphabet() -> App {
+fn log_at(text: &str) -> App {
     let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "abcdefg\nuvwxyz",
-    ));
+    app.messages
+        .push(DisplayMessage::new(MessageRole::Assistant, text));
     press(&mut app, KeyCode::Esc);
     press(&mut app, KeyCode::Esc);
     rows(&app, 80, SCREEN);
@@ -1108,7 +1078,7 @@ fn log_with_alphabet() -> App {
 
 #[test]
 fn ctrl_v_highlights_a_rectangle() {
-    let mut app = log_with_alphabet();
+    let mut app = log_at("abcdefg\nuvwxyz");
     for _ in 0..3 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1128,7 +1098,7 @@ fn ctrl_v_highlights_a_rectangle() {
 
 #[test]
 fn the_block_is_the_same_either_way_round() {
-    let mut app = log_with_alphabet();
+    let mut app = log_at("abcdefg\nuvwxyz");
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1148,17 +1118,7 @@ fn the_block_is_the_same_either_way_round() {
 
 #[test]
 fn a_linewise_yank_copies_the_rows_with_the_indent_off() {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "  hello\n    hello",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("  hello\n    hello");
     for _ in 0..4 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1175,7 +1135,7 @@ fn a_linewise_yank_copies_the_rows_with_the_indent_off() {
 
 #[test]
 fn a_blockwise_yank_joins_the_pieces_with_newlines() {
-    let mut app = log_with_alphabet();
+    let mut app = log_at("abcdefg\nuvwxyz");
     for _ in 0..3 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1195,17 +1155,7 @@ fn a_blockwise_yank_joins_the_pieces_with_newlines() {
 
 #[test]
 fn a_row_too_short_for_the_block_keeps_its_line() {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "abcdefg\nab\nuvwxyz",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("abcdefg\nab\nuvwxyz");
     for _ in 0..3 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1226,17 +1176,7 @@ fn a_row_too_short_for_the_block_keeps_its_line() {
 }
 
 fn linewise_over_indented_hello() -> App {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "  hello\n    hello",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("  hello\n    hello");
     press_with(&mut app, KeyCode::Char('V'), KeyModifiers::SHIFT);
     app
 }
@@ -1275,17 +1215,7 @@ fn caret(app: &App) -> Option<(u16, u16)> {
 }
 
 fn log_on_indented_hello() -> App {
-    let mut app = conversation(1);
-    app.messages.push(DisplayMessage::new(
-        MessageRole::Assistant,
-        "  hello\n    hello",
-    ));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at("  hello\n    hello");
     for _ in 0..6 {
         press(&mut app, KeyCode::Char('l'));
     }
@@ -1324,15 +1254,7 @@ fn dollar_goes_to_the_last_cell() {
 }
 
 fn log_on(text: &str) -> App {
-    let mut app = conversation(1);
-    app.messages
-        .push(DisplayMessage::new(MessageRole::Assistant, text));
-    press(&mut app, KeyCode::Esc);
-    press(&mut app, KeyCode::Esc);
-    rows(&app, 80, SCREEN);
-    for _ in 0..6 {
-        press(&mut app, KeyCode::Char('j'));
-    }
+    let mut app = log_at(text);
     press(&mut app, KeyCode::Char('^'));
     app
 }

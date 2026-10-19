@@ -206,12 +206,7 @@ mod tests {
     }
 
     fn user(text: &str) -> Message {
-        Message::User(
-            UserMessage::builder()
-                .content(UserContent::Text(text.into()))
-                .timestamp_ms(Timestamp::zero())
-                .build(),
-        )
+        crate::user_text::user_text(text.into(), Timestamp::zero())
     }
 
     #[test]
