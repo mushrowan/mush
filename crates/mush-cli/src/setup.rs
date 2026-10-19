@@ -20,7 +20,6 @@ pub struct ClientSetup {
     pub debug_cache: bool,
     pub http_client: mush_ai::http::HttpClient,
     pub project_context: loader::ProjectContext,
-    pub rlm: bool,
 }
 
 pub struct ClientArgs {
@@ -218,7 +217,6 @@ impl ClientSetup {
         crate::timing::mark(timer, "api keys");
 
         Ok(Self {
-            rlm: cfg.rlm,
             cfg,
             model,
             compaction_model,
@@ -253,7 +251,6 @@ impl AppSetup {
         );
         let ClientSetup {
             cfg,
-            model,
             cwd,
             project_context,
             http_client,
@@ -263,11 +260,9 @@ impl AppSetup {
         let mut registry = ApiRegistry::new();
         providers::register_builtins(&mut registry, http_client.clone());
 
-        let rlm = cfg.rlm;
-        if rlm && let Err(error) = crate::bundled_skills::install(&crate::bundled_skills::root()) {
+        if let Err(error) = crate::bundled_skills::install(&crate::bundled_skills::root()) {
             tracing::warn!("bundled skills: {error}");
         }
-        let classic_tools = !args.no_tools && !rlm;
         let mut kernel_state: Option<Arc<dyn mush_kernel::KernelState>> = None;
         let reaped = orphan_journal().reap_abandoned();
         if !reaped.killed.is_empty() {
@@ -275,7 +270,7 @@ impl AppSetup {
         }
         let mut kernel_packages = Vec::new();
         let mut ipython_tool = None;
-        let mut tools = if rlm && !args.no_tools {
+        let mut tools = if !args.no_tools {
             let plan = kernel_plan(cfg)?;
             kernel_packages = kernel_package_labels(&plan, &cfg.kernel.extra_packages).await;
             let ipython = Arc::new(build_ipython_tool(
@@ -290,37 +285,16 @@ impl AppSetup {
                 ipython as mush_agent::tool::SharedTool,
             ])
         } else {
-            init_builtin_tools(
-                model,
-                cwd,
-                args.kernel_sinks.output,
-                args.no_tools,
-                http_client,
-                mush_tools::forbidden_chars::ForbiddenChars::with_classes(
-                    cfg.forbidden_chars.iter().copied(),
-                    cfg.forbidden_char_classes.iter().copied(),
-                ),
-                cfg.max_image_mb,
-                cfg.web_search.clone(),
-            )
+            mush_agent::tool::ToolRegistry::new()
         };
         crate::timing::mark(&mut timer, "builtin tools");
 
-        let mcp = init_mcp(cfg, !classic_tools, &mut tools).await;
-        crate::timing::mark(&mut timer, "mcp");
-
-        init_skill_tools(project_context, !classic_tools, &mut tools);
-
-        let system_prompt = if rlm {
-            build_rlm_system_prompt(
-                project_context,
-                cwd,
-                &kernel_packages,
-                &RlmRole::root(rlm_max_depth(cfg).0),
-            )
-        } else {
-            build_system_prompt_from_context(project_context, cwd)
-        };
+        let system_prompt = build_rlm_system_prompt(
+            project_context,
+            cwd,
+            &kernel_packages,
+            &RlmRole::root(rlm_max_depth(cfg).0),
+        );
         crate::timing::mark(&mut timer, "system prompt");
 
         let max_turns = args
@@ -329,16 +303,10 @@ impl AppSetup {
             .unwrap_or(mush_agent::DEFAULT_MAX_TURNS);
         let lifecycle_hooks = cfg.lifecycle_hooks();
 
-        init_repo_map(cfg, cwd, !classic_tools, &mut tools);
-        crate::timing::mark(&mut timer, "repo map");
-
         let file_rules = build_file_rules(cwd);
-        let lsp_diagnostics = init_lsp(cfg, cwd, !classic_tools, &mut tools);
+        let (lsp_diagnostics, _) = build_lsp_diagnostics(cwd, cfg);
         crate::timing::mark(&mut timer, "lsp + rules");
 
-        if classic_tools && !model.supports_native_parallel_calls() {
-            mush_tools::add_batch_tool(&mut tools);
-        }
         if let Some(allowed) = &args.tools {
             tools.retain_named(allowed);
             let loaded: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
@@ -363,7 +331,7 @@ impl AppSetup {
                 lifecycle_hooks,
                 file_rules,
                 lsp_diagnostics,
-                mcp,
+                mcp: None,
                 kernel_state,
                 kernel_packages,
                 ipython_tool,
@@ -371,70 +339,6 @@ impl AppSetup {
             report,
         ))
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn init_builtin_tools(
-    model: &Model,
-    cwd: &std::path::Path,
-    output_sink: Option<mush_tools::bash::OutputSink>,
-    no_tools: bool,
-    http_client: &mush_ai::http::HttpClient,
-    forbidden_chars: mush_tools::forbidden_chars::ForbiddenChars,
-    max_image_mb: u32,
-    web_search: mush_tools::web_search::WebSearchConfig,
-) -> mush_agent::tool::ToolRegistry {
-    if no_tools {
-        return mush_agent::tool::ToolRegistry::new();
-    }
-    mush_tools::builtin_tools_with_options(
-        Arc::from(cwd),
-        output_sink,
-        model.uses_patch_tool(),
-        http_client.clone(),
-        forbidden_chars,
-        Some(max_image_mb as usize * 1024 * 1024),
-        web_search,
-    )
-}
-
-async fn init_mcp(
-    cfg: &config::Config,
-    no_tools: bool,
-    tools: &mut mush_agent::tool::ToolRegistry,
-) -> Option<std::sync::Arc<mush_mcp::McpManager>> {
-    if no_tools || cfg.mcp.is_empty() {
-        return None;
-    }
-
-    let manager = std::sync::Arc::new(mush_mcp::McpManager::connect_all(&cfg.mcp).await);
-    if cfg.dynamic_mcp {
-        tools.extend_shared(mush_mcp::dynamic::dynamic_mcp_tools(manager.catalogue()));
-    } else {
-        tools.extend_shared(manager.tool_registry().await.iter().cloned());
-    }
-    Some(manager)
-}
-
-fn init_skill_tools(
-    project_context: &loader::ProjectContext,
-    no_tools: bool,
-    tools: &mut mush_agent::tool::ToolRegistry,
-) {
-    if no_tools || project_context.skills.is_empty() {
-        return;
-    }
-    let skill_infos: Vec<mush_tools::skills::SkillInfo> = project_context
-        .skills
-        .iter()
-        .map(|s| mush_tools::skills::SkillInfo {
-            name: s.name.clone(),
-            description: s.description.clone(),
-            path: s.path.clone(),
-        })
-        .collect();
-    let skill_tools = mush_tools::skills::skill_tools(skill_infos);
-    tools.extend_shared(skill_tools.iter().cloned());
 }
 
 async fn init_compaction_model(
@@ -459,40 +363,6 @@ async fn init_compaction_model(
     }
     resolve_api_key(&mut compact_opts, &m, cfg).await;
     Some((m, compact_opts))
-}
-
-fn init_repo_map(
-    cfg: &config::Config,
-    cwd: &std::path::Path,
-    no_tools: bool,
-    tools: &mut mush_agent::tool::ToolRegistry,
-) {
-    if !cfg.repo_map.enabled || no_tools || !mush_treesitter::is_inside_repo(cwd) {
-        return;
-    }
-
-    let shared = mush_tools::repo_map::RepoMapShared::lazy(cwd.to_path_buf(), cfg.repo_map.budget);
-    tools.register_shared(std::sync::Arc::new(mush_tools::repo_map::RepoMapTool::new(
-        shared,
-    )));
-}
-
-fn init_lsp(
-    cfg: &config::Config,
-    cwd: &std::path::Path,
-    no_tools: bool,
-    tools: &mut mush_agent::tool::ToolRegistry,
-) -> Option<mush_agent::DiagnosticCallback> {
-    let (lsp_diagnostics, lsp_reg) = build_lsp_diagnostics(cwd, cfg);
-    if let Some(reg) = &lsp_reg
-        && !no_tools
-    {
-        let lsp_tool_list = mush_lsp::lsp_tools(reg.clone(), cwd.to_path_buf());
-        for tool in lsp_tool_list {
-            tools.register_shared(std::sync::Arc::from(tool));
-        }
-    }
-    lsp_diagnostics
 }
 
 pub fn expand_template(prompt: &str) -> String {
@@ -535,7 +405,7 @@ pub fn format_error(error: &str) -> String {
     }
 }
 
-fn format_available_skills(skills: &[loader::Skill], kernel: bool) -> String {
+fn format_available_skills(skills: &[loader::Skill]) -> String {
     let mut skills: Vec<&loader::Skill> = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
@@ -546,17 +416,15 @@ fn format_available_skills(skills: &[loader::Skill], kernel: bool) -> String {
     for skill in skills {
         out.push_str("  <skill>\n");
         out.push_str(&format!("    <name>{}</name>\n", escape_xml(&skill.name)));
-        if kernel {
-            match &skill.python {
-                Some(python) => {
-                    out.push_str("    <type>python</type>\n");
-                    out.push_str(&format!(
-                        "    <python_import>{}</python_import>\n",
-                        escape_xml(&python.import_name)
-                    ));
-                }
-                None => out.push_str("    <type>markdown</type>\n"),
+        match &skill.python {
+            Some(python) => {
+                out.push_str("    <type>python</type>\n");
+                out.push_str(&format!(
+                    "    <python_import>{}</python_import>\n",
+                    escape_xml(&python.import_name)
+                ));
             }
+            None => out.push_str("    <type>markdown</type>\n"),
         }
         out.push_str(&format!(
             "    <description>{}</description>\n",
@@ -585,36 +453,6 @@ fn escape_xml(text: &str) -> String {
         }
     }
     out
-}
-
-fn default_system_prompt(cwd_str: &str) -> String {
-    format!(
-        "You are running inside mush, a minimal coding agent harness. \
-         You help users by reading files, executing commands, \
-         editing code, and writing new files.\n\n\
-         Current working directory: {cwd_str}\n\n\
-         Guidelines:\n\
-         - Use bash for file operations like ls, grep, find\n\
-         - Use read to examine files before editing\n\
-         - Use edit for precise changes (old text must match exactly)\n\
-         - Use write only for new files or complete rewrites\n\
-         - Be concise in your responses\n\
-         - Continue authorised work within the task scope. Keep a record of decisions, \
-         checks and unresolved issues. Stop and request clarification when the next step \
-         needs approval or essential information\n\
-         - Your final answers are plain text that will be styled by the terminal TUI. \
-         Use Markdown-compatible basics for readability: short paragraphs, simple lists, \
-         inline backticks for paths and commands, and fenced code blocks for snippets. \
-         Avoid HTML, ANSI codes, and complex nested formatting\n\
-         - Explore with targeted tools first: prefer grep, find, or glob to locate \
-         relevant code before reading. When reading large files, use offset/limit, \
-         start_line/end_line, or around_line to fetch only the sections you need \
-         instead of dumping the whole file\n\
-         - Batch independent operations: when you need to read, edit, or operate on \
-         multiple files that don't depend on each other, use the Batch tool to do them \
-         all in a single call. This saves round-trips and helps you reason about \
-         related changes holistically before making them"
-    )
 }
 
 async fn kernel_package_labels(plan: &mush_kernel::PythonPlan, extra: &[String]) -> Vec<String> {
@@ -918,42 +756,11 @@ pub fn build_rlm_system_prompt(
              prepared in the persistent Python kernel when available and can be called directly \
              by that import name.\n\n",
         );
-        prompt.push_str(&format_available_skills(&skills, true));
+        prompt.push_str(&format_available_skills(&skills));
     }
     if custom.is_some() {
         push_date_and_cwd(&mut prompt, &cwd_str);
         prompt.push_str(&role_sections);
-    }
-    push_append(&mut prompt, context);
-    prompt
-}
-
-pub fn build_system_prompt_from_context(
-    context: &loader::ProjectContext,
-    cwd: &std::path::Path,
-) -> String {
-    let cwd_str = cwd.display().to_string();
-    let mut prompt = match &context.system_prompt {
-        Some(file) => file.content.trim_end().to_string(),
-        None => default_system_prompt(&cwd_str),
-    };
-
-    push_project_context(&mut prompt, &context.agents_md);
-
-    if context
-        .skills
-        .iter()
-        .any(|skill| !skill.disable_model_invocation)
-    {
-        prompt.push_str(
-            "\n\nSkills provide specialised instructions for specific tasks. \
-             Use the skill tool to load a skill when a task matches its description. \
-             If the user explicitly names a skill with `$skill-name`, load that skill before answering.\n\n",
-        );
-        prompt.push_str(&format_available_skills(&context.skills, false));
-    }
-    if context.system_prompt.is_some() {
-        push_date_and_cwd(&mut prompt, &cwd_str);
     }
     push_append(&mut prompt, context);
     prompt
@@ -1564,12 +1371,6 @@ mod tests {
         assert!(overridden.contains("<location>/repo/.mush/skills/goal/SKILL.md</location>"));
         assert!(!overridden.contains("/data/mush/bundled-skills/goal/"));
         assert!(overridden.contains("<name>rlm-heartbeat</name>"));
-
-        let classic = build_system_prompt_from_context(
-            &ProjectContext::default(),
-            std::path::Path::new("/repo"),
-        );
-        assert!(!classic.contains("bundled-skills"));
     }
 
     #[test]
@@ -1641,14 +1442,16 @@ mod tests {
             }),
         };
 
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
 
         assert!(prompt.starts_with("you are a terse reviewer"));
-        assert!(
-            prompt.ends_with(
-                "\nCurrent working directory: /repo\n\nalways answer in british english"
-            )
-        );
+        assert!(prompt.contains("\nCurrent working directory: /repo"));
+        assert!(prompt.ends_with("\n\nalways answer in british english"));
         assert!(prompt.contains("\n\nCurrent date: "));
         assert!(!prompt.contains("You are running inside mush"));
         assert!(prompt.contains("## /repo/AGENTS.md\n\nproject rules"));
@@ -1697,17 +1500,27 @@ mod tests {
             ..ProjectContext::default()
         };
         apply_prompt_overrides(&mut context, Some("from the flag"), None);
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
         assert!(prompt.starts_with("from the flag\n\n# Project Context"));
         assert!(prompt.contains("## /repo/AGENTS.md\n\nrepo rules"));
-        assert!(prompt.ends_with("Current working directory: /repo"));
+        assert!(prompt.contains("Current working directory: /repo"));
         assert!(!prompt.contains("from SYSTEM.md"));
 
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("prompt.md");
         std::fs::write(&file, "prompt from a file\n").unwrap();
         apply_prompt_overrides(&mut context, file.to_str(), None);
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
         assert!(prompt.starts_with("prompt from a file\n\n"));
     }
 
@@ -1745,7 +1558,12 @@ mod tests {
         let file = dir.path().join("extra.md");
         std::fs::write(&file, "read from disk\n").unwrap();
         apply_prompt_overrides(&mut context, None, file.to_str());
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
         assert!(prompt.ends_with("\n\nread from disk"));
     }
 
@@ -1765,10 +1583,15 @@ mod tests {
             ..ProjectContext::default()
         };
 
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
 
         assert_eq!(prompt.matches("# Project Context").count(), 1);
-        assert!(prompt.ends_with(
+        assert!(prompt.contains(
             "# Project Context\n\nProject-specific instructions and guidelines:\n\n\
              ## /home/u/.config/mush/AGENTS.md\n\nglobal rules\n\n\
              ## /repo/AGENTS.md\n\nrepo rules"
@@ -1792,57 +1615,32 @@ mod tests {
             append_system_prompt: None,
         };
 
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
 
         assert!(!prompt.contains("secret"));
-        assert!(!prompt.contains("<available_skills>"));
-    }
-
-    #[test]
-    fn default_prompt_encourages_targeted_exploration() {
-        let context = ProjectContext::default();
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
-        assert!(
-            prompt.contains("grep"),
-            "expected guidance to mention grep for exploration"
-        );
-        assert!(
-            prompt.contains("targeted"),
-            "expected prompt to mention targeted reads"
-        );
+        assert!(!prompt.contains("<name>secret</name>"));
     }
 
     #[test]
     fn default_prompt_mentions_terminal_markdown_rendering() {
         let context = ProjectContext::default();
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
 
-        assert!(prompt.contains("plain text that will be styled by the terminal TUI"));
-        assert!(prompt.contains("Markdown-compatible basics"));
+        assert!(prompt.contains("plain text styled by the terminal TUI"));
+        assert!(prompt.contains("short paragraphs, simple lists"));
         assert!(prompt.contains("terminal TUI"));
         assert!(prompt.contains("fenced code blocks"));
-        assert!(prompt.contains("Avoid HTML, ANSI codes"));
-    }
-
-    #[test]
-    fn default_prompt_sets_work_boundaries_without_presence_claims() {
-        let context = ProjectContext::default();
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
-        assert!(prompt.contains("Continue authorised work within the task scope."));
-        assert!(prompt.contains("Keep a record of decisions, checks and unresolved issues."));
-        assert!(prompt.contains("Stop and request clarification when the next step needs approval or essential information"));
-        for claim in [
-            "unattended",
-            "unmonitored",
-            "unsupervised",
-            "user is away",
-            "user is absent",
-            "nobody is watching",
-            "you are being monitored",
-            "user is watching",
-        ] {
-            assert!(!prompt.to_lowercase().contains(claim), "{claim}");
-        }
+        assert!(prompt.contains("No HTML or ANSI codes"));
     }
 
     #[test]
@@ -1872,7 +1670,12 @@ mod tests {
             append_system_prompt: None,
         };
 
-        let prompt = build_system_prompt_from_context(&context, std::path::Path::new("/repo"));
+        let prompt = build_rlm_system_prompt(
+            &context,
+            std::path::Path::new("/repo"),
+            &[],
+            &RlmRole::root(0),
+        );
 
         let alpha = prompt.find("<name>alpha</name>").unwrap();
         let zeta = prompt.find("<name>zeta</name>").unwrap();
@@ -1880,7 +1683,7 @@ mod tests {
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<description>alpha skill</description>"));
         assert!(prompt.contains("<location>/tmp/alpha/SKILL.md</location>"));
-        assert!(prompt.contains("Use the skill tool to load a skill"));
+        assert!(prompt.contains("read its SKILL.md"));
         assert!(prompt.contains("$skill-name"));
         assert!(!prompt.contains("load_skill"));
         assert!(alpha < zeta);
@@ -1910,15 +1713,12 @@ mod tests {
             },
         ];
 
-        let kernel = format_available_skills(&skills, true);
-        let classic = format_available_skills(&skills, false);
+        let kernel = format_available_skills(&skills);
 
         assert!(kernel.contains(
             "<name>word-count</name>\n    <type>python</type>\n    <python_import>word_count</python_import>\n"
         ));
         assert!(kernel.contains("<name>notes</name>\n    <type>markdown</type>\n"));
-        assert!(!classic.contains("<type>"));
-        assert!(!classic.contains("python_import"));
     }
 
     #[test]
@@ -1932,7 +1732,7 @@ mod tests {
             python: None,
         }];
 
-        let block = format_available_skills(&skills, false);
+        let block = format_available_skills(&skills);
 
         assert!(block.contains("<name>a&amp;b</name>"));
         assert!(block.contains(

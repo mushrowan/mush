@@ -638,17 +638,11 @@ fn build_confirm_callback(
 #[must_use]
 pub fn aligned_tools(
     tools: &ToolRegistry,
-    model: &Model,
+    _model: &Model,
     config: &TurnConfig,
-    cwd: PathBuf,
+    _cwd: PathBuf,
 ) -> ToolRegistry {
     let mut tool_registry = tools.clone();
-    mush_tools::align_for_model(
-        &mut tool_registry,
-        model,
-        Arc::from(cwd),
-        config.forbidden_chars.clone(),
-    );
     if let Some(allowed) = &config.tool_allowlist {
         tool_registry.retain_named(allowed);
     }

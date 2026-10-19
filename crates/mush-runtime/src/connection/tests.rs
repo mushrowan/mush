@@ -1754,6 +1754,9 @@ fn tool_names(context: &mush_ai::registry::LlmContext) -> Vec<(String, String)> 
 #[tokio::test]
 async fn a_side_question_is_answered_without_touching_the_conversation() {
     let (mut connection, requests) = connection();
+    connection
+        .tools
+        .register_shared(Arc::new(crate::testing::NoteTool));
     connection.runtime.system_prompt = Some("base prompt".into());
     connection
         .send(ClientCommand::Prompt {

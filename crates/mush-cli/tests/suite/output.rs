@@ -182,7 +182,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config/mush");
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("config.toml"), "rlm = false\ncompaction_model = 'missing-fixture-model'\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n[lsp]\ndiagnostics = true\n[mcp.fixture]\ntype = 'local'\ncommand = ['__missing_output_fixture__']\n").unwrap();
+        std::fs::write(config.join("config.toml"), "compaction_model = 'missing-fixture-model'\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n[kernel]\nmanaged = false\n[lsp]\ndiagnostics = true\n[mcp.fixture]\ntype = 'local'\ncommand = ['__missing_output_fixture__']\n").unwrap();
         std::fs::create_dir_all(dir.path().join(".mush/rules")).unwrap();
         std::fs::write(
             dir.path().join(".mush/rules/fixture.md"),
@@ -225,13 +225,13 @@ impl Fixture {
         first += &text_block(1, "message", "response.output_text.delta", "before tools\n");
         first += &event(
             "response.output_item.added",
-            json!({"output_index":2,"item":{"type":"function_call","call_id":"read-ok","name":"read","arguments":"{\"path\":\"fixture\"}"}}),
+            json!({"output_index":2,"item":{"type":"function_call","call_id":"read-ok","name":"ipython","arguments":serde_json::to_string(&json!({"code":"from pathlib import Path\nprint(Path('fixture').read_text())"})).unwrap()}}),
         );
         first += &event("response.output_item.done", json!({"output_index":2}));
         first += &completed();
         let second = event(
             "response.output_item.added",
-            json!({"output_index":0,"item":{"type":"function_call","call_id":"read-missing","name":"read","arguments":"{\"path\":\"missing\"}"}}),
+            json!({"output_index":0,"item":{"type":"function_call","call_id":"read-missing","name":"ipython","arguments":serde_json::to_string(&json!({"code":"print(Path('missing').read_text())"})).unwrap()}}),
         ) + &event("response.output_item.done", json!({"output_index":0}))
             + &completed();
         let third = text_block(0, "message", "response.output_text.delta", &answer)
@@ -328,9 +328,9 @@ fn assert_messages(fixture: &Fixture, stdout: &str, stderr: &str, err_colour: bo
     }
     assert!(!stderr.contains(&fixture.thinking), "{stderr:?}");
     for (text, code) in [
-        ("▶ read", 36),
-        ("✓ read", 32),
-        ("✗ read failed", 31),
+        ("▶ ipython", 36),
+        ("✓ ipython", 32),
+        ("✗ ipython failed", 31),
         ("LSP diagnostics enabled", 2),
         ("found 1 rule files in .mush/rules/", 2),
         ("cache read detected: 10 tokens", 36),
@@ -342,7 +342,6 @@ fn assert_messages(fixture: &Fixture, stdout: &str, stderr: &str, err_colour: bo
     }
     for (prefix, code) in [
         ("gpt-output-fixture | in:40 out:4 cache:10 |", 2),
-        ("mcp: fixture failed:", 33),
         ("session:", 2),
         (
             "warning: unknown compaction_model 'missing-fixture-model'",
@@ -356,8 +355,9 @@ fn assert_messages(fixture: &Fixture, stdout: &str, stderr: &str, err_colour: bo
         };
         assert!(stderr.contains(&expected), "{stderr:?}");
     }
-    assert!(stderr.find("▶ read").unwrap() < stderr.find("✓ read").unwrap());
-    assert!(stderr.find("✓ read").unwrap() < stderr.find("✗ read failed").unwrap());
+    assert!(!stderr.contains("mcp: fixture failed:"), "{stderr:?}");
+    assert!(stderr.find("▶ ipython").unwrap() < stderr.find("✓ ipython").unwrap());
+    assert!(stderr.find("✓ ipython").unwrap() < stderr.find("✗ ipython failed").unwrap());
     if fail {
         assert!(
             stderr.contains(&styled(
@@ -367,7 +367,7 @@ fn assert_messages(fixture: &Fixture, stdout: &str, stderr: &str, err_colour: bo
             )),
             "{stderr:?}"
         );
-        assert!(stderr.find("✗ read failed").unwrap() < stderr.find("session:").unwrap());
+        assert!(stderr.find("✗ ipython failed").unwrap() < stderr.find("session:").unwrap());
         assert!(stderr.find("session:").unwrap() < stderr.find("error: fixture_error").unwrap());
         assert!(!stderr.contains("Location:"), "{stderr:?}");
     }
@@ -468,11 +468,11 @@ fn worker_file_capture_keeps_message_order() {
         assert!(!output.contains(text), "{text:?} in {output:?}");
     }
     for text in [
-        "▶ read",
-        "✓ read",
+        "▶ ipython",
+        "✓ ipython",
         "gpt-output-fixture |",
-        "▶ read",
-        "✗ read failed",
+        "▶ ipython",
+        "✗ ipython failed",
         "session:",
         "error: fixture_error: fixture_code: fixture detail\nsecond detail",
     ] {

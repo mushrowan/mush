@@ -1,38 +1,27 @@
 pub mod apply_patch;
 pub mod attachment;
-pub mod background;
 pub mod bash;
-pub mod bash_status;
-pub mod batch;
 pub mod edit;
 pub mod file_mutation_queue;
-pub mod find;
 pub mod forbidden_chars;
-pub mod glob;
-pub mod grep;
 pub mod ipython;
 pub mod kernel_jobs;
-pub mod ls;
 pub mod notification;
-pub mod notify_user;
 pub mod orphans;
 pub mod read;
 pub mod read_ledger;
 pub mod redaction_guard;
-pub mod repo_map;
-pub mod skills;
 pub mod util;
-mod walk;
-pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
+#[cfg(test)]
 use std::path::Path;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use mush_agent::tool::{SharedTool, ToolRegistry};
-
-pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
 pub(crate) mod test_env {
@@ -73,58 +62,7 @@ pub(crate) mod test_env {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn builtin_tools_with_options(
-    cwd: Arc<Path>,
-    output_sink: Option<bash::OutputSink>,
-    use_patch: bool,
-    http_client: mush_ai::http::HttpClient,
-    forbidden_chars: forbidden_chars::ForbiddenChars,
-    max_image_bytes: Option<usize>,
-    web_search: web_search::WebSearchConfig,
-) -> ToolRegistry {
-    let bg_registry = background::BackgroundJobRegistry::new();
-
-    let bash_tool: SharedTool = {
-        let mut tool =
-            bash::BashTool::new(cwd.clone()).with_background_registry(bg_registry.clone());
-        if let Some(ref sink) = output_sink {
-            tool = tool.with_output_sink(sink.clone());
-        }
-        Arc::new(tool)
-    };
-
-    let mut tools: Vec<SharedTool> = vec![
-        Arc::new(read::ReadTool::new(cwd.clone()).with_max_image_bytes(max_image_bytes)),
-        forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
-            bash_tool,
-            forbidden_chars.clone(),
-            field_extractor("command"),
-            forbidden_chars::BypassVisibility::Hidden,
-        ),
-        Arc::new(bash_status::BashStatusTool::new(bg_registry)),
-        Arc::new(grep::GrepTool::new(cwd.clone())),
-        Arc::new(find::FindTool::new(cwd.clone())),
-        Arc::new(glob::GlobTool::new(cwd.clone())),
-        Arc::new(ls::LsTool::new(cwd.clone())),
-        Arc::new(web_search::WebSearchTool::with_config(
-            http_client.clone(),
-            &web_search,
-        )),
-        Arc::new(web_fetch::WebFetchTool::new(http_client.clone())),
-        Arc::new(notify_user::NotifyUserTool::new()),
-    ];
-
-    if use_patch {
-        tools.push(apply_patch_tool(cwd, forbidden_chars));
-    } else {
-        tools.push(write_tool(cwd.clone(), forbidden_chars.clone()));
-        tools.push(edit_tool(cwd, forbidden_chars));
-    }
-
-    ToolRegistry::from_shared(tools)
-}
-
+#[cfg(test)]
 fn apply_patch_tool(
     cwd: Arc<Path>,
     forbidden_chars: forbidden_chars::ForbiddenChars,
@@ -142,6 +80,7 @@ fn apply_patch_tool(
     )
 }
 
+#[cfg(test)]
 fn write_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -> SharedTool {
     let write: SharedTool = Arc::new(write::WriteTool::new(cwd.clone()));
     forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
@@ -156,6 +95,7 @@ fn write_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) 
     )
 }
 
+#[cfg(test)]
 fn edit_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -> SharedTool {
     let edit: SharedTool = Arc::new(edit::EditTool::new(cwd.clone()));
     forbidden_chars::ForbiddenCharsGuard::maybe_wrap(
@@ -166,6 +106,7 @@ fn edit_tool(cwd: Arc<Path>, forbidden_chars: forbidden_chars::ForbiddenChars) -
     )
 }
 
+#[cfg(test)]
 fn field_extractor(field: &'static str) -> forbidden_chars::ContentExtractor {
     Arc::new(move |args: &serde_json::Value| {
         args.get(field)
@@ -175,6 +116,7 @@ fn field_extractor(field: &'static str) -> forbidden_chars::ContentExtractor {
     })
 }
 
+#[cfg(test)]
 fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
     fn new_text(args: &serde_json::Value) -> Option<&str> {
         ["newText", "new_string"]
@@ -196,6 +138,7 @@ fn edit_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
+#[cfg(test)]
 fn apply_patch_content_extractor() -> forbidden_chars::ContentExtractor {
     Arc::new(|args: &serde_json::Value| {
         let Some(patch) = args.get("patch_text").and_then(|v| v.as_str()) else {
@@ -222,52 +165,22 @@ fn apply_patch_content_extractor() -> forbidden_chars::ContentExtractor {
     })
 }
 
-pub fn add_batch_tool(registry: &mut ToolRegistry) {
-    registry.register_shared(Arc::new(batch::BatchTool::new(registry.clone())));
-}
-
-pub fn align_for_model(
-    registry: &mut ToolRegistry,
-    model: &mush_ai::types::Model,
-    cwd: Arc<Path>,
-    forbidden_chars: forbidden_chars::ForbiddenChars,
-) {
-    registry.remove("apply_patch");
-    registry.remove("edit");
-    registry.remove("write");
-    registry.remove("batch");
-
-    if model.uses_patch_tool() {
-        registry.register_shared(apply_patch_tool(cwd, forbidden_chars));
-    } else {
-        registry.register_shared(write_tool(cwd.clone(), forbidden_chars.clone()));
-        registry.register_shared(edit_tool(cwd, forbidden_chars));
-    }
-
-    if !model.supports_native_parallel_calls() {
-        add_batch_tool(registry);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use forbidden_chars::ForbiddenChars;
 
-    fn http_client() -> mush_ai::http::HttpClient {
-        mush_ai::http::client()
-    }
-
     fn registry_with_chars(use_patch: bool, chars: ForbiddenChars) -> ToolRegistry {
-        builtin_tools_with_options(
-            Arc::from(std::env::temp_dir().as_path()),
-            None,
-            use_patch,
-            http_client(),
-            chars,
-            None,
-            Default::default(),
-        )
+        let cwd: Arc<Path> = Arc::from(std::env::temp_dir().as_path());
+        let tools = if use_patch {
+            vec![apply_patch_tool(cwd, chars)]
+        } else {
+            vec![
+                write_tool(cwd.clone(), chars.clone()),
+                edit_tool(cwd, chars),
+            ]
+        };
+        ToolRegistry::from_shared(tools)
     }
 
     #[test]
@@ -498,170 +411,6 @@ mod tests {
         assert_eq!(
             schema["properties"]["allow_forbidden_chars"]["type"], "boolean",
             "apply_patch schema should expose the override knob when the validator is configured"
-        );
-    }
-
-    #[tokio::test]
-    async fn bash_is_guarded_but_hides_the_bypass_knob() {
-        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
-        let bash = registry.get("bash").expect("bash tool registered");
-        assert!(
-            bash.parameters_schema()["properties"]["allow_forbidden_chars"].is_null(),
-            "bash must keep the bypass field hidden from the schema"
-        );
-        let blocked = bash
-            .execute(serde_json::json!({"command": "echo — dash"}))
-            .await;
-        assert!(
-            !blocked.outcome.is_success(),
-            "bash should block a forbidden char in the command"
-        );
-    }
-
-    #[tokio::test]
-    async fn bash_hidden_bypass_lets_forbidden_command_run() {
-        let registry = registry_with_chars(false, ForbiddenChars::new(['—']));
-        let bash = registry.get("bash").expect("bash tool registered");
-        let result = bash
-            .execute(serde_json::json!({
-                "command": "printf %s '—'",
-                "allow_forbidden_chars": true,
-            }))
-            .await;
-        assert!(
-            result.outcome.is_success(),
-            "the hidden bypass should let a forbidden-char command through"
-        );
-    }
-
-    fn model_with_id(id: &str) -> mush_ai::types::Model {
-        use mush_ai::types::{
-            Api, BaseUrl, InputModality, ModelCost, ModelId, Provider, TokenCount,
-        };
-        mush_ai::types::Model {
-            id: ModelId::from(id),
-            name: id.into(),
-            api: Api::AnthropicMessages,
-            provider: Provider::Anthropic,
-            base_url: BaseUrl::from("https://example.com"),
-            reasoning: false,
-            input: vec![InputModality::Text],
-            cost: ModelCost::default(),
-            context_window: TokenCount::new(200_000),
-            effective_context_window: None,
-            max_output_tokens: TokenCount::new(8192),
-            supports_adaptive_thinking: false,
-            supported_thinking_levels: Vec::new(),
-            default_thinking_level: None,
-        }
-    }
-
-    #[test]
-    fn align_for_model_swaps_edit_tools_when_switching_to_patch_model() {
-        let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
-        let mut registry = builtin_tools_with_options(
-            cwd.clone(),
-            None,
-            false,
-            http_client(),
-            ForbiddenChars::empty(),
-            None,
-            Default::default(),
-        );
-        add_batch_tool(&mut registry);
-
-        assert!(registry.get("edit").is_some(), "starting state has edit");
-        assert!(registry.get("write").is_some(), "starting state has write");
-        assert!(
-            registry.get("apply_patch").is_none(),
-            "starting state has no apply_patch"
-        );
-
-        let gpt_model = model_with_id("gpt-5");
-        assert!(gpt_model.uses_patch_tool());
-
-        align_for_model(
-            &mut registry,
-            &gpt_model,
-            cwd.clone(),
-            ForbiddenChars::empty(),
-        );
-
-        assert!(
-            registry.get("apply_patch").is_some(),
-            "after aligning to a patch model, apply_patch should be registered"
-        );
-        assert!(
-            registry.get("edit").is_none(),
-            "edit should be gone after aligning to a patch model"
-        );
-        assert!(
-            registry.get("write").is_none(),
-            "write should be gone after aligning to a patch model"
-        );
-    }
-
-    #[test]
-    fn align_for_model_swaps_back_to_edit_write_for_non_patch_model() {
-        let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
-        let mut registry = builtin_tools_with_options(
-            cwd.clone(),
-            None,
-            true,
-            http_client(),
-            ForbiddenChars::empty(),
-            None,
-            Default::default(),
-        );
-
-        assert!(registry.get("apply_patch").is_some());
-        assert!(registry.get("edit").is_none());
-
-        let claude_model = model_with_id("claude-sonnet-4-5");
-        assert!(!claude_model.uses_patch_tool());
-
-        align_for_model(
-            &mut registry,
-            &claude_model,
-            cwd.clone(),
-            ForbiddenChars::empty(),
-        );
-
-        assert!(registry.get("edit").is_some());
-        assert!(registry.get("write").is_some());
-        assert!(registry.get("apply_patch").is_none());
-    }
-
-    #[test]
-    fn align_for_model_toggles_batch_tool_with_native_parallel_support() {
-        let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
-        let mut registry = builtin_tools_with_options(
-            cwd.clone(),
-            None,
-            false,
-            http_client(),
-            ForbiddenChars::empty(),
-            None,
-            Default::default(),
-        );
-        add_batch_tool(&mut registry);
-        assert!(registry.get("batch").is_some());
-
-        let gpt = model_with_id("gpt-5");
-        assert!(gpt.supports_native_parallel_calls());
-        align_for_model(&mut registry, &gpt, cwd.clone(), ForbiddenChars::empty());
-        assert!(
-            registry.get("batch").is_none(),
-            "batch should be removed for native-parallel models"
-        );
-
-        let mut openrouter_glm = model_with_id("z-ai/glm-4.6");
-        openrouter_glm.provider = mush_ai::types::Provider::OpenRouter;
-        assert!(!openrouter_glm.supports_native_parallel_calls());
-        align_for_model(&mut registry, &openrouter_glm, cwd, ForbiddenChars::empty());
-        assert!(
-            registry.get("batch").is_some(),
-            "batch should be re-added for non-native-parallel models"
         );
     }
 }

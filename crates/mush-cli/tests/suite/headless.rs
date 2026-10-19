@@ -34,6 +34,35 @@ fn wait(child: &mut std::process::Child) -> std::io::Result<std::process::ExitSt
     }
 }
 
+#[test]
+fn a_retired_mode_is_refused_before_model_or_kernel_startup() {
+    for (config_text, overrides) in [
+        ("rlm = false\n", vec![]),
+        ("", vec!["--option", "rlm=false"]),
+        ("rlm = true\n", vec!["--option", "rlm=false"]),
+    ] {
+        let dir = crate::tempdir().unwrap();
+        let config = dir.path().join("config/mush");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.toml"), config_text).unwrap();
+        let output = command(dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(overrides)
+            .args(["--model", "nonexistent-retired-mode-model", "-p", "hello"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("rlm = false is no longer supported"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("unknown model"), "{stderr}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn signals_checkpoint_and_cancel_during_startup() {
@@ -41,14 +70,13 @@ fn signals_checkpoint_and_cancel_during_startup() {
         let dir = crate::tempdir().unwrap();
         let config = dir.path().join("config/mush");
         std::fs::create_dir_all(&config).unwrap();
+        let python = dir.path().join("startup-python");
+        std::fs::write(&python, "#!/bin/sh\ntouch ready\nexec sleep 8\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::write(
             config.join("config.toml"),
-            r#"
-rlm = false
-[mcp.wait]
-type = "local"
-command = ["sh", "-c", "touch ready; exec sleep 8"]
-"#,
+            format!("[kernel]\npython = {:?}\nmanaged = false\n", python),
         )
         .unwrap();
         let path = dir.path().join("status.json");
@@ -63,7 +91,7 @@ command = ["sh", "-c", "touch ready; exec sleep 8"]
             if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("startup did not reach local fake mcp server");
+                panic!("startup did not reach local interpreter probe");
             }
             std::thread::sleep(Duration::from_millis(10));
         }

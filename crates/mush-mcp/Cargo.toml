@@ -7,8 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-mush-ai.workspace = true
-mush-agent.workspace = true
 tokio.workspace = true
 anstream.workspace = true
 serde.workspace = true
@@ -17,7 +15,6 @@ schemars.workspace = true
 http.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-async-trait.workspace = true
 rmcp = { version = "3.5", default-features = false, features = [
   "client",
   "transport-child-process",

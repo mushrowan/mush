@@ -560,6 +560,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_environment_is_isolated_between_kernel_jobs() {
+        use mush_agent::exec_context::{CONTROL_ENDPOINT, ControlEndpoint};
+        let dir = tempfile::tempdir().unwrap();
+        let a = ControlEndpoint {
+            socket: dir.path().join("a.sock"),
+            target: mush_agent::ipc::control::Control::new("a".into()).target(),
+        };
+        let b = ControlEndpoint {
+            socket: dir.path().join("b.sock"),
+            target: mush_agent::ipc::control::Control::new("b".into()).target(),
+        };
+        let command = "printf '%s/%s/%s' \"$MUSH_CONTROL_INSTANCE\" \"$MUSH_CONTROL_SESSION\" \"$MUSH_CONTROL_ACTIVATION\"";
+        let jobs = KernelJobs::default();
+        let (ra, rb) = tokio::join!(
+            CONTROL_ENDPOINT.scope(
+                Some(a.clone()),
+                jobs.start(dir.path(), command, None, None, None)
+            ),
+            CONTROL_ENDPOINT.scope(
+                Some(b.clone()),
+                jobs.start(dir.path(), command, None, None, None)
+            ),
+        );
+        let (a_id, _) = ra.unwrap();
+        let (b_id, _) = rb.unwrap();
+        let ra = jobs.wait(&a_id).await.unwrap();
+        let rb = jobs.wait(&b_id).await.unwrap();
+        assert!(ra.output.contains(&a.target.instance));
+        assert!(!ra.output.contains(&b.target.instance));
+        assert!(rb.output.contains(&b.target.instance));
+        let mut seed = 0x91f0_b62a_5d3c_78e1_u64;
+        for _ in 0..16 {
+            let mut endpoint = a.clone();
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            endpoint.target.instance = format!("instance-{seed:016x}");
+            let (id, _) = CONTROL_ENDPOINT
+                .scope(
+                    Some(endpoint.clone()),
+                    jobs.start(dir.path(), command, None, None, None),
+                )
+                .await
+                .unwrap();
+            let result = jobs.wait(&id).await.unwrap();
+            assert!(result.output.contains(&endpoint.target.instance));
+            assert!(!result.output.contains(&b.target.instance));
+        }
+        assert!(mush_agent::exec_context::control_endpoint().is_none());
+    }
+
+    #[tokio::test]
     async fn a_job_runs_to_completion_and_wait_returns_its_output() {
         let jobs = KernelJobs::default();
 

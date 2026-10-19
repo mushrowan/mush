@@ -38,7 +38,7 @@ fn machine(root: &Path, name: &str, url: &str, key: &Path) -> PathBuf {
     std::fs::write(
         home.join("config/config.toml"),
         format!(
-            "rlm = false\n[sync]\nserver = \"{url}\"\nkey_file = \"{}\"\nmachine = \"{name}\"\n",
+            "[sync]\nserver = \"{url}\"\nkey_file = \"{}\"\nmachine = \"{name}\"\n",
             key.display()
         ),
     )

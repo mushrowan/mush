@@ -70,7 +70,7 @@ fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("config.toml"),
-        "rlm = false\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
+        "rlm = true\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -100,6 +100,8 @@ fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
         .current_dir(dir.path())
         .args([
             "--no-tools",
+            "--option",
+            "rlm=true",
             "--no-session",
             "--no-skills",
             "--no-context-files",
@@ -112,7 +114,12 @@ fn json_mode_streams_events_as_json_lines_and_nothing_else_on_stdout() {
         ])
         .output()
         .unwrap();
-    let _ = server.join().unwrap();
+    let request = server.join().unwrap();
+    assert!(
+        request
+            .get("tools")
+            .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty))
+    );
     assert!(
         output.status.success(),
         "{}",
@@ -191,7 +198,7 @@ fn a_resumed_print_run_keeps_the_sessions_thinking_level() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("config.toml"),
-        "rlm = false\nthinking = \"high\"\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
+        "thinking = \"high\"\n[compaction]\nenabled = false\n[api_keys]\nfixture = 'fixture-key'\n",
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

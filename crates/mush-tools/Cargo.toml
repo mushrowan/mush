@@ -10,7 +10,6 @@ publish = false
 mush-sandbox.workspace = true
 mush-ai.workspace = true
 mush-agent.workspace = true
-mush-treesitter.workspace = true
 mush-kernel.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
@@ -26,13 +25,7 @@ unicode-segmentation.workspace = true
 schemars.workspace = true
 urlencoding.workspace = true
 reqwest.workspace = true
-htmd = "0.5.5"
 similar.workspace = true
-globset = "0.4"
-grep-regex = "0.1"
-grep-searcher = "0.1"
-grep-matcher = "0.1"
-ignore = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

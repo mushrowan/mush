@@ -409,7 +409,7 @@ async fn a_session_owned_by_a_worker_refuses_a_second_opener() {
     .unwrap();
     std::fs::write(
         config.join("config.toml"),
-        "rlm = false\n[api_keys]\nfixture = 'fixture-key'\n",
+        "[api_keys]\nfixture = 'fixture-key'\n",
     )
     .unwrap();
     let SupervisorReply::Worker { descriptor, .. } = daemon
@@ -527,7 +527,7 @@ async fn a_daemon_worker_holds_the_sync_lease_while_open_and_releases_it_when_st
     std::fs::write(
         config.join("config.toml"),
         format!(
-            "rlm = false\n[api_keys]\nfixture = 'fixture-key'\n[sync]\nserver = \"{url}\"\nmachine = \"dot\"\n"
+            "[api_keys]\nfixture = 'fixture-key'\n[sync]\nserver = \"{url}\"\nmachine = \"dot\"\n"
         ),
     )
     .unwrap();

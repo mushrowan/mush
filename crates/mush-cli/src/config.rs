@@ -300,8 +300,6 @@ pub struct Config {
     pub autonomous: AutonomousConfig,
     #[serde(default)]
     pub auto_fork_compact: bool,
-    #[serde(default = "default_rlm")]
-    pub rlm: bool,
     pub rlm_max_depth: Option<u32>,
     #[serde(default)]
     pub kernel: KernelConfig,
@@ -365,10 +363,6 @@ fn default_feature_hints() -> bool {
     true
 }
 
-fn default_rlm() -> bool {
-    true
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -388,7 +382,6 @@ impl Default for Config {
             auto_refine: AutoRefineConfig::default(),
             autonomous: AutonomousConfig::default(),
             auto_fork_compact: false,
-            rlm: true,
             rlm_max_depth: None,
             kernel: KernelConfig::default(),
             confirm_tools: false,
@@ -575,6 +568,8 @@ pub fn config_path() -> PathBuf {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OverrideError {
+    #[error("rlm = false is no longer supported; remove the rlm setting to use the Python kernel")]
+    RetiredRlm,
     #[error("expected KEY=VALUE, got {0:?}")]
     Shape(String),
     #[error("unknown setting {0:?}")]
@@ -599,7 +594,7 @@ pub fn load_config() -> Config {
 
 pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
     let path = config_path();
-    let mut table = if !path.exists() {
+    let table = if !path.exists() {
         toml::Table::new()
     } else {
         match std::fs::read_to_string(&path) {
@@ -616,23 +611,7 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
             }
         }
     };
-    let schema = schemars::schema_for!(Config);
-    for spec in overrides {
-        apply_override(&mut table, schema.as_value(), spec)?;
-    }
-    let mut config: Config = match table.try_into() {
-        Ok(config) => config,
-        Err(e) if overrides.is_empty() => {
-            warn(format_args!("failed to parse config: {e}"));
-            Config::default()
-        }
-        Err(e) => {
-            return Err(OverrideError::Invalid {
-                key: overrides.join(" "),
-                error: e.to_string(),
-            });
-        }
-    };
+    let mut config = parse_config_table(table, overrides)?;
 
     let global = config_dir().join("settings.toml");
     if let Some(persisted) = try_load_persisted_settings(&global) {
@@ -669,6 +648,45 @@ pub fn load_config_with(overrides: &[String]) -> Result<Config, OverrideError> {
     Ok(config)
 }
 
+fn check_retired_rlm(value: &toml::Value) -> Result<(), OverrideError> {
+    match value.as_bool() {
+        Some(true) => Ok(()),
+        Some(false) => Err(OverrideError::RetiredRlm),
+        None => Err(OverrideError::Invalid {
+            key: "rlm".into(),
+            error: "the retired rlm setting must be true or removed".into(),
+        }),
+    }
+}
+
+fn parse_config_table(
+    mut table: toml::Table,
+    overrides: &[String],
+) -> Result<Config, OverrideError> {
+    if let Some(value) = table.remove("rlm") {
+        check_retired_rlm(&value)?;
+    }
+    let schema = schemars::schema_for!(Config);
+    for spec in overrides {
+        apply_override(&mut table, schema.as_value(), spec)?;
+    }
+    let config: Config = match table.try_into() {
+        Ok(config) => config,
+        Err(e) if overrides.is_empty() => {
+            warn(format_args!("failed to parse config: {e}"));
+            Config::default()
+        }
+        Err(e) => {
+            return Err(OverrideError::Invalid {
+                key: overrides.join(" "),
+                error: e.to_string(),
+            });
+        }
+    };
+
+    Ok(config)
+}
+
 fn apply_override(
     table: &mut toml::Table,
     schema: &serde_json::Value,
@@ -678,6 +696,9 @@ fn apply_override(
         .split_once('=')
         .ok_or_else(|| OverrideError::Shape(spec.to_string()))?;
     let key = key.trim();
+    if key == "rlm" {
+        return check_retired_rlm(&parse_override_value(raw));
+    }
     let path: Vec<&str> = key.split('.').collect();
     if key.is_empty() || path.iter().any(|segment| segment.is_empty()) {
         return Err(OverrideError::Shape(spec.to_string()));
@@ -850,6 +871,64 @@ mod tests {
                 key: specs.join(" "),
                 error: e.to_string(),
             })
+    }
+
+    #[test]
+    fn retired_rlm_config_and_overrides_are_checked_before_fallback() {
+        for raw in ["rlm = false", "rlm = false\nmax_turns = 'invalid'"] {
+            let table = toml::from_str(raw).unwrap();
+            let error = parse_config_table(table, &[]).unwrap_err();
+            assert!(matches!(error, OverrideError::RetiredRlm));
+            assert!(error.to_string().contains("remove the rlm setting"));
+        }
+        let table = toml::from_str("rlm = true\nmax_turns = 7").unwrap();
+        assert_eq!(parse_config_table(table, &[]).unwrap().max_turns, Some(7));
+        assert!(matches!(
+            overridden(&["rlm=false"]),
+            Err(OverrideError::RetiredRlm)
+        ));
+        assert_eq!(
+            overridden(&["rlm=true", "max_turns=9"]).unwrap().max_turns,
+            Some(9)
+        );
+        assert!(
+            matches!(overridden(&["rlm='false'"]), Err(OverrideError::Invalid { key, .. }) if key == "rlm")
+        );
+        let schema = schemars::schema_for!(Config);
+        assert!(!schema_has_path(
+            schema.as_value(),
+            schema.as_value(),
+            &["rlm"]
+        ));
+        assert!(schema_has_path(
+            schema.as_value(),
+            schema.as_value(),
+            &["rlm_max_depth"]
+        ));
+    }
+
+    #[test]
+    fn randomized_raw_config_preserves_the_retired_mode_boundary() {
+        let values = ["true", "false", "'true'", "'false'", "0", "1", "[]", "{}"];
+        let mut state = 0x72a5_930c_4e61_8bdfu64;
+        for _ in 0..512 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let value = values[(state >> 32) as usize % values.len()];
+            let turns = (state % 100) as usize;
+            let raw = if state & 1 == 0 {
+                format!("rlm = {value}\nmax_turns = {turns}\n")
+            } else {
+                format!("max_turns = {turns}\nrlm = {value} # old setting\n")
+            };
+            let parsed = parse_config_table(toml::from_str(&raw).unwrap(), &[]);
+            match value {
+                "true" => assert_eq!(parsed.unwrap().max_turns, Some(turns)),
+                "false" => assert!(matches!(parsed, Err(OverrideError::RetiredRlm))),
+                _ => assert!(
+                    matches!(parsed, Err(OverrideError::Invalid { key, .. }) if key == "rlm")
+                ),
+            }
+        }
     }
 
     #[test]

@@ -5,7 +5,6 @@ use crate::catalogue::McpCatalogue;
 use crate::config::McpServerConfig;
 use crate::connection::{DIM, YELLOW, report_status};
 use crate::server::{McpServer, McpServerStatus, ServerState};
-use crate::tool::McpTool;
 
 pub struct McpManager {
     servers: Vec<Arc<McpServer>>,
@@ -33,16 +32,6 @@ impl McpManager {
         }
 
         Self { servers }
-    }
-
-    pub async fn tool_registry(&self) -> mush_agent::tool::ToolRegistry {
-        let mut registry = mush_agent::tool::ToolRegistry::new();
-        for server in &self.servers {
-            for definition in server.tools().await {
-                registry.register_shared(Arc::new(McpTool::new(definition, Arc::clone(server))));
-            }
-        }
-        registry
     }
 
     #[must_use]
@@ -92,7 +81,7 @@ mod tests {
     async fn connect_all_with_empty_config() {
         let manager = McpManager::connect_all(&HashMap::new()).await;
         assert!(manager.statuses().await.is_empty());
-        assert!(manager.tool_registry().await.is_empty());
+        assert!(manager.catalogue().tools(None).await.is_empty());
     }
 
     #[tokio::test]
@@ -102,7 +91,7 @@ mod tests {
 
         let manager = McpManager::connect_all(&configs).await;
 
-        assert!(manager.tool_registry().await.is_empty());
+        assert!(manager.catalogue().tools(None).await.is_empty());
         let statuses = manager.statuses().await;
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, ServerState::Disabled);

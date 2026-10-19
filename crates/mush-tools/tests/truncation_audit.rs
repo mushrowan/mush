@@ -46,44 +46,13 @@ fn audit_per_tool_output_limit_choices() {
     use std::sync::Arc;
 
     let cwd: Arc<std::path::Path> = Arc::from(std::env::temp_dir().as_path());
-    let bg = mush_tools::background::BackgroundJobRegistry::new();
     let http = mush_ai::http::client();
 
     let cases: Vec<(&str, OutputLimit, Box<dyn AgentTool>)> = vec![
         (
-            "bash",
-            OutputLimit::Tail,
-            Box::new(mush_tools::bash::BashTool::new(cwd.clone())),
-        ),
-        (
-            "bash_status",
-            OutputLimit::Tail,
-            Box::new(mush_tools::bash_status::BashStatusTool::new(bg)),
-        ),
-        (
-            "ls",
-            OutputLimit::Head,
-            Box::new(mush_tools::ls::LsTool::new(cwd.clone())),
-        ),
-        (
             "read",
             OutputLimit::Head,
             Box::new(mush_tools::read::ReadTool::new(cwd.clone())),
-        ),
-        (
-            "find",
-            OutputLimit::Head,
-            Box::new(mush_tools::find::FindTool::new(cwd.clone())),
-        ),
-        (
-            "glob",
-            OutputLimit::Head,
-            Box::new(mush_tools::glob::GlobTool::new(cwd.clone())),
-        ),
-        (
-            "grep",
-            OutputLimit::Head,
-            Box::new(mush_tools::grep::GrepTool::new(cwd.clone())),
         ),
         (
             "edit",
@@ -99,16 +68,6 @@ fn audit_per_tool_output_limit_choices() {
             "apply_patch",
             OutputLimit::Head,
             Box::new(mush_tools::apply_patch::ApplyPatchTool::new(cwd.clone())),
-        ),
-        (
-            "notify_user",
-            OutputLimit::Head,
-            Box::new(mush_tools::notify_user::NotifyUserTool::new()),
-        ),
-        (
-            "web_fetch",
-            OutputLimit::Head,
-            Box::new(mush_tools::web_fetch::WebFetchTool::new(http.clone())),
         ),
         (
             "web_search",

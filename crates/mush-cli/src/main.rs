@@ -16,10 +16,7 @@ use mush_cli::{
 };
 use mush_tui::TuiConfig;
 
-use setup::{
-    AppSetup, SetupArgs, auto_compact, build_system_prompt_from_context, expand_template,
-    format_error,
-};
+use setup::{AppSetup, SetupArgs, auto_compact, expand_template, format_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum OutputMode {
@@ -1771,11 +1768,7 @@ fn worker_config(
         branch_summary: setup.client.cfg.branch_summary.settings(),
         auto_refine: setup.client.cfg.auto_refine.settings(),
         auto_fork_compact: setup.client.cfg.auto_fork_compact,
-        tool_allowlist: if setup.client.rlm {
-            Some(vec!["ipython".into()])
-        } else {
-            cli.tools.clone()
-        },
+        tool_allowlist: Some(vec!["ipython".into()]),
         generate_title: !cli.no_session,
         ..turn_config(
             &seed,
@@ -1874,25 +1867,18 @@ fn worker_config(
     };
     worker.system_prompt_builder = Some(std::sync::Arc::new({
         let discovery = cli.discovery();
-        let rlm = setup.client.rlm;
         let kernel_packages = setup.kernel_packages.clone();
         let cwd = setup.client.cwd.clone();
         let role = role.clone();
         let family = worker.family.clone();
         move || {
-            if rlm {
-                let role = setup::RlmRole {
-                    max_depth: family
-                        .as_ref()
-                        .map_or(role.max_depth, |family| family.max_depth()),
-                    ..role.clone()
-                };
-                rlm_system_prompt(&cwd, &discovery, &prompt_overrides, &kernel_packages, &role)
-            } else {
-                let mut project = mush_ext::loader::discover_project_context_with(&cwd, &discovery);
-                prompt_overrides.apply(&mut project);
-                build_system_prompt_from_context(&project, &cwd)
-            }
+            let role = setup::RlmRole {
+                max_depth: family
+                    .as_ref()
+                    .map_or(role.max_depth, |family| family.max_depth()),
+                ..role.clone()
+            };
+            rlm_system_prompt(&cwd, &discovery, &prompt_overrides, &kernel_packages, &role)
         }
     }));
 
