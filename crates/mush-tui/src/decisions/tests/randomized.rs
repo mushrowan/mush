@@ -71,6 +71,7 @@ proptest! {
         mode in 0u8..5,
         edit in text(),
         confirmations in proptest::collection::vec(text(), 0..3),
+        state in 0u8..5,
     ) {
         let mut app = populated(questions);
         for (index, item) in app.decisions.iter_mut().enumerate() {
@@ -78,11 +79,20 @@ proptest! {
             item.key.id = format!("{index}{}", item.question);
             item.lean = (!item.options.is_empty()).then_some(0);
             item.clarified = Some(edit.clone());
-            if index % 2 == 0 {
-                item.status = DecisionStatus::Clarifying { question: edit.clone(), at: Timestamp::zero() };
+            match state {
+                0 => item.status = DecisionStatus::Clarifying { question: edit.clone(), at: Timestamp::zero() },
+                1 => item.assume_at = Some(Timestamp::from_ms(1)),
+                2 => item.draft = Some(Draft { answer: Answer::Own { text: edit.clone() }, revision: 0 }),
+                3 => item.draft = Some(Draft { answer: Answer::Later, revision: item.revision }),
+                _ => {}
             }
         }
         app.children = confirmations.iter().enumerate().map(|(index, text)| child(&format!("c{index}"), Some(text))).collect();
+        for child in &mut app.children {
+            app.decisions_panel.confirms.insert(child.id.clone(), state % 2 == 0);
+            if state == 1 { child.status = mush_runtime::ChildStatus::Deleted; }
+            if state == 2 { child.status = mush_runtime::ChildStatus::Idle; }
+        }
         let keys = flat(&groups(&app.decisions, &app.children));
         if !keys.is_empty() {
             app.decisions_panel.selected = Some(keys[selected % keys.len()].clone());
@@ -123,10 +133,80 @@ proptest! {
     }
 
     #[test]
+    fn random_panel_navigation_and_editor_actions_preserve_state(
+        content in text(),
+        actions in proptest::collection::vec(0u8..20, 1..64),
+        option in 0usize..3,
+        width in 44u16..180,
+    ) {
+        let mut app = app();
+        open(&mut app);
+        let keys = flat(&groups(&app.decisions, &app.children));
+        for code in [KeyCode::Tab, KeyCode::BackTab, KeyCode::End, KeyCode::Home,
+                     KeyCode::Down, KeyCode::Up, KeyCode::PageDown, KeyCode::PageUp] {
+            press(&mut app, code);
+            prop_assert!(keys.contains(app.decisions_panel.selected.as_ref().unwrap()));
+        }
+        select(&mut app, "layout");
+        press(&mut app, KeyCode::Char(char::from(b'a' + option as u8)));
+        press(&mut app, KeyCode::Char('w'));
+        app.handle_paste(&content);
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End] {
+            press(&mut app, code);
+            let editor = app.decisions_panel.editor.as_ref().unwrap();
+            prop_assert!(editor.text.is_char_boundary(editor.cursor));
+        }
+        render(&app, width, 16);
+        ctrl(&mut app, 'u');
+        prop_assert!(app.decisions_panel.editor.as_ref().unwrap().text.is_empty());
+        app.handle_paste(&content);
+        press(&mut app, KeyCode::Enter);
+        ctrl(&mut app, 'n');
+        ctrl(&mut app, 'p');
+        app.children = vec![child("models", Some("confirm"))];
+        app.decisions_panel.selected = Some(ItemKey::Confirm("sub-models".into()));
+        press(&mut app, KeyCode::Char('a'));
+        render(&app, width, 16);
+        for action in actions {
+            let code = match action {
+                0 => KeyCode::Tab, 1 => KeyCode::BackTab,
+                2 => KeyCode::Home, 3 => KeyCode::End,
+                4 => KeyCode::Left, 5 => KeyCode::Right,
+                6 => KeyCode::Backspace, 7 => KeyCode::Enter,
+                8 => KeyCode::Char('w'), 9 => KeyCode::Char('?'),
+                10 => KeyCode::Char('x'), 11 => KeyCode::Char('a'),
+                12 => KeyCode::Char('l'), 13 => KeyCode::Char('S'),
+                14 => KeyCode::Char('j'), 15 => KeyCode::Char('k'),
+                16 => KeyCode::PageDown, 17 => KeyCode::PageUp,
+                18 => KeyCode::Char('A'), _ => KeyCode::Esc,
+            };
+            if !app.decisions_panel.open { open(&mut app); }
+            press(&mut app, code);
+            if let Some(editor) = &app.decisions_panel.editor {
+                prop_assert!(editor.cursor <= editor.text.len());
+                prop_assert!(editor.text.is_char_boundary(editor.cursor));
+            }
+            render(&app, width, 16);
+        }
+        open(&mut app);
+        app.note_decisions(Vec::new());
+        prop_assert!(!app.decisions_panel.review || !app.children.is_empty());
+        app.children.clear();
+        app.decisions_panel.review = true;
+        app.note_decisions(Vec::new());
+        prop_assert!(!app.decisions_panel.review);
+        app.decisions_panel.open = false;
+        prop_assert!(!paste(&mut app, &content));
+        prop_assert!(handle_key(&mut app, KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)).is_none());
+    }
+
+    #[test]
     fn random_focused_details_are_reachable_with_scroll_hints(
         before in 0usize..10,
         after in 0usize..10,
-        detail_count in 0usize..40,
+        detail_count in 0usize..16,
+        option_count in 1usize..5,
+        half_pages in any::<bool>(),
         size in prop_oneof![(44u16..110, 6u16..20), (112u16..180, 6u16..20)],
         padding in prop_oneof![Just(""), Just("界"), Just("e\u{301}"), Just("🦀")],
     ) {
@@ -134,32 +214,62 @@ proptest! {
         let mut app = populated((0..before + after + 1).map(|_| (String::new(), Vec::new(), false)).collect());
         let selected = before;
         app.decisions[selected].question = "FOCUS".into();
-        app.decisions[selected].context = Some((0..detail_count).map(|i| format!("{padding} R{i:03}\n")).collect());
-        app.decisions[selected].refs.clear();
+        let mut tokens = Vec::new();
+        let mut field = |tag: &str, count: usize| {
+            (0..count).map(|index| {
+                let token = format!("{tag}{index:02}");
+                tokens.push(token.clone());
+                format!("{padding} {token}\n")
+            }).collect::<String>()
+        };
+        let focused = &mut app.decisions[selected];
+        focused.context = Some(field("CTX", detail_count));
+        focused.refs = vec![field("REF", detail_count)];
+        focused.options = (0..option_count).map(|index| DecisionOption {
+            label: field(&format!("L{index}"), detail_count.max(1)),
+            detail: Some(field(&format!("D{index}"), detail_count)),
+            pros: vec![field(&format!("P{index}"), detail_count)],
+            cons: vec![field(&format!("C{index}"), detail_count)],
+        }).collect();
         app.decisions_panel.selected = Some(ItemKey::Decision(app.decisions[selected].key.clone()));
         let (initial, _) = render(&app, width, height);
         let marker = if width >= 112 { '▸' } else { '▾' };
         prop_assert!(initial.contains(marker), "{width}x{height}\n{initial}");
-        let mut seen = vec![false; detail_count];
-        let mut reached_end = false;
-        for step in 0..detail_count + 32 {
-            let (screen, _) = render(&app, width, height);
-            for (index, seen) in seen.iter_mut().enumerate() {
-                *seen |= screen.contains(&format!("R{index:03}"));
+        let mut seen = vec![false; tokens.len()];
+        let down = if half_pages {
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)
+        } else {
+            KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT)
+        };
+        let up = if half_pages {
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)
+        } else {
+            KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)
+        };
+        let budget = tokens.len() * 4 + 64;
+        for key in [down, up] {
+            let mut reached_end = false;
+            for step in 0..budget {
+                let (screen, _) = render(&app, width, height);
+                for (token, seen) in tokens.iter().zip(&mut seen) {
+                    *seen |= screen.contains(token);
+                }
+                if step == 0 && detail_count > usize::from(height) && width >= 70 {
+                    prop_assert!(screen.contains("J/K scroll"), "{width}x{height}\n{screen}");
+                }
+                let offset = app.decisions_panel.detail_scroll.get();
+                crate::input::handle_key(&mut app, key);
+                render(&app, width, height);
+                if app.decisions_panel.detail_scroll.get() == offset {
+                    reached_end = true;
+                    break;
+                }
             }
-            if step == 0 && detail_count > usize::from(height) && width >= 70 {
-                prop_assert!(screen.contains("J/K scroll"), "{width}x{height}\n{screen}");
-            }
-            let offset = app.decisions_panel.detail_scroll.get();
-            press(&mut app, KeyCode::Char('J'));
-            render(&app, width, height);
-            if app.decisions_panel.detail_scroll.get() == offset {
-                reached_end = true;
-                break;
-            }
+            prop_assert!(reached_end);
+            let missing = tokens.iter().zip(&seen).filter(|(_, seen)| !**seen).map(|(token, _)| token).collect::<Vec<_>>();
+            prop_assert!(missing.is_empty(), "missing {missing:?} at {width}x{height}");
+            seen.fill(false);
         }
-        prop_assert!(reached_end);
-        prop_assert!(seen.iter().all(|seen| *seen), "missing {:?} at {width}x{height}", seen);
         app.decisions_panel.detail_scroll.set(usize::MAX);
         render(&app, width, height);
         let bottom = app.decisions_panel.detail_scroll.get();

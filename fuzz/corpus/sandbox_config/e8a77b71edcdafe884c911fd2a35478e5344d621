@@ -1,0 +1,2 @@
+[profile.test]
+network = ["[::0]:6553$", "example.com:443"]

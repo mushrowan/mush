@@ -1,0 +1,2 @@
+[profile.test]
+network = ["[::alloallowed_host_requests43"]

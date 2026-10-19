@@ -20,6 +20,7 @@ fn config(cases: u32, seed: u64) -> Config {
     }
 }
 
+#[expect(clippy::unwrap_used)]
 fn sandbox(root: &Path) -> Sandbox {
     Sandbox {
         profile: Profile::default(),
@@ -431,5 +432,28 @@ proptest! {
         prop_assert_eq!(fs::metadata(&file).unwrap().mode() & 0o777, mode | 0o600);
         prop_assert_eq!(fs::read_to_string(&file).unwrap(), "after");
         prop_assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
+    }
+}
+
+proptest! {
+    #![proptest_config(config(8, 0x990a_73b4))]
+
+    #[test]
+    fn occupied_staging_names_fail_closed_without_touching_existing_entries(value in ".{0,64}") {
+        let temporary = tempfile::tempdir().unwrap();
+        let file = temporary.path().join("file");
+        fs::write(&file, "before").unwrap();
+        let broker = sandbox(temporary.path());
+        for index in 0..2048 {
+            fs::write(temporary.path().join(format!(".mush-edit-{}-{index}", std::process::id())), &value).unwrap();
+        }
+        prop_assert!(broker.edit_file(&file, "before", "after").is_err());
+        prop_assert_eq!(fs::read_to_string(&file).unwrap(), "before");
+        for entry in fs::read_dir(temporary.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path() != file {
+                prop_assert_eq!(fs::read_to_string(entry.path()).unwrap(), value.as_str());
+            }
+        }
     }
 }
