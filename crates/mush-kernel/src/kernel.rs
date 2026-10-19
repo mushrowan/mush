@@ -281,7 +281,7 @@ impl Kernel {
                 runtime.extend(venv.skills.iter().map(|skill| skill.dir.clone()));
             }
             let sandbox = Arc::new(sandbox.with_paths(&runtime, &[])?);
-            sandbox.prepare_command(&mut command)?;
+            command = sandbox.prepare_command(command)?;
             handler.configure_sandbox(sandbox.clone());
             command
                 .env("PYTHONUNBUFFERED", "1")
@@ -295,6 +295,11 @@ impl Kernel {
         } else {
             handler
         };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let mut child = command.spawn()?;
         let stdin = child.stdin.take().ok_or(KernelError::Pipes)?;
         let stdout = child.stdout.take().ok_or(KernelError::Pipes)?;

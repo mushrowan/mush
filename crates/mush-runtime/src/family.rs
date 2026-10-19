@@ -72,6 +72,7 @@ pub struct ChildSpec {
     pub resume_session: Option<String>,
     pub sandbox: Option<String>,
     pub inherited_sandbox: Option<mush_sandbox::Profile>,
+    pub narrow: Option<mush_sandbox::Narrow>,
 }
 
 pub struct ChildParts {
@@ -1176,6 +1177,22 @@ impl Family {
         sandbox: Option<String>,
         this: &Arc<Self>,
     ) -> Result<ChildHandle, String> {
+        self.spawn_with_narrowing(caller, prompt, name, model, thinking, sandbox, None, this)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_with_narrowing(
+        &self,
+        caller: &Identity,
+        prompt: String,
+        name: String,
+        model: Option<String>,
+        thinking: Option<ThinkingLevel>,
+        sandbox: Option<String>,
+        narrow: Option<mush_sandbox::Narrow>,
+        this: &Arc<Self>,
+    ) -> Result<ChildHandle, String> {
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err("name is required".into());
@@ -1194,7 +1211,7 @@ impl Family {
                 "recursion depth {max_depth} is the limit, this agent cannot spawn children"
             ));
         }
-        let (sandbox, inherited_sandbox) = {
+        let (sandbox, inherited_sandbox, narrow) = {
             let inner = self.lock();
             let parent = caller.id.as_ref().and_then(|id| inner.children.get(id));
             match parent.filter(|parent| parent.summary.sandbox_profile.is_some()) {
@@ -1205,12 +1222,20 @@ impl Family {
                                 .into(),
                         );
                     }
-                    (
-                        parent.summary.sandbox.clone(),
-                        parent.summary.sandbox_profile.clone(),
-                    )
+                    let profile = parent
+                        .summary
+                        .sandbox_profile
+                        .as_ref()
+                        .ok_or("sandboxed parent profile is unavailable")?;
+                    let inherited = match narrow.as_ref() {
+                        Some(narrow) => {
+                            profile.narrow(narrow).map_err(|error| error.to_string())?
+                        }
+                        None => profile.clone(),
+                    };
+                    (parent.summary.sandbox.clone(), Some(inherited), None)
                 }
-                None => (sandbox, None),
+                None => (sandbox, None, narrow),
             }
         };
         let factory = self
@@ -1271,6 +1296,7 @@ impl Family {
             resume_session: None,
             sandbox: sandbox.clone(),
             inherited_sandbox,
+            narrow,
         };
         let parts = match (factory)(spec, Arc::clone(this)).await {
             Ok(parts) => parts,
@@ -1447,6 +1473,7 @@ impl Family {
                 resume_session: Some(summary.session_id.clone()),
                 sandbox: summary.sandbox.clone(),
                 inherited_sandbox: summary.sandbox_profile.clone(),
+                narrow: None,
             };
             (spec, summary.status == ChildStatus::Interrupted)
         };
@@ -4405,6 +4432,122 @@ mod tests {
         assert_eq!(
             *seen.lock().unwrap(),
             vec![None, Some(mush_sandbox::Profile::default())]
+        );
+        family
+            .delete(&caller, &grandchild.rlm_child_id)
+            .await
+            .unwrap();
+        family.delete(&root, &child.rlm_child_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn descendants_narrow_and_persist_their_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("subagents.json");
+        let parent: mush_sandbox::Profile = serde_json::from_value(serde_json::json!({
+            "read": [], "write": [], "secrets": [], "network": ["example.com:443"],
+            "websearch": true, "allowed_host_requests": ["attach_image"]
+        }))
+        .unwrap();
+        let factory: ChildFactory = Arc::new({
+            let parent = parent.clone();
+            let inner = echo_factory(Arc::new(StdMutex::new(Vec::new())), "hi");
+            move |spec, family| {
+                let profile = spec
+                    .inherited_sandbox
+                    .clone()
+                    .unwrap_or_else(|| parent.clone());
+                let future = inner(spec, family);
+                Box::pin(async move {
+                    let mut parts = future.await?;
+                    parts.config.sandbox_profile = Some(profile);
+                    Ok(parts)
+                })
+            }
+        });
+        let root = Identity::root("root");
+        let family = Family::new(
+            root.clone(),
+            "root-session".into(),
+            3,
+            Some(factory),
+            Some(path.clone()),
+        );
+        let child = family
+            .spawn_with_sandbox(
+                &root,
+                "task".into(),
+                "worker".into(),
+                None,
+                None,
+                Some("restricted".into()),
+                &family,
+            )
+            .await
+            .unwrap();
+        let caller = Identity {
+            id: Some(child.rlm_child_id.clone()),
+            name: child.name,
+            depth: 1,
+        };
+        let narrow = mush_sandbox::Narrow {
+            network: Some(vec![]),
+            websearch: Some(false),
+            allowed_host_requests: Some(vec![]),
+            ..Default::default()
+        };
+        let grandchild = family
+            .spawn_with_narrowing(
+                &caller,
+                "task".into(),
+                "narrow".into(),
+                None,
+                None,
+                None,
+                Some(narrow.clone()),
+                &family,
+            )
+            .await
+            .unwrap();
+        let expected = parent.narrow(&narrow).unwrap();
+        let summary = family
+            .all()
+            .into_iter()
+            .find(|s| s.id == grandchild.rlm_child_id)
+            .unwrap();
+        assert_eq!(summary.sandbox_profile, Some(expected.clone()));
+        let registry: Registry = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            registry
+                .children
+                .iter()
+                .find(|s| s.id == grandchild.rlm_child_id)
+                .unwrap()
+                .sandbox_profile,
+            Some(expected)
+        );
+        let grandcaller = Identity {
+            id: Some(grandchild.rlm_child_id.clone()),
+            name: grandchild.name,
+            depth: 2,
+        };
+        assert!(
+            family
+                .spawn_with_narrowing(
+                    &grandcaller,
+                    "task".into(),
+                    "wide".into(),
+                    None,
+                    None,
+                    None,
+                    Some(mush_sandbox::Narrow {
+                        websearch: Some(true),
+                        ..Default::default()
+                    }),
+                    &family
+                )
+                .await
+                .is_err()
         );
         family
             .delete(&caller, &grandchild.rlm_child_id)

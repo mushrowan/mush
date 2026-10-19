@@ -67,6 +67,7 @@
   package = craneLib.buildPackage (commonArgs
     // {
       inherit cargoArtifacts;
+      MUSH_BWRAP = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "${pkgs.bubblewrap}/bin/bwrap";
       doCheck = false;
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [fd pkgs.makeWrapper pkgs.installShellFiles];
       postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''

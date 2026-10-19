@@ -242,8 +242,8 @@ fn job_command(
         .current_dir(cwd)
         .stdin(Stdio::null());
     if let Some(sandbox) = sandbox {
-        sandbox
-            .prepare_command(&mut cmd)
+        cmd = sandbox
+            .prepare_command(cmd)
             .map_err(|error| error.to_string())?;
         for name in [
             "MUSH_CONTROL_SOCKET",
@@ -254,6 +254,7 @@ fn job_command(
             cmd.env_remove(name);
         }
     }
+    cmd.stdin(Stdio::null());
     cmd.envs(QUIET_ENV.iter().copied());
     #[cfg(unix)]
     cmd.process_group(0);

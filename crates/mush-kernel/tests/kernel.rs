@@ -168,6 +168,9 @@ impl HostRequestHandler for Echo {
                 "output": format!("ran {}", payload["job_id"]),
                 "running": false
             })),
+            "rlm.spawn" => Ok(json!({
+                "rlm_child_id": "sub-1", "name": payload.to_string(), "session_id": "session", "model": "model"
+            })),
             "rlm.find_models" => Ok(json!([{
                 "id": format!("{}-{}", payload["query"].as_str().unwrap_or(""), payload["limit"]),
                 "name": "Claude Haiku 5.5",
@@ -193,6 +196,17 @@ async fn a_host_request_round_trips_through_the_handler() {
         .unwrap();
 
     assert_eq!(output.result.as_deref(), Some("1"));
+    kernel.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn spawn_forwards_sandbox_narrowing_without_dropping_empty_fields() {
+    let kernel = kernel_with(Arc::new(Echo)).await;
+    let output = kernel.execute("import json\nh = await rlm.spawn('task', name='worker', sandbox='restricted', narrow={'network': [], 'websearch': False})\np = json.loads(h.name)\n(p['sandbox'], p['narrow'])").await.unwrap();
+    assert_eq!(
+        output.result.as_deref(),
+        Some("('restricted', {'network': [], 'websearch': False})")
+    );
     kernel.shutdown().await.unwrap();
 }
 

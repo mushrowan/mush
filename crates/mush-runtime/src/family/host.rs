@@ -195,13 +195,19 @@ impl RlmHandler {
         let thinking = requested_thinking(payload.text("thinking"))?;
         let handle = self
             .family
-            .spawn_with_sandbox(
+            .spawn_with_narrowing(
                 &self.identity,
                 prompt,
                 name,
                 payload.text("model"),
                 thinking,
                 payload.text("sandbox"),
+                payload
+                    .0
+                    .get("narrow")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| HostError(format!("invalid sandbox narrowing: {error}")))?,
                 &self.family,
             )
             .await?;

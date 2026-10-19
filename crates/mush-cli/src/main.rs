@@ -1560,24 +1560,33 @@ fn child_sandbox_from(
     selection: Option<&str>,
     artifacts: Option<std::path::PathBuf>,
     inherited: Option<mush_sandbox::Profile>,
+    narrow: Option<&mush_sandbox::Narrow>,
 ) -> Result<Option<std::sync::Arc<mush_sandbox::Sandbox>>, String> {
     let cwd = cwd
         .canonicalize()
         .map_err(|error| format!("sandbox workspace: {error}"))?;
     let profile = if let Some(profile) = inherited {
         profile
+            .validate_snapshot()
+            .map_err(|error| error.to_string())?;
+        profile
     } else {
         let config = mush_sandbox::Config::load(config_path).map_err(|error| error.to_string())?;
         let Some(config) = config else {
-            return if selection.is_some() {
-                Err("a sandbox profile was requested but sandbox.toml does not exist".into())
+            return if selection.is_some() || narrow.is_some() {
+                Err("sandbox configuration is required for profile selection or narrowing".into())
             } else {
                 Ok(None)
             };
         };
         config
             .resolve(&cwd, selection)
+            .and_then(|profile| profile.canonicalized())
             .map_err(|error| error.to_string())?
+    };
+    let profile = match narrow {
+        Some(narrow) => profile.narrow(narrow).map_err(|error| error.to_string())?,
+        None => profile,
     };
     let mut write = Vec::new();
     if let Some(artifacts) = artifacts {
@@ -1632,6 +1641,7 @@ fn child_factory(seed: ChildSeed) -> mush_runtime::ChildFactory {
                 spec.sandbox.as_deref(),
                 child_artifacts(seed.saver.is_some(), &session.meta.id),
                 spec.inherited_sandbox.clone(),
+                spec.narrow.as_ref(),
             )?;
             let mut ipython =
                 setup::build_ipython_tool(&cfg, &seed.cwd, &project.skills, sinks.into());
@@ -2307,6 +2317,7 @@ mod tests {
             resume_session,
             sandbox: None,
             inherited_sandbox: None,
+            narrow: None,
         }
     }
 
@@ -2319,14 +2330,52 @@ mod tests {
         std::fs::write(repo.join(".mush/sandbox.toml"), "invalid").unwrap();
         let absent = dir.path().join("trusted/sandbox.toml");
         assert!(
-            child_sandbox_from(&absent, &repo, None, None, None)
+            child_sandbox_from(&absent, &repo, None, None, None, None)
                 .unwrap()
                 .is_none()
         );
-        assert!(child_sandbox_from(&absent, &repo, Some("wide"), None, None).is_err());
+        assert!(child_sandbox_from(&absent, &repo, Some("wide"), None, None, None).is_err());
+        assert!(
+            child_sandbox_from(
+                &absent,
+                &repo,
+                None,
+                None,
+                None,
+                Some(&mush_sandbox::Narrow::default())
+            )
+            .is_err()
+        );
         let invalid = dir.path().join("sandbox.toml");
         std::fs::write(&invalid, "network = ['example.com:443']").unwrap();
-        assert!(child_sandbox_from(&invalid, &repo, None, None, None).is_err());
+        assert!(child_sandbox_from(&invalid, &repo, None, None, None, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_sandbox_rejects_retargeted_snapshot_before_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let granted = root.path().join("granted");
+        std::fs::create_dir(&granted).unwrap();
+        let profile: mush_sandbox::Profile = serde_json::from_value(serde_json::json!({
+            "read": [granted], "write": [], "secrets": [], "websearch": false,
+            "allowed_host_requests": []
+        }))
+        .unwrap();
+        let profile = profile.canonicalized().unwrap();
+        std::fs::remove_dir(&granted).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &granted).unwrap();
+        let error = child_sandbox_from(
+            &root.path().join("absent"),
+            root.path(),
+            None,
+            None,
+            Some(profile),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("read snapshot path changed"), "{error}");
     }
 
     #[test]
@@ -2478,6 +2527,7 @@ mod tests {
             resume_session: None,
             sandbox: None,
             inherited_sandbox: None,
+            narrow: None,
         };
 
         let Err(refused) = child_factory(seed)(spec, family).await else {

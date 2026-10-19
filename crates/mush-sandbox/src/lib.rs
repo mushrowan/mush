@@ -15,8 +15,8 @@ pub enum Error {
     ConfigParse(#[from] toml::de::Error),
     #[error("sandbox path must be absolute: {0}")]
     RelativePath(PathBuf),
-    #[error("network grants are not supported")]
-    NetworkUnsupported,
+    #[error(transparent)]
+    Narrow(#[from] narrow::Error),
     #[error("unknown sandbox profile: {0}")]
     UnknownProfile(String),
     #[error("home directory is unavailable")]
@@ -70,6 +70,14 @@ pub enum Error {
     #[cfg(target_os = "linux")]
     #[error("seccomp compilation failed")]
     SeccompBackend(#[from] seccompiler::BackendError),
+    #[error("invalid sandbox network endpoint: {0}")]
+    NetworkEntry(String),
+    #[error("sandbox network setup failed")]
+    NetworkIo(#[from] std::io::Error),
+    #[error(
+        "network sandbox requires bubblewrap, the network helper, and unprivileged user namespaces: {0}"
+    )]
+    NetworkUnavailable(String),
     #[error("unsupported seccomp architecture")]
     Architecture,
 }
@@ -109,8 +117,8 @@ struct Grants {
 
 impl Grants {
     fn validate(&self) -> Result<()> {
-        if !self.network.is_empty() {
-            return Err(Error::NetworkUnsupported);
+        for entry in &self.network {
+            network::validate_entry(entry)?;
         }
         for path in self.read.iter().chain(&self.write).chain(&self.secrets) {
             require_absolute(path)?;
@@ -127,6 +135,8 @@ pub struct Profile {
     secrets: Vec<PathBuf>,
     websearch: bool,
     allowed_host_requests: Vec<String>,
+    #[serde(default)]
+    network: Vec<String>,
 }
 
 impl Profile {
@@ -141,6 +151,9 @@ impl Profile {
     }
     pub fn websearch(&self) -> bool {
         self.websearch
+    }
+    pub fn network(&self) -> &[String] {
+        &self.network
     }
     pub fn allowed_host_requests(&self) -> &[String] {
         &self.allowed_host_requests
@@ -169,6 +182,7 @@ impl Profile {
         self.read.extend_from_slice(&grants.read);
         self.write.extend_from_slice(&grants.write);
         self.secrets.extend_from_slice(&grants.secrets);
+        self.network.extend_from_slice(&grants.network);
         self.allowed_host_requests
             .extend_from_slice(&grants.allowed_host_requests);
         if let Some(websearch) = grants.websearch {
@@ -268,6 +282,8 @@ pub struct Sandbox {
     write: Vec<PathBuf>,
     secrets: Vec<PathBuf>,
     protected_read: Vec<PathBuf>,
+    #[cfg(target_os = "linux")]
+    network: Option<std::sync::Arc<network::Network>>,
 }
 
 impl Sandbox {
@@ -359,6 +375,16 @@ impl Sandbox {
                 .iter()
                 .map(|p| canonical(p))
                 .collect::<Result<Vec<_>>>()?;
+            let network = if profile.network.is_empty() {
+                None
+            } else {
+                Some(network::Network::new(&profile.network)?)
+            };
+            if let Some(network) = &network {
+                protected_read.push(network.directory.path().to_path_buf());
+                protected_read.push(canonical(&network.helper)?);
+                protected_read.push(canonical(&network.bwrap)?);
+            }
             let sandbox = Self {
                 profile,
                 workspace,
@@ -367,10 +393,14 @@ impl Sandbox {
                 write,
                 secrets,
                 protected_read,
+                network,
             };
             sandbox.validate_paths()?;
+            if let Some(network) = &sandbox.network {
+                network.check_namespaces()?;
+            }
             sandbox.ruleset()?;
-            linux::filter()?;
+            linux::filter(false)?;
             Ok(sandbox)
         }
     }
@@ -384,6 +414,8 @@ impl Sandbox {
             write: self.write.clone(),
             secrets: self.secrets.clone(),
             protected_read: self.protected_read.clone(),
+            #[cfg(target_os = "linux")]
+            network: self.network.clone(),
         };
         derived.protected_read.extend(
             read.iter()
@@ -464,7 +496,10 @@ impl Sandbox {
         Ok(())
     }
 
-    pub fn prepare_command(&self, command: &mut tokio::process::Command) -> Result<()> {
+    pub fn prepare_command(
+        &self,
+        mut command: tokio::process::Command,
+    ) -> Result<tokio::process::Command> {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = command;
@@ -472,8 +507,6 @@ impl Sandbox {
         }
         #[cfg(target_os = "linux")]
         {
-            let mut ruleset = Some(self.ruleset()?);
-            let filter = linux::filter()?;
             command.env_clear();
             for name in [
                 "PATH",
@@ -495,6 +528,12 @@ impl Sandbox {
             for name in ["TMPDIR", "TMP", "TEMP"] {
                 command.env(name, self.temporary.path());
             }
+            if let Some(network) = &self.network {
+                network.wrap(&mut command, &self.read, &self.write, &self.secrets)?;
+                return Ok(command);
+            }
+            let mut ruleset = Some(self.ruleset()?);
+            let filter = linux::filter(false)?;
             unsafe {
                 command.pre_exec(move || {
                     let ruleset = ruleset
@@ -513,7 +552,7 @@ impl Sandbox {
                     Ok(())
                 });
             }
-            Ok(())
+            Ok(command)
         }
     }
 
@@ -528,5 +567,45 @@ mod edit;
 #[cfg(target_os = "linux")]
 mod linux;
 
+mod narrow;
+pub use narrow::{Error as NarrowError, Narrow};
+
 #[cfg(test)]
 mod tests;
+
+mod network;
+#[cfg(all(test, target_os = "linux"))]
+mod network_tests;
+
+#[cfg(target_os = "linux")]
+mod net_helper;
+
+#[cfg(target_os = "linux")]
+pub fn run_network_helper(path: &Path) -> std::io::Result<i32> {
+    net_helper::run(path)
+}
+
+#[cfg(target_os = "linux")]
+fn helper_confine(manifest: &network::Manifest, command: &mut std::process::Command) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut ruleset = Some(linux::ruleset_paths(
+        &manifest.read,
+        &manifest.write,
+        &manifest.secrets,
+    )?);
+    let filter = linux::filter(true)?;
+    unsafe {
+        command.pre_exec(move || {
+            let ruleset = ruleset
+                .take()
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EPERM))?;
+            let status = ruleset.restrict_self().map_err(std::io::Error::other)?;
+            if status.ruleset != landlock::RulesetStatus::FullyEnforced || !status.no_new_privs {
+                return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            }
+            seccompiler::apply_filter(&filter).map_err(std::io::Error::other)?;
+            Ok(())
+        });
+    }
+    Ok(())
+}

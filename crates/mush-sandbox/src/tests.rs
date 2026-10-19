@@ -71,8 +71,29 @@ default = "a"
 }
 
 #[test]
-fn network_is_rejected_even_in_unused_profile() {
+fn malformed_network_is_rejected_even_in_unused_profile() {
     assert!(config("[profile.dev]\nnetwork = [\"example.com\"]").is_err());
+}
+
+#[test]
+fn network_entries_merge_and_persist() {
+    let cfg = config(
+        r#"
+[profile.dev]
+network = ["example.com:443"]
+[project."/repo".profile.dev]
+network = ["other.example:8443"]
+"#,
+    )
+    .unwrap();
+    let profile = cfg.resolve(Path::new("/repo"), Some("dev")).unwrap();
+    assert_eq!(
+        profile.network(),
+        &["example.com:443", "other.example:8443"]
+    );
+    let encoded = toml::to_string(&profile).unwrap();
+    let decoded: Profile = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded, profile);
 }
 
 #[test]
@@ -157,7 +178,7 @@ async fn enforcement_blocks_files_sockets_and_keyrings() {
     let mut command = tokio::process::Command::new(&executable);
     command.args(["--exact", "tests::enforcement_probe", "--nocapture"]);
     command.env("OPENAI_API_KEY", "not-a-real-key");
-    sandbox.prepare_command(&mut command).unwrap();
+    let mut command = sandbox.prepare_command(command).unwrap();
     command.env("MUSH_SANDBOX_PROBE", "1");
     command.env("MUSH_PROBE_WORKSPACE", workspace.path());
     command.env("MUSH_PROBE_READONLY", &readonly);
@@ -384,5 +405,27 @@ default = "unselected"
     assert_eq!(
         empty.resolve(Path::new("/repo"), None).unwrap(),
         Profile::default()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(not(mush_landlock_supported), ignore = "requires Linux Landlock ABI 9")]
+fn replacing_granted_root_with_symlink_fails_closed_at_launch() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = outside.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let profile = Profile {
+        read: vec![root.clone()],
+        ..Profile::default()
+    };
+    let sandbox = Sandbox::new(profile, workspace.path(), &[], &[]).unwrap();
+    std::fs::remove_dir(&root).unwrap();
+    std::os::unix::fs::symlink("/etc", &root).unwrap();
+    assert!(
+        sandbox
+            .prepare_command(tokio::process::Command::new("true"))
+            .is_err()
     );
 }
